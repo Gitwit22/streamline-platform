@@ -5,8 +5,7 @@ interface Props {
   onClose: () => void;
   onStart: (keys: { 
     youtubeKey?: string; 
-    facebookKey?: string; 
-    twitchKey?: string;   // ⭐ TWITCH
+    facebookKey?: string;
   }) => Promise<void>;
   onStop: () => Promise<void>;
   status: string;
@@ -22,10 +21,8 @@ export default function StreamSetupModal({
   const [useYouTube, setUseYouTube] = useState(true);
   const [useFacebook, setUseFacebook] = useState(false);
 
-  const [useTwitch, setUseTwitch] = useState(false);        // ⭐ TWITCH
   const [youtubeKey, setYoutubeKey] = useState("");
   const [facebookKey, setFacebookKey] = useState("");
-  const [twitchKey, setTwitchKey] = useState("");           // ⭐ TWITCH
 
   if (!isOpen) return null;
 
@@ -36,17 +33,15 @@ export default function StreamSetupModal({
   const handleStart = async () => {
     const yt = useYouTube ? youtubeKey.trim() : "";
     const fb = useFacebook ? facebookKey.trim() : "";
-    const tw = useTwitch ? twitchKey.trim() : "";           // ⭐ TWITCH
 
-    if (!yt && !fb && !tw) {
-      alert("Enter at least one stream key (YouTube, Facebook, or Twitch).");
+    if (!yt && !fb) {
+      alert("Enter at least one stream key (YouTube or Facebook).");
       return;
     }
 
     await onStart({
       youtubeKey: yt || undefined,
       facebookKey: fb || undefined,
-      twitchKey: tw || undefined,                           // ⭐ TWITCH
     });
   };
 
@@ -109,26 +104,6 @@ export default function StreamSetupModal({
                 onChange={(e) => setFacebookKey(e.target.value)}
                 placeholder="Facebook Stream Key"
                 disabled={!useFacebook || isBusy || isLive}
-                className="mt-1 w-full bg-black/40 border border-white/15 rounded px-2 py-1 text-xs"
-              />
-            </div>
-          </label>
-
-          {/* ⭐ TWITCH */}
-          <label className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={useTwitch}
-              onChange={() => setUseTwitch(v => !v)}
-            />
-            <div className="flex-1">
-              <div className="font-medium">Twitch Live</div>
-              <input
-                type="text"
-                value={twitchKey}
-                onChange={(e) => setTwitchKey(e.target.value)}
-                placeholder="Twitch Stream Key"
-                disabled={!useTwitch || isBusy || isLive}
                 className="mt-1 w-full bg-black/40 border border-white/15 rounded px-2 py-1 text-xs"
               />
             </div>

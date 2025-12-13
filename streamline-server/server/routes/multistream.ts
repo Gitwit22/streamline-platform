@@ -14,11 +14,9 @@ router.post("/:roomName/start-multistream", async (req, res) => {
   const {
     youtubeStreamKey,
     facebookStreamKey,
-    twitchStreamKey,
   } = req.body as {
     youtubeStreamKey?: string;
     facebookStreamKey?: string;
-    twitchStreamKey?: string;
   };
 
   if (!roomName) {
@@ -40,15 +38,10 @@ router.post("/:roomName/start-multistream", async (req, res) => {
     );
   }
 
-  if (twitchStreamKey) {
-    // Twitch
-    urls.push(`rtmp://live.twitch.tv/app/${twitchStreamKey}`);
-  }
-
   if (urls.length === 0) {
     return res
       .status(400)
-      .json({ error: "At least one stream key (YouTube, Facebook, Twitch) is required" });
+      .json({ error: "At least one stream key (YouTube or Facebook) is required" });
   }
 
   try {
@@ -143,6 +136,28 @@ router.post("/:roomName/stop-multistream", async (req, res) => {
     return res.status(500).json({
       error: "Failed to stop multistream",
       details: err?.message,
+    });
+  }
+});
+
+// Emergency stop endpoint for beforeunload (Task 5.1)
+router.post("/:roomName/emergency-stop", async (req, res) => {
+  const { roomName } = req.params;
+  const { egressId } = req.body;
+
+  if (!roomName || !egressId) {
+    return res.status(400).json({ error: "roomName and egressId are required" });
+  }
+
+  try {
+    await egressClient.stopEgress(egressId);
+    activeEgressIds.delete(roomName);
+    return res.json({ success: true });
+  } catch (err: any) {
+    console.error("Emergency stop failed:", err);
+    return res.status(500).json({ 
+      error: "Failed to stop", 
+      details: err?.message 
     });
   }
 });

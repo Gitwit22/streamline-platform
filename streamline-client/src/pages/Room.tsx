@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { LiveKitRoom, VideoConference } from "@livekit/components-react";
 import { useLocalParticipantPermissions } from "@livekit/components-react";
 import "@livekit/components-styles";
+import toast from "react-hot-toast";
 import InviteButton from "../shared/InviteButton";
 import StreamSetupModal from "../components/StreamSetupModal";
 import RoleOverlay from "../components/RoleOverlay";
@@ -140,6 +141,22 @@ useEffect(() => {
   fetchToken();
 }, [roomName, displayName]);
 
+// Auto-stop stream on page close/refresh (Task 5.1)
+useEffect(() => {
+  const handleBeforeUnload = () => {
+    // Auto-stop stream if user closes tab while live
+    if (streamStatus === 'live' && egressId && roomName) {
+      navigator.sendBeacon(
+        `${API_BASE}/api/rooms/${encodeURIComponent(roomName)}/emergency-stop`,
+        JSON.stringify({ roomName, egressId })
+      );
+    }
+  };
+  
+  window.addEventListener('beforeunload', handleBeforeUnload);
+  return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+}, [streamStatus, roomName, egressId]);
+
 
 
   const handleLeftRoom = () => {
@@ -180,10 +197,30 @@ useEffect(() => {
   const handleStartMultistream = async (keys: {
   youtubeKey?: string;
   facebookKey?: string;
-  twitchKey?: string;   // 👈 NEW
 }) => {
   if (!roomName) {
-    alert("No room name");
+    toast.error("No room name found");
+    return;
+  }
+
+  // Validate at least one platform
+  const yt = keys.youtubeKey?.trim() || "";
+  const fb = keys.facebookKey?.trim() || "";
+  
+  if (!yt && !fb) {
+    toast.error("Please add at least one stream key");
+    return;
+  }
+
+  // Validate YouTube key format (basic check)
+  if (yt && yt.length < 10) {
+    toast.error("Invalid YouTube stream key format");
+    return;
+  }
+
+  // Validate Facebook key format (basic check)
+  if (fb && !fb.match(/^[A-Za-z0-9-]+$/)) {
+    toast.error("Invalid Facebook stream key format");
     return;
   }
 
@@ -196,9 +233,8 @@ useEffect(() => {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          youtubeStreamKey: keys.youtubeKey,
-          facebookStreamKey: keys.facebookKey,
-          twitchStreamKey: keys.twitchKey,  // 👈 NEW
+          youtubeStreamKey: yt || undefined,
+          facebookStreamKey: fb || undefined,
         }),
       }
     );
@@ -206,7 +242,7 @@ useEffect(() => {
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       console.error("Start multistream failed", errData);
-      alert("Failed to start multistream");
+      toast.error("Failed to start multistream: " + (errData.error || "Unknown error"));
       setStreamStatus("idle");
       return;
     }
@@ -214,9 +250,10 @@ useEffect(() => {
     const data = await res.json();
     setEgressId(data.egressId);
     setStreamStatus("live");
+    toast.success("Stream started successfully!");
   } catch (err) {
     console.error("Error starting multistream", err);
-    alert("Error starting multistream");
+    toast.error("Error starting multistream");
     setStreamStatus("idle");
   }
 };
@@ -224,12 +261,12 @@ useEffect(() => {
 
   const handleStopMultistream = async () => {
   if (!egressId) {
-    alert("No active stream");
+    toast.error("No active stream");
     return;
   }
 
   if (!roomName) {
-    alert("No room name");
+    toast.error("No room name found");
     return;
   }
 
@@ -251,12 +288,20 @@ useEffect(() => {
     if (!res.ok) {
       const errData = await res.json().catch(() => ({}));
       console.error("Stop multistream failed", errData);
-      alert("Failed to stop multistream");
+      toast.error("Failed to stop multistream: " + (errData.error || "Unknown error"));
       setStreamStatus("live");
       return;
     }
 
     setEgressId(null);
+    setStreamStatus("idle");
+    toast.success("Stream stopped successfully!");
+  } catch (err) {
+    console.error("Error stopping multistream", err);
+    toast.error("Error stopping multistream");
+    setStreamStatus("live");
+  }
+};
     setStreamStatus("idle");
   } catch (err) {
     console.error("Error stopping multistream", err);
