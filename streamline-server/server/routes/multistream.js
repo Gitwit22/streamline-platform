@@ -36,7 +36,6 @@ router.post("/:roomName/start-multistream", async (req, res) => {
             protocol: livekit_server_sdk_1.StreamProtocol.RTMP,
             urls,
         });
-        // Prepare output options - stream is required, file is optional
         const outputOptions = { stream: streamOutput };
         // Add file output if R2 credentials are configured (saves recording to R2)
         if (process.env.R2_ACCESS_KEY_ID &&

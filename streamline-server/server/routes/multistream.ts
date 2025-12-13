@@ -51,7 +51,11 @@ router.post("/:roomName/start-multistream", async (req, res) => {
     });
 
     // Prepare output options - stream is required, file is optional
-    const outputOptions: any = { stream: streamOutput };
+    interface OutputOptions {
+      stream: StreamOutput;
+      file?: EncodedFileOutput;
+    }
+    const outputOptions: OutputOptions = { stream: streamOutput };
 
     // Add file output if R2 credentials are configured (saves recording to R2)
     if (
