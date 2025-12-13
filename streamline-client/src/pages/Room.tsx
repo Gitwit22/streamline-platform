@@ -302,13 +302,6 @@ useEffect(() => {
     setStreamStatus("live");
   }
 };
-    setStreamStatus("idle");
-  } catch (err) {
-    console.error("Error stopping multistream", err);
-    alert("Error stopping multistream");
-    setStreamStatus("live");
-  }
-};
 
 
   // --- conditional screens ---

@@ -1,7 +1,7 @@
 // server/routes/multistream.ts
 import express from "express";
 import { egressClient } from "../livekitClient";
-import { StreamOutput, StreamProtocol, EncodedFileOutput, EncodedFileType } from "livekit-server-sdk";
+import { StreamOutput, StreamProtocol, EncodedFileOutput, EncodedFileType, S3Upload } from "livekit-server-sdk";
 
 const router = express.Router();
 
@@ -63,11 +63,14 @@ router.post("/:roomName/start-multistream", async (req, res) => {
       const fileOutput = new EncodedFileOutput({
         fileType: EncodedFileType.MP4,
         filepath: `recordings/${roomName}-${Date.now()}.mp4`,
-        s3: {
-          accessKey: process.env.R2_ACCESS_KEY_ID,
-          secret: process.env.R2_SECRET_ACCESS_KEY,
-          endpoint: process.env.R2_ENDPOINT,
-          bucket: process.env.R2_BUCKET,
+        output: {
+          case: "s3",
+          value: new S3Upload({
+            accessKey: process.env.R2_ACCESS_KEY_ID,
+            secret: process.env.R2_SECRET_ACCESS_KEY,
+            endpoint: process.env.R2_ENDPOINT,
+            bucket: process.env.R2_BUCKET,
+          }),
         },
       });
       outputOptions.file = fileOutput;
@@ -122,8 +125,11 @@ router.post("/:roomName/stop-multistream", async (req, res) => {
     let videoUrl = null;
     try {
       const egressInfoList = await egressClient.listEgress({ egressId });
-      if (egressInfoList && egressInfoList.length > 0 && egressInfoList[0].file) {
-        videoUrl = egressInfoList[0].file.location;
+      if (egressInfoList && egressInfoList.length > 0) {
+        const fileResults = egressInfoList[0].fileResults;
+        if (fileResults && fileResults.length > 0 && fileResults[0].location) {
+          videoUrl = fileResults[0].location;
+        }
       }
     } catch (infoErr) {
       console.error("Error fetching egress info:", infoErr);
