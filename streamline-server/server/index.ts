@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import { RoomServiceClient, TrackSource, TrackType } from "livekit-server-sdk";
 import multistreamRoutes from "./routes/multistream";
 
@@ -21,6 +22,15 @@ const port = process.env.PORT || 3157;
 const app = express();
 app.use(cors());
 app.use(express.json());
+
+// Rate limiting for API routes
+const apiLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per windowMs
+  message: "Too many requests from this IP, please try again later.",
+});
+
+app.use("/api/", apiLimiter);
 
 // Health check
 app.get("/", (_req, res) => res.send("API up"));

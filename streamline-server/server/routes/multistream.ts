@@ -1,7 +1,7 @@
 // server/routes/multistream.ts
 import express from "express";
 import { egressClient } from "../livekitClient";
-import { StreamOutput, StreamProtocol } from "livekit-server-sdk";
+import { StreamOutput, StreamProtocol, EncodedFileOutput, EncodedFileType } from "livekit-server-sdk";
 
 const router = express.Router();
 
@@ -57,10 +57,33 @@ router.post("/:roomName/start-multistream", async (req, res) => {
       urls,
     });
 
+    // Prepare output options - stream is required, file is optional
+    const outputOptions: any = { stream: streamOutput };
+
+    // Add file output if R2 credentials are configured (saves recording to R2)
+    if (
+      process.env.R2_ACCESS_KEY_ID &&
+      process.env.R2_SECRET_ACCESS_KEY &&
+      process.env.R2_ENDPOINT &&
+      process.env.R2_BUCKET
+    ) {
+      const fileOutput = new EncodedFileOutput({
+        fileType: EncodedFileType.MP4,
+        filepath: `recordings/${roomName}-${Date.now()}.mp4`,
+        s3: {
+          accessKey: process.env.R2_ACCESS_KEY_ID,
+          secret: process.env.R2_SECRET_ACCESS_KEY,
+          endpoint: process.env.R2_ENDPOINT,
+          bucket: process.env.R2_BUCKET,
+        },
+      });
+      outputOptions.file = fileOutput;
+    }
+
     // Start Room Composite egress and stream to all URLs
     const info = await egressClient.startRoomCompositeEgress(
       roomName,
-      { stream: streamOutput },
+      outputOptions,
       { layout: "grid" } // you can change layout if needed
     );
 
@@ -102,7 +125,19 @@ router.post("/:roomName/stop-multistream", async (req, res) => {
     await egressClient.stopEgress(egressId);
     activeEgressIds.delete(roomName);
 
-    return res.json({ success: true });
+    // Fetch the egress info to get the video URL
+    let videoUrl = null;
+    try {
+      const egressInfoList = await egressClient.listEgress({ egressId });
+      if (egressInfoList && egressInfoList.length > 0 && egressInfoList[0].file) {
+        videoUrl = egressInfoList[0].file.location;
+      }
+    } catch (infoErr) {
+      console.error("Error fetching egress info:", infoErr);
+      // Don't fail the request if we can't get the info
+    }
+
+    return res.json({ success: true, videoUrl });
   } catch (err: any) {
     console.error("Error stopping multistream", err);
     return res.status(500).json({

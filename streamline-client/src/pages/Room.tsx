@@ -8,7 +8,7 @@ import StreamSetupModal from "../components/StreamSetupModal";
 import RoleOverlay from "../components/RoleOverlay";
 
 
-const API_BASE = "https://magdalena-bulllike-hildred.ngrok-free.dev";
+const API_BASE = "";  // Use Vite proxy
 
 
 type StreamStatus = "idle" | "starting" | "live" | "stopping";

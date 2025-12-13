@@ -24,14 +24,6 @@ const Welcome = () => {
       >
         Login
       </button>
-
-      {/* 🔥 DEV BYPASS — bottom-right corner, subtle */}
-      <button
-        onClick={() => nav("/join")}
-        className="absolute bottom-4 right-4 text-red-400 text-xs underline hover:text-red-300"
-      >
-        dev bypass
-      </button>
     </div>
   );
 };
