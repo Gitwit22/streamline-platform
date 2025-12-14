@@ -28,6 +28,7 @@ app.get("/", (_req, res) => res.send("API up"));
 app.use("/api/roomToken", roomToken_1.default);
 // Multistream routes (YouTube/FB)
 app.use("/api/rooms", multistream_1.default);
+// Editing routes (disabled - returns HTTP 410)
 app.use("/api/editing", editing_1.default);
 // ✅ PROMPT #1: Storage test route
 app.get("/api/storage/test", async (req, res) => {

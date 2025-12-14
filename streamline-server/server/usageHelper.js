@@ -1,6 +1,10 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.updateStorageUsage = exports.checkStorageLimit = exports.getUserUsage = exports.addUsageForUser = exports.computeNextResetDate = void 0;
+exports.computeNextResetDate = computeNextResetDate;
+exports.addUsageForUser = addUsageForUser;
+exports.getUserUsage = getUserUsage;
+exports.checkStorageLimit = checkStorageLimit;
+exports.updateStorageUsage = updateStorageUsage;
 // server/usageHelper.ts
 const firebaseAdmin_1 = require("./firebaseAdmin");
 /**
@@ -15,7 +19,6 @@ function computeNextResetDate(userCreatedAt, fromDate = new Date()) {
     const finalReset = fromDate.getDate() >= createdDay ? nextMonthReset : thisMonthReset;
     return finalReset;
 }
-exports.computeNextResetDate = computeNextResetDate;
 /**
  * Central function to add usage for a user
  * Called when: stream ends, render completes, etc.
@@ -82,7 +85,6 @@ async function addUsageForUser(userId, durationMinutes, options) {
         throw err;
     }
 }
-exports.addUsageForUser = addUsageForUser;
 /**
  * Get current usage for a user
  */
@@ -125,7 +127,6 @@ async function getUserUsage(userId) {
         throw err;
     }
 }
-exports.getUserUsage = getUserUsage;
 /**
  * ✅ PROMPT #3: Check storage limits before upload
  * Loads plan limits and current usage, enforces plan-based storage caps
@@ -161,7 +162,6 @@ async function checkStorageLimit(userId, fileSizeBytes) {
         throw err;
     }
 }
-exports.checkStorageLimit = checkStorageLimit;
 /**
  * Update storage usage after successful upload
  */
@@ -186,4 +186,3 @@ async function updateStorageUsage(userId, fileSizeBytes) {
         throw err;
     }
 }
-exports.updateStorageUsage = updateStorageUsage;

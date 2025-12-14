@@ -1,6 +1,13 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.generateThumbnailPath = exports.generateRecordingPath = exports.getFileMetadata = exports.checkFileExists = exports.deleteFile = exports.getSignedUploadUrl = exports.getSignedDownloadUrl = exports.uploadVideo = void 0;
+exports.uploadVideo = uploadVideo;
+exports.getSignedDownloadUrl = getSignedDownloadUrl;
+exports.getSignedUploadUrl = getSignedUploadUrl;
+exports.deleteFile = deleteFile;
+exports.checkFileExists = checkFileExists;
+exports.getFileMetadata = getFileMetadata;
+exports.generateRecordingPath = generateRecordingPath;
+exports.generateThumbnailPath = generateThumbnailPath;
 const client_s3_1 = require("@aws-sdk/client-s3");
 const s3_request_presigner_1 = require("@aws-sdk/s3-request-presigner");
 /**
@@ -60,7 +67,6 @@ async function uploadVideo(buffer, remotePath, contentType = "video/mp4") {
         throw new Error(`Failed to upload video to R2: ${error}`);
     }
 }
-exports.uploadVideo = uploadVideo;
 /**
  * Generate a signed download URL for a file in R2
  * @param remotePath - Path in R2 (e.g., "recordings/userId/roomName/timestamp.mp4")
@@ -82,7 +88,6 @@ async function getSignedDownloadUrl(remotePath, expiresIn = 3600) {
         throw new Error(`Failed to generate signed download URL: ${error}`);
     }
 }
-exports.getSignedDownloadUrl = getSignedDownloadUrl;
 /**
  * Generate a signed upload URL (for direct browser uploads)
  * @param remotePath - Path in R2 (e.g., "recordings/userId/roomName/timestamp.mp4")
@@ -106,7 +111,6 @@ async function getSignedUploadUrl(remotePath, contentType = "video/mp4", expires
         throw new Error(`Failed to generate signed upload URL: ${error}`);
     }
 }
-exports.getSignedUploadUrl = getSignedUploadUrl;
 /**
  * Delete a file from R2
  * @param remotePath - Path in R2
@@ -125,7 +129,6 @@ async function deleteFile(remotePath) {
         throw new Error(`Failed to delete file from R2: ${error}`);
     }
 }
-exports.deleteFile = deleteFile;
 /**
  * Check if a file exists in R2
  * @param remotePath - Path in R2
@@ -148,7 +151,6 @@ async function checkFileExists(remotePath) {
         throw new Error(`Failed to check file existence: ${error}`);
     }
 }
-exports.checkFileExists = checkFileExists;
 /**
  * Get file metadata (size, last modified, etc.)
  * @param remotePath - Path in R2
@@ -168,7 +170,6 @@ async function getFileMetadata(remotePath) {
         throw new Error(`Failed to get file metadata: ${error}`);
     }
 }
-exports.getFileMetadata = getFileMetadata;
 /**
  * Generate a recording file path based on userId, roomName, and timestamp
  * @param userId - User ID
@@ -179,7 +180,6 @@ exports.getFileMetadata = getFileMetadata;
 function generateRecordingPath(userId, roomName, timestamp) {
     return `recordings/${userId}/${roomName}/${timestamp}.mp4`;
 }
-exports.generateRecordingPath = generateRecordingPath;
 /**
  * Generate a thumbnail file path based on userId, roomName, and timestamp
  * @param userId - User ID
@@ -190,7 +190,6 @@ exports.generateRecordingPath = generateRecordingPath;
 function generateThumbnailPath(userId, roomName, timestamp) {
     return `thumbnails/${userId}/${roomName}/${timestamp}.jpg`;
 }
-exports.generateThumbnailPath = generateThumbnailPath;
 exports.default = {
     uploadVideo,
     getSignedDownloadUrl,

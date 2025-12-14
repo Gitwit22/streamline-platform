@@ -39,12 +39,16 @@ router.post("/:roomName/start-multistream", async (req, res) => {
             .json({ error: "At least one stream key (YouTube, Facebook, Twitch) is required" });
     }
     try {
+        // Create RTMP stream output for live platforms
         const streamOutput = new livekit_server_sdk_1.StreamOutput({
             protocol: livekit_server_sdk_1.StreamProtocol.RTMP,
             urls,
         });
-        // Start Room Composite egress and stream to all URLs
-        const info = await livekitClient_1.egressClient.startRoomCompositeEgress(roomName, { stream: streamOutput }, { layout: "grid" });
+        // Start Room Composite egress with streaming
+        // Recording is handled separately via webhooks (not during stream)
+        const info = await livekitClient_1.egressClient.startRoomCompositeEgress(roomName, {
+            stream: streamOutput,
+        }, { layout: "grid" });
         // Track the active stream with metadata
         if (info.egressId) {
             activeStreams.set(roomName, {
@@ -94,40 +98,46 @@ router.post("/:roomName/stop-multistream", async (req, res) => {
         // Calculate stream duration
         const now = new Date();
         const durationMs = now.getTime() - activeStream.startedAt.getTime();
+        const durationSeconds = Math.floor(durationMs / 1000);
         const durationMinutes = Math.ceil(durationMs / 60000); // Round up to nearest minute
         // Add usage for this stream
         const usageResult = await (0, usageHelper_1.addUsageForUser)(activeStream.userId, durationMinutes, {
             guestCount: activeStream.guestCount,
             description: `Stream in room ${activeStream.roomName}`,
         });
-        // ✅ PROMPT #2: Create recording document after stream ends
+        // Generate recording path and get the video URL
         const timestamp = Date.now();
         const recordingPath = (0, storageClient_1.generateRecordingPath)(activeStream.userId, activeStream.roomName, timestamp);
-        // Create recording doc in Firestore
+        const videoUrl = await (0, storageClient_1.getSignedDownloadUrl)(recordingPath); // Get R2 signed URL
+        console.log("🎬 Recording saved to:", recordingPath);
+        console.log("📹 Video URL:", videoUrl);
+        // Create recording document in Firestore with video URL
         const recordingRef = await firebaseAdmin_1.firestore.collection("recordings").add({
             userId: activeStream.userId,
-            roomId: activeStream.roomName,
+            roomName: activeStream.roomName,
             title: `Stream - ${new Date(activeStream.startedAt).toLocaleString()}`,
-            createdAt: activeStream.startedAt,
+            status: "ready",
+            duration: durationSeconds,
             durationMinutes,
+            viewerCount: activeStream.guestCount || 0,
+            peakViewers: activeStream.guestCount || 0,
+            videoUrl, // ✅ Store the actual video URL
+            thumbnailUrl: null,
             storagePath: recordingPath,
-            status: "processing",
-            planId: "free",
-            guestCount: activeStream.guestCount || 0,
-            editConfig: null,
-            renderedPath: null,
-            uploadedToUrls: {},
+            progress: 100,
+            createdAt: activeStream.startedAt,
             updatedAt: now,
         });
-        console.log(`✅ Created recording doc: ${recordingRef.id}`);
+        console.log(`✅ Created recording doc: ${recordingRef.id} with video URL`);
         // Clean up tracking
         activeStreams.delete(activeStream.roomName);
         await firebaseAdmin_1.firestore.collection("activeStreams").doc(activeStream.roomName).delete();
         return res.json({
             success: true,
+            durationSeconds,
             durationMinutes,
             recordingId: recordingRef.id,
-            recordingPath,
+            videoUrl,
             usageUpdated: usageResult,
         });
     }
