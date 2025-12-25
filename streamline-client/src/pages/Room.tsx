@@ -2,15 +2,19 @@ import { useEffect, useState, useRef } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { LiveKitRoom, VideoConference } from "@livekit/components-react";
 import "@livekit/components-styles";
-import StreamSetupModal from "../components/StreamSetupModal";
+import StreamSetupModalV2 from "../components/StreamSetupModal";
 import RoleOverlay from "../components/RoleOverlay";
-import InviteMenu from "../components/InviteMenu";
+import { HostAVControls } from "../components/HostAVControls";
+
+
 
 // Use relative paths - Vite proxy forwards /api/* to http://localhost:5137
 const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 type StreamStatus = "idle" | "starting" | "live" | "stopping";
-type RecordingStatus = "idle" | "recording" | "stopping" | "stopped";
+type RecordingStatus = "idle" | "recording" | "stopping" | "stopped" | "error";
+
+
 
 function ThankYouScreen({ showHomeButton = false, onHome }: { showHomeButton?: boolean; onHome?: () => void }) {
   useEffect(() => {
@@ -120,21 +124,140 @@ function ThankYouScreen({ showHomeButton = false, onHome }: { showHomeButton?: b
   );
 }
 
-function StreamEndedModal({ recordingId, onStartEditing, onExitRoom }: { recordingId: string; onStartEditing: () => void; onExitRoom: () => void }) {
+function StreamEndedModal({
+  recordingId,
+  onStartEditing,
+  onExitRoom,
+}: {
+  recordingId: string;
+  onStartEditing: () => void;
+  onExitRoom: () => void;
+}) {
+  const [processing, setProcessing] = useState(true);
+const [ready, setReady] = useState(false);
+const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+const pollCountRef = useRef(0);
+  const MAX_POLLS = 100; // Stop after 5 minutes (100 * 3 seconds)
+
+  useEffect(() => {
+  if (!recordingId) return;
+
+  const pollStatus = async () => {
+    // ✅ Safety limit: Stop after MAX_POLLS attempts
+    pollCountRef.current += 1;
+    if (pollCountRef.current > MAX_POLLS) {
+      console.warn("⚠️ Max polling attempts reached. Stopping.");
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      setProcessing(false);
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/recordings/${recordingId}`);
+      if (!res.ok) throw new Error("Failed to fetch recording status");
+
+      const text = await res.text();
+      if (!text) throw new Error("Empty response from server");
+
+      const payload = JSON.parse(text);
+      console.log("🔍 Full response:", payload);
+
+      const status = payload?.data?.status ?? payload?.status ?? "PROCESSING";
+      const downloadReady = !!payload?.data?.downloadReady;
+
+      console.log("📊 Recording status:", status);
+      console.log("📦 downloadReady:", downloadReady);
+      console.log("📊 Current state - Processing:", processing, "Ready:", ready);
+
+      // ✅ NEW SOURCE OF TRUTH: only unlock when downloadReady === true
+      if (downloadReady) {
+        console.log("✅ downloadReady is true - enabling download button!");
+
+        if (intervalRef.current) {
+          clearInterval(intervalRef.current);
+          intervalRef.current = null;
+          console.log("🛑 Polling stopped - recording is ready!");
+        }
+
+        setProcessing(false);
+        setReady(true);
+        return;
+      }
+
+      // Not ready yet — keep processing indicator on
+      if (status === "RECORDING") {
+        setProcessing(true);
+      } else if (status === "STOP_REQUESTED" || status === "PROCESSING") {
+        setProcessing(true);
+      } else {
+        // Unknown status, still keep it "processing" until downloadReady flips
+        setProcessing(true);
+      }
+    } catch (err) {
+      console.error("❌ Poll error:", err);
+      setProcessing(true);
+    }
+  };
+
+  // Run once immediately, then poll
+  pollStatus();
+  intervalRef.current = setInterval(pollStatus, 3000);
+
+  return () => {
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+  };
+}, [API_BASE, recordingId]);
+
+
+    
+  // ✅ UPDATED download handler (this is the only change)
+  const handleDownload = async () => {
+    try {
+      // 1️⃣ Ask backend for a one-time download link
+      const res = await fetch(
+        `${API_BASE}/api/recordings/${recordingId}/download-link`
+      );
+
+      if (!res.ok) {
+        throw new Error("Failed to get download link");
+      }
+
+      const data = await res.json();
+
+      if (!data?.success || !data?.data?.path) {
+        throw new Error(data?.error || "Invalid download link response");
+      }
+
+      // 2️⃣ Open the real download URL (includes token)
+      window.open(`${API_BASE}${data.data.path}`, "_blank");
+    } catch (err) {
+      console.error(err);
+      alert("Failed to download recording.");
+    }
+  };
+
   return (
-    <div style={{
-      position: 'fixed',
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      background: 'rgba(0, 0, 0, 0.8)',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'center',
-      zIndex: 9999,
-      backdropFilter: 'blur(4px)',
-    }}>
+    <div
+      style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        background: "rgba(0, 0, 0, 0.8)",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        zIndex: 9999,
+        backdropFilter: "blur(4px)",
+      }}
+    >
       <div style={{
         background: 'linear-gradient(135deg, #1a1a1a 0%, #2d1a1a 100%)',
         border: '2px solid rgba(220, 38, 38, 0.3)',
@@ -145,57 +268,57 @@ function StreamEndedModal({ recordingId, onStartEditing, onExitRoom }: { recordi
         textAlign: 'center',
         color: '#ffffff',
       }}>
-        {/* Success Icon */}
-        <div style={{
-          width: '80px',
-          height: '80px',
-          borderRadius: '50%',
-          background: 'linear-gradient(135deg, #16a34a, #22c55e)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          margin: '0 auto 1.5rem',
-          fontSize: '2rem',
-        }}>
-          ✓
-        </div>
-
-        <h2 style={{ fontSize: '1.875rem', fontWeight: 'bold', marginBottom: '1rem' }}>Stream Ended</h2>
-        <p style={{ fontSize: '1rem', color: 'rgba(255, 255, 255, 0.8)', marginBottom: '2rem' }}>
-          Your recording is ready. Choose what you'd like to do next.
-        </p>
-
-        {/* Action Buttons */}
+       {processing && (
+  <div style={{ marginBottom: '1rem', fontWeight: 600, color: '#fbbf24', textAlign: 'center' }}>
+    <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>⏳</div>
+    <div className="processing-text">Processing recording<span className="dots"></span></div>
+    <div style={{ fontSize: '0.85rem', color: '#9ca3af', marginTop: '0.5rem' }}>
+      This usually takes 1-2 minutes. The download button will activate when ready.
+    </div>
+  </div>
+)}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
           <button
-            onClick={onStartEditing}
-            style={{
-              width: '100%',
-              padding: '1rem',
-              background: 'linear-gradient(to right, #dc2626, #ef4444)',
-              color: '#ffffff',
-              border: 'none',
-              borderRadius: '0.5rem',
-              fontSize: '1rem',
-              fontWeight: '600',
-              cursor: 'pointer',
-              transition: 'all 0.3s ease',
-            }}
-            onMouseEnter={(e) => {
-              const target = e.target as HTMLButtonElement;
-              target.style.background = 'linear-gradient(to right, #991b1b, #dc2626)';
-              target.style.transform = 'translateY(-2px)';
-              target.style.boxShadow = '0 10px 25px rgba(220, 38, 38, 0.3)';
-            }}
-            onMouseLeave={(e) => {
-              const target = e.target as HTMLButtonElement;
-              target.style.background = 'linear-gradient(to right, #dc2626, #ef4444)';
-              target.style.transform = 'translateY(0)';
-              target.style.boxShadow = 'none';
-            }}
-          >
-            ✂️ Start Editing
-          </button>
+  onClick={onStartEditing}
+  style={{
+    width: '100%',
+    padding: '1rem',
+    background: 'linear-gradient(to right, #dc2626, #ef4444)',
+    color: '#ffffff',
+    border: 'none',
+    borderRadius: '0.5rem',
+    fontSize: '1rem',
+    fontWeight: '600',
+    cursor: 'pointer',
+    transition: 'all 0.3s ease',
+  }}
+  disabled={processing}
+>
+  ✂️ Start Editing
+</button>
+
+<button
+  onClick={handleDownload}
+  disabled={!ready}
+  style={{
+    width: "100%",
+    padding: "12px 16px",
+    borderRadius: "8px",
+    border: "none",
+    fontSize: "14px",
+    fontWeight: 600,
+    cursor: !ready ? "not-allowed" : "pointer",
+    opacity: !ready ? 0.6 : 1,
+    transition: "all 0.3s ease",
+    background: ready ? "#16a34a" : "#374151",  // ✅ green vs gray
+    color: "#fff",
+  }}
+>
+  {ready ? "⬇️ Download Recording" : "⏳ Processing..."}
+</button>
+
+
+
 
           <button
             onClick={onExitRoom}
@@ -210,18 +333,6 @@ function StreamEndedModal({ recordingId, onStartEditing, onExitRoom }: { recordi
               fontWeight: '600',
               cursor: 'pointer',
               transition: 'all 0.3s ease',
-            }}
-            onMouseEnter={(e) => {
-              const target = e.target as HTMLButtonElement;
-              target.style.background = 'rgba(255, 255, 255, 0.15)';
-              target.style.borderColor = 'rgba(255, 255, 255, 0.4)';
-              target.style.transform = 'translateY(-2px)';
-            }}
-            onMouseLeave={(e) => {
-              const target = e.target as HTMLButtonElement;
-              target.style.background = 'rgba(255, 255, 255, 0.1)';
-              target.style.borderColor = 'rgba(255, 255, 255, 0.2)';
-              target.style.transform = 'translateY(0)';
             }}
           >
             🚪 Exit Room
@@ -246,24 +357,17 @@ function getOrCreateUid() {
 }
 
 export default function Room() {
+
+    
+    // Separate ref for stream egress id
+    const streamEgressRef = useRef<string | null>(null);
+  
   const nav = useNavigate();
-  const { roomName: rn } = useParams<{ roomName: string }>();
-  const roomName = rn ?? "";
+  const { roomName } = useParams<{ roomName: string }>();
+  const onExitRoom = () => nav("/dashboard");
+  const onStartEditing = () => nav("/editor");
+
   
-  // Debug room name extraction
-  useEffect(() => {
-    console.log('🏠 Room component - URL params:', { rn, roomName, fullPath: window.location.pathname });
-  }, [rn, roomName]);
-  
-  const [sessionStart, setSessionStart] = useState<number | null>(null);
-  
-  useEffect(() => {
-    const start = Date.now();
-    setSessionStart(start);
-    // Store room name and session start time for exit page
-    localStorage.setItem("sl_roomName", roomName);
-    localStorage.setItem("sl_sessionStart", start.toString());
-  }, [roomName]);
 
   const [displayName, setDisplayName] = useState(
     () => localStorage.getItem("sl_displayName") ?? ""
@@ -306,6 +410,7 @@ export default function Room() {
     });
   }, [roomName, currentUserId]);
 
+  const [recordingEnabled, setRecordingEnabled] = useState(false);
   const [recordingId, setRecordingId] = useState<string | null>(null);
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus>("idle");
   const recordingRef = useRef<string | null>(null);
@@ -383,49 +488,145 @@ export default function Room() {
     nav('/join', { replace: true });
   };
 
-  const startRecording = async () => {
+ async function apiStartRecording(roomName: string, layout: "speaker" | "grid" = "grid") {
+  console.log("🔧 apiStartRecording called:", { roomName, layout });
+  
+  const res = await fetch(`${API_BASE}/api/recordings/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ roomName, layout }),
+  });
+
+  console.log("🔧 Response status:", res.status);
+
+  // ✅ FIX: Read as text first (more reliable than res.json())
+  const text = await res.text();
+  console.log("🔧 Raw response:", text);
+
+  if (!res.ok) {
+    throw new Error(text || `HTTP ${res.status}`);
+  }
+
+  // Now parse the text
+  const json = JSON.parse(text);
+  console.log("🔧 Parsed JSON:", json);
+  
+  return json;
+}
+  
+  // UPDATED: Return the full response (bulletproof format)
+  
+
+
+async function apiStopRecording(recordingId: string) {
+  console.log("🛑 apiStopRecording called:", { recordingId });
+  
+  const res = await fetch(`${API_BASE}/api/recordings/stop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ recordingId }),
+  });
+
+  console.log("🛑 API response status:", res.status);
+
+  if (!res.ok) {
     try {
-      console.log("🔴 Starting recording...");
-      setRecordingStatus("recording");
-      
-      // Generate a simple recording ID for MVP (no backend storage needed)
-      const recordId = `rec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-      
-      console.log("✅ Recording started with ID:", recordId);
-      setRecordingId(recordId);
-      recordingRef.current = recordId;
-    } catch (error) {
-      console.error("❌ Failed to start recording:", error);
-      setRecordingStatus("idle");
+      const errorData = await res.json();
+      console.error("🛑 API error:", errorData);
+      throw new Error(errorData.error || `HTTP ${res.status}`);
+    } catch (parseError) {
+      const text = await res.text();
+      console.error("🛑 API error (text):", text);
+      throw new Error(text || `HTTP ${res.status}`);
     }
-  };
+  }
 
-  const stopRecording = async () => {
-    try {
-      console.log("⏹️ Stopping recording...");
-      
-      const recordId = recordingRef.current;
-      console.log("Recording ID to stop:", recordId);
+  const json = await res.json();
+  console.log("🛑 API response JSON:", json);
+  
+  // UPDATED: Return the full response
+  return json;
+}
 
-      if (recordId) {
-        // Calculate actual stream duration
-        const duration = streamStartTimeRef.current ? Math.floor((Date.now() - streamStartTimeRef.current) / 1000) : 0;
-        console.log("📊 Recording stopped with duration:", duration, "seconds");
+const startRecording = async (layout: "speaker" | "grid" = "grid") => {
+  if (!roomName) {
+    console.log("❌ No roomName, can't start recording");
+    return;
+  }
+  if (recordingRef.current) {
+    console.log("⏳ Recording already in progress, skipping startRecording call.");
+    return;
+  }
 
-        // Set stream ended status and store the recording ID
-        setRecordingStatus("stopped");
-        setRecordingId(recordId);
-      } else {
-        console.warn("⚠️ No recording ID available");
-        setRecordingStatus("stopped");
-        setRecordingId("unknown");
-      }
-    } catch (error) {
-      console.error("❌ Failed to stop recording:", error);
-      setRecordingStatus("stopped");
-      setRecordingId("unknown");
+  console.log("🎬 startRecording called. roomName:", roomName, "layout:", layout);
+  setRecordingStatus("recording");
+  
+  try {  // ✅ ADD THIS LINE if missing
+    console.log("📡 Calling apiStartRecording...");
+    const response = await apiStartRecording(roomName, layout);
+    console.log("📡 Got response:", response);
+    
+    const { recordingId } = response.data;
+    console.log("🎬 Extracted recordingId:", recordingId);
+    
+    if (!recordingId || recordingId === "unknown") {
+      console.error("❌ Invalid recordingId:", recordingId);
+      setRecordingStatus("error");
+      return;
     }
-  };
+    
+    recordingRef.current = recordingId;
+    setRecordingId(recordingId);
+    streamStartTimeRef.current = Date.now();
+    
+    console.log("✅ Recording started!");
+    console.log("   recordingRef.current:", recordingRef.current);
+    console.log("   recordingId state:", recordingId);
+  } catch (e) {  // ✅ Line 581
+    console.error("❌ Failed to start recording:", e);
+    setRecordingStatus("error");
+        alert(`Failed to start recording: ${(e as Error).message || "Unknown error"}`);
+
+  }
+};
+
+const stopRecording = async () => {
+  console.log("🛑 stopRecording called");
+  console.log("   recordingRef.current:", recordingRef.current);
+  console.log("   recordingId state:", recordingId);
+  
+  const id = recordingRef.current;
+  
+  if (!id || id === "unknown") {
+    console.error("❌ No valid recording ID to stop!");
+    console.error("   recordingRef.current:", recordingRef.current);
+    console.error("   This means recording never started properly");
+    setRecordingStatus("error");
+    return;
+  }
+
+  console.log("🛑 Stopping recording with ID:", id);
+  setRecordingStatus("stopping");
+  
+  try {
+    const response = await apiStopRecording(id);
+    console.log("✅ Recording stopped successfully:", response);
+    
+    // UPDATED: Check for success
+    if (!response.success) {
+      throw new Error(response.error || "Stop recording failed");
+    }
+    
+    setRecordingStatus("stopped");
+    setRecordingId(id);  // Set this so modal can poll!
+
+  } catch (e) {
+    console.error("❌ Failed to stop recording:", e);
+    setRecordingStatus("error");
+        alert(`Failed to start recording: ${(e as Error).message || "Unknown error"}`);
+
+  }
+};
 
   useEffect(() => {
     if (isHost && token && !recordingRef.current) {
@@ -494,7 +695,10 @@ export default function Room() {
     youtubeKey?: string;
     facebookKey?: string;
     twitchKey?: string;
+    record?: boolean;
+    layout?: "speaker" | "grid";
   }) => {
+    if (streamStatus === "starting" || streamStatus === "live") return;
     if (!roomName) {
       alert("No room name");
       return;
@@ -507,6 +711,8 @@ export default function Room() {
       youtube: keys.youtubeKey ? "✓ provided" : "✗ empty",
       facebook: keys.facebookKey ? "✓ provided" : "✗ empty",
       twitch: keys.twitchKey ? "✓ provided" : "✗ empty",
+      record: keys.record,
+      layout: keys.layout,
     });
 
     // Validate at least one key
@@ -537,10 +743,21 @@ export default function Room() {
         }
       );
 
-      console.log("   Response status:", res.status);
+      // Bulletproof: try to parse as JSON, fallback to text
+      let data;
+      try {
+        data = await res.json();
+      } catch (e) {
+        const text = await res.text();
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = { raw: text };
+        }
+      }
 
-      const data = await res.json();
-      console.log("   Response data:", data);
+      // Log the full response for debugging
+      console.log("🔍 startMultistream full response:", data);
 
       if (!res.ok) {
         console.error("Start multistream failed", data);
@@ -549,12 +766,23 @@ export default function Room() {
         return;
       }
 
-      setEgressId(data.egressId);
+      // Bulletproof egressId extraction
+      const egressId =
+        data?.data?.egressId ??
+        data?.egressId ??
+        data?.data?.id ??
+        data?.id;
+
+     
+      streamEgressRef.current = egressId || null;
       setStreamStatus("live");
+      streamStartTimeRef.current = Date.now();
       setDidStreamThisSession(true);
-      // Start recording when stream goes live - DISABLED FOR MVP
-      // await startRecording();
-      console.log("✅ Stream started! Egress ID:", data.egressId);
+      // Start recording using passed-in values
+      if (keys.record) {
+        await startRecording(keys.layout ?? "grid");
+      }
+      console.log("✅ Stream started! Egress ID:", egressId);
     } catch (err) {
       console.error("Error starting multistream:", err);
       alert("Error starting multistream");
@@ -563,7 +791,9 @@ export default function Room() {
   };
 
   const handleStopMultistream = async () => {
-    if (!egressId) {
+    // Use streamEgressRef for stopping stream
+    const streamEgressId = streamEgressRef.current;
+    if (!streamEgressId) {
       alert("No active stream");
       return;
     }
@@ -576,18 +806,15 @@ export default function Room() {
     try {
       setStreamStatus("stopping");
 
-      // Stop recording when stopping the stream (this saves to database) - DISABLED FOR MVP
-      // if (recordingStatus === "recording") {
-      //   await stopRecording();
-      //   // Don't return - continue to stop the multistream
-      // }
+      // ✅ DON'T stop recording - let user control that separately
+      // Recording continues even after stream ends
 
       const res = await fetch(
         `${API_BASE}/api/rooms/${encodeURIComponent(roomName)}/stop-multistream`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ egressId }),
+          body: JSON.stringify({ egressId: streamEgressId }),
         }
       );
 
@@ -599,6 +826,13 @@ export default function Room() {
 
       setEgressId(null);
       setStreamStatus("idle");
+      streamEgressRef.current = null;
+      
+      // ✅ Show alert that recording is still active
+      if (recordingStatus === "recording") {
+        console.log("ℹ️ Stream stopped but recording still active");
+      }
+        
     } catch (err) {
       console.error("Error stopping multistream", err);
       alert("Error stopping multistream");
@@ -960,7 +1194,39 @@ export default function Room() {
 
           {/* Invite Menu - only for hosts */}
           {isHost && (
-            <InviteMenu roomName={roomName} />
+            <button
+              onClick={() => {
+                const inviteUrl = `${window.location.origin}/join?room=${encodeURIComponent(roomName)}`;
+                navigator.clipboard.writeText(inviteUrl);
+                alert(`Invite link copied to clipboard!\n${inviteUrl}`);
+              }}
+              style={{
+                fontSize: '0.75rem',
+                padding: '0.5rem 0.75rem',
+                border: '1px solid rgba(34, 197, 94, 0.4)',
+                borderRadius: '0.375rem',
+                background: 'rgba(34, 197, 94, 0.05)',
+                color: '#22c55e',
+                cursor: 'pointer',
+                transition: 'all 0.3s ease',
+                backdropFilter: 'blur(10px)',
+                fontWeight: '500'
+              }}
+              onMouseEnter={(e) => {
+                const target = e.target as HTMLButtonElement;
+                target.style.background = 'rgba(34, 197, 94, 0.1)';
+                target.style.borderColor = 'rgba(220, 38, 38, 0.6)';
+              }}
+              onMouseLeave={(e) => {
+                const target = e.target as HTMLButtonElement;
+                target.style.background = 'rgba(34, 197, 94, 0.05)';
+                target.style.borderColor = 'rgba(34, 197, 94, 0.4)';
+                target.style.boxShadow = 'none';
+              }}
+              title="Copy invite link to clipboard"
+            >
+              🔗 Invite
+            </button>
           )}
 
           {/* Stream Timer - only show when streaming */}
@@ -1074,6 +1340,7 @@ export default function Room() {
           }}
         >
           <div style={{ width: "100%", height: "100%", position: "relative" }}>
+            {isHost && <HostAVControls />}
             <VideoConference />
             {/* On-stream logo for hosts - visible to viewers */}
             {isHost && (
@@ -1103,12 +1370,16 @@ export default function Room() {
         </LiveKitRoom>
       )}
 
-      <StreamSetupModal
-        isOpen={showStreamSetup}
+      <StreamSetupModalV2
+        open={showStreamSetup}
         onClose={() => setShowStreamSetup(false)}
-        onStart={handleStartMultistream}
-        onStop={handleStopMultistream}
-        status={streamStatus}
+        roomName={roomName ?? ""}
+        streamStatus={streamStatus}
+        onStartStream={handleStartMultistream}
+        onStopStream={handleStopMultistream}
+        recordingStatus={recordingStatus}
+        onStartRecording={startRecording}
+        onStopRecording={stopRecording}
       />
 
       {recordingStatus === "stopped" && recordingId && (
@@ -1116,19 +1387,32 @@ export default function Room() {
           recordingId={recordingId}
           onStartEditing={() => nav('/edit', { replace: true })}
           onExitRoom={() => nav('/thanks', { replace: true })}
+
+          
         />
-      )}
+      )} 
 
       <style>{`
-        @keyframes pulse {
-          0%, 100% {
-            opacity: 1;
-          }
-          50% {
-            opacity: 0.7;
-          }
-        }
-      `}</style>
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+  }
+  
+  @keyframes dots {
+    0%, 20% { content: '.'; }
+    40% { content: '..'; }
+    60%, 100% { content: '...'; }
+  }
+  
+  .processing-text {
+    display: inline-block;
+  }
+  
+  .dots::after {
+    content: '';
+    animation: dots 1.5s steps(1) infinite;
+  }
+`}</style>
     </>
   );
 }

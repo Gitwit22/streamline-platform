@@ -115,66 +115,11 @@ function HostPanel({ roomName }: { roomName: string }) {
       <Section title="Live Participants">
         <ParticipantList
           participants={parts}
-          onMute={(id, muted) => apiMute(roomName, id, muted)}
           onRemove={(id) => apiRemove(roomName, id)}
           canModerate
         />
 
-        {/* Mute / Unmute all controls */}
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.5rem' }}>
-          <button
-            style={{
-              borderRadius: '0.375rem',
-              border: '1px solid rgba(220, 38, 38, 0.5)',
-              padding: '0.375rem 0.75rem',
-              fontSize: '0.75rem',
-              background: 'linear-gradient(135deg, #dc2626, #b91c1c)',
-              color: '#ffffff',
-              cursor: 'pointer',
-              transition: 'all 0.3s ease',
-              fontWeight: '600'
-            }}
-            onMouseEnter={(e) => {
-              const target = e.target as HTMLButtonElement;
-              target.style.background = 'linear-gradient(135deg, #b91c1c, #991b1b)';
-              target.style.boxShadow = '0 0 10px rgba(220, 38, 38, 0.3)';
-            }}
-            onMouseLeave={(e) => {
-              const target = e.target as HTMLButtonElement;
-              target.style.background = 'linear-gradient(135deg, #dc2626, #b91c1c)';
-              target.style.boxShadow = 'none';
-            }}
-            onClick={() => apiMuteAll(roomName, true)}
-          >
-            Mute all
-          </button>
-          <button
-            style={{
-              borderRadius: '0.375rem',
-              border: '1px solid rgba(34, 197, 94, 0.5)',
-              padding: '0.375rem 0.75rem',
-              fontSize: '0.75rem',
-              background: 'linear-gradient(135deg, #22c55e, #16a34a)',
-              color: '#ffffff',
-              cursor: 'pointer',
-              transition: 'all 0.3s ease',
-              fontWeight: '600'
-            }}
-            onMouseEnter={(e) => {
-              const target = e.target as HTMLButtonElement;
-              target.style.background = 'linear-gradient(135deg, #16a34a, #15803d)';
-              target.style.boxShadow = '0 0 10px rgba(34, 197, 94, 0.3)';
-            }}
-            onMouseLeave={(e) => {
-              const target = e.target as HTMLButtonElement;
-              target.style.background = 'linear-gradient(135deg, #22c55e, #16a34a)';
-              target.style.boxShadow = 'none';
-            }}
-            onClick={() => apiMuteAll(roomName, false)}
-          >
-            Unmute all
-          </button>
-        </div>
+        {/* Removed Mute / Unmute all controls */}
       </Section>
 
       <Section title="Greenroom (Coming Soon)">
@@ -255,7 +200,7 @@ function ModeratorPanel({ roomName }: { roomName: string }) {
       <Section title="Live Participants">
         <ParticipantList
           participants={parts}
-          onMute={(id, muted) => apiMute(roomName, id, muted)}
+          
           onRemove={(id) => apiRemove(roomName, id)}
           canModerate
         />
@@ -302,12 +247,12 @@ function Section({
 function ParticipantList({
   participants,
   canModerate,
-  onMute,
+  // onMute removed
   onRemove,
 }: {
   participants: ReturnType<typeof useParticipants>;
   canModerate?: boolean;
-  onMute?: (identity: string, muted: boolean) => void;
+  // onMute removed
   onRemove?: (identity: string) => void;
 }) {
   if (!participants?.length) {
@@ -338,58 +283,7 @@ function ParticipantList({
           </div>
           {canModerate && (
             <div style={{ display: 'flex', gap: '0.25rem' }}>
-              <button
-                style={{
-                  borderRadius: '0.25rem',
-                  border: '1px solid rgba(220, 38, 38, 0.5)',
-                  padding: '0.25rem 0.5rem',
-                  fontSize: '0.7rem',
-                  background: 'linear-gradient(135deg, #dc2626, #b91c1c)',
-                  color: '#ffffff',
-                  cursor: 'pointer',
-                  transition: 'all 0.3s ease',
-                  fontWeight: '600'
-                }}
-                onMouseEnter={(e) => {
-                  const target = e.target as HTMLButtonElement;
-                  target.style.background = 'linear-gradient(135deg, #b91c1c, #991b1b)';
-                  target.style.boxShadow = '0 0 8px rgba(220, 38, 38, 0.3)';
-                }}
-                onMouseLeave={(e) => {
-                  const target = e.target as HTMLButtonElement;
-                  target.style.background = 'linear-gradient(135deg, #dc2626, #b91c1c)';
-                  target.style.boxShadow = 'none';
-                }}
-                onClick={() => onMute?.(p.identity, true)}
-              >
-                Mute
-              </button>
-              <button
-                style={{
-                  borderRadius: '0.25rem',
-                  border: '1px solid rgba(34, 197, 94, 0.5)',
-                  padding: '0.25rem 0.5rem',
-                  fontSize: '0.7rem',
-                  background: 'linear-gradient(135deg, #22c55e, #16a34a)',
-                  color: '#ffffff',
-                  cursor: 'pointer',
-                  transition: 'all 0.3s ease',
-                  fontWeight: '600'
-                }}
-                onMouseEnter={(e) => {
-                  const target = e.target as HTMLButtonElement;
-                  target.style.background = 'linear-gradient(135deg, #16a34a, #15803d)';
-                  target.style.boxShadow = '0 0 8px rgba(34, 197, 94, 0.3)';
-                }}
-                onMouseLeave={(e) => {
-                  const target = e.target as HTMLButtonElement;
-                  target.style.background = 'linear-gradient(135deg, #22c55e, #16a34a)';
-                  target.style.boxShadow = 'none';
-                }}
-                onClick={() => onMute?.(p.identity, false)}
-              >
-                Unmute
-              </button>
+              {/* Mute/Unmute participant buttons removed. Use local controls only. */}
               <button
                 style={{
                   borderRadius: '0.25rem',
@@ -424,63 +318,7 @@ function ParticipantList({
   );
 }
 
-/** --- Minimal admin calls (MVP; secure later with auth/JWT) --- */
 
-async function apiMute(room: string, identity: string, muted: boolean) {
-  try {
-    const res = await fetch(`${API_BASE}/api/admin/mute`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ room, identity, muted }),
-    });
-
-    let data: any = null;
-    try {
-      data = await res.json();
-    } catch {
-      // ignore JSON parse errors
-    }
-
-    if (!res.ok || (data && data.error)) {
-      console.error("mute/unmute failed", { status: res.status, data });
-      alert((data && data.error) || `Mute failed (HTTP ${res.status})`);
-      return;
-    }
-
-    console.log("mute/unmute success", data);
-  } catch (e) {
-    console.error("mute/unmute failed (network)", e);
-    alert("Mute request failed (network error)");
-  }
-}
-
-async function apiMuteAll(room: string, muted: boolean) {
-  try {
-    const res = await fetch(`${API_BASE}/api/admin/mute-all`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ room, muted }),
-    });
-
-    let data: any = null;
-    try {
-      data = await res.json();
-    } catch {
-      // ignore JSON parse errors
-    }
-
-    if (!res.ok || (data && data.error)) {
-      console.error("mute-all failed", { status: res.status, data });
-      alert((data && data.error) || `Mute all failed (HTTP ${res.status})`);
-      return;
-    }
-
-    console.log("mute-all success", data);
-  } catch (e) {
-    console.error("mute-all failed (network)", e);
-    alert("Mute-all request failed (network error)");
-  }
-}
 
 async function apiRemove(room: string, identity: string) {
   try {

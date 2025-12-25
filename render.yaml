@@ -1,0 +1,79 @@
+version: "1"
+
+services:
+  # -------------------------
+  # BACKEND (TEST)
+  # -------------------------
+  - type: web
+    name: streamline-backend2test
+    runtime: node
+    plan: free
+    repo: https://github.com/Gitwit22/streamline-platform
+    branch: test
+    rootDir: streamline-server
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+
+      # LiveKit (backend uses HTTPS URL)
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+
+      # Auth
+      - key: JWT_SECRET
+        sync: false
+
+      # Firebase (if you use it server-side)
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_BASE64
+        sync: false
+
+      # R2 (only if multistream/recording uses it)
+      - key: R2_ACCOUNT_ACCESS_KEY_ID
+        sync: false
+      - key: R2_ACCOUNT_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_USER_ACCESS_KEY_ID
+        sync: false
+      - key: R2_USER_SECRET_ACCESS_KEY
+        sync: false
+
+  # -------------------------
+  # FRONTEND (TEST)
+  # -------------------------
+  - type: web
+    name: streamline-platform-test
+    runtime: static
+    repo: https://github.com/Gitwit22/streamline-platform
+    branch: test
+    rootDir: streamline-client
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    autoDeploy: true
+    envVars:
+      # Frontend calls backend
+      - key: VITE_API_BASE
+        sync: false
+
+      # Frontend connects to LiveKit via WSS
+      - key: VITE_LIVEKIT_URL
+        sync: false
+
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html

@@ -4,7 +4,7 @@
 // ============================================================================
 
 // Use Vite proxy by default (routes /api/* to localhost:5137)
-const API_BASE = import.meta.env.VITE_API_BASE || '/api';
+import { API_BASE } from "./apiBase";
 
 // ============================================================================
 // TYPES

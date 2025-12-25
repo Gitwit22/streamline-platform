@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { editingApi } from "../lib/editingApi";
+import { DashboardAVControls } from "../components/DashboardAVControls";
 
 type Recording = {
   id: string;
@@ -34,49 +35,16 @@ export default function Dashboard() {
   const [totalViewers, setTotalViewers] = useState(0);
   const [totalDuration, setTotalDuration] = useState(0);
 
-  useEffect(() => {
-    const userStr = localStorage.getItem("sl_user");
-    if (userStr) {
-      const userData = JSON.parse(userStr);
-      setUser(userData);
-    }
-
-    const fetchData = async () => {
-      try {
-        // Fetch recordings from real backend API
-        const allRecordings = await editingApi.getRecordings();
-        if (Array.isArray(allRecordings)) {
-          setRecordings(allRecordings as Recording[]);
-
-          const totalViewCount = allRecordings.reduce((sum: number, r: any) => sum + (r.peakViewers || 0), 0);
-          setTotalViewers(totalViewCount);
-
-          const totalDurationSeconds = allRecordings.reduce((sum: number, r: any) => sum + (r.duration || 0), 0);
-          setTotalDuration(totalDurationSeconds / 60); // Convert to minutes
-        }
-      } catch (error) {
-        console.error("Failed to fetch recordings:", error);
-        setRecordings([]);
-      }
-
-      try {
-        // Fetch projects from real backend API
-        const allProjects = await editingApi.getProjects();
-        if (Array.isArray(allProjects)) {
-          setProjects(allProjects as Project[]);
-        } else {
-          setProjects([]);
-        }
-      } catch (error) {
-        console.error("Failed to fetch projects:", error);
-        setProjects([]);
-      }
-    };
-
-    fetchData();
-  }, []);
-
   const readyRecordings = recordings.filter((r) => r.status === "ready");
+
+  // ...existing code...
+
+  return (
+    <div>
+      <DashboardAVControls />
+      {/* ...existing dashboard UI... */}
+    </div>
+  );
 
   const handleDeleteRecording = (recordingId: string) => {
     if (confirm("Are you sure you want to delete this recording? This cannot be undone.")) {

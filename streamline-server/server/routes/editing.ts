@@ -59,22 +59,23 @@ router.post(
     try {
       console.log("📤 Upload request received");
       
-      if (!req.file) {
+      const file = (req as any).file;
+      if (!file) {
         console.log("❌ No file in request");
         return res.status(400).json({ error: "No file uploaded" });
       }
 
       const userId = req.user?.id;
-      const title = req.body.title || req.file.originalname.replace(/\.[^/.]+$/, "");
+      const title = req.body.title || file.originalname.replace(/\.[^/.]+$/, "");
 
       console.log(`📹 Uploading: ${title}`);
-      console.log(`📦 Size: ${(req.file.size / 1024 / 1024).toFixed(2)} MB`);
+      console.log(`📦 Size: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
       console.log(`👤 User: ${userId}`);
 
       // Check storage limits (skip for dev user)
       if (userId && userId !== "dev_user_123") {
         try {
-          await checkStorageLimit(userId, req.file.size);
+          await checkStorageLimit(userId, file.size);
         } catch (err: any) {
           console.log("⚠️ Storage limit check:", err.message);
           // Continue anyway for dev
@@ -84,16 +85,16 @@ router.post(
       // Generate unique filename
       const timestamp = Date.now();
       const safeName = title.replace(/[^a-z0-9]/gi, "-").toLowerCase();
-      const fileName = `${timestamp}-${safeName}.${req.file.originalname.split('.').pop()}`;
+      const fileName = `${timestamp}-${safeName}.${file.originalname.split('.').pop()}`;
       const path = `uploads/${userId}/${fileName}`;
 
       console.log(`☁️ Uploading to: ${path}`);
 
       // Upload to R2/S3
       const publicUrl = await uploadVideo(
-        req.file.buffer,
+        file.buffer,
         path,
-        req.file.mimetype
+        file.mimetype
       );
 
       console.log(`✅ Upload complete: ${publicUrl}`);
@@ -101,7 +102,7 @@ router.post(
       // Update storage usage (skip for dev user)
       if (userId && userId !== "dev_user_123") {
         try {
-          await updateStorageUsage(userId, req.file.size);
+          await updateStorageUsage(userId, file.size);
         } catch (err) {
           console.log("⚠️ Storage usage update failed (non-critical)");
         }
@@ -112,7 +113,7 @@ router.post(
         userId,
         name: title,
         type: 'video',
-        fileSize: req.file.size,
+        fileSize: file.size,
         videoUrl: publicUrl,
         storagePath: path,
         thumbnailUrl: null,
