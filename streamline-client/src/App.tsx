@@ -7,6 +7,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { SignupPage } from "./pages/SignupPage";
 import Join from "./pages/Join";
 import Room from "./pages/Room";
+import SettingsDestinations from "./pages/SettingsDestinations";
 import RoomExitPage from "./pages/RoomExitPage";
 import Dashboard from "./pages/Dashboard";
 import StreamSummaryPage from "./pages/StreamSummaryPage";
@@ -56,6 +57,7 @@ function App() {
       {/* Streaming flow */}
       <Route path="/join" element={<Join />} />
       <Route path="/room/:roomName" element={<Room />} />
+      <Route path="/settings/destinations" element={<SettingsDestinations />} />
       <Route path="/room-exit/:recordingId" element={<RoomExitPage />} />
 
       {/* Stream Summary */}

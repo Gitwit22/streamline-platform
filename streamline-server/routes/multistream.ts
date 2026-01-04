@@ -2,6 +2,7 @@ import { Router } from "express";
 import { firestore } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { canAccessFeature } from "./featureAccess";
+import type { ApiErrorCode } from "../types/streaming";
 
 // livekit-server-sdk is ESM; use dynamic import so CommonJS builds work on Render
 let _lkMod: any | null = null;

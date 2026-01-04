@@ -3,6 +3,9 @@ import { logAuthDebugContext } from "../lib/logAuthDebug";
 import { useNavigate, useParams } from "react-router-dom";
 import { LiveKitRoom, VideoConference } from "@livekit/components-react";
 import "@livekit/components-styles";
+import InviteButton from "../shared/InviteButton";
+import StreamSetupModal from "../components/StreamSetupModal";
+import { fetchDestinations, preflight, type DestinationItem } from "../services/destinations";
 import StreamSetupModalV2 from "../components/StreamSetupModal";
 import RoleOverlay from "../components/RoleOverlay";
 import { HostAVControls } from "../components/HostAVControls";
@@ -467,6 +470,75 @@ export default function Room() {
       streamStartTimeRef.current = null;
       setElapsedTime(0);
     }
+  };
+
+  fetchToken();
+}, [roomName, displayName]);
+
+  // Load destinations (soft gate)
+  useEffect(() => {
+    const loadDestinations = async () => {
+      try {
+        setDestinationsLoading(true);
+        const res = await fetchDestinations({ includeDisabled: false });
+        const items = res.items || [];
+        setDestinations(items);
+        const connectedEnabled = items.filter((d) => d.enabled && d.status === "connected");
+        setDestinationsReady(connectedEnabled.length > 0);
+      } catch (e) {
+        console.error("destinations load failed", e);
+        setDestinationsReady(false);
+      } finally {
+        setDestinationsLoading(false);
+      }
+    };
+    loadDestinations();
+  }, []);
+
+  async function refreshDestinations() {
+    try {
+      const res = await fetchDestinations({ includeDisabled: false });
+      const items = res.items || [];
+      setDestinations(items);
+      const connectedEnabled = items.filter((d) => d.enabled && d.status === "connected");
+      setDestinationsReady(connectedEnabled.length > 0);
+    } catch (e) {
+      // no-op
+    }
+  }
+
+  // Run preflight when modal opens (hard gate)
+  useEffect(() => {
+    const runPreflight = async () => {
+      setPreflightLoading(true);
+      try {
+        const res = await preflight({});
+        setPreflightResult(res);
+        const connected = (res.destinations || []).filter((d: any) => d.status === "connected");
+        setCanGoLive(connected.length > 0);
+      } catch (e) {
+        console.error("preflight failed", e);
+        setCanGoLive(false);
+      } finally {
+        setPreflightLoading(false);
+      }
+    };
+    if (showStreamSetup) runPreflight();
+  }, [showStreamSetup]);
+
+  function buildPreflightItems(): Array<{ id: string; label: string; ok: boolean; detail?: string }> {
+    const dests = (preflightResult?.destinations || []) as Array<{ id: string; platform: string; status: string; statusReason?: string | null }>;
+    const items: Array<{ id: string; label: string; ok: boolean; detail?: string }> = [];
+    dests.forEach((d) => {
+      const ok = d.status === "connected";
+      items.push({ id: d.id, label: `${d.platform} destination`, ok, detail: d.statusReason || undefined });
+    });
+    // Static note for Facebook
+    items.push({ id: "fb_note", label: "Facebook requires Go Live in FB console", ok: true });
+    return items;
+  }
+
+
   }, [streamStatus]);
 
   const handleLeftRoom = () => {
@@ -495,6 +567,22 @@ export default function Room() {
     return json;
   }
 
+  handleLeftRoom();
+};
+
+
+  const handleStartMultistream = async (keys: {
+  youtubeKey?: string;
+  facebookKey?: string;
+  twitchKey?: string;   // 👈 NEW
+}) => {
+  if (!canGoLive) {
+    alert("Preflight not passed. Connect destinations and try again.");
+    return;
+  }
+  if (!roomName) {
+    alert("No room name");
+    return;
   async function apiStopRecording(recordingId: string) {
     console.log("🛑 apiStopRecording called:", { recordingId });
     const res = await fetch(`/api/recordings/stop`, {
@@ -577,6 +665,16 @@ export default function Room() {
     }
   };
 
+    const data = await res.json();
+    setEgressId(data.egressId);
+    setStreamStatus("live");
+    await refreshDestinations();
+  } catch (err) {
+    console.error("Error starting multistream", err);
+    alert("Error starting multistream");
+    setStreamStatus("idle");
+  }
+};
   const handleEndStream = async () => {
     if (isHost && streamStatus === "live") {
       alert("⏹️ Stream is still live. Stop the stream first.");
@@ -697,6 +795,16 @@ export default function Room() {
       setStreamStatus("idle");
     }
   };
+
+    setEgressId(null);
+    setStreamStatus("idle");
+    await refreshDestinations();
+  } catch (err) {
+    console.error("Error stopping multistream", err);
+    alert("Error stopping multistream");
+    setStreamStatus("live");
+  }
+};
 
   const handleStopMultistream = async () => {
     const streamEgressId = streamEgressRef.current;

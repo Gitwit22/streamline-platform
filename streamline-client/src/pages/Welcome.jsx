@@ -394,6 +394,13 @@ const Welcome = () => {
       >
         dev bypass →
       </button>
+      {/* Destinations settings quick link for testing */}
+      <button
+        onClick={() => nav("/settings/destinations")}
+        className="absolute bottom-4 left-4 text-blue-400 text-xs underline hover:text-blue-300"
+      >
+        destinations
+      </button>
 
       {/* FOOTER LINKS - BOTTOM LEFT */}
       <div 
