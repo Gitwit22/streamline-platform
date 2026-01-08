@@ -14,8 +14,6 @@ import usageRoutes from "./routes/usageRoutes";
 import plansRoutes from "./routes/plans";
 import roomTokenRoute from "./routes/roomToken";
 import multistreamRoutes from "./routes/multistream";
-import destinationsRoutes from "./routes/destinations";
-import liveRoutes from "./routes/live";
 import statsRoutes from "./routes/stats";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
@@ -98,10 +96,6 @@ app.use("/api/roomToken", roomTokenRoute);
 
 // Multistream routes (YouTube/FB/Twitch)
 app.use("/api/rooms", multistreamRoutes);
-// Destinations management (encrypted keys)
-app.use("/api/destinations", destinationsRoutes);
-// Live preflight
-app.use("/api/live", liveRoutes);
 
 // Billing routes
 app.use("/api/billing", billingRoutes);

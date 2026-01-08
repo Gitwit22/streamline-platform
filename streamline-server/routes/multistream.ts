@@ -2,7 +2,6 @@ import { Router } from "express";
 import { firestore } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { canAccessFeature } from "./featureAccess";
-import type { ApiErrorCode } from "../types/streaming";
 
 // livekit-server-sdk is ESM; use dynamic import so CommonJS builds work on Render
 let _lkMod: any | null = null;
@@ -19,8 +18,8 @@ router.post("/:roomName/start-multistream", requireAuth, async (req, res) => {
     const uid = (req as any).user?.uid;
 const roomName = String(req.params.roomName || "").trim();
 
-if (!uid) return res.status(401).json({ error: "unauthorized" as ApiErrorCode });
-if (!roomName) return res.status(400).json({ error: "invalid_query" as ApiErrorCode, details: "roomName param required" });
+if (!uid) return res.status(401).json({ error: "Unauthorized" });
+if (!roomName) return res.status(400).json({ error: "Missing roomName param" });
 
 const streamDocId = `${uid}_${roomName}`; // always non-empty if checks passed
 const ref = firestore.collection("activeStreams").doc(streamDocId);
@@ -35,18 +34,18 @@ const ref = firestore.collection("activeStreams").doc(streamDocId);
     });
 
     if (!youtubeStreamKey && !facebookStreamKey && !twitchStreamKey) {
-      return res.status(400).json({ error: "missing_required_fields" as ApiErrorCode, details: "At least one stream key is required" });
+      return res.status(400).json({ error: "At least one stream key is required" });
     }
 
     
 
     // Load user (optional, but fine)
     const userSnap = await firestore.collection("users").doc(uid).get();
-    if (!userSnap.exists) return res.status(404).json({ error: "not_found" as ApiErrorCode, details: "user not found" });
+    if (!userSnap.exists) return res.status(401).json({ error: "User not found" });
 
     const access = await canAccessFeature(uid, "multistream");
     if (!access.allowed) {
-      return res.status(403).json({ error: "limit_exceeded" as ApiErrorCode, details: access.reason || "Multistreaming is not available on your plan" });
+      return res.status(403).json({ error: access.reason || "Multistreaming is not available on your plan" });
     }
 
     // Save intent / status (optional but useful)
@@ -71,7 +70,7 @@ const ref = firestore.collection("activeStreams").doc(streamDocId);
     if (twitchStreamKey) urls.push(`rtmp://live.twitch.tv/app/${twitchStreamKey}`);
 
     if (urls.length === 0) {
-      return res.status(400).json({ error: "missing_required_fields" as ApiErrorCode, details: "At least one stream key is required" });
+      return res.status(400).json({ error: "At least one stream key is required" });
     }
     console.log("[multistream:start] RTMP URLs:", urls);
 
@@ -116,15 +115,15 @@ const ref = firestore.collection("activeStreams").doc(streamDocId);
         return res.status(200).json({ success: true, egressId: response.egressId, status: "started" });
       } else {
         console.error("[multistream:start] No egressId returned from LiveKit");
-        return res.status(500).json({ error: "server_error" as ApiErrorCode, details: "Failed to start egress - no ID returned" });
+        return res.status(500).json({ error: "Failed to start egress - no ID returned" });
       }
     } catch (err) {
       console.error("[multistream:start] error:", err);
-      return res.status(500).json({ error: "server_error" as ApiErrorCode, details: (err as any)?.message || String(err) });
+      return res.status(500).json({ error: "Failed to start multistream", details: (err as any)?.message || String(err) });
     }
   } catch (err) {
     console.error("[multistream:start] outer error:", err);
-    return res.status(500).json({ error: "server_error" as ApiErrorCode });
+    return res.status(500).json({ error: "Failed to start multistream" });
   }
 });
 
@@ -133,8 +132,8 @@ router.post("/:roomName/stop-multistream", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
     const roomName = String(req.params.roomName || "").trim();
-    if (!uid) return res.status(401).json({ error: "unauthorized" as ApiErrorCode });
-    if (!roomName) return res.status(400).json({ error: "invalid_query" as ApiErrorCode, details: "roomName param required" });
+    if (!uid) return res.status(401).json({ error: "Unauthorized" });
+    if (!roomName) return res.status(400).json({ error: "Missing roomName param" });
 
     const streamDocId = `${uid}_${roomName}`;
     const ref = firestore.collection("activeStreams").doc(streamDocId);
@@ -148,18 +147,18 @@ router.post("/:roomName/stop-multistream", requireAuth, async (req, res) => {
       // Fallback: search for activeStreams doc with matching egressId from request body
       egressId = req.body.egressId;
       if (!egressId) {
-        return res.status(404).json({ error: "not_found" as ApiErrorCode, details: "No active multistream found for this room and no egressId provided" });
+        return res.status(404).json({ error: "No active multistream found for this room and no egressId provided" });
       }
       const querySnap = await firestore.collection("activeStreams").where("egressId", "==", egressId).get();
       if (querySnap.empty) {
-        return res.status(404).json({ error: "not_found" as ApiErrorCode, details: "No active multistream found for this egressId" });
+        return res.status(404).json({ error: "No active multistream found for this egressId" });
       }
       // Use the first matching doc
       doc = querySnap.docs[0];
       foundRef = doc.ref;
     }
     if (!egressId) {
-      return res.status(400).json({ error: "missing_required_fields" as ApiErrorCode, details: "No egressId found for active stream" });
+      return res.status(400).json({ error: "No egressId found for active stream" });
     }
 
     // Import LiveKit egress client using dynamic helper
@@ -175,11 +174,11 @@ router.post("/:roomName/stop-multistream", requireAuth, async (req, res) => {
       return res.json({ success: true, status: "stopped" });
     } catch (err) {
       console.error("Error stopping multistream:", err);
-      return res.status(500).json({ error: "server_error" as ApiErrorCode, details: (err as any)?.message });
+      return res.status(500).json({ error: "Failed to stop multistream", details: err?.message });
     }
   } catch (err) {
     console.error("stop-multistream error:", err);
-    return res.status(500).json({ error: "server_error" as ApiErrorCode });
+    return res.status(500).json({ error: "Failed to stop multistream" });
   }
 });
 

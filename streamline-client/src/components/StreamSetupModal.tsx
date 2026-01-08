@@ -1,198 +1,455 @@
 import { useState } from "react";
 
 interface Props {
-  isOpen: boolean;
+  open: boolean;
   onClose: () => void;
-  onStart: (keys: { 
-    youtubeKey?: string; 
-    facebookKey?: string; 
-    twitchKey?: string;   // ⭐ TWITCH
+  roomName: string;
+  
+  // Stream state
+  streamStatus: "idle" | "starting" | "live" | "stopping";
+  onStartStream: (params: {
+    youtubeKey?: string;
+    facebookKey?: string;
+    twitchKey?: string;
   }) => Promise<void>;
-  onStop: () => Promise<void>;
-  status: string;
-  canGoLive?: boolean;
-  preflightLoading?: boolean;
-  preflightItems?: Array<{ id: string; label: string; ok: boolean; detail?: string }>;
+  onStopStream: () => Promise<void>;
+  
+  // Recording state (independent from stream)
+  recordingStatus: "idle" | "recording" | "stopping" | "stopped" | "error";
+  onStartRecording: (layout: "speaker" | "grid") => Promise<void>;
+  onStopRecording: () => Promise<void>;
 }
 
-export default function StreamSetupModal({
-  isOpen,
+export default function StreamSetupModalV2({
+  open,
   onClose,
-  onStart,
-  onStop,
-  status,
-  canGoLive = true,
-  preflightLoading = false,
-  preflightItems = [],
+  roomName,
+  streamStatus,
+  onStartStream,
+  onStopStream,
+  recordingStatus,
+  onStartRecording,
+  onStopRecording,
 }: Props) {
-  const [useYouTube, setUseYouTube] = useState(true);
+  const [useYouTube, setUseYouTube] = useState(false);
   const [useFacebook, setUseFacebook] = useState(false);
+  const [useTwitch, setUseTwitch] = useState(false);
 
-  const [useTwitch, setUseTwitch] = useState(false);        // ⭐ TWITCH
   const [youtubeKey, setYoutubeKey] = useState("");
   const [facebookKey, setFacebookKey] = useState("");
-  const [twitchKey, setTwitchKey] = useState("");           // ⭐ TWITCH
+  const [twitchKey, setTwitchKey] = useState("");
 
-  if (!isOpen) return null;
+  const [layout, setLayout] = useState<"speaker" | "grid">("speaker");
 
-  const isLive = status === "live";
-  const isBusy =
-    status === "starting" || status === "stopping";
+  if (!open) return null;
 
-  const handleStart = async () => {
+  const streamIsLive = streamStatus === "live";
+  const streamIsBusy = streamStatus === "starting" || streamStatus === "stopping";
+  
+  const recordingIsActive = recordingStatus === "recording";
+  const recordingIsBusy = recordingStatus === "stopping";
+
+  const handleStartStream = async () => {
     const yt = useYouTube ? youtubeKey.trim() : "";
     const fb = useFacebook ? facebookKey.trim() : "";
-    const tw = useTwitch ? twitchKey.trim() : "";           // ⭐ TWITCH
+    const tw = useTwitch ? twitchKey.trim() : "";
 
     if (!yt && !fb && !tw) {
       alert("Enter at least one stream key (YouTube, Facebook, or Twitch).");
       return;
     }
 
-    await onStart({
+    await onStartStream({
       youtubeKey: yt || undefined,
       facebookKey: fb || undefined,
-      twitchKey: tw || undefined,                           // ⭐ TWITCH
+      twitchKey: tw || undefined,
     });
   };
 
-  const handleStop = async () => {
-    await onStop();
+  const handleStartRecording = async () => {
+    if (!streamIsLive) {
+      alert("Start streaming first before recording!");
+      return;
+    }
+    await onStartRecording(layout);
   };
 
   return (
-    <div
-      className="fixed inset-0 flex items-center justify-center bg-black/60 z-50"
-      style={{ backdropFilter: "blur(3px)" }}
-    >
-      <div className="bg-[#111] text-white rounded-lg p-4 w-full max-w-md shadow-lg border border-white/10">
-        <div className="flex justify-between items-center mb-3">
-          <h2 className="text-lg font-semibold">Setup Stream</h2>
-          <button onClick={onClose} disabled={isBusy} className="text-sm">
-            ✕
+    <div style={{
+      position: 'fixed',
+      bottom: '80px',
+      right: '20px',
+      zIndex: 50,
+      pointerEvents: 'auto'
+    }}>
+      {/* Floating Menu Card */}
+      <div style={{
+        background: 'rgba(20, 20, 20, 0.98)',
+        borderRadius: '0.75rem',
+        border: '1px solid rgba(220, 38, 38, 0.5)',
+        backdropFilter: 'blur(20px)',
+        boxShadow: '0 20px 60px rgba(220, 38, 38, 0.2)',
+        width: '380px',
+        maxHeight: '70vh',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        color: '#ffffff'
+      }}>
+        {/* Header */}
+        <div style={{
+          padding: '1rem',
+          borderBottom: '2px solid rgba(220, 38, 38, 0.4)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          background: 'linear-gradient(135deg, rgba(220, 38, 38, 0.1), rgba(239, 68, 68, 0.05))'
+        }}>
+          <div>
+            <div style={{ fontWeight: '700', fontSize: '0.95rem', color: '#ef4444', letterSpacing: '0.5px' }}>
+              STREAM CONTROL
+            </div>
+            <div style={{ fontSize: '0.7rem', color: 'rgba(255, 255, 255, 0.5)', marginTop: '0.25rem' }}>
+              Stream & Recording are independent
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            disabled={streamIsBusy || recordingIsBusy}
+            style={{
+              background: 'rgba(220, 38, 38, 0.2)',
+              border: '1px solid rgba(220, 38, 38, 0.5)',
+              borderRadius: '0.375rem',
+              color: '#ef4444',
+              padding: '0.4rem 0.6rem',
+              cursor: (streamIsBusy || recordingIsBusy) ? 'not-allowed' : 'pointer',
+              fontSize: '1.25rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: '32px',
+              height: '32px',
+              transition: 'all 0.3s ease',
+              fontWeight: 'bold',
+              opacity: (streamIsBusy || recordingIsBusy) ? 0.5 : 1
+            }}
+          >
+            ×
           </button>
         </div>
 
-        {!isLive && (
-          <div className="mb-3 text-xs">
-            {preflightLoading ? (
-              <span className="text-neutral-400">Running preflight…</span>
-            ) : canGoLive ? (
-              <span className="text-green-400">Preflight passed. You’re ready to go live.</span>
+        {/* Content - Scrollable */}
+        <div style={{
+          padding: '1rem',
+          flex: 1,
+          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '1rem'
+        }}>
+          
+          {/* SECTION 1: STREAM PLATFORMS */}
+          <div style={{
+            background: 'rgba(59, 130, 246, 0.05)',
+            border: '1px solid rgba(59, 130, 246, 0.2)',
+            borderRadius: '0.5rem',
+            padding: '0.75rem'
+          }}>
+            <div style={{ fontSize: '0.75rem', fontWeight: '600', color: '#3b82f6', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
+              📡 Stream Destinations
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+              {/* YouTube */}
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem', fontSize: '0.85rem' }}>
+                <input
+                  type="checkbox"
+                  checked={useYouTube}
+                  onChange={() => setUseYouTube(v => !v)}
+                  disabled={streamIsLive}
+                  style={{ marginTop: '0.25rem', cursor: streamIsLive ? 'not-allowed' : 'pointer', accentColor: '#ef4444' }}
+                />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: '600', marginBottom: '0.25rem' }}>YouTube Live</div>
+                  <input
+                    type="text"
+                    value={youtubeKey}
+                    onChange={(e) => setYoutubeKey(e.target.value)}
+                    placeholder="Stream Key"
+                    disabled={!useYouTube || streamIsLive}
+                    style={{
+                      width: '100%',
+                      padding: '0.4rem 0.5rem',
+                      background: 'rgba(31, 41, 55, 0.7)',
+                      border: '1px solid rgba(75, 85, 99, 0.5)',
+                      borderRadius: '0.25rem',
+                      color: '#ffffff',
+                      fontSize: '0.75rem',
+                      outline: 'none',
+                      opacity: (!useYouTube || streamIsLive) ? 0.5 : 1,
+                      cursor: (!useYouTube || streamIsLive) ? 'not-allowed' : 'text'
+                    }}
+                  />
+                </div>
+              </label>
+
+              {/* Facebook */}
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem', fontSize: '0.85rem' }}>
+                <input
+                  type="checkbox"
+                  checked={useFacebook}
+                  onChange={() => setUseFacebook(v => !v)}
+                  disabled={streamIsLive}
+                  style={{ marginTop: '0.25rem', cursor: streamIsLive ? 'not-allowed' : 'pointer', accentColor: '#ef4444' }}
+                />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: '600', marginBottom: '0.25rem' }}>Facebook Live</div>
+                  <input
+                    type="text"
+                    value={facebookKey}
+                    onChange={(e) => setFacebookKey(e.target.value)}
+                    placeholder="Stream Key"
+                    disabled={!useFacebook || streamIsLive}
+                    style={{
+                      width: '100%',
+                      padding: '0.4rem 0.5rem',
+                      background: 'rgba(31, 41, 55, 0.7)',
+                      border: '1px solid rgba(75, 85, 99, 0.5)',
+                      borderRadius: '0.25rem',
+                      color: '#ffffff',
+                      fontSize: '0.75rem',
+                      outline: 'none',
+                      opacity: (!useFacebook || streamIsLive) ? 0.5 : 1,
+                      cursor: (!useFacebook || streamIsLive) ? 'not-allowed' : 'text'
+                    }}
+                  />
+                </div>
+              </label>
+
+              {/* Twitch */}
+              <label style={{ display: 'flex', alignItems: 'flex-start', gap: '0.75rem', fontSize: '0.85rem' }}>
+                <input
+                  type="checkbox"
+                  checked={useTwitch}
+                  onChange={() => setUseTwitch(v => !v)}
+                  disabled={streamIsLive}
+                  style={{ marginTop: '0.25rem', cursor: streamIsLive ? 'not-allowed' : 'pointer', accentColor: '#ef4444' }}
+                />
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: '600', marginBottom: '0.25rem' }}>Twitch</div>
+                  <input
+                    type="text"
+                    value={twitchKey}
+                    onChange={(e) => setTwitchKey(e.target.value)}
+                    placeholder="Stream Key"
+                    disabled={!useTwitch || streamIsLive}
+                    style={{
+                      width: '100%',
+                      padding: '0.4rem 0.5rem',
+                      background: 'rgba(31, 41, 55, 0.7)',
+                      border: '1px solid rgba(75, 85, 99, 0.5)',
+                      borderRadius: '0.25rem',
+                      color: '#ffffff',
+                      fontSize: '0.75rem',
+                      outline: 'none',
+                      opacity: (!useTwitch || streamIsLive) ? 0.5 : 1,
+                      cursor: (!useTwitch || streamIsLive) ? 'not-allowed' : 'text'
+                    }}
+                  />
+                </div>
+              </label>
+            </div>
+
+            {/* Stream Control Button */}
+            <div style={{ marginTop: '0.75rem' }}>
+              {(streamStatus === "idle" || streamStatus === "starting") ? (
+                <button
+                  onClick={handleStartStream}
+                  disabled={streamIsBusy}
+                  style={{
+                    width: '100%',
+                    padding: '0.75rem',
+                    fontSize: '0.875rem',
+                    borderRadius: '0.5rem',
+                    background: streamIsBusy ? 'rgba(59, 130, 246, 0.5)' : 'linear-gradient(135deg, #22c55e, #16a34a)',
+                    color: '#ffffff',
+                    border: 'none',
+                    fontWeight: '600',
+                    cursor: streamIsBusy ? 'not-allowed' : 'pointer',
+                    transition: 'all 0.3s ease',
+                  }}
+                >
+                  {streamStatus === "starting" ? "🔄 Starting Stream..." : "📡 Start Stream"}
+                </button>
+              ) : (
+                <button
+                  onClick={onStopStream}
+                  disabled={streamIsBusy}
+                  style={{
+                    width: '100%',
+                    padding: '0.75rem',
+                    fontSize: '0.875rem',
+                    borderRadius: '0.5rem',
+                    background: streamIsBusy ? 'rgba(239, 68, 68, 0.5)' : 'linear-gradient(135deg, #dc2626, #b91c1c)',
+                    color: '#ffffff',
+                    border: 'none',
+                    fontWeight: '600',
+                    cursor: streamIsBusy ? 'not-allowed' : 'pointer',
+                    transition: 'all 0.3s ease',
+                  }}
+                >
+                  {streamStatus === "stopping" ? "🔄 Stopping Stream..." : "⏹️ Stop Stream"}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* SECTION 2: RECORDING CONTROL */}
+          <div style={{
+            background: 'rgba(220, 38, 38, 0.05)',
+            border: '1px solid rgba(220, 38, 38, 0.2)',
+            borderRadius: '0.5rem',
+            padding: '0.75rem'
+          }}>
+            <div style={{ fontSize: '0.75rem', fontWeight: '600', color: '#ef4444', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
+              🎬 Recording Control
+            </div>
+
+            {/* Layout Selector */}
+            <label style={{ fontSize: '0.875rem', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+              <span style={{ fontWeight: 600 }}>Layout:</span>
+              <select
+                value={layout}
+                onChange={e => setLayout(e.target.value as "speaker" | "grid")}
+                disabled={recordingIsActive || !streamIsLive}
+                style={{
+                  padding: '0.4rem 0.7rem',
+                  borderRadius: '0.3rem',
+                  border: '1px solid #ef4444',
+                  background: '#18181b',
+                  color: '#fff',
+                  fontWeight: 600,
+                  fontSize: '0.85rem',
+                  outline: 'none',
+                  cursor: (recordingIsActive || !streamIsLive) ? 'not-allowed' : 'pointer',
+                  opacity: (recordingIsActive || !streamIsLive) ? 0.5 : 1
+                }}
+              >
+                <option value="speaker">Speaker</option>
+                <option value="grid">Grid</option>
+              </select>
+            </label>
+
+            {/* Status */}
+            {!streamIsLive && (
+              <div style={{ 
+                fontSize: '0.75rem', 
+                color: 'rgba(255, 255, 255, 0.5)', 
+                marginBottom: '0.75rem',
+                fontStyle: 'italic'
+              }}>
+                ⚠️ Start stream first to enable recording
+              </div>
+            )}
+
+            {recordingStatus === "error" && (
+              <div style={{ 
+                fontSize: '0.75rem', 
+                color: '#ef4444', 
+                marginBottom: '0.75rem',
+                padding: '0.5rem',
+                background: 'rgba(220, 38, 38, 0.1)',
+                borderRadius: '0.25rem'
+              }}>
+                ❌ Recording failed to start. Check server logs.
+              </div>
+            )}
+
+            {/* Recording Control Button */}
+            {!recordingIsActive ? (
+              <button
+                onClick={handleStartRecording}
+                disabled={!streamIsLive || recordingIsBusy}
+                style={{
+                  width: '100%',
+                  padding: '0.75rem',
+                  fontSize: '0.875rem',
+                  borderRadius: '0.5rem',
+                  background: (!streamIsLive || recordingIsBusy) ? 'rgba(220, 38, 38, 0.3)' : 'linear-gradient(135deg, #dc2626, #b91c1c)',
+                  color: '#ffffff',
+                  border: 'none',
+                  fontWeight: '600',
+                  cursor: (!streamIsLive || recordingIsBusy) ? 'not-allowed' : 'pointer',
+                  transition: 'all 0.3s ease',
+                  opacity: (!streamIsLive || recordingIsBusy) ? 0.6 : 1
+                }}
+              >
+                🎬 Start Recording
+              </button>
             ) : (
-              <span className="text-yellow-400">Connect destinations and pass preflight to enable Go Live.</span>
+              <button
+                onClick={onStopRecording}
+                disabled={recordingIsBusy}
+                style={{
+                  width: '100%',
+                  padding: '0.75rem',
+                  fontSize: '0.875rem',
+                  borderRadius: '0.5rem',
+                  background: recordingIsBusy ? 'rgba(220, 38, 38, 0.5)' : 'linear-gradient(135deg, #7c2d12, #991b1b)',
+                  color: '#ffffff',
+                  border: 'none',
+                  fontWeight: '600',
+                  cursor: recordingIsBusy ? 'not-allowed' : 'pointer',
+                  transition: 'all 0.3s ease',
+                }}
+              >
+                {recordingIsBusy ? "🔄 Stopping Recording..." : "⏹️ Stop Recording"}
+              </button>
+            )}
+
+            {recordingIsActive && (
+              <div style={{
+                marginTop: '0.75rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '0.5rem',
+                fontSize: '0.75rem',
+                color: '#ef4444'
+              }}>
+                <div style={{
+                  width: '8px',
+                  height: '8px',
+                  borderRadius: '50%',
+                  background: '#ef4444',
+                  animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite'
+                }} />
+                <span>Recording in progress...</span>
+              </div>
             )}
           </div>
-        )}
 
-        {!isLive && preflightItems.length > 0 && (
-          <div className="mb-2 text-xs">
-            {preflightItems.map(item => (
-              <div key={item.id} className="flex items-center gap-2 py-0.5">
-                <span className={item.ok ? "text-green-400" : "text-red-400"}>{item.ok ? "✅" : "❌"}</span>
-                <span>{item.label}{item.detail ? ` — ${item.detail}` : ""}</span>
-              </div>
-            ))}
+          {/* Help Text */}
+          <div style={{ 
+            fontSize: '0.7rem', 
+            color: 'rgba(255, 255, 255, 0.4)', 
+            lineHeight: 1.4,
+            fontStyle: 'italic'
+          }}>
+            💡 Tip: You can stream without recording, or record without streaming to platforms. They're independent!
           </div>
-        )}
-
-        <p className="text-xs text-neutral-400 mb-3">
-          Paste your <strong>stream keys</strong> for any platform you want to
-          stream to. No logins are saved.
-        </p>
-
-        <div className="space-y-3">
-
-          {/* YouTube */}
-          <label className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={useYouTube}
-              onChange={() => setUseYouTube(v => !v)}
-            />
-            <div className="flex-1">
-              <div className="font-medium">YouTube Live</div>
-              <input
-                type="text"
-                value={youtubeKey}
-                onChange={(e) => setYoutubeKey(e.target.value)}
-                placeholder="YouTube Stream Key"
-                disabled={!useYouTube || isBusy || isLive}
-                className="mt-1 w-full bg-black/40 border border-white/15 rounded px-2 py-1 text-xs"
-              />
-            </div>
-          </label>
-
-          {/* Facebook */}
-          <label className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={useFacebook}
-              onChange={() => setUseFacebook(v => !v)}
-            />
-            <div className="flex-1">
-              <div className="font-medium">Facebook Live</div>
-              <input
-                type="text"
-                value={facebookKey}
-                onChange={(e) => setFacebookKey(e.target.value)}
-                placeholder="Facebook Stream Key"
-                disabled={!useFacebook || isBusy || isLive}
-                className="mt-1 w-full bg-black/40 border border-white/15 rounded px-2 py-1 text-xs"
-              />
-            </div>
-          </label>
-
-          {/* ⭐ TWITCH */}
-          <label className="flex items-start gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={useTwitch}
-              onChange={() => setUseTwitch(v => !v)}
-            />
-            <div className="flex-1">
-              <div className="font-medium">Twitch Live</div>
-              <input
-                type="text"
-                value={twitchKey}
-                onChange={(e) => setTwitchKey(e.target.value)}
-                placeholder="Twitch Stream Key"
-                disabled={!useTwitch || isBusy || isLive}
-                className="mt-1 w-full bg-black/40 border border-white/15 rounded px-2 py-1 text-xs"
-              />
-            </div>
-          </label>
-
-        </div>
-
-        <div className="mt-4 flex justify-between items-center">
-          <div className="text-xs text-neutral-400">
-            Status:{" "}
-            <span className="font-semibold text-white">
-              {(status || "").toUpperCase()}
-            </span>
-          </div>
-
-         {!isLive ? (
-  <button
-    onClick={handleStart}
-    disabled={isBusy || !canGoLive}
-    className="px-3 py-1 text-xs rounded bg-green-600 disabled:bg-green-900"
-  >
-    {(status as string) === "starting" ? "Starting…" : "Go Live"}
-  </button>
-) : (
-  <button
-    onClick={handleStop}
-    disabled={isBusy}
-    className="px-3 py-1 text-xs rounded bg-red-600 disabled:bg-red-900"
-  >
-    {(status as string) === "stopping" ? "Stopping…" : "Stop Stream"}
-  </button>
-)}
-
         </div>
       </div>
+
+      <style>{`
+        @keyframes pulse {
+          0%, 100% {
+            opacity: 1;
+          }
+          50% {
+            opacity: 0.5;
+          }
+        }
+      `}</style>
     </div>
   );
 }

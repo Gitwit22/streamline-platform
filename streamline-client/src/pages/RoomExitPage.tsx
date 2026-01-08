@@ -1,0 +1,691 @@
+import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { editingApi } from "../lib/editingApi";
+import { downloadService, type DownloadProgress } from "../services/downloadService";
+
+/**
+ * STREAMLINE ROOM EXIT PAGE - REDESIGNED
+ * Glassmorphism black/red/white theme
+ * Shows different content for host vs guest
+ */
+
+export default function RoomExitPage() {
+  const nav = useNavigate();
+  const { recordingId } = useParams<{ recordingId: string }>();
+  const [recording, setRecording] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [downloading, setDownloading] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
+  const [sessionDuration, setSessionDuration] = useState<number>(0);
+  
+  const isHost = !!recordingId && recordingId !== "unknown";
+
+  const handleDownload = async () => {
+    if (!recording || !recording.videoUrl) {
+      alert("Recording not ready for download");
+      return;
+    }
+
+    setDownloading(true);
+    setDownloadProgress(null);
+
+    try {
+      // Try to get download URL from backend if recordingId exists
+      let videoUrl = recording.videoUrl;
+      
+      if (recordingId) {
+        try {
+          const token = localStorage.getItem('sl_token') || localStorage.getItem('auth_token');
+          
+          const response = await fetch(`/api/recordings/${recordingId}/download`, {
+            headers: {
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+          });
+
+          if (response.ok) {
+            const data = await response.json();
+            videoUrl = data.videoUrl;
+          }
+        } catch (err) {
+          console.warn('Could not fetch recording from backend, using mock URL:', err);
+        }
+      }
+
+      const fileName = `${recording.title.replace(/[^a-z0-9]/gi, '-').toLowerCase()}.mp4`;
+      
+      await downloadService.downloadVideo(
+        videoUrl,
+        fileName,
+        (progress) => {
+          setDownloadProgress(progress);
+        }
+      );
+
+      // After successful download, delete from cloud (locally and backend)
+      if (recordingId) {
+        try {
+          const token = localStorage.getItem('sl_token') || localStorage.getItem('auth_token');
+          
+          // Try backend deletion (uses Vite proxy)
+          await fetch(`/api/recordings/${recordingId}`, {
+            method: 'DELETE',
+            headers: {
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+          });
+        } catch (err) {
+          console.warn('Could not delete from backend:', err);
+        }
+      }
+
+      setDownloading(false);
+      alert("✅ Stream downloaded successfully!");
+      nav("/join");
+    } catch (error) {
+      console.error("Download failed:", error);
+      setDownloading(false);
+      alert(`Download failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  };
+
+  useEffect(() => {
+    const fetchData = async () => {
+      if (recordingId && recordingId !== "unknown") {
+        try {
+          const rec = await editingApi.getRecording(recordingId);
+          setRecording(rec);
+        } catch (error) {
+          console.error("Failed to fetch recording:", error);
+          setRecording(null);
+        }
+      } else {
+        setRecording(null);
+      }
+      
+      // Calculate session duration from sessionStart stored in localStorage
+      const sessionStartStr = localStorage.getItem('sl_sessionStart');
+      if (sessionStartStr) {
+        const sessionStart = parseInt(sessionStartStr, 10);
+        const sessionEnd = Date.now();
+        const duration = Math.floor((sessionEnd - sessionStart) / 1000); // Convert to seconds
+        setSessionDuration(duration);
+      }
+      
+      setLoading(false);
+    };
+
+    fetchData();
+  }, [recordingId]);
+
+  if (loading) {
+    return (
+      <div 
+        style={{
+          minHeight: '100vh',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: '#000000',
+          color: '#ffffff'
+        }}
+      >
+        <div style={{ textAlign: 'center' }}>
+          <div 
+            style={{
+              width: '48px',
+              height: '48px',
+              border: '4px solid rgba(220, 38, 38, 0.3)',
+              borderTop: '4px solid #ef4444',
+              borderRadius: '50%',
+              animation: 'spin 1s linear infinite',
+              margin: '0 auto 16px'
+            }}
+          />
+          <p style={{ color: '#9ca3af' }}>Loading...</p>
+        </div>
+        <style>{`
+          @keyframes spin {
+            to { transform: rotate(360deg); }
+          }
+        `}</style>
+      </div>
+    );
+  }
+
+  // GUEST VIEW
+  if (!isHost) {
+    return (
+      <div 
+        style={{
+          minHeight: '100vh',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          backgroundColor: '#000000',
+          color: '#ffffff',
+          padding: '24px',
+          position: 'relative',
+          overflow: 'hidden'
+        }}
+      >
+        
+        {/* ANIMATED BACKGROUND */}
+        <div style={{ position: 'absolute', inset: 0, zIndex: 0 }}>
+          <div 
+            style={{
+              position: 'absolute',
+              top: '20%',
+              left: '20%',
+              width: '500px',
+              height: '500px',
+              background: 'rgba(220, 38, 38, 0.15)',
+              borderRadius: '50%',
+              filter: 'blur(120px)',
+              animation: 'pulse 4s ease-in-out infinite'
+            }}
+          />
+          <div 
+            style={{
+              position: 'absolute',
+              bottom: '20%',
+              right: '20%',
+              width: '600px',
+              height: '600px',
+              background: 'rgba(239, 68, 68, 0.1)',
+              borderRadius: '50%',
+              filter: 'blur(150px)',
+              animation: 'pulse 4s ease-in-out infinite',
+              animationDelay: '2s'
+            }}
+          />
+        </div>
+
+        {/* CONTENT */}
+        <div style={{ position: 'relative', zIndex: 10, textAlign: 'center', maxWidth: '480px' }}>
+          
+          {/* Icon */}
+          <div 
+            style={{
+              width: '80px',
+              height: '80px',
+              background: 'rgba(34, 197, 94, 0.2)',
+              border: '2px solid rgba(34, 197, 94, 0.4)',
+              borderRadius: '50%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              fontSize: '40px',
+              margin: '0 auto 32px'
+            }}
+          >
+            👋
+          </div>
+
+          <h1 
+            style={{
+              fontSize: '36px',
+              fontWeight: 700,
+              marginBottom: '16px',
+              background: 'linear-gradient(to right, #ffffff, #fecaca, #ffffff)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent'
+            }}
+          >
+            Thanks for joining!
+          </h1>
+          
+          <p style={{ fontSize: '16px', color: '#9ca3af', marginBottom: '40px', lineHeight: '1.6' }}>
+            The stream has ended. You can now close this window or go back to the home page.
+          </p>
+
+          <button
+            onClick={() => nav("/join")}
+            style={{
+              padding: '16px 32px',
+              background: 'linear-gradient(to right, #dc2626, #ef4444)',
+              color: '#ffffff',
+              border: 'none',
+              borderRadius: '12px',
+              fontSize: '16px',
+              fontWeight: 600,
+              cursor: 'pointer',
+              boxShadow: '0 8px 32px rgba(220, 38, 38, 0.3)',
+              transition: 'all 0.3s ease'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'linear-gradient(to right, #ef4444, #f87171)';
+              e.currentTarget.style.transform = 'translateY(-2px)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'linear-gradient(to right, #dc2626, #ef4444)';
+              e.currentTarget.style.transform = 'translateY(0)';
+            }}
+          >
+            Back to Home
+          </button>
+        </div>
+
+        {/* CSS ANIMATIONS */}
+        <style>{`
+          @keyframes pulse {
+            0%, 100% { opacity: 0.15; transform: scale(1); }
+            50% { opacity: 0.25; transform: scale(1.05); }
+          }
+        `}</style>
+      </div>
+    );
+  }
+
+  // HOST VIEW
+  return (
+    <div 
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        backgroundColor: '#000000',
+        color: '#ffffff',
+        padding: '40px 24px',
+        position: 'relative',
+        overflow: 'hidden'
+      }}
+    >
+      
+      {/* ANIMATED BACKGROUND */}
+      <div style={{ position: 'absolute', inset: 0, zIndex: 0 }}>
+        <div 
+          style={{
+            position: 'absolute',
+            top: '15%',
+            left: '10%',
+            width: '600px',
+            height: '600px',
+            background: 'rgba(220, 38, 38, 0.15)',
+            borderRadius: '50%',
+            filter: 'blur(120px)',
+            animation: 'pulse 4s ease-in-out infinite'
+          }}
+        />
+        <div 
+          style={{
+            position: 'absolute',
+            bottom: '15%',
+            right: '10%',
+            width: '700px',
+            height: '700px',
+            background: 'rgba(239, 68, 68, 0.1)',
+            borderRadius: '50%',
+            filter: 'blur(150px)',
+            animation: 'pulse 4s ease-in-out infinite',
+            animationDelay: '2s'
+          }}
+        />
+      </div>
+
+      {/* CONTENT */}
+      <div style={{ position: 'relative', zIndex: 10, width: '100%', maxWidth: '520px' }}>
+        
+        {/* Success Icon */}
+        <div 
+          style={{
+            width: '80px',
+            height: '80px',
+            background: 'rgba(34, 197, 94, 0.2)',
+            border: '2px solid rgba(34, 197, 94, 0.4)',
+            borderRadius: '50%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            fontSize: '40px',
+            margin: '0 auto 32px'
+          }}
+        >
+          ✅
+        </div>
+
+        {/* RECORDING INFO CARD */}
+        <div
+          style={{
+            background: 'rgba(15, 15, 15, 0.7)',
+            backdropFilter: 'blur(20px)',
+            border: '1px solid rgba(255, 255, 255, 0.1)',
+            borderRadius: '20px',
+            padding: '32px',
+            marginBottom: '24px'
+          }}
+        >
+          <h1 
+            style={{
+              fontSize: '28px',
+              fontWeight: 700,
+              marginBottom: '12px',
+              background: 'linear-gradient(to right, #ffffff, #fecaca)',
+              WebkitBackgroundClip: 'text',
+              WebkitTextFillColor: 'transparent'
+            }}
+          >
+            Stream Ended
+          </h1>
+          <p style={{ fontSize: '15px', color: '#9ca3af', marginBottom: '24px', lineHeight: '1.6' }}>
+            Your recording is being processed. You can now edit it or save it for later.
+          </p>
+
+          {recording && (
+            <div 
+              style={{
+                background: 'rgba(0, 0, 0, 0.4)',
+                border: '1px solid rgba(255, 255, 255, 0.05)',
+                borderRadius: '12px',
+                padding: '16px',
+                marginBottom: '16px'
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                <span style={{ fontSize: '13px', color: '#6b7280' }}>Title:</span>
+                <span style={{ fontSize: '13px', color: '#ffffff', fontWeight: 500 }}>
+                  {recording.title}
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                <span style={{ fontSize: '13px', color: '#6b7280' }}>Duration:</span>
+                <span style={{ fontSize: '13px', color: '#ffffff', fontWeight: 500 }}>
+                  {Math.round(recording.duration / 60)}m
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
+                <span style={{ fontSize: '13px', color: '#6b7280' }}>Status:</span>
+                <span 
+                  style={{
+                    fontSize: '13px',
+                    color: '#22c55e',
+                    fontWeight: 600,
+                    textTransform: 'capitalize'
+                  }}
+                >
+                  {recording.status}
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                <span style={{ fontSize: '13px', color: '#6b7280' }}>Room Duration:</span>
+                <span style={{ fontSize: '13px', color: '#ffffff', fontWeight: 500 }}>
+                  {Math.floor(sessionDuration / 60)}m {sessionDuration % 60}s
+                </span>
+              </div>
+              {recording.progress !== undefined && (
+                <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                  <span style={{ fontSize: '13px', color: '#6b7280' }}>Progress:</span>
+                  <span style={{ fontSize: '13px', color: '#ffffff', fontWeight: 500 }}>
+                    {recording.progress}%
+                  </span>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* ACTION BUTTONS */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+          
+          {/* Go to Editor */}
+          <button
+            onClick={() => nav(`/editing/editor/new?recordingId=${recordingId}`)}
+            style={{
+              width: '100%',
+              padding: '16px 24px',
+              background: 'linear-gradient(to right, #dc2626, #ef4444)',
+              color: '#ffffff',
+              border: 'none',
+              borderRadius: '12px',
+              fontSize: '16px',
+              fontWeight: 600,
+              cursor: 'pointer',
+              boxShadow: '0 8px 32px rgba(220, 38, 38, 0.3)',
+              transition: 'all 0.3s ease',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '8px'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'linear-gradient(to right, #ef4444, #f87171)';
+              e.currentTarget.style.transform = 'translateY(-2px)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'linear-gradient(to right, #dc2626, #ef4444)';
+              e.currentTarget.style.transform = 'translateY(0)';
+            }}
+          >
+            ✂️ Start Editing
+          </button>
+
+          {/* Download Stream */}
+          <button
+            onClick={handleDownload}
+            disabled={downloading || !recording || recording.status !== 'ready'}
+            style={{
+              width: '100%',
+              padding: '16px 24px',
+              background: downloading ? 'rgba(107, 114, 128, 0.3)' : 'rgba(220, 38, 38, 0.2)',
+              border: downloading ? '1px solid rgba(107, 114, 128, 0.4)' : '1px solid rgba(220, 38, 38, 0.4)',
+              color: downloading ? '#6b7280' : '#ffffff',
+              borderRadius: '12px',
+              fontSize: '16px',
+              fontWeight: 600,
+              cursor: downloading ? 'not-allowed' : 'pointer',
+              transition: 'all 0.3s ease',
+              opacity: downloading ? 0.6 : 1,
+            }}
+            onMouseEnter={(e) => {
+              if (!downloading && (!recording || recording.status === 'ready')) {
+                e.currentTarget.style.background = 'rgba(220, 38, 38, 0.3)';
+                e.currentTarget.style.borderColor = 'rgba(220, 38, 38, 0.6)';
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!downloading) {
+                e.currentTarget.style.background = 'rgba(220, 38, 38, 0.2)';
+                e.currentTarget.style.borderColor = 'rgba(220, 38, 38, 0.4)';
+              }
+            }}
+          >
+            <div style={{ marginBottom: downloading ? '0' : '4px' }}>
+              {downloading ? '⬇️ Downloading...' : '🔥 Download Stream'}
+            </div>
+            {!downloading && (
+              <div style={{ fontSize: '11px', color: '#fca5a5' }}>
+                ⚠️ Download now or it's gone forever
+              </div>
+            )}
+          </button>
+
+          {/* Back to Home */}
+          <button
+            onClick={() => nav("/join")}
+            style={{
+              width: '100%',
+              padding: '14px 24px',
+              background: 'rgba(255, 255, 255, 0.05)',
+              border: '1px solid rgba(255, 255, 255, 0.1)',
+              color: '#9ca3af',
+              borderRadius: '12px',
+              fontSize: '15px',
+              fontWeight: 500,
+              cursor: 'pointer',
+              transition: 'all 0.3s ease'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)';
+              e.currentTarget.style.color = '#ffffff';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
+              e.currentTarget.style.color = '#9ca3af';
+            }}
+          >
+            Back to Home
+          </button>
+        </div>
+      </div>
+
+      {/* DOWNLOAD PROGRESS MODAL */}
+      {downloading && downloadProgress && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.8)',
+            backdropFilter: 'blur(4px)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 50,
+          }}
+        >
+          <div
+            style={{
+              background: 'rgba(15, 15, 15, 0.95)',
+              border: '1px solid rgba(220, 38, 38, 0.3)',
+              borderRadius: '20px',
+              padding: '40px',
+              maxWidth: '400px',
+              width: '90%',
+              backdropFilter: 'blur(20px)',
+            }}
+          >
+            {/* Title */}
+            <h2
+              style={{
+                fontSize: '24px',
+                fontWeight: 700,
+                marginBottom: '8px',
+                color: '#ffffff',
+              }}
+            >
+              Downloading Stream
+            </h2>
+            <p style={{ color: '#9ca3af', marginBottom: '24px', fontSize: '14px' }}>
+              Your recording is being saved to your device
+            </p>
+
+            {/* Progress Bar */}
+            <div
+              style={{
+                width: '100%',
+                height: '8px',
+                background: 'rgba(255, 255, 255, 0.1)',
+                borderRadius: '4px',
+                overflow: 'hidden',
+                marginBottom: '16px',
+              }}
+            >
+              <div
+                style={{
+                  height: '100%',
+                  background: 'linear-gradient(to right, #dc2626, #ef4444)',
+                  width: `${downloadProgress.percent}%`,
+                  transition: 'width 0.3s ease',
+                }}
+              />
+            </div>
+
+            {/* Stats Row */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1fr',
+                gap: '16px',
+                marginBottom: '24px',
+              }}
+            >
+              {/* Percentage */}
+              <div
+                style={{
+                  background: 'rgba(0, 0, 0, 0.4)',
+                  border: '1px solid rgba(255, 255, 255, 0.05)',
+                  borderRadius: '12px',
+                  padding: '12px',
+                  textAlign: 'center',
+                }}
+              >
+                <div style={{ fontSize: '24px', fontWeight: 700, color: '#ef4444' }}>
+                  {Math.round(downloadProgress.percent)}%
+                </div>
+                <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '4px' }}>
+                  Complete
+                </div>
+              </div>
+
+              {/* Speed */}
+              <div
+                style={{
+                  background: 'rgba(0, 0, 0, 0.4)',
+                  border: '1px solid rgba(255, 255, 255, 0.05)',
+                  borderRadius: '12px',
+                  padding: '12px',
+                  textAlign: 'center',
+                }}
+              >
+                <div style={{ fontSize: '14px', fontWeight: 600, color: '#fecaca' }}>
+                  {downloadService.formatBytes(downloadProgress.speed)}/s
+                </div>
+                <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '4px' }}>
+                  Speed
+                </div>
+              </div>
+            </div>
+
+            {/* Detailed Stats */}
+            <div
+              style={{
+                background: 'rgba(0, 0, 0, 0.4)',
+                border: '1px solid rgba(255, 255, 255, 0.05)',
+                borderRadius: '12px',
+                padding: '12px',
+                fontSize: '13px',
+              }}
+            >
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  marginBottom: '8px',
+                }}
+              >
+                <span style={{ color: '#6b7280' }}>Downloaded:</span>
+                <span style={{ color: '#ffffff', fontWeight: 500 }}>
+                  {downloadService.formatBytes(downloadProgress.loaded)}{' '}
+                  <span style={{ color: '#6b7280' }}>
+                    / {downloadService.formatBytes(downloadProgress.total)}
+                  </span>
+                </span>
+              </div>
+              <div
+                style={{
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                }}
+              >
+                <span style={{ color: '#6b7280' }}>Time Remaining:</span>
+                <span style={{ color: '#fecaca', fontWeight: 500 }}>
+                  {downloadService.formatTime(downloadProgress.timeRemaining)}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* CSS ANIMATIONS */}
+      <style>{`
+        @keyframes pulse {
+          0%, 100% { opacity: 0.15; transform: scale(1); }
+          50% { opacity: 0.25; transform: scale(1.05); }
+        }
+      `}</style>
+    </div>
+  );
+}

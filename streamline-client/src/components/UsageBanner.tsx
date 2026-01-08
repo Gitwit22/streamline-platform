@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "https://magdalena-bulllike-hildred.ngrok-free.dev";
+// Use relative paths - Vite proxy forwards /api/* to http://localhost:5137
+const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 
 type UsageSummary = {
   displayName: string;
@@ -21,23 +22,33 @@ export default function UsageBanner() {
   useEffect(() => {
     const load = async () => {
       try {
-        const uid = localStorage.getItem("sl_userId"); // TEMP until real auth
-        if (!uid) {
-          setLoading(false);
-          return;
-        }
-
-        const res = await fetch(
-          `${API_BASE}/api/usage/summary?uid=${encodeURIComponent(uid)}`
-        );
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
-
+        const res = await fetch(`${API_BASE}/api/usage/me`, { credentials: "include" });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
-        setData(json);
+
+        const planId = json?.plan?.id || json?.user?.planId || "free";
+        const participantMinutes = Number(json?.usageMonthly?.usage?.participantMinutes ?? 0);
+        const usedHours = Math.round((participantMinutes / 60) * 10) / 10;
+        const maxMinutes = Number(json?.plan?.limits?.participantMinutes ?? 0);
+        const maxHours = maxMinutes > 0 ? Math.round((maxMinutes / 60) * 10) / 10 : 0;
+        const ytdMinutes = Number(json?.usageMonthly?.ytd?.participantMinutes ?? 0);
+        const ytdHours = Math.round((ytdMinutes / 60) * 10) / 10;
+        const resetDate = json?.resetDate || null;
+        const multistreamEnabled = !!json?.plan?.features?.rtmpMultistream;
+        const maxGuests = Number(json?.plan?.limits?.maxGuests ?? (planId === "pro" ? 10 : planId === "starter" ? 2 : 1));
+
+        setData({
+          displayName: "",
+          planId,
+          usedHours,
+          maxHours,
+          ytdHours,
+          resetDate,
+          maxGuests,
+          multistreamEnabled,
+        });
       } catch (err) {
-        console.error("usage summary error", err);
+        console.error("usage banner error", err);
         setError("Could not load usage");
       } finally {
         setLoading(false);

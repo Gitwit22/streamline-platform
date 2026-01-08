@@ -6,6 +6,9 @@ export const PLAN_LIMITS: Record<string, number> = {
   pro: 40        // 40 hours per month
 };
 
+// Minimal export for routes/plans.ts; avoids duplication
+export const PLANS: string[] = Object.keys(PLAN_LIMITS);
+
 export function getPlanMaxHours(plan: string, existingMaxHours?: number): number {
   // If the user has a custom maxHours set in their Firestore doc, use that
   if (existingMaxHours && existingMaxHours > 0) {

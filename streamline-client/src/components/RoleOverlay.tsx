@@ -1,6 +1,8 @@
 import React from "react";
 import { useParticipants } from "@livekit/components-react";
 
+const API_BASE = import.meta.env.VITE_API_BASE || "";
+
 type Role = "host" | "moderator" | "participant";
 
 export default function RoleOverlay({
@@ -17,44 +19,92 @@ export default function RoleOverlay({
   if (!open) return null;
 
   return (
-  // Full-screen overlay
-  <div className="fixed inset-0 z-[9999] flex items-center justify-center pointer-events-none">
-    {/* Backdrop */}
-    <div
-      className="absolute inset-0 bg-black/40 pointer-events-auto"
-      onClick={onClose}
-    />
-
-    {/* Centered dashboard card */}
-<div
-  className="relative w-full max-w-[520px] max-h-[80vh] bg-white shadow-2xl rounded-2xl flex flex-col pointer-events-auto overflow-hidden"
-  style={{
-    transform: "translateX(150px)", // move left
-  }}
->
-
-      
-      <header className="px-4 py-3 border-b flex items-center justify-between">
-        <div className="font-semibold">
-          Dashboard{" "}
-          <span className="opacity-60 text-sm">({role})</span>
+    <div style={{
+      position: 'fixed',
+      bottom: '80px',
+      left: '20px',
+      zIndex: 9999,
+      pointerEvents: 'auto'
+    }}>
+      {/* Floating Menu Card */}
+      <div style={{
+        background: 'rgba(20, 20, 20, 0.98)',
+        borderRadius: '0.75rem',
+        border: '1px solid rgba(220, 38, 38, 0.5)',
+        backdropFilter: 'blur(20px)',
+        boxShadow: '0 20px 60px rgba(220, 38, 38, 0.2)',
+        width: '320px',
+        maxHeight: '50vh',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+        color: '#ffffff'
+      }}>
+        {/* Header */}
+        <div style={{
+          padding: '1rem',
+          borderBottom: '2px solid rgba(220, 38, 38, 0.4)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          background: 'linear-gradient(135deg, rgba(220, 38, 38, 0.1), rgba(239, 68, 68, 0.05))'
+        }}>
+          <div>
+            <div style={{ fontWeight: '700', fontSize: '0.95rem', color: '#ef4444', letterSpacing: '0.5px' }}>
+              {role === 'host' ? 'DASHBOARD' : role.toUpperCase()}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            style={{
+              background: 'rgba(220, 38, 38, 0.2)',
+              border: '1px solid rgba(220, 38, 38, 0.5)',
+              borderRadius: '0.375rem',
+              color: '#ef4444',
+              padding: '0.4rem 0.6rem',
+              cursor: 'pointer',
+              fontSize: '1.25rem',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              width: '32px',
+              height: '32px',
+              transition: 'all 0.3s ease',
+              fontWeight: 'bold'
+            }}
+            onMouseEnter={(e) => {
+              const target = e.target as HTMLButtonElement;
+              target.style.background = 'rgba(220, 38, 38, 0.4)';
+              target.style.borderColor = 'rgba(220, 38, 38, 0.8)';
+              target.style.boxShadow = '0 0 15px rgba(220, 38, 38, 0.3)';
+            }}
+            onMouseLeave={(e) => {
+              const target = e.target as HTMLButtonElement;
+              target.style.background = 'rgba(220, 38, 38, 0.2)';
+              target.style.borderColor = 'rgba(220, 38, 38, 0.5)';
+              target.style.boxShadow = 'none';
+            }}
+          >
+            ×
+          </button>
         </div>
-        <button
-          onClick={onClose}
-          className="rounded-lg px-3 py-1 border text-sm"
-        >
-          Close
-        </button>
-      </header>
 
-      <div className="p-3 flex-1 overflow-y-auto space-y-6">
-        {role === "host" && <HostPanel roomName={roomName} />}
-        {role === "moderator" && <ModeratorPanel roomName={roomName} />}
-        {role === "participant" && <ParticipantPanel roomName={roomName} />}
+        {/* Content */}
+        <div style={{
+          padding: '1rem',
+          flex: 1,
+          overflowY: 'auto',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '0.75rem'
+        }}>
+          {role === "host" && <HostPanel roomName={roomName} />}
+          {role === "moderator" && <ModeratorPanel roomName={roomName} />}
+          {role === "participant" && <ParticipantPanel roomName={roomName} />}
+        </div>
       </div>
     </div>
-  </div>
-);
+  );
 
 }
 
@@ -65,44 +115,69 @@ function HostPanel({ roomName }: { roomName: string }) {
       <Section title="Live Participants">
         <ParticipantList
           participants={parts}
-          onMute={(id, muted) => apiMute(roomName, id, muted)}
           onRemove={(id) => apiRemove(roomName, id)}
           canModerate
         />
 
-        {/* Mute / Unmute all controls */}
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            className="rounded-md border px-2 py-1 text-[11px]"
-            onClick={() => apiMuteAll(roomName, true)}
-          >
-            Mute all
-          </button>
-          <button
-            className="rounded-md border px-2 py-1 text-[11px]"
-            onClick={() => apiMuteAll(roomName, false)}
-          >
-            Unmute all
-          </button>
-        </div>
+        {/* Removed Mute / Unmute all controls */}
       </Section>
 
       <Section title="Greenroom (Coming Soon)">
-        <p className="text-sm opacity-70">
+        <p style={{ fontSize: '0.875rem', opacity: 0.7, color: 'rgba(255, 255, 255, 0.7)', lineHeight: 1.5 }}>
           Admit/Reject guests from a separate lobby room.
         </p>
       </Section>
 
       <Section title="Overlays (MVP)">
-        <div className="flex gap-2">
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
           <button
-            className="rounded-lg border px-3 py-1 text-sm"
+            style={{
+              borderRadius: '0.375rem',
+              border: '1px solid rgba(220, 38, 38, 0.5)',
+              padding: '0.375rem 0.75rem',
+              fontSize: '0.75rem',
+              background: 'linear-gradient(135deg, #dc2626, #b91c1c)',
+              color: '#ffffff',
+              cursor: 'pointer',
+              transition: 'all 0.3s ease',
+              fontWeight: '600'
+            }}
+            onMouseEnter={(e) => {
+              const target = e.target as HTMLButtonElement;
+              target.style.background = 'linear-gradient(135deg, #b91c1c, #991b1b)';
+              target.style.boxShadow = '0 0 10px rgba(220, 38, 38, 0.3)';
+            }}
+            onMouseLeave={(e) => {
+              const target = e.target as HTMLButtonElement;
+              target.style.background = 'linear-gradient(135deg, #dc2626, #b91c1c)';
+              target.style.boxShadow = 'none';
+            }}
             onClick={() => alert("Show lower-third (stub)")}
           >
             Show Lower Third
           </button>
           <button
-            className="rounded-lg border px-3 py-1 text-sm"
+            style={{
+              borderRadius: '0.375rem',
+              border: '1px solid rgba(75, 85, 99, 0.5)',
+              padding: '0.375rem 0.75rem',
+              fontSize: '0.75rem',
+              background: 'rgba(75, 85, 99, 0.2)',
+              color: '#ffffff',
+              cursor: 'pointer',
+              transition: 'all 0.3s ease',
+              fontWeight: '600'
+            }}
+            onMouseEnter={(e) => {
+              const target = e.target as HTMLButtonElement;
+              target.style.background = 'rgba(75, 85, 99, 0.4)';
+              target.style.borderColor = 'rgba(75, 85, 99, 0.8)';
+            }}
+            onMouseLeave={(e) => {
+              const target = e.target as HTMLButtonElement;
+              target.style.background = 'rgba(75, 85, 99, 0.2)';
+              target.style.borderColor = 'rgba(75, 85, 99, 0.5)';
+            }}
             onClick={() => alert("Hide lower-third (stub)")}
           >
             Hide
@@ -125,7 +200,7 @@ function ModeratorPanel({ roomName }: { roomName: string }) {
       <Section title="Live Participants">
         <ParticipantList
           participants={parts}
-          onMute={(id, muted) => apiMute(roomName, id, muted)}
+          
           onRemove={(id) => apiRemove(roomName, id)}
           canModerate
         />
@@ -138,13 +213,13 @@ function ParticipantPanel({ roomName }: { roomName: string }) {
   return (
     <>
       <Section title="Info">
-        <p className="text-sm opacity-80">
-          You’re in <b>{roomName}</b>. Use the control bar to toggle mic/cam or
+        <p style={{ fontSize: '0.875rem', opacity: 0.8, color: 'rgba(255, 255, 255, 0.8)', lineHeight: 1.5 }}>
+          You're in <b>{roomName}</b>. Use the control bar to toggle mic/cam or
           share your screen.
         </p>
       </Section>
       <Section title="Tips">
-        <ul className="list-disc pl-5 text-sm opacity-80">
+        <ul style={{ listStyle: 'disc', paddingLeft: '1.25rem', fontSize: '0.875rem', opacity: 0.8, color: 'rgba(255, 255, 255, 0.8)', lineHeight: 1.6 }}>
           <li>Use headphones to avoid echo.</li>
           <li>Mute when not speaking.</li>
           <li>Use chat for links and quick notes.</li>
@@ -163,8 +238,8 @@ function Section({
 }) {
   return (
     <div>
-      <div className="text-sm font-medium mb-2">{title}</div>
-      <div className="rounded-xl border p-3 bg-white">{children}</div>
+      <div style={{ fontSize: '0.875rem', fontWeight: '600', marginBottom: '0.5rem', color: '#ef4444', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{title}</div>
+      <div style={{ borderRadius: '0.375rem', border: '1px solid rgba(220, 38, 38, 0.2)', padding: '0.75rem', background: 'rgba(31, 41, 55, 0.3)', color: 'rgba(255, 255, 255, 0.9)' }}>{children}</div>
     </div>
   );
 }
@@ -172,47 +247,65 @@ function Section({
 function ParticipantList({
   participants,
   canModerate,
-  onMute,
+  // onMute removed
   onRemove,
 }: {
   participants: ReturnType<typeof useParticipants>;
   canModerate?: boolean;
-  onMute?: (identity: string, muted: boolean) => void;
+  // onMute removed
   onRemove?: (identity: string) => void;
 }) {
   if (!participants?.length) {
-    return <p className="text-sm opacity-70">No one here yet.</p>;
+    return <p style={{ fontSize: '0.875rem', opacity: 0.7, color: 'rgba(255, 255, 255, 0.7)' }}>No one here yet.</p>;
   }
 
   return (
-    <div className="space-y-2">
+    <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
       {participants.map((p) => (
         <div
           key={p.identity}
-          className="flex items-center justify-between rounded-lg border px-3 py-2"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            borderRadius: '0.375rem',
+            border: '1px solid rgba(75, 85, 99, 0.3)',
+            padding: '0.5rem',
+            background: 'rgba(31, 41, 55, 0.2)',
+            gap: '0.5rem'
+          }}
         >
-          <div className="text-sm">
-            <div className="font-medium">{p.name || p.identity}</div>
-            <div className="opacity-60 text-xs break-all">
+          <div style={{ fontSize: '0.875rem' }}>
+            <div style={{ fontWeight: '600', color: '#ffffff' }}>{p.name || p.identity}</div>
+            <div style={{ opacity: 0.6, fontSize: '0.75rem', wordBreak: 'break-all', color: 'rgba(255, 255, 255, 0.6)' }}>
               {p.identity}
             </div>
           </div>
           {canModerate && (
-            <div className="flex gap-2">
+            <div style={{ display: 'flex', gap: '0.25rem' }}>
+              {/* Mute/Unmute participant buttons removed. Use local controls only. */}
               <button
-                className="rounded-md border px-2 py-1 text-xs"
-                onClick={() => onMute?.(p.identity, true)}
-              >
-                Mute
-              </button>
-              <button
-                className="rounded-md border px-2 py-1 text-xs"
-                onClick={() => onMute?.(p.identity, false)}
-              >
-                Unmute
-              </button>
-              <button
-                className="rounded-md border px-2 py-1 text-xs"
+                style={{
+                  borderRadius: '0.25rem',
+                  border: '1px solid rgba(220, 38, 38, 0.5)',
+                  padding: '0.25rem 0.5rem',
+                  fontSize: '0.7rem',
+                  background: 'linear-gradient(135deg, #dc2626, #b91c1c)',
+                  color: '#ffffff',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease',
+                  fontWeight: '600'
+                }}
+                onMouseEnter={(e) => {
+                  const target = e.target as HTMLButtonElement;
+                  target.style.background = 'linear-gradient(135deg, #b91c1c, #991b1b)';
+                  target.style.boxShadow = '0 0 8px rgba(220, 38, 38, 0.3)';
+                }}
+                onMouseLeave={(e) => {
+                  const target = e.target as HTMLButtonElement;
+                  target.style.background = 'linear-gradient(135deg, #dc2626, #b91c1c)';
+                  target.style.boxShadow = 'none';
+                }}
                 onClick={() => onRemove?.(p.identity)}
               >
                 Remove
@@ -225,67 +318,11 @@ function ParticipantList({
   );
 }
 
-/** --- Minimal admin calls (MVP; secure later with auth/JWT) --- */
 
-async function apiMute(room: string, identity: string, muted: boolean) {
-  try {
-    const res = await fetch("/api/admin/mute", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ room, identity, muted }),
-    });
-
-    let data: any = null;
-    try {
-      data = await res.json();
-    } catch {
-      // ignore JSON parse errors
-    }
-
-    if (!res.ok || (data && data.error)) {
-      console.error("mute/unmute failed", { status: res.status, data });
-      alert((data && data.error) || `Mute failed (HTTP ${res.status})`);
-      return;
-    }
-
-    console.log("mute/unmute success", data);
-  } catch (e) {
-    console.error("mute/unmute failed (network)", e);
-    alert("Mute request failed (network error)");
-  }
-}
-
-async function apiMuteAll(room: string, muted: boolean) {
-  try {
-    const res = await fetch("/api/admin/mute-all", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ room, muted }),
-    });
-
-    let data: any = null;
-    try {
-      data = await res.json();
-    } catch {
-      // ignore JSON parse errors
-    }
-
-    if (!res.ok || (data && data.error)) {
-      console.error("mute-all failed", { status: res.status, data });
-      alert((data && data.error) || `Mute all failed (HTTP ${res.status})`);
-      return;
-    }
-
-    console.log("mute-all success", data);
-  } catch (e) {
-    console.error("mute-all failed (network)", e);
-    alert("Mute-all request failed (network error)");
-  }
-}
 
 async function apiRemove(room: string, identity: string) {
   try {
-    const res = await fetch("/api/admin/remove", {
+    const res = await fetch(`${API_BASE}/api/admin/remove`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ room, identity }),

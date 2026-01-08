@@ -1,0 +1,46 @@
+# Exported from Render on 2025-12-17T11:44:21Z
+version: "1"
+projects:
+- name: StreamLine
+  environments:
+  - name: Production
+    services:
+    - type: web
+      name: streamline-backend2
+      runtime: node
+      repo: https://github.com/Gitwit22/streamline-platform
+      plan: free
+      envVars:
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        sync: false
+      - key: R2_ENDPOINT
+        sync: false
+      - key: R2_BUCKET_NAME
+        sync: false
+      - key: R2_USER_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_USER_ACCESS_KEY_ID
+        sync: false
+      - key: R2_ACCOUNT_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_ACCOUNT_ACCESS_KEY_ID
+        sync: false
+      - key: VITE_API_BASE
+        sync: false
+      - key: PORT
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: VITE_LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      region: ohio
+      buildCommand: npm install && npm run build
+      startCommand: npm run start
+      autoDeployTrigger: checksPass
+      rootDir: streamline-server

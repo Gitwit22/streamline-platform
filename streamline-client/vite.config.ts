@@ -4,18 +4,13 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   plugins: [react()],
   server: {
-    port: 5173,
-
-    // Proxy ALL /api requests to your backend (including admin routes)
     proxy: {
-      '/api': {
-        target: 'http://localhost:5137',
-        changeOrigin: true,
-        secure: false,
-      },
-    },
-
-    // Allow ANY ngrok domain
-    allowedHosts: ['.ngrok-free.dev'],
+  "/api": {
+    target: "http://127.0.0.1:5137",
+    changeOrigin: true,
+    secure: false,
   },
-})
+},
+
+  },
+});
