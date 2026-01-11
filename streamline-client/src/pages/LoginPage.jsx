@@ -1,7 +1,6 @@
-import React, { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 
-const API_BASE = import.meta.env.VITE_API_BASE || "";
 
 // Email validation function
 function validateEmail(email) {
@@ -21,10 +20,26 @@ function validateEmail(email) {
 
 export const LoginPage = () => {
   const nav = useNavigate();
+  const location = useLocation();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
+
+  const nextUrl = useMemo(() => {
+    try {
+      const sp = new URLSearchParams(location.search || "");
+      const next = sp.get("next") || "";
+      // Only allow internal relative paths
+      if (!next || typeof next !== "string") return null;
+      if (!next.startsWith("/")) return null;
+      if (next.startsWith("//")) return null;
+      return next;
+    } catch {
+      return null;
+    }
+  }, [location.search]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -41,25 +56,49 @@ export const LoginPage = () => {
     try {
       const res = await fetch(`${API_BASE}/api/auth/login`, {
         method: "POST",
-        headers: { 
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
         body: JSON.stringify({ email, password }),
       });
 
-      const data = await res.json();
-
       if (!res.ok) {
-        setError(data.error || "Login failed");
+        const ct = res.headers.get("content-type") || "";
+        const err = ct.includes("application/json")
+          ? await res.json().catch(() => ({}))
+          : { error: "Login failed: backend returned non-JSON (check API base / server)" };
+        setError(err?.error || "Invalid credentials");
         setLoading(false);
         return;
       }
 
-      localStorage.setItem("sl_user", JSON.stringify(data.user));
-      localStorage.setItem("sl_token", data.token);
-      localStorage.setItem("sl_userId", data.user.id || data.user.uid);
-      
-      nav("/join");
+      // ✅ LOGIN SUCCEEDED — cookie is now set
+      // Hydrate user from /me
+      const meRes = await fetch(`${API_BASE}/api/auth/me`, {
+        credentials: "include",
+      });
+
+      if (!meRes.ok) {
+        setError("Logged in, but failed to load profile");
+        setLoading(false);
+        return;
+      }
+
+      const ctMe = meRes.headers.get("content-type") || "";
+      if (!ctMe.includes("application/json")) {
+        setError("Profile load returned non-JSON. Verify backend URL and CORS.");
+        setLoading(false);
+        return;
+      }
+      const me = await meRes.json();
+
+      // Optional: store user for UI convenience
+      localStorage.setItem("sl_user", JSON.stringify(me));
+
+      setLoading(false);
+      if (typeof document !== "undefined") {
+        console.log('[Login] Cookies after login:', document.cookie);
+      }
+      nav(nextUrl || "/join"); // or /dashboard
     } catch (err) {
       console.error(err);
       setError("Something went wrong. Try again.");

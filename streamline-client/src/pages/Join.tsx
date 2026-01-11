@@ -1,45 +1,190 @@
-import { useState, useEffect } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useState, useEffect, useMemo } from "react";
+import { useAuthMe } from "../hooks/useAuthMe";
+import { PLAN_IDS, PlanId, isPlanId } from "../lib/planIds";
+import { API_BASE } from "../lib/apiBase";
+import { logAuthDebugContext } from "../lib/logAuthDebug";
+import { useNavigate, useSearchParams,} from "react-router-dom";
 
-const raw = localStorage.getItem("sl_user");
-const user = raw ? JSON.parse(raw) : null;
 
-/**
- * STREAMLINE JOIN PAGE WITH USAGE BANNER - REDESIGNED
- * Glassmorphism black/red/white theme with integrated usage stats
- */
-
-// Mock usage data - replace with real API call
-const mockUsageData = {
-  streamingMinutes: 127,
-  maxStreamingMinutes: 300,
-  storageUsed: 2.3, // GB
-  maxStorage: 10, // GB
-  planId: "free"
+type UsageData = {
+  streamingMinutes: number;
+  maxStreamingMinutes: number;
+  storageUsed: number;
+  maxStorage: number;
+  planId: PlanId;
 };
 
+function formatDefaultRoomName(displayName: string) {
+  const now = new Date();
+  const dateFmt = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+  }).format(now);
+  const timeFmt = new Intl.DateTimeFormat("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(now);
+
+  if (displayName) return `${displayName} – Live Session`;
+  return `StreamLine Live – ${dateFmt}, ${timeFmt}`;
+}
+
 export default function Join() {
+  // Log auth/user info when arriving at join page
+  useEffect(() => { logAuthDebugContext("Arrive Join Page"); }, []);
   const nav = useNavigate();
   const [searchParams] = useSearchParams();
-  const [displayName, setDisplayName] = useState("");
+
+  const [displayName, setDisplayName] = useState(() => {
+    // Prefer profile displayName if available, then fall back to cached value
+    try {
+      const rawUser = localStorage.getItem("sl_user");
+      if (rawUser && rawUser !== "undefined") {
+        const parsed = JSON.parse(rawUser);
+        if (parsed?.displayName) return parsed.displayName as string;
+      }
+    } catch {
+      // ignore parse errors and fall back
+    }
+    return localStorage.getItem("sl_displayName") || "";
+  });
+  const [didEditDisplayName, setDidEditDisplayName] = useState(false);
   const [roomName, setRoomName] = useState("");
   const [showEditingModal, setShowEditingModal] = useState(false);
+
+  // Usage state
+  const [usageData, setUsageData] = useState<UsageData | null>(null);
+  const [usageLoading, setUsageLoading] = useState(false);
+  const [usageError, setUsageError] = useState<string | null>(null);
+
+  // Pull user from localStorage (existing behavior) - useState so it's stable
+  const [user] = useState(() => {
+    const raw = localStorage.getItem("sl_user");
+    if (!raw || raw === "undefined") return null;
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      localStorage.removeItem("sl_user");
+      return null;
+    }
+  });
 
   // Check for invite link (room query parameter)
   const isParticipant = searchParams.get("room") !== null;
   const role = searchParams.get("role") || "guest"; // Get role from URL
-  
+
+// Use /api/auth/me for admin status
+const { user: authUser, loading: authLoading } = useAuthMe();
+const isAdmin = !!authUser?.isAdmin;
+const adminLoading = authLoading;
+
+  // Auto-populate the name field from authenticated profile (test env often lacks sl_user localStorage)
+  // Do not override if user has typed.
+  useEffect(() => {
+    if (didEditDisplayName) return;
+    if (displayName.trim()) return;
+
+    const candidate =
+      (typeof authUser?.displayName === "string" && authUser.displayName.trim()) ||
+      (typeof (authUser as any)?.name === "string" && String((authUser as any).name).trim()) ||
+      (typeof authUser?.email === "string" && authUser.email.split("@")[0]?.trim()) ||
+      "";
+
+    if (!candidate) return;
+    setDisplayName(candidate);
+    try {
+      localStorage.setItem("sl_displayName", candidate);
+    } catch {
+      // ignore
+    }
+  }, [authUser, didEditDisplayName, displayName]);
+
   useEffect(() => {
     const inviteRoom = searchParams.get("room");
     if (inviteRoom) {
       const decodedRoom = decodeURIComponent(inviteRoom);
       setRoomName(decodedRoom);
-      
+
       // Store role for later use in room
-      console.log("👤 Joining as role:", role);
       localStorage.setItem("sl_current_role", role);
     }
   }, [searchParams, role]);
+
+  const lastRoom = useMemo(() => {
+    try {
+      const raw = localStorage.getItem("sl_last_room");
+      const ts = Number(localStorage.getItem("sl_last_room_ts") || 0);
+      if (!raw || !ts) return null;
+      const ageMs = Date.now() - ts;
+      // Only suggest reuse if within 6 hours
+      if (ageMs > 6 * 60 * 60 * 1000) return null;
+      return raw;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isParticipant) return; // never override invite room
+    if (roomName.trim()) return; // respect user edits
+
+    // Prefer recent room name, else generate a deterministic friendly default
+    if (lastRoom) {
+      setRoomName(lastRoom);
+      return;
+    }
+
+    const fallback = formatDefaultRoomName(displayName.trim());
+    setRoomName(fallback);
+  }, [displayName, isParticipant, lastRoom, roomName]);
+
+  // Fetch real usage summary (for all authenticated users)
+  useEffect(() => {
+    let didCancel = false;
+   
+
+    setUsageLoading(true);
+    setUsageError(null);
+
+    fetch(`${API_BASE}/api/usage/me`, { credentials: "include" })
+  .then(async (res) => {
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || "Failed to fetch usage data");
+    }
+    return res.json();
+  })
+  .then((data) => {
+    if (!didCancel) {
+      const um = data?.usageMonthly || {};
+      // Canonicalize plan id
+      let planIdRaw = data?.plan?.id ?? data?.user?.planId ?? "free";
+      let canonicalPlanId: PlanId = "free";
+      if (planIdRaw === "starter_paid" || planIdRaw === "starter_trial") {
+        canonicalPlanId = "starter";
+      } else if (isPlanId(planIdRaw)) {
+        canonicalPlanId = planIdRaw;
+      }
+      setUsageData({
+        streamingMinutes: um?.participantMinutes ?? um?.usage?.participantMinutes ?? Math.max(0, Math.round((data?.user?.usage?.hoursStreamedThisMonth || 0) * 60)),
+        maxStreamingMinutes: data?.plan?.limits?.participantMinutes ?? 0,
+        storageUsed: um?.storageGB ?? um?.usage?.storageGB ?? 0,
+        maxStorage: data?.plan?.limits?.storageGB ?? 0,
+        planId: canonicalPlanId,
+      });
+      setUsageLoading(false);
+    }
+  })
+      .catch((err) => {
+        if (!didCancel) {
+          setUsageError(err.message || "Failed to fetch usage data");
+          setUsageLoading(false);
+        }
+      });
+    return () => {
+      didCancel = true;
+    };
+  }, [user]);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -49,280 +194,391 @@ export default function Join() {
     if (!name || !room) return;
 
     localStorage.setItem("sl_displayName", name);
-    
+
     // Mark this room as created by this user (only if not joining via invite)
     if (!isParticipant) {
-      const createdRooms = JSON.parse(localStorage.getItem("sl_created_rooms") || "[]");
+      const createdRooms = JSON.parse(
+        localStorage.getItem("sl_created_rooms") || "[]"
+      );
       if (!createdRooms.includes(room)) {
         createdRooms.push(room);
         localStorage.setItem("sl_created_rooms", JSON.stringify(createdRooms));
       }
+      localStorage.setItem("sl_last_room", room);
+      localStorage.setItem("sl_last_room_ts", String(Date.now()));
+      // Set role to 'host' when creating a room
+      localStorage.setItem("sl_current_role", "host");
     }
-    
+
     nav(`/room/${encodeURIComponent(room)}`);
   }
 
-  const streamingPercent = (mockUsageData.streamingMinutes / mockUsageData.maxStreamingMinutes) * 100;
-  const storagePercent = (mockUsageData.storageUsed / mockUsageData.maxStorage) * 100;
+  const streamingPercent =
+    usageData && usageData.maxStreamingMinutes > 0
+      ? (usageData.streamingMinutes / usageData.maxStreamingMinutes) * 100
+      : 0;
+
+  const storagePercent =
+    usageData && usageData.maxStorage > 0
+      ? (usageData.storageUsed / usageData.maxStorage) * 100
+      : 0;
 
   return (
-    <div 
+    <div
       style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: '#000000',
-        color: '#ffffff',
-        padding: '24px',
-        position: 'relative',
-        overflow: 'hidden'
+        minHeight: "100vh",
+        display: "flex",
+        flexDirection: "column",
+        alignItems: "center",
+        justifyContent: "center",
+        backgroundColor: "#000000",
+        color: "#ffffff",
+        padding: "24px",
+        position: "relative",
+        overflow: "hidden",
       }}
     >
-      
       {/* ANIMATED BACKGROUND */}
-      <div style={{ position: 'absolute', inset: 0, zIndex: 0 }}>
-        <div 
+      <div style={{ position: "absolute", inset: 0, zIndex: 0 }}>
+        <div
           style={{
-            position: 'absolute',
-            top: '20%',
-            right: '15%',
-            width: '500px',
-            height: '500px',
-            background: 'rgba(220, 38, 38, 0.15)',
-            borderRadius: '50%',
-            filter: 'blur(120px)',
-            animation: 'pulse 4s ease-in-out infinite'
+            position: "absolute",
+            top: "20%",
+            right: "15%",
+            width: "500px",
+            height: "500px",
+            background: "rgba(220, 38, 38, 0.15)",
+            borderRadius: "50%",
+            filter: "blur(120px)",
+            animation: "pulse 4s ease-in-out infinite",
           }}
         />
-        <div 
+        <div
           style={{
-            position: 'absolute',
-            bottom: '20%',
-            left: '15%',
-            width: '600px',
-            height: '600px',
-            background: 'rgba(239, 68, 68, 0.1)',
-            borderRadius: '50%',
-            filter: 'blur(150px)',
-            animation: 'pulse 4s ease-in-out infinite',
-            animationDelay: '2s'
+            position: "absolute",
+            bottom: "20%",
+            left: "15%",
+            width: "600px",
+            height: "600px",
+            background: "rgba(239, 68, 68, 0.1)",
+            borderRadius: "50%",
+            filter: "blur(150px)",
+            animation: "pulse 4s ease-in-out infinite",
+            animationDelay: "2s",
           }}
         />
       </div>
 
-      {/* USAGE BANNER - TOP BAR - Hidden for participants */}
-      {!isParticipant && (
-      <div 
-        style={{
-          position: 'fixed',
-          top: 0,
-          left: 0,
-          right: 0,
-          zIndex: 30,
-          background: 'rgba(15, 15, 15, 0.9)',
-          backdropFilter: 'blur(20px)',
-          borderBottom: '1px solid rgba(255, 255, 255, 0.1)',
-          padding: '16px 24px'
-        }}
-      >
-        <div 
+      {/* USAGE BANNER - TOP BAR - For all authenticated users */}
+      {user && (
+        <div
           style={{
-            maxWidth: '1200px',
-            margin: '0 auto',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'space-between',
-            gap: '24px',
-            flexWrap: 'wrap'
+            position: "fixed",
+            top: 0,
+            left: 0,
+            right: 0,
+            zIndex: 30,
+            background: "rgba(15, 15, 15, 0.9)",
+            backdropFilter: "blur(20px)",
+            borderBottom: "1px solid rgba(255, 255, 255, 0.1)",
+            padding: "16px 24px",
           }}
         >
-          
-          {/* Usage Stats */}
-          <div style={{ display: 'flex', alignItems: 'center', gap: '32px', flexWrap: 'wrap' }}>
-            
-            {/* Streaming Minutes */}
-            <div>
-              <div 
-                style={{
-                  fontSize: '11px',
-                  color: '#6b7280',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em',
-                  marginBottom: '4px'
-                }}
-              >
-                Streaming Minutes
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <div style={{ fontSize: '18px', fontWeight: 700 }}>
-                  {mockUsageData.streamingMinutes}
-                </div>
-                <div style={{ fontSize: '13px', color: '#9ca3af' }}>
-                  / {mockUsageData.maxStreamingMinutes}
-                </div>
-              </div>
-              <div 
-                style={{
-                  width: '120px',
-                  height: '4px',
-                  background: 'rgba(255, 255, 255, 0.1)',
-                  borderRadius: '2px',
-                  marginTop: '4px',
-                  overflow: 'hidden'
-                }}
-              >
-                <div 
-                  style={{
-                    height: '100%',
-                    width: `${streamingPercent}%`,
-                    background: 'linear-gradient(to right, #dc2626, #ef4444)',
-                    borderRadius: '2px'
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* Storage Used */}
-            <div>
-              <div 
-                style={{
-                  fontSize: '11px',
-                  color: '#6b7280',
-                  textTransform: 'uppercase',
-                  letterSpacing: '0.05em',
-                  marginBottom: '4px'
-                }}
-              >
-                Storage Used
-              </div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <div style={{ fontSize: '18px', fontWeight: 700 }}>
-                  {mockUsageData.storageUsed} GB
-                </div>
-                <div style={{ fontSize: '13px', color: '#9ca3af' }}>
-                  / {mockUsageData.maxStorage} GB
-                </div>
-              </div>
-              <div 
-                style={{
-                  width: '120px',
-                  height: '4px',
-                  background: 'rgba(255, 255, 255, 0.1)',
-                  borderRadius: '2px',
-                  marginTop: '4px',
-                  overflow: 'hidden'
-                }}
-              >
-                <div 
-                  style={{
-                    height: '100%',
-                    width: `${storagePercent}%`,
-                    background: 'linear-gradient(to right, #dc2626, #ef4444)',
-                    borderRadius: '2px'
-                  }}
-                />
-              </div>
-            </div>
-
-            {/* Plan Badge */}
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <div 
-                style={{
-                  padding: '6px 12px',
-                  background: 'rgba(220, 38, 38, 0.2)',
-                  border: '1px solid rgba(220, 38, 38, 0.4)',
-                  borderRadius: '8px',
-                  fontSize: '12px',
-                  fontWeight: 600,
-                  textTransform: 'uppercase'
-                }}
-              >
-                {mockUsageData.planId} Plan
-              </div>
-              <button
-                onClick={() => alert('Upgrade modal coming soon')}
-                style={{
-                  fontSize: '12px',
-                  color: '#ef4444',
-                  background: 'none',
-                  border: 'none',
-                  textDecoration: 'underline',
-                  cursor: 'pointer',
-                  whiteSpace: 'nowrap'
-                }}
-              >
-                Upgrade
-              </button>
-            </div>
-          </div>
-
-          {/* My Content Button */}
-          <div>
-            <button
-              onClick={() => setShowEditingModal(true)}
+          <div
+            style={{
+              maxWidth: "1200px",
+              margin: "0 auto",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "24px",
+              flexWrap: "wrap",
+            }}
+          >
+            {/* Usage Stats */}
+            <div
               style={{
-                fontSize: '13px',
-                padding: '8px 16px',
-                background: 'rgba(220, 38, 38, 0.1)',
-                border: '1px solid rgba(220, 38, 38, 0.4)',
-                borderRadius: '8px',
-                color: '#ef4444',
-                cursor: 'pointer',
-                whiteSpace: 'nowrap',
-                transition: 'all 0.3s ease',
-                fontWeight: 500
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background = 'rgba(220, 38, 38, 0.2)';
-                e.currentTarget.style.borderColor = 'rgba(220, 38, 38, 0.8)';
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background = 'rgba(220, 38, 38, 0.1)';
-                e.currentTarget.style.borderColor = 'rgba(220, 38, 38, 0.4)';
+                display: "flex",
+                alignItems: "center",
+                gap: "32px",
+                flexWrap: "wrap",
               }}
             >
-              🎬 My Content
-            </button>
-          </div>
-        </div>
-      </div>
-      )}
+              {/* Streaming Minutes */}
+              <div>
+                <div
+                  style={{
+                    fontSize: "11px",
+                    color: "#6b7280",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                    marginBottom: "4px",
+                  }}
+                >
+                  Streaming Minutes
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <div style={{ fontSize: "18px", fontWeight: 700 }}>
+                    {usageLoading
+                      ? "..."
+                      : usageError
+                      ? "—"
+                      : usageData?.streamingMinutes ?? "—"}
+                  </div>
+                  <div style={{ fontSize: "13px", color: "#9ca3af" }}>
+                    /{" "}
+                    {usageLoading
+                      ? "..."
+                      : usageError
+                      ? "—"
+                      : usageData?.maxStreamingMinutes ?? "—"}
+                  </div>
+                </div>
+                <div
+                  style={{
+                    width: "120px",
+                    height: "4px",
+                    background: "rgba(255, 255, 255, 0.1)",
+                    borderRadius: "2px",
+                    marginTop: "4px",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${streamingPercent}%`,
+                      background: "linear-gradient(to right, #dc2626, #ef4444)",
+                      borderRadius: "2px",
+                    }}
+                  />
+                </div>
+              </div>
 
-      <div style={{ position: 'relative', zIndex: 10, width: '100%', maxWidth: '480px', marginTop: isParticipant ? '0px' : '80px' }}>
-        
+              {/* Storage Used */}
+              <div>
+                <div
+                  style={{
+                    fontSize: "11px",
+                    color: "#6b7280",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.05em",
+                    marginBottom: "4px",
+                  }}
+                >
+                  Storage Used
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                  <div style={{ fontSize: "18px", fontWeight: 700 }}>
+                    {usageLoading
+                      ? "..."
+                      : usageError
+                      ? "—"
+                      : usageData?.storageUsed ?? "—"}{" "}
+                    GB
+                  </div>
+                  <div style={{ fontSize: "13px", color: "#9ca3af" }}>
+                    /{" "}
+                    {usageLoading
+                      ? "..."
+                      : usageError
+                      ? "—"
+                      : usageData?.maxStorage ?? "—"}{" "}
+                    GB
+                  </div>
+                </div>
+                <div
+                  style={{
+                    width: "120px",
+                    height: "4px",
+                    background: "rgba(255, 255, 255, 0.1)",
+                    borderRadius: "2px",
+                    marginTop: "4px",
+                    overflow: "hidden",
+                  }}
+                >
+                  <div
+                    style={{
+                      height: "100%",
+                      width: `${storagePercent}%`,
+                      background: "linear-gradient(to right, #dc2626, #ef4444)",
+                      borderRadius: "2px",
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Plan Badge */}
+              <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                <div
+                  style={{
+                    padding: "6px 12px",
+                    background: "rgba(220, 38, 38, 0.2)",
+                    border: "1px solid rgba(220, 38, 38, 0.4)",
+                    borderRadius: "8px",
+                    fontSize: "12px",
+                    fontWeight: 600,
+                    textTransform: "uppercase",
+                  }}
+                >
+                  {usageLoading
+                    ? "Loading..."
+                    : usageError
+                    ? "—"
+                    : usageData?.planId
+                    ? `${usageData.planId} Plan`
+                    : "—"}
+                </div>
+
+                {/* Upgrade button removed */}
+              </div>
+
+              {/* Error message under usage stats */}
+              {/* Only show Admin Dashboard button for actual admins. No fallback for non-admins. */}
+              {usageError && (
+                <button
+                  style={{
+                    marginTop: "8px",
+                    background: "rgba(220, 38, 38, 0.15)",
+                    border: "1px solid #ef4444",
+                    color: "#ef4444",
+                    borderRadius: "6px",
+                    padding: "6px 16px",
+                    fontSize: "13px",
+                    fontWeight: 600,
+                    cursor: "pointer",
+                  }}
+                  disabled
+                  title={usageError}
+                >
+                  {usageError}
+                </button>
+              )}
+            </div>
+
+            {/* Right side actions */}
+<div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+  {/* Settings & Billing button, always visible to logged-in users */}
+  <button
+    onClick={() => nav("/settings/billing")}
+    style={{
+      fontSize: "13px",
+      padding: "8px 16px",
+      background: "rgba(255,255,255,0.05)",
+      border: "1px solid rgba(255,255,255,0.2)",
+      color: "#fff",
+      borderRadius: "8px",
+      fontWeight: 600,
+      cursor: "pointer",
+      whiteSpace: "nowrap",
+      transition: "all 0.3s ease",
+    }}
+    onMouseEnter={e => {
+      e.currentTarget.style.background = 'rgba(255,255,255,0.1)';
+      e.currentTarget.style.borderColor = 'rgba(34,197,94,0.6)';
+    }}
+    onMouseLeave={e => {
+      e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+      e.currentTarget.style.borderColor = 'rgba(255,255,255,0.2)';
+    }}
+  >
+    ⚙️ Settings & Billing
+  </button>
+
+  {/* Admin Dashboard button (admin only) */}
+  {!adminLoading && isAdmin === true && (
+    <button
+      onClick={() => nav("/admin/dashboard")}
+      style={{
+        fontSize: "13px",
+        padding: "8px 16px",
+        background: "rgba(220, 38, 38, 0.15)",
+        border: "1px solid rgba(220, 38, 38, 0.5)",
+        borderRadius: "8px",
+        color: "#ef4444",
+        cursor: "pointer",
+        fontWeight: 600,
+        whiteSpace: "nowrap",
+      }}
+    >
+      🛠 Admin Dashboard
+    </button>
+  )}
+
+  {/* My Content button */}
+  <button
+    onClick={() => setShowEditingModal(true)}
+    style={{
+      fontSize: "13px",
+      padding: "8px 16px",
+      background: "rgba(220, 38, 38, 0.1)",
+      border: "1px solid rgba(220, 38, 38, 0.4)",
+      borderRadius: "8px",
+      color: "#ef4444",
+      cursor: "pointer",
+      whiteSpace: "nowrap",
+      transition: "all 0.3s ease",
+      fontWeight: 500,
+    }}
+    onMouseEnter={(e) => {
+      e.currentTarget.style.background = "rgba(220, 38, 38, 0.2)";
+      e.currentTarget.style.borderColor = "rgba(220, 38, 38, 0.8)";
+    }}
+    onMouseLeave={(e) => {
+      e.currentTarget.style.background = "rgba(220, 38, 38, 0.1)";
+      e.currentTarget.style.borderColor = "rgba(220, 38, 38, 0.4)";
+    }}
+  >
+    🎬 My Content
+  </button>
+</div>
+
+              
+      </div>
+    </div>
+  )}
+
+
+      <div
+        style={{
+          position: "relative",
+          zIndex: 10,
+          width: "100%",
+          maxWidth: "480px",
+          marginTop: isParticipant ? "0px" : "80px",
+        }}
+      >
         {/* LOGO */}
-        <div style={{ marginBottom: '32px', textAlign: 'center' }}>
+        <div style={{ marginBottom: "32px", textAlign: "center" }}>
           <img
             src="/logo.png"
             alt="StreamLine Logo"
             style={{
-              width: '320px',
-              height: '320px',
-              margin: '0 auto',
-              filter: 'drop-shadow(0 0 25px rgba(220, 38, 38, 0.5))'
+              width: "320px",
+              height: "320px",
+              margin: "0 auto",
+              filter: "drop-shadow(0 0 25px rgba(220, 38, 38, 0.5))",
             }}
           />
         </div>
 
         {/* WELCOME MESSAGE */}
         {user && (
-          <div style={{ marginBottom: '32px', textAlign: 'center' }}>
-            <h2 
+          <div style={{ marginBottom: "32px", textAlign: "center" }}>
+            <h2
               style={{
-                fontSize: '28px',
+                fontSize: "28px",
                 fontWeight: 700,
-                marginBottom: '8px',
-                background: 'linear-gradient(to right, #ffffff, #fecaca, #ffffff)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent'
+                marginBottom: "8px",
+                background: "linear-gradient(to right, #ffffff, #fecaca, #ffffff)",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
               }}
             >
               Welcome back, {user.displayName || user.email}! 👋
             </h2>
             {user.defaultResolution && (
-              <p style={{ fontSize: '14px', color: '#6b7280' }}>
+              <p style={{ fontSize: "14px", color: "#6b7280" }}>
                 Default resolution: {user.defaultResolution}
               </p>
             )}
@@ -330,125 +586,46 @@ export default function Join() {
         )}
 
         {!user && (
-          <div style={{ marginBottom: '32px', textAlign: 'center' }}>
-            <h1 
+          <div style={{ marginBottom: "32px", textAlign: "center" }}>
+            <h1
               style={{
-                fontSize: '32px',
+                fontSize: "32px",
                 fontWeight: 700,
-                marginBottom: '8px',
-                background: 'linear-gradient(to right, #ffffff, #fecaca, #ffffff)',
-                WebkitBackgroundClip: 'text',
-                WebkitTextFillColor: 'transparent'
+                marginBottom: "8px",
+                background: "linear-gradient(to right, #ffffff, #fecaca, #ffffff)",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
               }}
             >
-              Create or Join Room
+              Join Room
             </h1>
-            <p style={{ fontSize: '16px', color: '#9ca3af' }}>
-              Start streaming in seconds
+            <p style={{ fontSize: "16px", color: "#9ca3af" }}>
+              Once you enter the room, click the camera and mic icons.
             </p>
-          </div>
-        )}
-
-        {/* ONBOARDING COMPLETION CARD - Only show if user is authenticated AND not coming from an invite */}
-        {user && !user.onboardingCompleted && !searchParams.get("room") && (
-          <div
-            style={{
-              background: 'rgba(15, 15, 15, 0.7)',
-              backdropFilter: 'blur(20px)',
-              border: '1px solid rgba(255, 255, 255, 0.1)',
-              borderRadius: '16px',
-              padding: '24px',
-              marginBottom: '24px'
-            }}
-          >
-            <h3 style={{ fontSize: '16px', fontWeight: 600, marginBottom: '8px', color: '#ef4444' }}>
-              ⚠️ Finish Your Streaming Setup (Coming Soon)
-            </h3>
-            <p style={{ fontSize: '13px', color: '#9ca3af', marginBottom: '16px', lineHeight: '1.5' }}>
-              You skipped streaming setup during signup. Connect your destinations here to make going live even faster.
-            </p>
-
-            {!user.youtubeConnected && (
-              <button
-                onClick={() => alert("YouTube OAuth coming soon")}
-                style={{
-                  width: '100%',
-                  padding: '12px',
-                  background: 'rgba(239, 68, 68, 0.2)',
-                  border: '1px solid rgba(239, 68, 68, 0.3)',
-                  borderRadius: '10px',
-                  color: '#ffffff',
-                  fontSize: '14px',
-                  fontWeight: 500,
-                  cursor: 'pointer',
-                  marginBottom: '12px',
-                  transition: 'all 0.3s ease'
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = 'rgba(239, 68, 68, 0.3)';
-                  e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.5)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'rgba(239, 68, 68, 0.2)';
-                  e.currentTarget.style.borderColor = 'rgba(239, 68, 68, 0.3)';
-                }}
-              >
-                🔴 Connect YouTube
-              </button>
-            )}
-
-            {!user.facebookConnected && (
-              <button
-                onClick={() => alert("Facebook OAuth coming soon")}
-                style={{
-                  width: '100%',
-                  padding: '12px',
-                  background: 'rgba(59, 130, 246, 0.2)',
-                  border: '1px solid rgba(59, 130, 246, 0.3)',
-                  borderRadius: '10px',
-                  color: '#ffffff',
-                  fontSize: '14px',
-                  fontWeight: 500,
-                  cursor: 'pointer',
-                  transition: 'all 0.3s ease'
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = 'rgba(59, 130, 246, 0.3)';
-                  e.currentTarget.style.borderColor = 'rgba(59, 130, 246, 0.5)';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = 'rgba(59, 130, 246, 0.2)';
-                  e.currentTarget.style.borderColor = 'rgba(59, 130, 246, 0.3)';
-                }}
-              >
-                📘 Connect Facebook
-              </button>
-            )}
           </div>
         )}
 
         {/* FORM CONTAINER */}
         <div
           style={{
-            background: 'rgba(15, 15, 15, 0.7)',
-            backdropFilter: 'blur(20px)',
-            border: '1px solid rgba(255, 255, 255, 0.1)',
-            borderRadius: '20px',
-            padding: '32px',
-            marginBottom: '24px'
+            background: "rgba(15, 15, 15, 0.7)",
+            backdropFilter: "blur(20px)",
+            border: "1px solid rgba(255, 255, 255, 0.1)",
+            borderRadius: "20px",
+            padding: "32px",
+            marginBottom: "24px",
           }}
         >
           <form onSubmit={handleSubmit}>
-            
             {/* DISPLAY NAME */}
-            <div style={{ marginBottom: '20px' }}>
-              <label 
+            <div style={{ marginBottom: "20px" }}>
+              <label
                 style={{
-                  display: 'block',
-                  fontSize: '13px',
+                  display: "block",
+                  fontSize: "13px",
                   fontWeight: 500,
-                  color: '#9ca3af',
-                  marginBottom: '8px'
+                  color: "#9ca3af",
+                  marginBottom: "8px",
                 }}
               >
                 Your Name
@@ -457,31 +634,34 @@ export default function Join() {
                 type="text"
                 placeholder="Enter your display name"
                 value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
+                onChange={(e) => {
+                  setDidEditDisplayName(true);
+                  setDisplayName(e.target.value);
+                }}
                 required
                 style={{
-                  width: '100%',
-                  padding: '14px 16px',
-                  background: 'rgba(0, 0, 0, 0.4)',
-                  border: '1px solid rgba(255, 255, 255, 0.1)',
-                  borderRadius: '12px',
-                  color: '#ffffff',
-                  fontSize: '15px',
-                  outline: 'none'
+                  width: "100%",
+                  padding: "14px 16px",
+                  background: "rgba(0, 0, 0, 0.4)",
+                  border: "1px solid rgba(255, 255, 255, 0.1)",
+                  borderRadius: "12px",
+                  color: "#ffffff",
+                  fontSize: "15px",
+                  outline: "none",
                 }}
               />
             </div>
 
             {/* ROOM NAME */}
             {!searchParams.get("room") && (
-              <div style={{ marginBottom: '24px' }}>
-                <label 
+              <div style={{ marginBottom: "24px" }}>
+                <label
                   style={{
-                    display: 'block',
-                    fontSize: '13px',
+                    display: "block",
+                    fontSize: "13px",
                     fontWeight: 500,
-                    color: '#9ca3af',
-                    marginBottom: '8px'
+                    color: "#9ca3af",
+                    marginBottom: "8px",
                   }}
                 >
                   Room Name
@@ -493,14 +673,14 @@ export default function Join() {
                   onChange={(e) => setRoomName(e.target.value)}
                   required
                   style={{
-                    width: '100%',
-                    padding: '14px 16px',
-                    background: 'rgba(0, 0, 0, 0.4)',
-                    border: '1px solid rgba(255, 255, 255, 0.1)',
-                    borderRadius: '12px',
-                    color: '#ffffff',
-                    fontSize: '15px',
-                    outline: 'none'
+                    width: "100%",
+                    padding: "14px 16px",
+                    background: "rgba(0, 0, 0, 0.4)",
+                    border: "1px solid rgba(255, 255, 255, 0.1)",
+                    borderRadius: "12px",
+                    color: "#ffffff",
+                    fontSize: "15px",
+                    outline: "none",
                   }}
                 />
               </div>
@@ -510,25 +690,27 @@ export default function Join() {
             <button
               type="submit"
               style={{
-                width: '100%',
-                padding: '16px',
-                background: 'linear-gradient(to right, #dc2626, #ef4444)',
-                color: '#ffffff',
-                border: 'none',
-                borderRadius: '12px',
-                fontSize: '16px',
+                width: "100%",
+                padding: "16px",
+                background: "linear-gradient(to right, #dc2626, #ef4444)",
+                color: "#ffffff",
+                border: "none",
+                borderRadius: "12px",
+                fontSize: "16px",
                 fontWeight: 600,
-                cursor: 'pointer',
-                boxShadow: '0 8px 32px rgba(220, 38, 38, 0.3)',
-                transition: 'all 0.3s ease'
+                cursor: "pointer",
+                boxShadow: "0 8px 32px rgba(220, 38, 38, 0.3)",
+                transition: "all 0.3s ease",
               }}
               onMouseEnter={(e) => {
-                e.currentTarget.style.background = 'linear-gradient(to right, #ef4444, #f87171)';
-                e.currentTarget.style.transform = 'translateY(-2px)';
+                e.currentTarget.style.background =
+                  "linear-gradient(to right, #ef4444, #f87171)";
+                e.currentTarget.style.transform = "translateY(-2px)";
               }}
               onMouseLeave={(e) => {
-                e.currentTarget.style.background = 'linear-gradient(to right, #dc2626, #ef4444)';
-                e.currentTarget.style.transform = 'translateY(0)';
+                e.currentTarget.style.background =
+                  "linear-gradient(to right, #dc2626, #ef4444)";
+                e.currentTarget.style.transform = "translateY(0)";
               }}
             >
               Enter Room
@@ -536,28 +718,62 @@ export default function Join() {
           </form>
         </div>
 
+        {/* Streaming setup hint - hosts only */}
+        {!isParticipant && (
+          <div
+            style={{
+              marginBottom: "24px",
+              fontSize: "12px",
+              color: "#9ca3af",
+              textAlign: "center",
+            }}
+          >
+            Suggested room name: <strong>{roomName || "StreamLine Live"}</strong>
+            <div style={{ marginTop: "6px" }}>
+              Want one-click Go Live to YouTube, Facebook, or Twitch?
+              {" "}
+              <button
+                type="button"
+                onClick={() => nav("/settings/billing?tab=destinations")}
+                style={{
+                  marginLeft: "4px",
+                  fontSize: "12px",
+                  color: "#f97316",
+                  textDecoration: "underline",
+                  background: "transparent",
+                  border: "none",
+                  cursor: "pointer",
+                  padding: 0,
+                }}
+              >
+                Configure streaming settings
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* LOGOUT BUTTON */}
-        <div style={{ textAlign: 'center' }}>
+        <div style={{ textAlign: "center" }}>
           <button
             onClick={() => {
               localStorage.removeItem("sl_displayName");
               window.location.href = "/";
             }}
             style={{
-              fontSize: '13px',
-              padding: '8px 16px',
-              border: '1px solid rgba(220, 38, 38, 0.5)',
-              background: 'transparent',
-              color: '#ef4444',
-              borderRadius: '8px',
-              cursor: 'pointer',
-              transition: 'all 0.3s ease'
+              fontSize: "13px",
+              padding: "8px 16px",
+              border: "1px solid rgba(220, 38, 38, 0.5)",
+              background: "transparent",
+              color: "#ef4444",
+              borderRadius: "8px",
+              cursor: "pointer",
+              transition: "all 0.3s ease",
             }}
             onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'rgba(220, 38, 38, 0.2)';
+              e.currentTarget.style.background = "rgba(220, 38, 38, 0.2)";
             }}
             onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'transparent';
+              e.currentTarget.style.background = "transparent";
             }}
           >
             Logout
@@ -569,73 +785,81 @@ export default function Join() {
       {showEditingModal && (
         <div
           style={{
-            position: 'fixed',
+            position: "fixed",
             top: 0,
             left: 0,
             right: 0,
             bottom: 0,
-            background: 'rgba(0, 0, 0, 0.8)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
+            background: "rgba(0, 0, 0, 0.8)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
             zIndex: 1000,
-            backdropFilter: 'blur(8px)'
+            backdropFilter: "blur(8px)",
           }}
           onClick={() => setShowEditingModal(false)}
         >
           <div
             style={{
-              background: 'linear-gradient(135deg, rgba(20, 20, 30, 0.95), rgba(30, 30, 40, 0.95))',
-              border: '1px solid rgba(220, 38, 38, 0.3)',
-              borderRadius: '16px',
-              padding: '2rem',
-              maxWidth: '400px',
-              width: '90%',
-              textAlign: 'center',
-              backdropFilter: 'blur(16px)',
-              boxShadow: '0 25px 50px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1) inset'
+              background:
+                "linear-gradient(135deg, rgba(20, 20, 30, 0.95), rgba(30, 30, 40, 0.95))",
+              border: "1px solid rgba(220, 38, 38, 0.3)",
+              borderRadius: "16px",
+              padding: "2rem",
+              maxWidth: "400px",
+              width: "90%",
+              textAlign: "center",
+              backdropFilter: "blur(16px)",
+              boxShadow:
+                "0 25px 50px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1) inset",
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            <div style={{ fontSize: '3rem', marginBottom: '1rem' }}>🎬</div>
-            <h2 style={{ 
-              fontSize: '1.5rem', 
-              fontWeight: 'bold', 
-              marginBottom: '1rem',
-              background: 'linear-gradient(135deg, #ffffff, #f0f0f0)',
-              backgroundClip: 'text',
-              WebkitBackgroundClip: 'text',
-              WebkitTextFillColor: 'transparent'
-            }}>
+            <div style={{ fontSize: "3rem", marginBottom: "1rem" }}>🎬</div>
+            <h2
+              style={{
+                fontSize: "1.5rem",
+                fontWeight: "bold",
+                marginBottom: "1rem",
+                background: "linear-gradient(135deg, #ffffff, #f0f0f0)",
+                backgroundClip: "text",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+              }}
+            >
               Editing Suite
             </h2>
-            <p style={{ 
-              color: 'rgba(255, 255, 255, 0.8)', 
-              marginBottom: '1.5rem',
-              lineHeight: '1.6'
-            }}>
-              Our powerful video editing suite is coming soon! 
-              For now, you can stream and download your recordings.
+            <p
+              style={{
+                color: "rgba(255, 255, 255, 0.8)",
+                marginBottom: "1.5rem",
+                lineHeight: "1.6",
+              }}
+            >
+              Our powerful video editing suite is coming soon! For now, you can
+              stream and download your recordings.
             </p>
             <button
               onClick={() => setShowEditingModal(false)}
               style={{
-                padding: '0.75rem 1.5rem',
-                background: 'linear-gradient(135deg, #dc2626, #ef4444)',
-                border: 'none',
-                borderRadius: '8px',
-                color: '#ffffff',
-                fontWeight: '600',
-                cursor: 'pointer',
-                transition: 'all 0.3s ease'
+                padding: "0.75rem 1.5rem",
+                background: "linear-gradient(135deg, #dc2626, #ef4444)",
+                border: "none",
+                borderRadius: "8px",
+                color: "#ffffff",
+                fontWeight: "600",
+                cursor: "pointer",
+                transition: "all 0.3s ease",
               }}
               onMouseEnter={(e) => {
-                e.currentTarget.style.background = 'linear-gradient(135deg, #b91c1c, #dc2626)';
-                e.currentTarget.style.transform = 'translateY(-2px)';
+                e.currentTarget.style.background =
+                  "linear-gradient(135deg, #b91c1c, #dc2626)";
+                e.currentTarget.style.transform = "translateY(-2px)";
               }}
               onMouseLeave={(e) => {
-                e.currentTarget.style.background = 'linear-gradient(135deg, #dc2626, #ef4444)';
-                e.currentTarget.style.transform = 'translateY(0)';
+                e.currentTarget.style.background =
+                  "linear-gradient(135deg, #dc2626, #ef4444)";
+                e.currentTarget.style.transform = "translateY(0)";
               }}
             >
               Got it!

@@ -1,0 +1,5 @@
+/* Scoped styles for SettingsBilling */
+.billing button:hover:not(:disabled) { opacity: 0.9; transform: translateY(-1px); }
+.billing button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+@keyframes spin { to { transform: rotate(360deg); } }

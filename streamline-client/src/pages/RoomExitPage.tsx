@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { API_BASE } from "../lib/apiBase";
 import { editingApi } from "../lib/editingApi";
-import { downloadService, type DownloadProgress } from "../services/downloadService";
+// downloadService no longer used for direct downloads; we rely on signed links
 
 /**
  * STREAMLINE ROOM EXIT PAGE - REDESIGNED
@@ -15,78 +16,79 @@ export default function RoomExitPage() {
   const [recording, setRecording] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [downloading, setDownloading] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState<DownloadProgress | null>(null);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [confirmMessage, setConfirmMessage] = useState<string | null>(null);
   const [sessionDuration, setSessionDuration] = useState<number>(0);
   
   const isHost = !!recordingId && recordingId !== "unknown";
 
   const handleDownload = async () => {
-    if (!recording || !recording.videoUrl) {
+    if (!recordingId) {
       alert("Recording not ready for download");
       return;
     }
 
     setDownloading(true);
-    setDownloadProgress(null);
 
     try {
-      // Try to get download URL from backend if recordingId exists
-      let videoUrl = recording.videoUrl;
-      
-      if (recordingId) {
-        try {
-          const token = localStorage.getItem('sl_token') || localStorage.getItem('auth_token');
-          
-          const response = await fetch(`/api/recordings/${recordingId}/download`, {
-            headers: {
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-          });
+      const res = await fetch(`${API_BASE}/api/recordings/${recordingId}/download-link`, {
+        credentials: "include",
+      });
+      if (res.status === 410) {
+        alert("This recording link expired. Use Settings → Usage → Emergency Download.");
+        setDownloading(false);
+        return;
+      }
+      if (res.status === 402) {
+        alert("Upgrade required to download this recording.");
+        setDownloading(false);
+        return;
+      }
+      if (!res.ok) throw new Error("Failed to get download link");
 
-          if (response.ok) {
-            const data = await response.json();
-            videoUrl = data.videoUrl;
-          }
-        } catch (err) {
-          console.warn('Could not fetch recording from backend, using mock URL:', err);
-        }
+      const data = await res.json();
+      const url = data?.data?.url;
+      if (!data?.success || !url) {
+        throw new Error(data?.error || "Invalid download link response");
       }
 
-      const fileName = `${recording.title.replace(/[^a-z0-9]/gi, '-').toLowerCase()}.mp4`;
-      
-      await downloadService.downloadVideo(
-        videoUrl,
-        fileName,
-        (progress) => {
-          setDownloadProgress(progress);
-        }
-      );
+      window.open(url, "_blank");
 
-      // After successful download, delete from cloud (locally and backend)
-      if (recordingId) {
-        try {
-          const token = localStorage.getItem('sl_token') || localStorage.getItem('auth_token');
-          
-          // Try backend deletion (uses Vite proxy)
-          await fetch(`/api/recordings/${recordingId}`, {
-            method: 'DELETE',
-            headers: {
-              ...(token ? { Authorization: `Bearer ${token}` } : {}),
-            },
-          });
-        } catch (err) {
-          console.warn('Could not delete from backend:', err);
-        }
-      }
+      setConfirmMessage(null);
+      setShowConfirmModal(true);
 
       setDownloading(false);
-      alert("✅ Stream downloaded successfully!");
-      nav("/join");
     } catch (error) {
       console.error("Download failed:", error);
       setDownloading(false);
       alert(`Download failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
+  };
+
+  const handleConfirmYes = async () => {
+    try {
+      await fetch(`${API_BASE}/api/recordings/${recordingId}/download-link?confirm=true`, {
+        credentials: "include",
+      });
+      setConfirmMessage("Great — you're all set. Save the file somewhere safe.");
+    } catch (e) {
+      setConfirmMessage("Noted. Thanks for confirming.");
+    } finally {
+      setShowConfirmModal(false);
+    }
+  };
+
+  const handleConfirmNo = async () => {
+    try {
+      await fetch(`${API_BASE}/api/recordings/${recordingId}/report-download-issue`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ reason: "user_reported_issue" }),
+      });
+    } catch {}
+    setConfirmMessage("Use Settings → Usage → Emergency Download (Latest Recording) if you're having trouble.");
+    setShowConfirmModal(false);
   };
 
   useEffect(() => {
@@ -501,6 +503,22 @@ export default function RoomExitPage() {
               </div>
             )}
           </button>
+
+              {showConfirmModal && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 20 }}>
+                  <div style={{ background: '#111', border: '1px solid #333', borderRadius: 12, padding: 20, width: 320 }}>
+                    <h4 style={{ margin: 0, marginBottom: 10, color: '#fff' }}>Did your download start?</h4>
+                    <p style={{ margin: 0, marginBottom: 16, color: '#d1d5db', fontSize: 14 }}>If not, try Emergency Download in Settings → Usage.</p>
+                    <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                      <button onClick={handleConfirmNo} style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #444', background: '#1f2937', color: '#fff', cursor: 'pointer' }}>No</button>
+                      <button onClick={handleConfirmYes} style={{ padding: '8px 12px', borderRadius: 8, border: 'none', background: 'linear-gradient(135deg,#dc2626,#ef4444)', color: '#fff', cursor: 'pointer' }}>Yes</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+              {confirmMessage && (
+                <div style={{ color: '#d1d5db', fontSize: 13 }}>{confirmMessage}</div>
+              )}
 
           {/* Back to Home */}
           <button

@@ -1,48 +1,52 @@
+
 import { API_BASE } from "./apiBase";
+
+export async function apiFetch(path: string, init: RequestInit = {}) {
+  const res = await fetch(path, {
+    ...init,
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+      ...(init.headers || {}),
+    },
+  });
+  if (!res.ok) {
+    let errBody: any = null;
+    try { errBody = await res.json(); } catch {}
+    throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status, body: errBody });
+  }
+  return res;
+}
 
 export async function getToken(
   roomId: string,
   userId: string,
   role: "host" | "guest"
 ) {
-  const res = await fetch(`${API_BASE}/v1/rooms/token`, {
+  const res = await apiFetch(`${API_BASE}/v1/rooms/token`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ roomId, userId, role }),
   });
-
-  if (!res.ok) {
-    throw new Error(`Token error ${res.status}`);
-  }
-
   return res.json() as Promise<{ token: string; wsUrl: string }>;
 }
 
 export async function apiStartRecording(
   roomName: string,
-  layout: "speaker" | "grid"
+  layout: "speaker" | "grid",
+  mode: "cloud" | "dual" = "cloud",
+  presetId?: string
 ) {
-  const res = await fetch(`${API_BASE}/api/recordings/start`, {
+  const res = await apiFetch(`${API_BASE}/api/recordings/start`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ roomName, layout }),
+    body: JSON.stringify({ roomName, layout, mode, presetId }),
   });
-  const text = await res.text();
-  if (!res.ok) throw new Error(text);
-  try {
-    return JSON.parse(text);
-  } catch (err) {
-    console.error("Non-JSON response from /api/recordings/start:", text);
-    throw new Error(`Non-JSON response: ${text}`);
-  }
+  return res.json();
 }
 
 export async function apiStopRecording(recordingId: string) {
-  const res = await fetch(`${API_BASE}/api/recordings/stop`, {
+  const res = await apiFetch(`${API_BASE}/api/recordings/stop`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ recordingId }),
   });
-  if (!res.ok) throw new Error(await res.text());
   return res.json() as Promise<{ ok: true }>;
 }

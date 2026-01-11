@@ -58,6 +58,7 @@ export type Recording = {
   videoUrl: string;
   roomName?: string;
   status: "processing" | "ready" | "failed";
+  usageType?: "live" | "recording_only" | "live+recording";
   createdAt: string;
   fileSize?: number;
   userId?: string;

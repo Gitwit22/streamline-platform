@@ -1,5 +1,6 @@
-import React from "react";
-import { useNavigate } from "react-router-dom";
+import React, { useEffect, useState } from "react";
+import { useNavigate, Link } from "react-router-dom";
+import { API_BASE } from "../lib/apiBase";
 
 /**
  * STREAMLINE WELCOME PAGE - REDESIGNED
@@ -15,6 +16,46 @@ import { useNavigate } from "react-router-dom";
 
 const Welcome = () => {
   const nav = useNavigate();
+
+  const [stats, setStats] = useState({ streamers: null, hoursStreamed: null, streamersActive: null });
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/stats/public`, { credentials: "include" });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        if (!cancelled) {
+          setStats({
+            streamers: data?.streamers ?? null,
+            hoursStreamed: data?.hoursStreamed ?? null,
+            streamersActive: data?.streamersActive ?? null,
+          });
+        }
+      } catch (e) {
+        if (!cancelled) setStatsError(e?.message || "Failed to load stats");
+      } finally {
+        if (!cancelled) setStatsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const fmtK = (n) => {
+    if (n == null) return null;
+    if (n >= 1_000_000) return `${Math.floor(n / 1_000_000)}M+`;
+    if (n >= 1_000) return `${Math.floor(n / 1_000)}K+`;
+    return String(n);
+  };
+
+  const renderStatValue = (value) => {
+    if (statsLoading) return "…";
+    if (value == null) return "—";
+    return fmtK(value);
+  };
 
   return (
     <div 
@@ -252,7 +293,7 @@ const Welcome = () => {
           </button>
           
           <button
-            onClick={() => nav("/login")}
+            onClick={() => nav("/learnmore")}
             style={{
               width: window.innerWidth < 640 ? '100%' : 'auto',
               background: 'rgba(255, 255, 255, 0.05)',
@@ -291,23 +332,29 @@ const Welcome = () => {
           }}
         >
           <div>
-            <div style={{ fontSize: '28px', fontWeight: 700, color: '#ffffff' }}>10K+</div>
+            <div style={{ fontSize: '28px', fontWeight: 700, color: '#ffffff' }}>
+              {renderStatValue(stats.streamers)}
+            </div>
             <div style={{ fontSize: '11px', color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
               Streamers
             </div>
           </div>
           <div style={{ width: '1px', background: 'rgba(255, 255, 255, 0.1)' }}></div>
           <div>
-            <div style={{ fontSize: '28px', fontWeight: 700, color: '#ffffff' }}>50M+</div>
+            <div style={{ fontSize: '28px', fontWeight: 700, color: '#ffffff' }}>
+              {renderStatValue(stats.hoursStreamed)}
+            </div>
             <div style={{ fontSize: '11px', color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
               Hours Streamed
             </div>
           </div>
           <div style={{ width: '1px', background: 'rgba(255, 255, 255, 0.1)' }}></div>
           <div>
-            <div style={{ fontSize: '28px', fontWeight: 700, color: '#ffffff' }}>99.9%</div>
+            <div style={{ fontSize: '28px', fontWeight: 700, color: '#ffffff' }}>
+              {renderStatValue(stats.streamersActive)}
+            </div>
             <div style={{ fontSize: '11px', color: '#6b7280', textTransform: 'uppercase', letterSpacing: '0.1em' }}>
-              Uptime
+              Active Now
             </div>
           </div>
         </div>
@@ -342,7 +389,6 @@ const Welcome = () => {
       >
         dev bypass →
       </button>
-
       {/* FOOTER LINKS - BOTTOM LEFT */}
       <div 
         style={{
@@ -355,30 +401,30 @@ const Welcome = () => {
           color: '#4b5563'
         }}
       >
-        <a 
-          href="#" 
+        <Link 
+          to="/privacy" 
           style={{ color: '#4b5563', textDecoration: 'none', transition: 'color 0.3s ease' }}
           onMouseEnter={(e) => e.currentTarget.style.color = '#ef4444'}
           onMouseLeave={(e) => e.currentTarget.style.color = '#4b5563'}
         >
           Privacy
-        </a>
-        <a 
-          href="#" 
+        </Link>
+        <Link 
+          to="/terms" 
           style={{ color: '#4b5563', textDecoration: 'none', transition: 'color 0.3s ease' }}
           onMouseEnter={(e) => e.currentTarget.style.color = '#ef4444'}
           onMouseLeave={(e) => e.currentTarget.style.color = '#4b5563'}
         >
           Terms
-        </a>
-        <a 
-          href="#" 
+        </Link>
+        <Link 
+          to="/support" 
           style={{ color: '#4b5563', textDecoration: 'none', transition: 'color 0.3s ease' }}
           onMouseEnter={(e) => e.currentTarget.style.color = '#ef4444'}
           onMouseLeave={(e) => e.currentTarget.style.color = '#4b5563'}
         >
           Support
-        </a>
+        </Link>
       </div>
 
       {/* CSS ANIMATION KEYFRAMES */}

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { PLAN_IDS, PlanId, isPlanId } from "../lib/planIds";
 import { useNavigate } from "react-router-dom";
 import { editingApi } from "../lib/editingApi";
 import { DashboardAVControls } from "../components/DashboardAVControls";
@@ -32,6 +33,13 @@ export default function Dashboard() {
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [user, setUser] = useState<any>(null);
+  // Canonical plan id for display
+  function canonicalPlanId(planId: string | undefined): PlanId {
+    if (!planId) return "free";
+    if (planId === "starter_paid" || planId === "starter_trial") return "starter";
+    if (isPlanId(planId)) return planId;
+    return "free";
+  }
   const [totalViewers, setTotalViewers] = useState(0);
   const [totalDuration, setTotalDuration] = useState(0);
 
@@ -133,10 +141,36 @@ export default function Dashboard() {
               Welcome back, {user?.displayName || "Streamer"}! 👋
             </h1>
             <p style={{ fontSize: '14px', color: '#6b7280' }}>
-              {user?.planId?.toUpperCase() || "FREE"} Plan
+              {canonicalPlanId(user?.planId).toUpperCase()} Plan
             </p>
           </div>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            {/* Settings & Billing button (left side) */}
+            <button
+              onClick={() => nav("/settings/billing")}
+              style={{
+                padding: '12px 24px',
+                background: 'rgba(255,255,255,0.05)',
+                border: '1px solid rgba(255,255,255,0.2)',
+                color: '#fff',
+                borderRadius: '12px',
+                fontSize: '15px',
+                fontWeight: 600,
+                cursor: 'pointer',
+                transition: 'all 0.3s ease'
+              }}
+              onMouseEnter={e => {
+                e.currentTarget.style.background = 'rgba(255,255,255,0.1)';
+                e.currentTarget.style.borderColor = 'rgba(34,197,94,0.6)';
+              }}
+              onMouseLeave={e => {
+                e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
+                e.currentTarget.style.borderColor = 'rgba(255,255,255,0.2)';
+              }}
+            >
+              ⚙️ Settings & Billing
+            </button>
+            {/* Content and New Stream buttons (right side) */}
             <button
               onClick={() => nav("/join")}
               style={{
@@ -159,7 +193,7 @@ export default function Dashboard() {
                 e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.2)';
               }}
             >
-              ← Back
+              🎬 My Content
             </button>
             <button
               onClick={() => nav("/join")}

@@ -89,12 +89,12 @@ button:focus-visible {
 
 .sl-watermark {
   position: absolute;
-  bottom: 80px;
-  right: 15px;
-  width: 140px;          /* adjust size */
-  opacity: 0.8;          /* 80% opacity */
-  pointer-events: none;  /* don't block clicks */
-  z-index: 9999;         /* over the video tiles */
+  top: 12px;
+  right: 12px;
+  width: 96px;
+  opacity: 0.85;
+  pointer-events: none;
+  z-index: 9999;
 }
 
 /* ======================================
@@ -105,8 +105,8 @@ button:focus-visible {
 
 @media (max-width: 768px) {
   .sl-watermark {
-    width: 60px;   /* phone size */
-    bottom: 80px;
+    width: 64px;
+    top: 12px;
     right: 6px;
   }
 }

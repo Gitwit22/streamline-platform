@@ -590,3 +590,10 @@ if (result.success) {
 - [ ] Token refresh happens automatically
 - [ ] Audit log entries created for all actions
 
+---
+
+## Update: Plan Entitlements & Moderator Gate (Jan 2026)
+
+- **Entitlements endpoint:** `/api/usage/entitlements` returns plan features (recording, dualRecording, rtmpMultistream) and limits (maxGuests, maxDestinations, participantMinutes). The Room UI now shows these near stream/record controls and inside Settings → Usage so hosts know what is enabled.
+- **Moderator issuance guard:** Moderator tokens require an admin grant. The client sends `roomAdmin: true` when requesting moderator; the server downgrades the role if admin is missing. Moderator invite copy calls out the potential downgrade.
+
