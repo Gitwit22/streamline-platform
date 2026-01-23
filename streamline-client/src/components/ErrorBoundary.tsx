@@ -47,6 +47,29 @@ export class ErrorBoundary extends React.Component<ErrorBoundaryProps, ErrorBoun
               The live room UI hit an unexpected error. Try refreshing the page. If this keeps happening, contact
               support with a screenshot of the browser console.
             </p>
+            <button
+              type="button"
+              onClick={() => {
+                try {
+                  window.location.href = "/join";
+                } catch {
+                  // ignore
+                }
+              }}
+              style={{
+                marginBottom: "0.9rem",
+                padding: "0.6rem 1.2rem",
+                borderRadius: "0.5rem",
+                border: "none",
+                background: "linear-gradient(135deg,#dc2626,#ef4444)",
+                color: "#ffffff",
+                fontWeight: 600,
+                fontSize: "0.9rem",
+                cursor: "pointer",
+              }}
+            >
+              ⬅ Back to Join Room
+            </button>
             <pre
               style={{
                 marginTop: "0.75rem",

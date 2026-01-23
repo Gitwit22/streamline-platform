@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+set -e
+
+# Prevent LoginPage.jsx from reappearing and causing import ambiguity.
+node streamline-client/scripts/check-no-loginpage-jsx.cjs

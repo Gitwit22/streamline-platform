@@ -110,29 +110,6 @@ button:focus-visible {
     right: 6px;
   }
 }
-
-
-@media (min-width: 769px) {
-  .sl-layout .lk-video-grid {
-    display: flex !important;     /* restore LiveKit flex layout */
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 8px;
-  }
-
-  .sl-layout .lk-video-grid > * {
-    aspect-ratio: auto !important;
-    width: auto !important;
-    height: auto !important;
-    flex: 0 1 auto !important;    /* normal rectangular tiles */
-    border-radius: 8px;
-    overflow: hidden;
-  }
-
-  .sl-layout .lk-video-grid > * video {
-    object-fit: cover !important;
-  }
-}
 /* Optional: light-mode override (remove if you always want dark) */
 @media (prefers-color-scheme: light) {
   body {
@@ -198,4 +175,8 @@ button:focus-visible {
   .sl-layout .lk-video-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+}
+
+/* Desktop: allow LiveKit to control screen-share tile visuals; no extra overlay */
+@media (min-width: 769px) {
 }

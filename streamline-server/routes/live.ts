@@ -23,7 +23,7 @@ router.post("/preflight", requireAuth, async (req: any, res) => {
     const uid = req.user?.uid;
     if (!uid) return res.status(401).json({ error: "unauthorized" as ApiErrorCode });
 
-    const access = await canAccessFeature(uid, "multistream");
+    const access = await canAccessFeature((req as any).account || uid, "multistream");
     if (!access.allowed) {
       return res.status(403).json({ error: "limit_exceeded" as ApiErrorCode, details: access.reason || "Feature not available" });
     }

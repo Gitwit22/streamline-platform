@@ -13,10 +13,18 @@ import recordingsRoutes from "./routes/recordings";
 import usageRoutes from "./routes/usageRoutes";
 import plansRoutes from "./routes/plans";
 import roomTokenRoute from "./routes/roomToken";
+import roomsCreateRoutes from "./routes/roomsCreate";
+import invitesRoutes from "./routes/invites";
 import multistreamRoutes from "./routes/multistream";
+import roomsResolveRoutes from "./routes/roomsResolve";
+import roomsHlsConfigRoutes from "./routes/roomsHlsConfig";
+import roomsActiveEmbedRoutes from "./routes/roomsActiveEmbed";
+import roomControlsRoutes from "./routes/roomControls";
 import destinationsRoutes from "./routes/destinations";
 import liveRoutes from "./routes/live";
 import statsRoutes from "./routes/stats";
+import telemetryRoutes from "./routes/telemetry";
+import savedEmbedsRoutes from "./routes/savedEmbeds";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
 import { getLiveKitSdk } from "./lib/livekit"; // adjust path
@@ -25,7 +33,13 @@ import { getCurrentMonthKey } from "./lib/usageTracker";
 import admin from "firebase-admin";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-
+import hlsRoutes from "./routes/hls";
+import publicHlsRoutes from "./routes/publicHls";
+import publicRoomsHlsConfigRoutes from "./routes/publicRoomsHlsConfig";
+import { sanitizeDisplayName } from "./lib/sanitizeDisplayName";
+import { resolveRoomIdentity } from "./lib/roomIdentity";
+import { assertRoomPerm, RoomPermissionError } from "./lib/rolePermissions";
+import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "./middleware/roomAccessToken";
 
 
 import { uploadVideo } from "./lib/storageClient";
@@ -38,6 +52,14 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 
 
 const app = express();
+
+function normalizeControlsDocId(raw: any): string {
+  const id = String(raw || "").trim();
+  if (!id) return "default";
+  if (id.includes("/")) return "default";
+  if (id.length > 128) return id.slice(0, 128);
+  return id;
+}
 
 // Allow primary client plus local dev hosts for testing/incognito shares
 const allowedOrigins = [
@@ -58,20 +80,30 @@ app.use(cors({
   },
   credentials: true,
   methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
-  allowedHeaders: ["Content-Type","Authorization","Cache-Control"],
+  allowedHeaders: [
+    "Content-Type",
+    "Authorization",
+    "Cache-Control",
+    // Room-level access token used by in-room APIs (HLS, multistream, controls, etc.).
+    // Explicitly allow both typical header casings to satisfy browser preflight checks.
+    "x-room-access-token",
+    "X-Room-Access-Token",
+  ],
+  exposedHeaders: ["x-sl-auth-fallback", "x-sl-auth-header-invalid"],
 }));
 
 
 
 
 
-// Body parsers must come before any routes that need req.body
+// Stripe/Billing webhooks MUST run before JSON body parsing so Stripe
+// webhook signature verification can use the raw request body.
+app.use("/api/webhooks", webhookRouter);
+
+// Body parsers for the rest of the API
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-
-// Stripe/Billing webhooks
-app.use("/api/webhooks", webhookRouter);
 app.use("/api/auth", authRoutes);
 app.use("/api/account", accountRoutes);
 
@@ -89,13 +121,18 @@ app.get("/api", (req, res) => {
       "/api/webhooks",
       "/api/recordings",
       "/api/rooms",
-      "/api/admin"
+      "/api/admin",
+      "/api/hls",
     ]
   });
 });
 
-
-
+// HLS routes
+app.use("/api/hls", hlsRoutes);
+// Public viewer HLS status (no auth, tiny payload)
+app.use("/api/public/hls", publicHlsRoutes);
+// Public viewer-safe HLS config (no auth)
+app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
 // Recordings API - This handles GET /:id and POST /start, /stop
 app.use("/api/recordings", recordingsRoutes);
 
@@ -110,12 +147,29 @@ app.use("/api/usage", usageRoutes); // gives /api/usage/summary
 // Token route used by the frontend
 app.use("/api/roomToken", roomTokenRoute);
 
+// Room creation (host flow)
+app.use("/api/rooms", roomsCreateRoutes);
+
+// Invite resolve/accept flow
+app.use("/api/invites", invitesRoutes);
+
 // Multistream routes (YouTube/FB/Twitch)
-app.use("/api/rooms", multistreamRoutes);
+app.use("/api/multistream", multistreamRoutes);
+// Room resolve endpoint (/api/rooms/resolve)
+app.use("/api/rooms", roomsResolveRoutes);
+// Realtime in-room controls (host/cohost writes; all participants read via roomAccessToken)
+app.use("/api/rooms", roomControlsRoutes);
+// Room-level persistent HLS config (NOT runtime HLS state)
+app.use("/api/rooms", roomsHlsConfigRoutes);
+// Room-level selection of which Saved Embed to use for HLS control
+app.use("/api/rooms", roomsActiveEmbedRoutes);
 // Destinations management (encrypted keys)
 app.use("/api/destinations", destinationsRoutes);
 // Live preflight
 app.use("/api/live", liveRoutes);
+
+// Saved embeds (user-owned) -> stable Firestore rooms
+app.use("/api/saved-embeds", savedEmbedsRoutes);
 
 // Billing routes
 app.use("/api/billing", billingRoutes);
@@ -124,6 +178,8 @@ app.use("/api/billing", billingRoutes);
 app.use("/api/plans", plansRoutes);
 // Public stats for landing page
 app.use("/api/stats", statsRoutes);
+// Lightweight telemetry events
+app.use("/api/telemetry", telemetryRoutes);
 
 
 // Storage test route
@@ -168,27 +224,74 @@ async function getRoomService(): Promise<RoomServiceClient> {
 // In-memory room-level flags (non-persistent across server restarts)
 const roomMuteLocks = new Map<string, boolean>();
 
-// Mute/unmute a single participant's audio (host/mod tools, not platform admin)
-app.post("/api/roomModeration/mute", requireAuth, async (req, res) => {
+async function assertEffectiveRoomControl(
+  req: express.Request,
+  roomId: string,
+  perm: "canMuteGuests" | "canRemoveGuests",
+): Promise<void> {
+  const trimmedRoomId = String(roomId || "").trim();
+  if (!trimmedRoomId) {
+    throw new RoomPermissionError(400, "invalid_room", "roomId is required");
+  }
+
+  const ctx = await assertRoomPerm(req as any, trimmedRoomId, perm);
+  const access = ctx.roomAccess as RoomAccessClaims | undefined;
+
+  if (!access || !access.roomId) {
+    throw new RoomPermissionError(401, "room_token_required");
+  }
+  if (access.roomId !== trimmedRoomId) {
+    throw new RoomPermissionError(403, "room_mismatch");
+  }
+
+  const role = String(access.role || "").toLowerCase();
+  const requiredRole = "host";
+  const roleOk = role === requiredRole;
+  if (process.env.AUTH_DEBUG === "1") {
+    console.log("[perm-debug] moderation role check", {
+      role,
+      required: requiredRole,
+      pass: roleOk,
+    });
+  }
+  // Updated policy: only hosts can use roomModeration endpoints.
+  // Non-hosts are blocked here regardless of controls docs.
+  if (!roleOk) {
+    throw new RoomPermissionError(403, "insufficient_role");
+  }
+}
+
+// Mute/unmute a single participant's audio (host tools, not platform admin)
+app.post("/api/roomModeration/mute", requireAuth, requireRoomAccessToken as any, async (req, res) => {
   try {
-    const { room, identity, muted } = req.body as {
-      room?: string;
+    const { identity, muted } = req.body as {
       identity?: string;
       muted?: boolean;
     };
 
-    if (!room || !identity || typeof muted !== "boolean") {
-      return res.status(400).json({ error: "room, identity and muted are required" });
+    if (!identity || typeof muted !== "boolean") {
+      return res.status(400).json({ error: "identity and muted are required" });
     }
 
-    console.log("ADMIN MUTE", { room, identity, muted });
+    const { roomId, livekitRoomName } = getRoomAccess(req as any);
+
+    try {
+      await assertEffectiveRoomControl(req as any, roomId, "canMuteGuests");
+    } catch (err) {
+      if (err instanceof RoomPermissionError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+      throw err;
+    }
+
+    console.log("ADMIN MUTE", { roomId, livekitRoomName, identity, muted });
 
     const roomService = await getRoomService();
     const sdk = (await getLiveKitSdk()) as any;
     const TrackType = sdk.TrackType;
     const TrackSource = sdk.TrackSource;
 
-    const participant = await roomService.getParticipant(room, identity);
+    const participant = await roomService.getParticipant(livekitRoomName, identity);
     const audioTrack = participant.tracks?.find((t: any) => {
       const isAudioType = t.type === TrackType.AUDIO;
       const isMicSource = t.source === TrackSource.MICROPHONE;
@@ -196,11 +299,20 @@ app.post("/api/roomModeration/mute", requireAuth, async (req, res) => {
     });
 
     if (!audioTrack) {
-      console.warn("No audio track found for", { room, identity });
+      console.warn("No audio track found for", { roomId, livekitRoomName, identity });
       return res.status(404).json({ error: "no audio track found" });
     }
 
-    await roomService.mutePublishedTrack(room, identity, audioTrack.sid, muted);
+    if (process.env.AUTH_DEBUG === "1") {
+      console.log("[livekit-debug] mutePublishedTrack", {
+        livekitRoomName,
+        identity,
+        trackSid: audioTrack.sid,
+        muted,
+      });
+    }
+
+    await roomService.mutePublishedTrack(livekitRoomName, identity, audioTrack.sid, muted);
 
     return res.json({
       ok: true,
@@ -220,23 +332,38 @@ app.post("/api/roomModeration/mute", requireAuth, async (req, res) => {
   }
 });
 
-// Mute/unmute ALL participants' audio
-app.post("/api/roomModeration/mute-all", requireAuth, async (req, res) => {
+// Mute/unmute ALL participants' audio (host tools)
+app.post("/api/roomModeration/mute-all", requireAuth, requireRoomAccessToken as any, async (req, res) => {
   try {
-    const { room, muted } = req.body as { room?: string; muted?: boolean };
+    const { muted } = req.body as { room?: string; muted?: boolean };
 
-    if (!room || typeof muted !== "boolean") {
-      return res.status(400).json({ error: "room and muted are required" });
+    if (typeof muted !== "boolean") {
+      return res.status(400).json({ error: "muted is required" });
     }
 
-    console.log("ADMIN MUTE-ALL", { room, muted });
+    const { roomId, livekitRoomName } = getRoomAccess(req as any);
+
+    try {
+      await assertEffectiveRoomControl(req as any, roomId, "canMuteGuests");
+    } catch (err) {
+      if (err instanceof RoomPermissionError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+      throw err;
+    }
+
+    console.log("ADMIN MUTE-ALL", { roomId, livekitRoomName, muted });
 
     const roomService = await getRoomService();
     const sdk = (await getLiveKitSdk()) as any;
     const TrackType = sdk.TrackType;
     const TrackSource = sdk.TrackSource;
 
-    const participants = await roomService.listParticipants(room);
+    if (process.env.AUTH_DEBUG === "1") {
+      console.log("[livekit-debug] listParticipants (mute-all)", { livekitRoomName });
+    }
+
+    const participants = await roomService.listParticipants(livekitRoomName);
     const results: Array<{ identity: string; trackSid: string | null; changed: boolean }> = [];
 
     for (const p of participants) {
@@ -251,7 +378,16 @@ app.post("/api/roomModeration/mute-all", requireAuth, async (req, res) => {
         continue;
       }
 
-      await roomService.mutePublishedTrack(room, p.identity, audioTrack.sid, muted);
+          if (process.env.AUTH_DEBUG === "1") {
+            console.log("[livekit-debug] mutePublishedTrack (mute-all)", {
+              livekitRoomName,
+              identity: p.identity,
+              trackSid: audioTrack.sid,
+              muted,
+            });
+          }
+
+          await roomService.mutePublishedTrack(livekitRoomName, p.identity, audioTrack.sid, muted);
       results.push({ identity: p.identity, trackSid: audioTrack.sid, changed: true });
     }
 
@@ -268,8 +404,8 @@ app.post("/api/roomModeration/mute-all", requireAuth, async (req, res) => {
   }
 });
 
-// Room-level mute lock flag (in-memory) + LiveKit permissions update
-app.post("/api/roomModeration/mute-lock", requireAuth, async (req, res) => {
+// Room-level mute lock flag (in-memory) + LiveKit permissions update (host tools)
+app.post("/api/roomModeration/mute-lock", requireAuth, requireRoomAccessToken as any, async (req, res) => {
   try {
     const { room, muteLock, hostIdentity } = req.body as {
       room?: string;
@@ -277,12 +413,23 @@ app.post("/api/roomModeration/mute-lock", requireAuth, async (req, res) => {
       hostIdentity?: string;
     };
 
-    if (!room || typeof muteLock !== "boolean") {
-      return res.status(400).json({ error: "room and muteLock are required" });
+    if (typeof muteLock !== "boolean") {
+      return res.status(400).json({ error: "muteLock is required" });
     }
 
-    roomMuteLocks.set(room, muteLock);
-    console.log("ROOM MODERATION MUTE-LOCK", { room, muteLock, hostIdentity });
+    const { roomId, livekitRoomName } = getRoomAccess(req as any);
+
+    try {
+      await assertEffectiveRoomControl(req as any, roomId, "canMuteGuests");
+    } catch (err) {
+      if (err instanceof RoomPermissionError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+      throw err;
+    }
+
+    roomMuteLocks.set(livekitRoomName, muteLock);
+    console.log("ROOM MODERATION MUTE-LOCK", { roomId, livekitRoomName, muteLock, hostIdentity });
 
     // Update LiveKit participant permissions so guests can't re-enable mic
     try {
@@ -290,7 +437,7 @@ app.post("/api/roomModeration/mute-lock", requireAuth, async (req, res) => {
       const sdk = (await getLiveKitSdk()) as any;
       const TrackSource = sdk.TrackSource;
 
-      const participants = await roomService.listParticipants(room);
+      const participants = await roomService.listParticipants(livekitRoomName);
 
       for (const p of participants) {
         if (hostIdentity && p.identity === hostIdentity) continue; // never restrict host
@@ -303,7 +450,7 @@ app.post("/api/roomModeration/mute-lock", requireAuth, async (req, res) => {
           const blocked = new Set([TrackSource.MICROPHONE, TrackSource.SCREEN_SHARE_AUDIO]);
           const nextSources = currentSources.filter((s) => !blocked.has(s));
 
-          await roomService.updateParticipant(room, p.identity, {
+          await roomService.updateParticipant(livekitRoomName, p.identity, {
             permission: {
               ...currentPerms,
               canPublishSources: nextSources,
@@ -314,7 +461,7 @@ app.post("/api/roomModeration/mute-lock", requireAuth, async (req, res) => {
           const toEnsure = [TrackSource.MICROPHONE, TrackSource.SCREEN_SHARE_AUDIO];
           const merged = Array.from(new Set([...currentSources, ...toEnsure]));
 
-          await roomService.updateParticipant(room, p.identity, {
+          await roomService.updateParticipant(livekitRoomName, p.identity, {
             permission: {
               ...currentPerms,
               canPublishSources: merged,
@@ -351,21 +498,95 @@ app.get("/api/roomSettings/:room", (req, res) => {
 });
 
 // Remove/kick a participant
-app.post("/api/roomModeration/remove", requireAuth, async (req, res) => {
+app.post("/api/roomModeration/remove", requireAuth, requireRoomAccessToken as any, async (req, res) => {
   try {
-    const { room, identity } = req.body;
+    const { identity } = req.body;
 
-    if (!room || !identity) {
-      return res.status(400).json({ ok: false, error: "room and identity are required" });
+    if (!identity) {
+      return res.status(400).json({ ok: false, error: "identity is required" });
     }
 
-    const roomService = await getRoomService(); // or getRoomServiceClient()
-    await roomService.removeParticipant(room, identity);
+    const { roomId, livekitRoomName } = getRoomAccess(req as any);
+
+    try {
+      await assertEffectiveRoomControl(req as any, roomId, "canRemoveGuests");
+    } catch (err) {
+      if (err instanceof RoomPermissionError) {
+        return res.status(err.status).json({ ok: false, error: err.code });
+      }
+      throw err;
+    }
+
+    const roomService = await getRoomService();
+
+    if (process.env.AUTH_DEBUG === "1") {
+      console.log("[livekit-debug] removeParticipant", {
+        livekitRoomName,
+        identity,
+      });
+    }
+
+    await roomService.removeParticipant(livekitRoomName, identity);
 
     return res.json({ ok: true });
   } catch (e: any) {
     console.error("remove error", e);
     return res.status(500).json({ ok: false, error: e?.message || "remove_error" });
+  }
+});
+
+// Remove/kick ALL participants in a room
+app.post("/api/roomModeration/remove-all", requireAuth, requireRoomAccessToken as any, async (req, res) => {
+  try {
+    const { roomId, livekitRoomName } = getRoomAccess(req as any);
+
+    try {
+      await assertEffectiveRoomControl(req as any, roomId, "canRemoveGuests");
+    } catch (err) {
+      if (err instanceof RoomPermissionError) {
+        return res.status(err.status).json({ ok: false, error: err.code });
+      }
+      throw err;
+    }
+
+    const roomService = await getRoomService();
+
+    if (process.env.AUTH_DEBUG === "1") {
+      console.log("[livekit-debug] listParticipants (remove-all)", { livekitRoomName });
+    }
+
+    const participants = await roomService.listParticipants(livekitRoomName);
+
+    const results: Array<{ identity: string; removed: boolean; error?: string }> = [];
+
+    for (const p of participants) {
+      const identity = (p as any)?.identity;
+      if (!identity) continue;
+      try {
+        if (process.env.AUTH_DEBUG === "1") {
+          console.log("[livekit-debug] removeParticipant (remove-all)", {
+            livekitRoomName,
+            identity,
+          });
+        }
+
+        await roomService.removeParticipant(livekitRoomName, identity);
+        results.push({ identity, removed: true });
+      } catch (err: any) {
+        console.error("remove-all failed for participant", { livekitRoomName, identity, err });
+        results.push({
+          identity,
+          removed: false,
+          error: typeof err?.message === "string" ? err.message : "remove_participant_failed",
+        });
+      }
+    }
+
+    const removedCount = results.filter((r) => r.removed).length;
+    return res.json({ ok: true, removedCount, results });
+  } catch (e: any) {
+    console.error("remove-all error", e);
+    return res.status(500).json({ ok: false, error: e?.message || "remove_all_error" });
   }
 });
 
@@ -444,7 +665,7 @@ app.post("/api/auth/signup", async (req, res) => {
     // Build userData (DO NOT store passwordHash)
 const userData: any = {
   email: email.trim().toLowerCase(),
-  displayName: displayName?.trim() || "",
+  displayName: sanitizeDisplayName(displayName).trim(),
   timeZone: timeZone || "America/Chicago",
 
   // Plan assignment
@@ -594,64 +815,10 @@ console.log("✅ User document created:", uid);
 });
 
 // Login
-app.post("/api/auth/login", async (req, res) => {
-  try {
-    const { email, password } = req.body as {
-      email?: string;
-      password?: string;
-    };
-
-    if (!email || !password) {
-      return res.status(400).json({ error: "email and password are required" });
-    }
-
-    const snap = await db
-      .collection("users")
-      .where("email", "==", email)
-      .limit(1)
-      .get();
-
-    if (snap.empty) {
-      return res.status(401).json({ error: "invalid email or password" });
-    }
-
-    const doc = snap.docs[0];
-    const data = doc.data() as any;
-
-    const ok = await bcrypt.compare(password, data.passwordHash || "");
-    if (!ok) {
-      return res.status(401).json({ error: "invalid email or password" });
-    }
-
-    const user = {
-      id: doc.id,
-      email: data.email,
-      displayName: data.displayName || "",
-      plan: data.plan || "free",
-      timeZone: data.timeZone || null,
-      onboardingCompleted: data.onboardingCompleted ?? false,
-      defaultResolution: data.defaultResolution || null,
-      defaultDestinations: data.defaultDestinations || null,
-      defaultPrivacy: data.defaultPrivacy || null,
-      youtubeConnected: data.youtubeConnected || false,
-      facebookConnected: data.facebookConnected || false,
-    };
-
-    const token = jwt.sign(user, JWT_SECRET, { expiresIn: "7d" });
-
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    });
-    // Also return token in response for frontend fallback (non-httpOnly)
-    return res.json({ user, token });
-  } catch (err) {
-    console.error("login error", err);
-    return res.status(500).json({ error: "internal server error" });
-  }
-});
+// NOTE: /api/auth/login and /api/auth/signup are now handled exclusively by
+// routes/auth.ts via app.use("/api/auth", authRoutes). The legacy inline
+// implementations that signed different JWT payloads have been removed to
+// ensure a single, consistent auth flow.
 
 // =============================================================================
 // USAGE TRACKING
@@ -800,6 +967,8 @@ app.post("/api/usage/streamEnded", async (req, res) => {
     const nextUsage = {
       participantMinutes: Number(prevUsage.participantMinutes || 0) + durationMinutes,
       transcodeMinutes: Number(prevUsage.transcodeMinutes || 0) + transcodeMinutes,
+      // Preserve any existing HLS minutes; HLS-specific updates occur in the HLS stop handler.
+      hlsMinutes: Number(prevUsage.hlsMinutes || 0),
       minutes: {
         live: {
           currentPeriod: Number(prevMinutes.live?.currentPeriod || 0) + durationMinutes,
@@ -820,6 +989,8 @@ app.post("/api/usage/streamEnded", async (req, res) => {
     const nextYtd = {
       participantMinutes: Number(prevYtd.participantMinutes || 0) + durationMinutes,
       transcodeMinutes: Number(prevYtd.transcodeMinutes || 0) + transcodeMinutes,
+      // Preserve any existing HLS minutes.
+      hlsMinutes: Number(prevYtd.hlsMinutes || 0),
       minutes: {
         live: {
           lifetime:

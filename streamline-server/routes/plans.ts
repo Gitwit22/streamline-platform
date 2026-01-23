@@ -55,7 +55,9 @@ router.get("/", async (_req, res) => {
           recording: !!plan.features.recording,
           rtmp: !!plan.features.rtmp,
           multistream: !!plan.features.multistream,
-          advancedPermissions: !!plan.features.advancedPermissions,
+          // Advanced permissions have been removed; all accounts use
+          // the simple Participant/Co-host model.
+          advancedPermissions: false,
         },
         editing: {
           access: !!data.editing?.access,

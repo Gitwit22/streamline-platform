@@ -21,6 +21,7 @@
 import { Router } from "express";
 import { firestore } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
+import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "../middleware/roomAccessToken";
 import { canAccessFeature } from "./featureAccess";
 import { clampRecordingPreset, getUserPlanId, toEncodingOptions } from "../lib/mediaPresets";
 import { Timestamp } from "firebase-admin/firestore";
@@ -33,6 +34,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 
 const router = Router();
 
@@ -276,8 +278,8 @@ function getAuthUserId(req: any): string | null {
  * Generate recording path for R2
  * CRITICAL: No leading slash - use "recordings/..." not "/recordings/..."
  */
-function generateRecordingPath(userId: string, roomName: string, timestamp: number): string {
-  const safeRoom = roomName.replace(/[^a-zA-Z0-9_-]/g, "_");
+function generateRecordingPath(userId: string, roomKey: string, timestamp: number): string {
+  const safeRoom = roomKey.replace(/[^a-zA-Z0-9_-]/g, "_");
   // Ensure no leading slash - R2/S3 keys should not start with /
   return `recordings/${userId}/${safeRoom}/${timestamp}.mp4`;
 }
@@ -507,9 +509,11 @@ async function stopRecordingInternal(options: {
 
   // Release active recording lock for this (user, room)
   try {
+    const roomId = typeof (data as any).roomId === "string" ? (data as any).roomId : null;
     const roomName = typeof data.roomName === "string" ? data.roomName : null;
-    if (roomName && uid) {
-      const activeKey = `${uid}_${roomName}`;
+    const roomKey = roomId || roomName;
+    if (roomKey && uid) {
+      const activeKey = `${uid}_${roomKey}`;
       const activeRef = firestore.collection("activeRecordings").doc(activeKey);
       await activeRef.set(
         {
@@ -561,7 +565,7 @@ async function stopRecordingInternal(options: {
 // POST /start - Start Recording
 // =============================================================================
 
-router.post("/start", requireAuth, async (req, res) => {
+router.post("/start", requireAuth, requireRoomAccessToken as any, async (req, res) => {
   const startTime = Date.now();
   console.log("[recordings/start] Request received");
 
@@ -572,16 +576,17 @@ router.post("/start", requireAuth, async (req, res) => {
     }
 
     // Feature access gate
-    const access = await canAccessFeature(uid, "recording");
-    if (!access.allowed) {
+    const featureAccess = await canAccessFeature((req as any).account || uid, "recording");
+    if (!featureAccess.allowed) {
       return res.status(403).json({
         success: false,
-        error: access.reason || "Recording requires upgrade",
+        error: featureAccess.reason || "Recording requires upgrade",
       });
     }
 
     // Validate request
-    const { roomName, layout: rawLayout, mode: rawMode, presetId, usageType: rawUsageType } = req.body as {
+    const { roomId: rawRoomId, roomName: rawRoomName, layout: rawLayout, mode: rawMode, presetId, usageType: rawUsageType } = req.body as {
+      roomId?: string;
       roomName?: string;
       layout?: string;
       mode?: string; // "cloud" | "dual"
@@ -589,8 +594,22 @@ router.post("/start", requireAuth, async (req, res) => {
       usageType?: string;
     };
 
-    if (!roomName) {
-      return res.status(400).json({ error: "roomName is required" });
+    const { roomId: canonicalRoomId, livekitRoomName, access: roomAccess } = getRoomAccess(req as any);
+
+    // If caller sent a roomId/roomName in the body, ensure it matches the token (defensive only)
+    if (rawRoomId && String(rawRoomId).trim() && String(rawRoomId).trim() !== canonicalRoomId) {
+      return res.status(400).json({ error: "room_mismatch" });
+    }
+
+    const roomId = canonicalRoomId;
+
+    try {
+      await assertRoomPerm(req as any, roomId, "canRecord");
+    } catch (err) {
+      if (err instanceof RoomPermissionError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+      throw err;
     }
 
     // CRITICAL: Layout must be exactly "speaker" or "grid" - anything else causes 400
@@ -613,11 +632,17 @@ router.post("/start", requireAuth, async (req, res) => {
     }
 
     // If a stream is live, lower recording quality to stream preset when required
-    const streamDocId = `${uid}_${roomName}`;
+    const streamDocIdNew = `${uid}_${roomId}`;
+    const streamDocIdLegacy = `${uid}_${roomAccess.roomName || roomId}`;
+    let streamDocId = streamDocIdNew;
     let activeStreamPresetId: string | null = null;
     let hasActiveStream = false;
     try {
-      const streamSnap = await firestore.collection("activeStreams").doc(streamDocId).get();
+      let streamSnap = await firestore.collection("activeStreams").doc(streamDocIdNew).get();
+      if (!streamSnap.exists && streamDocIdLegacy !== streamDocIdNew) {
+        streamSnap = await firestore.collection("activeStreams").doc(streamDocIdLegacy).get();
+        if (streamSnap.exists) streamDocId = streamDocIdLegacy;
+      }
       if (streamSnap.exists) {
         hasActiveStream = true;
         const data = streamSnap.data() || {};
@@ -656,7 +681,7 @@ router.post("/start", requireAuth, async (req, res) => {
     // Generate recording path and ID
     const now = new Date();
     const timestamp = now.getTime();
-    const objectKey = generateRecordingPath(uid, roomName, timestamp);
+    const objectKey = generateRecordingPath(uid, roomId, timestamp);
     const recordingId = firestore.collection("recordings").doc().id;
     const recordingRef = firestore.collection("recordings").doc(recordingId);
 
@@ -666,7 +691,7 @@ router.post("/start", requireAuth, async (req, res) => {
         : null;
 
     // activeRecordings lock for (uid, room)
-    const activeKey = `${uid}_${roomName}`;
+    const activeKey = `${uid}_${roomId}`;
     const activeRef = firestore.collection("activeRecordings").doc(activeKey);
 
     // =========================================================================
@@ -675,7 +700,9 @@ router.post("/start", requireAuth, async (req, res) => {
     const initialDoc = {
       id: recordingId,
       userId: uid,
-      roomName,
+      roomId,
+      roomName: roomAccess.roomName || roomId,
+      livekitRoomName,
       layout: layout || "grid",
       mode,
       status: "starting",
@@ -722,7 +749,8 @@ router.post("/start", requireAuth, async (req, res) => {
       await activeRef.set(
         {
           uid,
-          roomName,
+          roomId,
+          roomName: roomAccess.roomName || roomId,
           recordingId,
           status: "starting",
           createdAt: now,
@@ -821,13 +849,15 @@ router.post("/start", requireAuth, async (req, res) => {
         videoOnly: false,
       };
 
-      console.log("[recordings/start] Egress request:", {
-        roomName,
-        objectKey,
-        layout: compositeOpts.layout,
-      });
+      if (process.env.AUTH_DEBUG === "1") {
+        console.log("[livekit-debug] startRoomCompositeEgress (recording)", {
+          livekitRoomName,
+          objectKey,
+          layout: compositeOpts.layout,
+        });
+      }
 
-      const egressResp = await egressClient.startRoomCompositeEgress(roomName, fileOutput, {
+      const egressResp = await egressClient.startRoomCompositeEgress(livekitRoomName, fileOutput, {
         ...compositeOpts,
         encodingOptions,
       });
@@ -961,7 +991,7 @@ router.post("/sweep", async (_req, res) => {
 // POST /stop - Stop Recording
 // =============================================================================
 
-router.post("/stop", requireAuth, async (req, res) => {
+router.post("/stop", requireAuth, requireRoomAccessToken as any, async (req, res) => {
   console.log("[recordings/stop] Request received");
 
   try {
@@ -984,9 +1014,23 @@ router.post("/stop", requireAuth, async (req, res) => {
 
     const data = snap.data() || {};
 
-    // Verify ownership
-    if (data.userId && data.userId !== uid) {
-      return res.status(403).json({ error: "Forbidden" });
+    const { roomId: canonicalRoomId } = getRoomAccess(req as any);
+
+    // If the recording has a stored roomId, ensure it matches the caller's room
+    const recordingRoomId: string | null = typeof (data as any).roomId === "string" ? (data as any).roomId.trim() : null;
+    if (recordingRoomId && recordingRoomId !== canonicalRoomId) {
+      return res.status(400).json({ error: "room_mismatch" });
+    }
+
+    const roomId = canonicalRoomId;
+
+    try {
+      await assertRoomPerm(req as any, roomId, "canRecord");
+    } catch (err: any) {
+      if (err instanceof RoomPermissionError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+      throw err;
     }
 
     // Calculate duration
@@ -1148,9 +1192,11 @@ router.post("/stop", requireAuth, async (req, res) => {
 
     // Release active recording lock for this (user, room)
     try {
+      const roomId = typeof (data as any).roomId === "string" ? (data as any).roomId : null;
       const roomName = typeof data.roomName === "string" ? data.roomName : null;
-      if (roomName) {
-        const activeKey = `${uid}_${roomName}`;
+      const roomKey = roomId || roomName;
+      if (roomKey) {
+        const activeKey = `${uid}_${roomKey}`;
         const activeRef = firestore.collection("activeRecordings").doc(activeKey);
         await activeRef.set(
           {
@@ -1230,7 +1276,7 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
       .get();
 
     if (snap.empty) {
-      // Fallback: try to find any recording with an objectKey
+      // Fallback: try to find any recent recording with a stored path
       const fallbackSnap = await firestore
         .collection("recordings")
         .where("userId", "==", uid)
@@ -1242,7 +1288,8 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
       fallbackSnap.forEach((doc) => {
         if (!fallbackDoc) {
           const d = doc.data() || {};
-          if (d.objectKey && d.paywallState !== "requires_payment") {
+          const hasPath = !!(d.objectKey || d.downloadPath);
+          if (hasPath && d.paywallState !== "requires_payment") {
             fallbackDoc = doc;
           }
         }
@@ -1256,9 +1303,21 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
         });
       }
 
-      // Verify fallback file exists
+      // Verify fallback file exists (prefer objectKey, fall back to downloadPath)
       const fallbackData = fallbackDoc.data() || {};
-      const size = await r2HeadObjectSize(fallbackData.objectKey);
+      const fallbackKey: string | undefined =
+        (fallbackData.objectKey as string | undefined) ||
+        (fallbackData.downloadPath as string | undefined);
+
+      if (!fallbackKey) {
+        return res.status(200).json({
+          success: false,
+          noRecording: true,
+          message: "Recording missing file reference",
+        });
+      }
+
+      const size = await r2HeadObjectSize(fallbackKey);
       if (size <= 0) {
         return res.status(200).json({
           success: false,
@@ -1267,11 +1326,25 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
         });
       }
 
-      const signedUrl = await getSignedDownloadUrl(fallbackData.objectKey, 15 * 60);
+      const signedUrl = await getSignedDownloadUrl(fallbackKey, 15 * 60);
+
+      const nowTs = Timestamp.now();
       await firestore
         .collection("recordings")
         .doc(fallbackDoc.id)
-        .set({ lastDownloadRequestedAt: Timestamp.now() }, { merge: true });
+        .set(
+          {
+            lastDownloadRequestedAt: nowTs,
+            status: "ready",
+            downloadReady: true,
+            objectKey: fallbackKey,
+            downloadPath: fallbackKey,
+            fileSize: size,
+            readyAt: fallbackData.readyAt || nowTs,
+            updatedAt: nowTs,
+          },
+          { merge: true }
+        );
 
       return res.status(200).json({
         success: true,
@@ -1280,7 +1353,7 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
           recordingId: fallbackDoc.id,
           fallbackUsed: true,
           size,
-          status: fallbackData.status,
+          status: "ready",
         },
       });
     }
@@ -1288,7 +1361,9 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
     // Found a ready recording
     const readyDoc = snap.docs[0];
     const readyData = readyDoc.data() || {};
-    const objectKey = readyData.objectKey;
+    const objectKey: string | undefined =
+      (readyData.objectKey as string | undefined) ||
+      (readyData.downloadPath as string | undefined);
 
     if (!objectKey) {
       return res.json({
@@ -1300,11 +1375,22 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
 
     // Generate signed URL (15-minute TTL per spec)
     const signedUrl = await getSignedDownloadUrl(objectKey, 15 * 60);
-    
+
+    const nowTs = Timestamp.now();
     await firestore
       .collection("recordings")
       .doc(readyDoc.id)
-      .set({ lastDownloadRequestedAt: Timestamp.now() }, { merge: true });
+      .set(
+        {
+          lastDownloadRequestedAt: nowTs,
+          objectKey,
+          downloadPath: objectKey,
+          status: "ready",
+          downloadReady: true,
+          updatedAt: nowTs,
+        },
+        { merge: true }
+      );
 
     return res.status(200).json({
       success: true,

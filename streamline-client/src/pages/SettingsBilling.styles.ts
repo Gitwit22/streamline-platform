@@ -414,6 +414,16 @@ export const S: Record<string, CSSProperties> = {
     marginTop: 24,
     textAlign: "center",
   },
+  input: {
+    width: "100%",
+    padding: "10px 12px",
+    background: "rgba(15,23,42,0.8)",
+    border: "1px solid rgba(148,163,184,0.6)",
+    borderRadius: 999,
+    color: "#e5e7eb",
+    fontSize: 13,
+    outline: "none",
+  },
   tabsRow: {
     display: "flex",
     gap: 12,

@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import multer from "multer";
 import { uploadVideo, getSignedDownloadUrl } from "../lib/storageClient";
 import { checkStorageLimit, updateStorageUsage } from "../usageHelper";
+import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 
 const router = Router();
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
@@ -54,7 +55,7 @@ declare global {
 router.post(
   "/upload",
   authenticateToken,
-  upload.single('video'), // ✅ Parse file from FormData
+  upload.single('video') as any, // ✅ Parse file from FormData (typed as any for TS)
   async (req: Request, res: Response) => {
     try {
       console.log("📤 Upload request received");
@@ -578,6 +579,10 @@ router.put("/:recordingId", authenticateToken, async (req: Request, res: Respons
 // POST /api/editing/render - Trigger render job for a recording
 router.post("/render", authenticateToken, async (req: Request, res: Response) => {
   try {
+    if (!assertPlatformTranscodeEnabled(res)) {
+      return;
+    }
+
     const { recordingId, renderedBuffer } = req.body;
     const userId = req.user?.id;
 

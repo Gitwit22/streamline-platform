@@ -6,6 +6,7 @@ export type EffectiveEntitlements = {
   planId: string;
   limits: CanonicalPlan["limits"];
   features: CanonicalPlan["features"];
+  caps: CanonicalPlan["caps"];
 };
 
 function resolveEffectivePlanId(account: UserAccount): string {
@@ -38,6 +39,7 @@ export async function getEffectiveEntitlements(accountOrUid: UserAccount | strin
     planId: plan.id,
     limits: plan.limits,
     features: plan.features,
+    caps: plan.caps,
     plan,
   };
 }

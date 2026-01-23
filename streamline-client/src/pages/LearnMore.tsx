@@ -70,6 +70,15 @@ export default function LearnMore() {
       ],
     },
     {
+      icon: "🌐",
+      title: "HLS",
+      items: [
+        "Stream to a shareable link",
+        "Works on websites, mobile, and TV",
+        "Great for private or unlisted events",
+      ],
+    },
+    {
       icon: "📼",
       title: "Recording",
       items: [

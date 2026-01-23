@@ -122,7 +122,10 @@ export default function Support() {
           <button onClick={() => nav("/privacy")} style={styles.quickLink}>
             Privacy Policy
           </button>
-          <button onClick={() => nav("/terms")} style={styles.quickLink}>
+          <button
+            onClick={() => window.open("/terms", "_blank", "noopener,noreferrer")}
+            style={styles.quickLink}
+          >
             Terms of Service
           </button>
           <button onClick={() => nav("/settings/billing")} style={styles.quickLink}>

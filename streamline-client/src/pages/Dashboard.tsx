@@ -2,7 +2,6 @@ import { useState, useEffect } from "react";
 import { PLAN_IDS, PlanId, isPlanId } from "../lib/planIds";
 import { useNavigate } from "react-router-dom";
 import { editingApi } from "../lib/editingApi";
-import { DashboardAVControls } from "../components/DashboardAVControls";
 
 type Recording = {
   id: string;
@@ -44,15 +43,6 @@ export default function Dashboard() {
   const [totalDuration, setTotalDuration] = useState(0);
 
   const readyRecordings = recordings.filter((r) => r.status === "ready");
-
-  // ...existing code...
-
-  return (
-    <div>
-      <DashboardAVControls />
-      {/* ...existing dashboard UI... */}
-    </div>
-  );
 
   const handleDeleteRecording = (recordingId: string) => {
     if (confirm("Are you sure you want to delete this recording? This cannot be undone.")) {

@@ -35,20 +35,22 @@ export function canStartStream(params: CanStartStreamParams): GateResult {
 
   const maxDestinations = resolveMaxDestinations((plan.limits as any) || {});
 
-  // 1) Check if plan allows RTMP multistream
-  if (wantsRTMP && !plan.features.rtmpMultistream) {
+  // 1) Check if plan allows any RTMP destinations at all.
+  // Under the new model, the numeric cap (rtmpDestinationsMax/maxDestinations)
+  // is the primary capability flag: 0 = disabled, >0 = enabled.
+  if (wantsRTMP && maxDestinations <= 0) {
     return {
       allowed: false,
-      reason: "Your plan does not include RTMP multistreaming",
+      reason: "Your plan does not include Stream Destinations (RTMP)",
       requiresUpgrade: true,
     };
   }
 
-  // 2) Check if destinations count exceeds plan limit (only if a hard cap is configured)
+  // 2) Check if destinations count exceeds plan limit (only when enabled).
   if (maxDestinations > 0 && selectedDestinationsCount > maxDestinations) {
     return {
       allowed: false,
-      reason: `Your plan allows ${maxDestinations} destination(s), but you selected ${selectedDestinationsCount}`,
+      reason: `Your plan allows ${maxDestinations} stream destination(s), but you selected ${selectedDestinationsCount}`,
       requiresUpgrade: true,
     };
   }

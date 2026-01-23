@@ -1,14 +1,21 @@
 {
+  "scripts": {
+    "hooks:install": "git config core.hooksPath .githooks",
+    "hooks:check": "node streamline-client/scripts/check-no-loginpage-jsx.cjs",
+    "test": "tsx test/admin.test.ts"
+  },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.946.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "cookie-parser": "^1.4.7",
     "dotenv": "^17.2.3",
-    "firebase-admin": "^13.6.0"
+    "firebase-admin": "^13.6.0",
+    "node-fetch": "^2.6.13"
   },
   "devDependencies": {
     "@types/cookie-parser": "^1.4.10",
-    "@types/node-fetch": "^2.6.13"
+    "@types/node-fetch": "^2.6.13",
+    "tsx": "^4.21.0"
   }
 }

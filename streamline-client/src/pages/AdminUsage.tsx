@@ -5,7 +5,7 @@ interface UsageData {
   userId: string;
   email: string;
   displayName?: string;
-  planId: "free" | "starter" | "pro" | "enterprise";
+  planId: "free" | "starter" | "pro" | "basic" | "enterprise" | "internal_unlimited";
   minutesUsed: number;
   bonusMinutes: number;
   planLimit: number;
@@ -287,6 +287,7 @@ export default function AdminUsage() {
             >
               <option value="all">All Plans</option>
               <option value="free">Free</option>
+              <option value="basic">Basic</option>
               <option value="starter">Starter</option>
               <option value="pro">Pro</option>
               <option value="enterprise">Enterprise</option>
@@ -444,6 +445,7 @@ export default function AdminUsage() {
                 className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded text-white"
               >
                 <option value="free">Free (60 min)</option>
+                <option value="basic">Basic</option>
                 <option value="starter">Starter (300 min)</option>
                 <option value="pro">Pro (1200 min)</option>
                 <option value="enterprise">Enterprise (Unlimited)</option>
@@ -518,9 +520,11 @@ function Modal({
 function getPlanColor(planId: string): string {
   const colors: Record<string, string> = {
     free: "bg-gray-500/20 text-gray-300",
+    basic: "bg-sky-500/20 text-sky-300",
     starter: "bg-blue-500/20 text-blue-300",
     pro: "bg-purple-500/20 text-purple-300",
     enterprise: "bg-orange-500/20 text-orange-300",
+    internal_unlimited: "bg-emerald-500/20 text-emerald-300",
   };
   return colors[planId] || colors.free;
 }

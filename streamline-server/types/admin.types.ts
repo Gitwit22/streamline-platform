@@ -1,6 +1,14 @@
 // Admin-related TypeScript types
 
-export type PlanId = "free" | "starter" | "pro" | "enterprise";
+// Mirror the canonical plan ids used across the platform. This keeps
+// admin-only helper types consistent with server/types/plan.ts.
+export type PlanId =
+  | "free"
+  | "starter"
+  | "pro"
+  | "basic"
+  | "enterprise"
+  | "internal_unlimited";
 
 export interface User {
   uid: string;

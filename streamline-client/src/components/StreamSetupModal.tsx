@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useState } from "react";
 import { type DestinationItem } from "../services/destinations";
 import { formatLimitLabel } from "../lib/entitlements";
+import { API_BASE } from "../lib/apiBase";
+import { APP_BASE } from "../lib/appBase";
+import { getHlsStatus, startHls, stopHls } from "../services/hls";
+import CollapsibleSection from "./CollapsibleSection";
 
-type PlatformKey = "youtube" | "facebook" | "twitch" | "custom";
+type PlatformKey = "youtube" | "facebook" | "twitch" | "instagram" | "custom";
 
 const PLATFORM_CONFIG: Record<PlatformKey, { label: string; accent: string }> = {
   youtube: { label: "YouTube", accent: "#ef4444" },
   facebook: { label: "Facebook", accent: "#3b82f6" },
   twitch: { label: "Twitch", accent: "#a855f7" },
-  custom: { label: "Custom RTMP", accent: "#14b8a6" },
+  instagram: { label: "Instagram", accent: "#f97316" },
+  custom: { label: "Custom (RTMP)", accent: "#14b8a6" },
 };
 
 const MAX_MANUAL_FIELDS = 3;
@@ -33,8 +38,23 @@ const buildDefaultPlatformState = (): Record<PlatformKey, PlatformState> => ({
   youtube: { selected: false, manualFields: [], error: null, info: null },
   facebook: { selected: false, manualFields: [], error: null, info: null },
   twitch: { selected: false, manualFields: [], error: null, info: null },
+  instagram: { selected: false, manualFields: [], error: null, info: null },
   custom: { selected: false, manualFields: [], error: null, info: null },
 });
+
+type RoomUiSectionKey = "destinations" | "recording" | "layout" | "audio" | "hls";
+
+type RoomUiState = Record<RoomUiSectionKey, boolean>;
+
+const DEFAULT_ROOM_UI_STATE: RoomUiState = {
+  destinations: false,
+  recording: false,
+  layout: false,
+  audio: false,
+  hls: false,
+};
+
+const ROOM_UI_STORAGE_PREFIX = "sl_room_ui_v1";
 
 function getDefaultRtmpBase(p: PlatformKey): string {
   switch (p) {
@@ -44,6 +64,8 @@ function getDefaultRtmpBase(p: PlatformKey): string {
       return "rtmps://live-api-s.facebook.com:443/rtmp/";
     case "twitch":
       return "rtmp://live.twitch.tv/app";
+    case "instagram":
+      return "rtmps://edgetee-upload-det1-1.xx.fbcdn.net:443/rtmp/";
     case "custom":
       return "";
     default:
@@ -51,10 +73,20 @@ function getDefaultRtmpBase(p: PlatformKey): string {
   }
 }
 
+type SessionRtmpDestination = {
+  type: "instagram";
+  protocol: "rtmp";
+  rtmpUrl: string;
+  streamKey: string;
+  label?: string;
+};
+
 interface Props {
   open: boolean;
   onClose: () => void;
   roomName: string;
+  roomId: string;
+  roomAccessToken?: string;
   selectedPresetId?: string;
   defaultLayout?: "speaker" | "grid";
   defaultRecordingMode?: "cloud" | "dual";
@@ -68,6 +100,7 @@ interface Props {
     enabledTargetIds?: string[];
     sessionKeys?: Record<string, { rtmpUrlBase?: string; streamKey?: string }>;
     destinations?: EffectiveDestinationPayload[];
+    extraDestinations?: SessionRtmpDestination[];
     presetId?: string;
   }) => Promise<void>;
   onStopStream: () => Promise<void>;
@@ -81,6 +114,20 @@ interface Props {
   dualRecordingAllowed?: boolean;
   maxGuests?: number;
   multistreamAllowed?: boolean;
+  // Numeric RTMP destinations cap from plan/entitlements. 0 = disabled,
+  // 1 = single destination, >1 = multistream up to this number.
+  rtmpDestinationsMax?: number;
+  hlsEnabled?: boolean;
+  hlsCustomizationEnabled?: boolean;
+  onUpgradeHls?: () => void;
+  // Controls whether the HLS Setup (branding/config) section is rendered at all (platform-level flag).
+  showHlsSection?: boolean;
+
+  // Optional: whether this caller has permission to start/stop HLS.
+  canStartStopHls?: boolean;
+
+  // Optional: whether plan/platform entitlements have hydrated.
+  entitlementsReady?: boolean;
 
   // Optional: plan + per-clip recording cap (in minutes)
   planId?: string;
@@ -94,6 +141,8 @@ export default function StreamSetupModalV2({
   open,
   onClose,
   roomName,
+  roomId,
+  roomAccessToken,
   selectedPresetId,
   defaultLayout = "speaker",
   defaultRecordingMode = "cloud",
@@ -108,6 +157,13 @@ export default function StreamSetupModalV2({
   dualRecordingAllowed = false,
   maxGuests,
   multistreamAllowed = true,
+  rtmpDestinationsMax,
+  hlsEnabled = true,
+  hlsCustomizationEnabled = false,
+  onUpgradeHls,
+  showHlsSection = true,
+  canStartStopHls = true,
+  entitlementsReady = true,
   planId,
   recordingMaxMinutes,
   savedDestinations,
@@ -122,14 +178,53 @@ export default function StreamSetupModalV2({
     youtube: false,
     facebook: false,
     twitch: false,
+    instagram: false,
     custom: false,
   });
   const [warmupLogged, setWarmupLogged] = useState(false);
 
-  const platformOrder: PlatformKey[] = ["youtube", "facebook", "twitch", "custom"];
+  const [roomUiState, setRoomUiState] = useState<RoomUiState>(DEFAULT_ROOM_UI_STATE);
+
+  const [hlsStatus, setHlsStatus] = useState<"idle" | "starting" | "live" | "error">("idle");
+  const [hlsPlaylistUrl, setHlsPlaylistUrl] = useState<string | null>(null);
+  const [hlsEgressId, setHlsEgressId] = useState<string | null>(null);
+  const [hlsError, setHlsError] = useState<string | null>(null);
+  const [hlsBusy, setHlsBusy] = useState(false);
+  const [boundEmbedId, setBoundEmbedId] = useState<string | null>(null);
+  const [boundEmbedName, setBoundEmbedName] = useState<string>("");
+  const [boundEmbedViewerPath, setBoundEmbedViewerPath] = useState<string>("");
+  const [boundEmbedLoading, setBoundEmbedLoading] = useState(false);
+  const [boundEmbedError, setBoundEmbedError] = useState<string | null>(null);
+  const [hlsAdvancedOpen, setHlsAdvancedOpen] = useState(false);
+
+  const platformOrder: PlatformKey[] = ["youtube", "facebook", "twitch", "instagram", "custom"];
 
   const [layout, setLayout] = useState<"speaker" | "grid">(defaultLayout);
   const [recordingMode, setRecordingMode] = useState<"cloud" | "dual">(defaultRecordingMode);
+
+  // Canonical: HLS is always keyed by Firestore roomId.
+  const hlsRoomId = roomId?.trim() || "";
+
+  const looksLikeName =
+    hlsRoomId.includes(" ") || hlsRoomId.includes("–") || hlsRoomId.includes("#");
+
+  // HLS controls unlock once we have a canonical Firestore roomId
+  // (and not a human-readable name). This matches the host/control-plane
+  // contract where everything is keyed by roomId.
+  const hlsRoomReady = !!hlsRoomId && !looksLikeName;
+
+  const effectiveHlsRoomId = hlsRoomId;
+
+  const hlsViewerUrl = boundEmbedId
+    ? `${APP_BASE || (typeof window !== "undefined" ? window.location.origin : "")}/live/${encodeURIComponent(
+        boundEmbedId,
+      )}`
+    : "";
+
+  const authHeaders = useMemo(() => {
+    const token = typeof window !== "undefined" ? window.localStorage.getItem("sl_token") : null;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  }, []);
 
   // Keep local layout/mode in sync with defaults from account prefs
   useEffect(() => {
@@ -143,6 +238,270 @@ export default function StreamSetupModalV2({
   useEffect(() => {
     setDestinations(savedDestinations || []);
   }, [savedDestinations]);
+
+  // Load per-room UI state (collapsible sections) from localStorage on first open
+  useEffect(() => {
+    if (!hlsRoomId) return;
+    try {
+      const key = `${ROOM_UI_STORAGE_PREFIX}:${hlsRoomId}`;
+      const raw = window.localStorage.getItem(key);
+      if (!raw) {
+        setRoomUiState(DEFAULT_ROOM_UI_STATE);
+        return;
+      }
+      const parsed = JSON.parse(raw) || {};
+      const next: RoomUiState = {
+        destinations: !!parsed.destinations,
+        recording: !!parsed.recording,
+        layout: !!parsed.layout,
+        audio: !!parsed.audio,
+        hls: !!parsed.hls,
+      };
+      setRoomUiState(next);
+    } catch {
+      setRoomUiState(DEFAULT_ROOM_UI_STATE);
+    }
+  }, [hlsRoomId]);
+
+  // Whenever the modal opens for a different room, clear any previous
+  // bound embed state so we never show a "ghost" connection while
+  // the new room's binding is being resolved.
+  useEffect(() => {
+    if (!open) {
+      setBoundEmbedId(null);
+      setBoundEmbedName("");
+      setBoundEmbedViewerPath("");
+      setBoundEmbedError(null);
+      setBoundEmbedLoading(false);
+      return;
+    }
+
+    // On open/room change, clear to a neutral state; the
+    // active-embed fetch will repopulate as needed.
+    setBoundEmbedId(null);
+    setBoundEmbedName("");
+    setBoundEmbedViewerPath("");
+    setBoundEmbedError(null);
+  }, [open, hlsRoomId]);
+
+  const updateRoomUiSection = (section: RoomUiSectionKey, open: boolean) => {
+    setRoomUiState((prev) => {
+      const safePrev = prev || DEFAULT_ROOM_UI_STATE;
+      const next: RoomUiState = { ...DEFAULT_ROOM_UI_STATE, ...safePrev, [section]: open };
+      try {
+        const key = `${ROOM_UI_STORAGE_PREFIX}:${hlsRoomId}`;
+        window.localStorage.setItem(key, JSON.stringify(next));
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
+
+  // Fetch which Saved Embed (if any) this room is bound to, then
+  // resolve basic embed metadata for the viewer link.
+  useEffect(() => {
+    if (!open) return;
+    if (!hlsRoomReady) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(hlsRoomId)}/active-embed`, {
+          credentials: "include",
+          cache: "no-store",
+          headers: {
+            ...authHeaders,
+          },
+        });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) {
+          return;
+        }
+        const activeEmbedId = String(payload?.activeEmbedId || "").trim();
+        const savedEmbedId = String(payload?.savedEmbedId || "").trim();
+        const embedId = activeEmbedId || savedEmbedId;
+        if (!cancelled && embedId) {
+          setBoundEmbedId(embedId);
+        }
+      } catch {
+        // ignore
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, hlsRoomReady, hlsRoomId, authHeaders]);
+
+  // Resolve basic embed metadata for the bound embed so we can show
+  // a friendly connection label + viewer URL. This uses the public
+  // resolver so it stays in sync with the viewer page.
+  useEffect(() => {
+    if (!boundEmbedId) {
+      setBoundEmbedName("");
+      setBoundEmbedViewerPath("");
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      setBoundEmbedLoading(true);
+      setBoundEmbedError(null);
+      try {
+        const res = await fetch(`${API_BASE}/api/saved-embeds/public/${encodeURIComponent(boundEmbedId)}`);
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(payload?.error || "Failed to load embed");
+        }
+        if (cancelled) return;
+        const name = String(payload?.name || payload?.label || "").trim();
+        const viewerPath = String(payload?.viewerPath || `/live/${boundEmbedId}`).trim();
+        setBoundEmbedName(name || boundEmbedId);
+        setBoundEmbedViewerPath(viewerPath);
+      } catch (e: any) {
+        if (!cancelled) {
+          setBoundEmbedError(e?.message || "Failed to load embed");
+          setBoundEmbedName("");
+          setBoundEmbedViewerPath("");
+        }
+      } finally {
+        if (!cancelled) setBoundEmbedLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [boundEmbedId]);
+
+  // Initial one-shot fetch of HLS status so we can show chip even when collapsed
+  useEffect(() => {
+    if (!open) return;
+    if (!hlsRoomReady) {
+      setHlsStatus("idle");
+      setHlsPlaylistUrl(null);
+      setHlsEgressId(null);
+      setHlsError(null);
+      return;
+    }
+    if (!effectiveHlsRoomId) {
+      setHlsStatus("idle");
+      setHlsPlaylistUrl(null);
+      setHlsEgressId(null);
+      setHlsError(null);
+      return;
+    }
+    let cancelled = false;
+
+    const fetchStatus = async () => {
+      try {
+        const data = await getHlsStatus(effectiveHlsRoomId, roomAccessToken || undefined);
+        if (cancelled) return;
+        const status = (data?.status as string) || "idle";
+        setHlsStatus(status === "starting" || status === "live" || status === "error" ? status : "idle");
+        setHlsPlaylistUrl(data?.playlistUrl ?? null);
+        setHlsEgressId(data?.egressId ?? null);
+        setHlsError(data?.error ?? null);
+      } catch (err: any) {
+        if (cancelled) return;
+        const msg = String(err?.message || "");
+        if (msg.startsWith("status_failed_404")) {
+          setHlsStatus("idle");
+          setHlsPlaylistUrl(null);
+          setHlsEgressId(null);
+          setHlsError(null);
+          return;
+        }
+        if (msg.startsWith("status_failed_403")) {
+          let friendly = "You don't have permission to use HLS for this embed.";
+          const parts = msg.split(":", 2);
+          if (parts.length === 2) {
+            try {
+              const parsed = JSON.parse(parts[1] || "{}");
+              const code = String((parsed && (parsed.error || parsed.reason)) || "").trim();
+              if (code === "hls_not_in_plan") {
+                friendly = "HLS Broadcast Page is not included in this plan.";
+              } else if (code === "room_mismatch") {
+                friendly = "This embed is linked to a different show. Create a new embed for this room from Settings → HLS Setup.";
+              }
+            } catch {
+              // fall back to default friendly message
+            }
+          }
+          setHlsStatus("error");
+          setHlsError(friendly);
+          return;
+        }
+        setHlsStatus("error");
+        setHlsError("Failed to fetch HLS status");
+      }
+    };
+
+    fetchStatus();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, effectiveHlsRoomId, hlsRoomReady, roomAccessToken]);
+
+  // Poll while HLS section is open or status is starting
+  useEffect(() => {
+    if (!open) return;
+    if (!hlsRoomReady) return;
+    if (!effectiveHlsRoomId) return;
+
+    const shouldPoll = roomUiState.hls && (hlsStatus === "starting" || hlsStatus === "live");
+    if (!shouldPoll) return;
+
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const data = await getHlsStatus(effectiveHlsRoomId, roomAccessToken || undefined);
+        if (cancelled) return;
+        const status = (data?.status as string) || "idle";
+        setHlsStatus(status === "starting" || status === "live" || status === "error" ? status : "idle");
+        setHlsPlaylistUrl(data?.playlistUrl ?? null);
+        setHlsEgressId(data?.egressId ?? null);
+        setHlsError(data?.error ?? null);
+      } catch (err: any) {
+        if (!cancelled) {
+          const msg = String(err?.message || "");
+          if (msg.startsWith("status_failed_403")) {
+            let friendly = "You don't have permission to use HLS for this embed.";
+            const parts = msg.split(":", 2);
+            if (parts.length === 2) {
+              try {
+                const parsed = JSON.parse(parts[1] || "{}");
+                const code = String((parsed && (parsed.error || parsed.reason)) || "").trim();
+                if (code === "hls_not_in_plan") {
+                  friendly = "HLS Broadcast Page is not included in this plan.";
+                } else if (code === "room_mismatch") {
+                  friendly = "This embed is linked to a different show. Create a new embed for this room from Settings → HLS Setup.";
+                }
+              } catch {
+                // fall back to default friendly message
+              }
+            }
+            setHlsStatus("error");
+            setHlsError(friendly);
+          } else {
+            // Soft failure; keep last known status but surface a generic error
+            setHlsStatus("error");
+            setHlsError("Failed to poll HLS status");
+          }
+        }
+      }
+    };
+
+    poll();
+    const id = window.setInterval(poll, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [open, effectiveHlsRoomId, roomUiState.hls, hlsStatus]);
 
   const mainByPlatform = useMemo(() => {
     const map: Partial<Record<PlatformKey, DestinationItem>> = {};
@@ -173,10 +532,18 @@ export default function StreamSetupModalV2({
 
   useEffect(() => {
     if (!open) {
-      setPlatformState(buildDefaultPlatformState());
+      // Preserve entered keys across close/reopen within the same session.
+      // Only clear transient errors/flags.
+      setPlatformState((prev) => {
+        const next: Record<PlatformKey, PlatformState> = { ...prev };
+        (Object.keys(next) as PlatformKey[]).forEach((p) => {
+          next[p] = { ...next[p], error: null, info: null };
+        });
+        return next;
+      });
       setStartError(null);
       setWarmupStartedAt(null);
-      setWarmupReadyMap({ youtube: false, facebook: false, twitch: false, custom: false });
+      setWarmupReadyMap({ youtube: false, facebook: false, twitch: false, instagram: false, custom: false });
       setWarmupLogged(false);
     }
   }, [open]);
@@ -225,20 +592,71 @@ export default function StreamSetupModalV2({
 
   if (!open) return null;
 
+  if (!entitlementsReady) {
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+        <div className="rounded-lg bg-slate-900 px-4 py-3 text-sm text-slate-100 shadow-lg">
+          Loading stream features...
+        </div>
+      </div>
+    );
+  }
+
   const streamIsLive = streamStatus === "live";
   const streamIsBusy = streamStatus === "starting" || streamStatus === "stopping";
-  const streamDisallowed = !multistreamAllowed;
+  const rtmpCap = typeof rtmpDestinationsMax === "number" ? rtmpDestinationsMax : 0;
+  // Entitlement-level caps: numeric RTMP destinations are the single
+  // source of truth for whether destinations are included in the plan.
+  //
+  // - rtmpDestinationsAllowed: can stream to at least one platform
+  // - multistreamCapAllowed: can stream to multiple platforms (true multistream)
+  const rtmpDestinationsAllowed = rtmpCap >= 1;
+  const multistreamCapAllowed = rtmpCap >= 2;
+  // Caller-level permission flag (roomPermissions) controls whether this
+  // particular user may manage destinations at all.
+  const hasStreamingPermission = multistreamAllowed !== false;
+  // Final gate: either the plan disables RTMP entirely, or this user
+  // lacks in-room permission to manage streaming.
+  const streamDisallowed = !rtmpDestinationsAllowed || !hasStreamingPermission;
+  // Temporary debug to verify canonical entitlements wiring in UI.
+  if (typeof window !== "undefined") {
+    console.debug("[StreamSetupModal] gating", {
+      rtmpDestinationsMax: rtmpDestinationsMax ?? null,
+      rtmpCap,
+      rtmpDestinationsAllowed,
+      multistreamCapAllowed,
+      multistreamAllowed,
+      hasStreamingPermission,
+      streamDisallowed,
+    });
+  }
   
   const recordingIsActive = recordingStatus === "recording";
   const recordingIsBusy = recordingStatus === "stopping";
+  // Recording controls are visible when the caller indicates recording is allowed
+  // for this session (again based on roomPermissions).
   const showRecordingControls = recordingEnabled !== false;
 
   const hasRecordingCap = typeof recordingMaxMinutes === "number" && recordingMaxMinutes > 0;
+  const hlsAllowed = hlsEnabled !== false;
 
   const badgeItems = [
-    { label: "Recording", value: recordingEnabled ? "On" : "Off", ok: recordingEnabled },
+    recordingEnabled
+      ? { label: "Recording", value: "On", ok: true }
+      : null,
     { label: "Dual", value: dualRecordingAllowed ? "On" : "Off", ok: dualRecordingAllowed },
-    { label: "Multistream", value: multistreamAllowed ? "On" : "Off", ok: multistreamAllowed },
+    // RTMP badge reflects the numeric destination cap. 0 = off,
+    // 1 = single destination, >1 = multistream up to N.
+    {
+      label: rtmpCap > 1 ? "Multistream" : "RTMP",
+      value:
+        rtmpCap <= 0
+          ? "Off"
+          : rtmpCap === 1
+          ? "1 destination"
+          : `up to ${rtmpCap}`,
+      ok: rtmpCap > 0,
+    },
     typeof maxGuests === "number"
       ? {
           label: "Guests",
@@ -249,20 +667,79 @@ export default function StreamSetupModalV2({
   ].filter(Boolean) as Array<{ label: string; value: string; ok: boolean }>;
 
   const selectedPlatforms = platformOrder.filter((p) => platformState[p].selected);
+  const customHasManual = platformState.custom.manualFields.some((f) => f.value.trim());
+  const instagramState = platformState.instagram;
+  const instagramHasManual = instagramState.manualFields.some((f) => (f.value && f.value.trim()) || (f.base && f.base.trim()));
+  const instagramSelected = instagramState.selected || instagramHasManual;
+  const anyPlatformSelection = selectedPlatforms.length > 0 || customHasManual;
   const missingKeySelected = selectedPlatforms.some((p) => {
     const main = mainByPlatform[p];
     const mainUsable = !!(main && main.hasKey && main.mode !== "connected");
     const manual = platformState[p].manualFields.find((f) => f.value.trim());
     return !(mainUsable || manual);
   });
-  const startDisabled = streamIsBusy || streamDisallowed || selectedPlatforms.length === 0 || missingKeySelected || warmupActive;
+  const startDisabled =
+    streamIsBusy ||
+    streamDisallowed ||
+    !anyPlatformSelection ||
+    missingKeySelected ||
+    warmupActive;
+
+  const handleStartHls = async () => {
+    if (!hlsRoomReady || !effectiveHlsRoomId) {
+      // Defensive guard: HLS should never start without a canonical roomId.
+      // This should already be prevented by disabled state, but we guard here
+      // to avoid confusing failures if the UI logic ever regresses.
+      console.warn("[HLS] start requested without ready roomId", { hlsRoomReady, effectiveHlsRoomId });
+      return;
+    }
+    if (!boundEmbedId) {
+      // HLS must be bound to a Saved Embed so /live/:savedEmbedId resolves.
+      console.warn("[HLS] start requested without bound Saved Embed", { roomId: effectiveHlsRoomId });
+      return;
+    }
+    if (hlsStatus === "starting" || hlsStatus === "live") return;
+    setHlsBusy(true);
+    setHlsError(null);
+    setHlsStatus("starting");
+    try {
+      const data = await startHls(effectiveHlsRoomId, roomAccessToken || undefined);
+      const status = (data?.status as string) || "live";
+      setHlsStatus(status === "starting" || status === "live" || status === "error" ? status : "live");
+      setHlsPlaylistUrl(data?.playlistUrl ?? null);
+      setHlsEgressId(data?.egressId ?? null);
+      setHlsError(null);
+    } catch (err: any) {
+      setHlsStatus("error");
+      setHlsError(err?.message || "Failed to start HLS");
+    } finally {
+      setHlsBusy(false);
+    }
+  };
+
+  const handleStopHls = async () => {
+    if (!effectiveHlsRoomId) return;
+    if (hlsStatus === "idle") return;
+    setHlsBusy(true);
+    try {
+      await stopHls(effectiveHlsRoomId, roomAccessToken || undefined);
+      setHlsStatus("idle");
+      setHlsError(null);
+      // playlistUrl may remain for debugging; UI only exposes when live
+    } catch (err: any) {
+      setHlsError(err?.message || "Failed to stop HLS");
+    } finally {
+      setHlsBusy(false);
+    }
+  };
 
   const handleStartStream = async () => {
     if (streamDisallowed) {
-      alert("Multistreaming is disabled for this plan. Upgrade in Settings → Usage to enable external destinations.");
+      alert("You don't have permission to start streaming in this room.");
       return;
     }
     const sessionKeyPayload: Record<string, { rtmpUrlBase?: string; streamKey?: string }> = {};
+    const instagramDestinations: SessionRtmpDestination[] = [];
     const enabledTargetIds: string[] = [];
     const effectiveDestinations: EffectiveDestinationPayload[] = [];
     let youtubeKey: string | undefined;
@@ -278,12 +755,51 @@ export default function StreamSetupModalV2({
     platformOrder.forEach((platform) => {
       const state = platformState[platform];
       nextPlatformState[platform] = { ...state, error: null, info: state.info };
-      if (!state.selected) return;
-      hasSelection = true;
+
+      if (platform === "instagram") {
+        const main = mainByPlatform[platform];
+        const hasMain = !!main;
+        const firstManual = state.manualFields.find((f) => (f.value && f.value.trim()) || (f.base && f.base.trim()));
+        const treatedAsSelected = state.selected || !!firstManual;
+        if (!treatedAsSelected) return;
+        hasSelection = true;
+
+        const rtmpUrl = (firstManual?.base || "").trim();
+        const streamKey = (firstManual?.value || "").trim();
+
+        if (!rtmpUrl || !streamKey) {
+          nextPlatformState[platform].error = !rtmpUrl ? "RTMP URL required." : "Stream key required.";
+          hasErrors = true;
+          return;
+        }
+
+        const hasValidScheme = rtmpUrl.startsWith("rtmp://") || rtmpUrl.startsWith("rtmps://");
+        if (!hasValidScheme) {
+          nextPlatformState[platform].error = "RTMP URL must start with rtmp:// or rtmps://.";
+          hasErrors = true;
+          return;
+        }
+
+        instagramDestinations.push({
+          type: "instagram",
+          protocol: "rtmp",
+          rtmpUrl,
+          streamKey,
+          label: "Instagram",
+        });
+
+        if (!hasMain && !state.manualFields.length) {
+          nextPlatformState[platform].info = "Session-only. Not saved for reuse.";
+        }
+        return;
+      }
 
       const main = mainByPlatform[platform];
       const mainUsable = !!(main && main.hasKey && main.mode !== "connected");
       const manualField = state.manualFields.find((f) => f.value.trim());
+      const treatedAsSelected = state.selected || (platform === "custom" && !!manualField);
+      if (!treatedAsSelected) return;
+      hasSelection = true;
       let sessionKey = manualField?.value.trim() || "";
       const customBase = manualField?.base?.trim();
       const hasKey = mainUsable || !!sessionKey;
@@ -314,7 +830,7 @@ export default function StreamSetupModalV2({
       }
 
       if (platform === "custom" && !rtmpBase) {
-        nextPlatformState[platform].error = "Base RTMP URL required.";
+        nextPlatformState[platform].error = "RTMP ingest URL required.";
         hasErrors = true;
         return;
       }
@@ -352,12 +868,12 @@ export default function StreamSetupModalV2({
     setPlatformState(nextPlatformState);
 
     if (!hasSelection) {
-      setStartError("Pick at least one platform to stream to.");
+      setStartError("Add at least one stream destination or custom RTMP key.");
       return;
     }
 
     if (hasErrors) {
-      setStartError("Fix the highlighted platforms before starting.");
+      setStartError("Fix the highlighted destinations before starting.");
       return;
     }
 
@@ -367,7 +883,7 @@ export default function StreamSetupModalV2({
       setWarmupActive(true);
       setWarmupStartedAt(now);
       setWarmupPlatforms(platformsNow);
-      setWarmupReadyMap({ youtube: false, facebook: false, twitch: false, custom: false });
+      setWarmupReadyMap({ youtube: false, facebook: false, twitch: false, instagram: false, custom: false });
       setWarmupLogged(false);
 
       await onStartStream({
@@ -377,6 +893,7 @@ export default function StreamSetupModalV2({
         enabledTargetIds: enabledTargetIds.length ? enabledTargetIds : undefined,
         sessionKeys: Object.keys(sessionKeyPayload).length ? sessionKeyPayload : undefined,
         destinations: effectiveDestinations,
+        extraDestinations: instagramDestinations.length ? instagramDestinations : undefined,
         presetId: selectedPresetId,
       });
     } catch (err: any) {
@@ -405,10 +922,10 @@ export default function StreamSetupModalV2({
         backdropFilter: 'blur(20px)',
         boxShadow: '0 20px 60px rgba(220, 38, 38, 0.2)',
         width: '380px',
-        maxHeight: '70vh',
+        maxHeight: '80vh',
         display: 'flex',
         flexDirection: 'column',
-        overflow: 'hidden',
+        overflowY: 'auto',
         color: '#ffffff'
       }}>
         {/* Header */}
@@ -453,50 +970,77 @@ export default function StreamSetupModalV2({
           </button>
         </div>
 
-        {/* Content - Scrollable */}
+        {/* Content */}
         <div style={{
           padding: '1rem',
-          flex: 1,
-          overflowY: 'auto',
           display: 'flex',
           flexDirection: 'column',
           gap: '1rem'
         }}>
 
-          {/* Entitlements summary */}
+          {/* Features Panel (constant, always visible) */}
           {badgeItems.length > 0 && (
             <div style={{
-              display: 'grid',
-              gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
-              gap: '0.5rem',
-              border: '1px solid rgba(255,255,255,0.08)',
-              borderRadius: '0.5rem',
-              padding: '0.6rem',
-              background: 'rgba(255,255,255,0.02)'
+              borderRadius: '0.75rem',
+              border: '1px solid rgba(148,163,184,0.35)',
+              background: 'radial-gradient(circle at top left, rgba(248,113,113,0.3), rgba(15,23,42,0.95))',
+              padding: '0.75rem 0.8rem',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.55rem'
             }}>
-              {badgeItems.map((item) => (
-                <div
-                  key={item.label}
-                  style={{
-                    border: `1px solid ${item.ok ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)'}`,
-                    background: item.ok ? 'rgba(34,197,94,0.08)' : 'rgba(239,68,68,0.06)',
-                    color: item.ok ? '#bbf7d0' : '#fecdd3',
-                    borderRadius: '0.45rem',
-                    padding: '0.35rem 0.5rem',
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: '0.1rem',
-                    minHeight: '48px'
-                  }}
-                >
-                  <span style={{ fontSize: '0.7rem', opacity: 0.8 }}>{item.label}</span>
-                  <span style={{ fontSize: '0.8rem', fontWeight: 700 }}>{item.value}</span>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '0.5rem' }}>
+                <div style={{ fontSize: '0.8rem', fontWeight: 700, letterSpacing: '0.06em', textTransform: 'uppercase', color: '#e5e7eb' }}>
+                  Features Panel
                 </div>
-              ))}
+                {planId && (
+                  <div style={{
+                    fontSize: '0.7rem',
+                    padding: '0.2rem 0.5rem',
+                    borderRadius: '999px',
+                    background: 'rgba(15,23,42,0.85)',
+                    border: '1px solid rgba(148,163,184,0.6)',
+                    color: '#cbd5f5'
+                  }}>
+                    Plan: {planId}
+                  </div>
+                )}
+              </div>
+              <div style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(120px, 1fr))',
+                gap: '0.5rem'
+              }}>
+                {badgeItems.map((item) => (
+                  <div
+                    key={item.label}
+                    style={{
+                      border: `1px solid ${item.ok ? 'rgba(34,197,94,0.35)' : 'rgba(239,68,68,0.35)'}`,
+                      background: item.ok ? 'rgba(34,197,94,0.12)' : 'rgba(239,68,68,0.09)',
+                      color: item.ok ? '#bbf7d0' : '#fecdd3',
+                      borderRadius: '0.6rem',
+                      padding: '0.4rem 0.55rem',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '0.15rem',
+                      minHeight: '52px'
+                    }}
+                  >
+                    <span style={{ fontSize: '0.7rem', opacity: 0.78 }}>{item.label}</span>
+                    <span style={{ fontSize: '0.8rem', fontWeight: 700 }}>{item.value}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
 
           {/* SECTION 1: STREAM PLATFORMS */}
+          <CollapsibleSection
+            id="destinations"
+            title="Stream Destinations"
+            defaultOpen={roomUiState.destinations}
+            onToggle={(open) => updateRoomUiSection("destinations", open)}
+          >
           <div style={{
             background: 'rgba(59, 130, 246, 0.05)',
             border: '1px solid rgba(59, 130, 246, 0.2)',
@@ -504,10 +1048,14 @@ export default function StreamSetupModalV2({
             padding: '0.75rem'
           }}>
             <div style={{ fontSize: '0.75rem', fontWeight: '600', color: '#3b82f6', marginBottom: '0.75rem', textTransform: 'uppercase' }}>
-              📡 Stream Destinations
+              {!rtmpDestinationsAllowed
+                ? "📡 Stream Destinations"
+                : !multistreamCapAllowed
+                ? "📡 RTMP (1 destination)"
+                : `📡 Multistream (up to ${rtmpCap})`}
             </div>
 
-            {streamDisallowed && (
+            {!rtmpDestinationsAllowed && (
               <div style={{
                 marginBottom: '0.75rem',
                 padding: '0.55rem 0.75rem',
@@ -517,7 +1065,7 @@ export default function StreamSetupModalV2({
                 fontSize: '0.75rem',
                 color: '#fca5a5'
               }}>
-                Multistream is disabled for this plan. Upgrade in Settings → Usage to enable streaming to external destinations.
+                Stream Destinations are disabled for this plan. Upgrade in Settings  Usage to enable streaming to external destinations.
               </div>
             )}
 
@@ -530,7 +1078,12 @@ export default function StreamSetupModalV2({
                 const disabled = streamIsLive || streamIsBusy || streamDisallowed;
                 const connectedMode = false;
                 const mainPreview = main?.hasKey && main?.keyPreview ? ` • ••••${main.keyPreview}` : main?.hasKey ? "" : "";
-                const manualLabel = platform === "custom" ? "Custom stream key" : "Session stream key (this stream only)";
+                const manualLabel =
+                  platform === "custom"
+                    ? "Custom stream key (RTMP)"
+                    : platform === "instagram"
+                    ? "Stream key from Instagram Live Producer"
+                    : "Session stream key (this stream only)";
                 const manualMissing = state.selected && !mainHasKey && !state.manualFields.find((f) => f.value.trim());
                 const manualLimitReached = state.manualFields.length >= MAX_MANUAL_FIELDS;
 
@@ -577,7 +1130,7 @@ export default function StreamSetupModalV2({
                         <button
                           onClick={() => {
                             const fieldId = `${platform}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                            const nextFields = [...state.manualFields, { id: fieldId, value: "", base: "" }];
+                            const nextFields = [...state.manualFields, { id: fieldId, value: "", base: getDefaultRtmpBase(platform) }];
                             updatePlatformState(platform, { manualFields: nextFields, error: null });
                           }}
                           disabled={disabled || manualLimitReached}
@@ -591,13 +1144,15 @@ export default function StreamSetupModalV2({
                             cursor: (disabled || manualLimitReached) ? 'not-allowed' : 'pointer'
                           }}
                         >
-                          Add
+                          Add key
                         </button>
                       </div>
                     </div>
                     {!main && (
                       <div style={{ fontSize: '0.75rem', color: 'rgba(226,232,240,0.7)' }}>
-                        No main key saved. Add one in Settings to reuse across sessions.
+                        {platform === 'instagram'
+                          ? 'Instagram Live is session-only. Enter RTMP URL + Stream Key from Instagram Live Producer each time you go live.'
+                          : 'No saved destination yet. Add one in Settings → Stream Destinations to reuse across sessions.'}
                       </div>
                     )}
 
@@ -646,7 +1201,7 @@ export default function StreamSetupModalV2({
                                 ✕
                               </button>
                             </div>
-                            {platform === 'custom' && (
+                            {(platform === 'custom' || platform === 'instagram') && (
                               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                                 <input
                                   type="text"
@@ -655,7 +1210,7 @@ export default function StreamSetupModalV2({
                                     const nextFields = state.manualFields.map((f) => (f.id === field.id ? { ...f, base: e.target.value } : f));
                                     updatePlatformState(platform, { manualFields: nextFields, error: null });
                                   }}
-                                  placeholder="Optional base RTMP URL"
+                                  placeholder={platform === 'instagram' ? 'RTMP URL from Instagram Live Producer' : 'Optional RTMP ingest URL (base)'}
                                   disabled={streamIsLive || streamDisallowed}
                                   style={{
                                     flex: 1,
@@ -708,6 +1263,20 @@ export default function StreamSetupModalV2({
               })}
             </div>
 
+            {instagramSelected && (
+              <div style={{
+                marginTop: '0.6rem',
+                padding: '0.5rem 0.6rem',
+                borderRadius: '0.45rem',
+                border: '1px solid rgba(234,179,8,0.6)',
+                background: 'rgba(250,204,21,0.08)',
+                fontSize: '0.75rem',
+                color: '#facc15'
+              }}>
+                Instagram performs best in portrait 9:16 (720×1280).
+              </div>
+            )}
+
             <div style={{ marginTop: '0.75rem' }}>
               {(streamStatus === "idle" || streamStatus === "starting") ? (
                 <>
@@ -759,7 +1328,7 @@ export default function StreamSetupModalV2({
                             ? "facebook"
                             : warmupPlatforms[0]) as PlatformKey;
                           const primaryConfig = PLATFORM_CONFIG[primaryKey];
-                          const primaryLabel = primaryConfig?.label || "your destinations";
+                          const primaryLabel = primaryConfig?.label || "your stream destinations";
                           return `Connecting to ${primaryLabel}… this usually takes 5–10 seconds.`;
                         })()}
                       </div>
@@ -809,9 +1378,16 @@ export default function StreamSetupModalV2({
               )}
             </div>
           </div>
+          </CollapsibleSection>
 
           {/* SECTION 2: RECORDING CONTROL */}
           {showRecordingControls && (
+            <CollapsibleSection
+              id="recording"
+              title="Recording settings"
+              defaultOpen={roomUiState.recording}
+              onToggle={(open) => updateRoomUiSection("recording", open)}
+            >
             <div style={{
               background: 'rgba(220, 38, 38, 0.05)',
               border: '1px solid rgba(220, 38, 38, 0.2)',
@@ -997,7 +1573,316 @@ export default function StreamSetupModalV2({
                 </div>
               )}
             </div>
+          </CollapsibleSection>
           )}
+
+            {/* HLS Broadcast section (runtime start/stop).
+              Gated by platform-level flag via showHlsSection. */}
+            {showHlsSection && (
+            <CollapsibleSection
+              id="hls"
+              title="HLS Broadcast"
+              defaultOpen={roomUiState.hls}
+              onToggle={(open) => updateRoomUiSection("hls", open)}
+              rightBadge={(
+                <span
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '0.3rem',
+                    padding: '0.1rem 0.45rem',
+                    borderRadius: '999px',
+                    fontSize: '0.7rem',
+                    fontWeight: 600,
+                    background:
+                      hlsStatus === 'live'
+                        ? 'rgba(220,38,38,0.16)'
+                        : hlsStatus === 'starting'
+                        ? 'rgba(234,179,8,0.16)'
+                        : hlsStatus === 'error'
+                        ? 'rgba(248,113,113,0.16)'
+                        : 'rgba(31,41,55,0.9)',
+                    border:
+                      hlsStatus === 'live'
+                        ? '1px solid rgba(220,38,38,0.7)'
+                        : hlsStatus === 'starting'
+                        ? '1px solid rgba(234,179,8,0.7)'
+                        : hlsStatus === 'error'
+                        ? '1px solid rgba(248,113,113,0.7)'
+                        : '1px solid rgba(148,163,184,0.6)',
+                    color:
+                      hlsStatus === 'live'
+                        ? '#fecaca'
+                        : hlsStatus === 'starting'
+                        ? '#facc15'
+                        : hlsStatus === 'error'
+                        ? '#fecaca'
+                        : '#e5e7eb',
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: '999px',
+                      backgroundColor:
+                        hlsStatus === 'live'
+                          ? '#ef4444'
+                          : hlsStatus === 'starting'
+                          ? '#eab308'
+                          : hlsStatus === 'error'
+                          ? '#f97373'
+                          : '#6b7280',
+                    }}
+                  />
+                  <span>{hlsStatus === 'idle' ? 'Idle' : hlsStatus === 'starting' ? 'Starting' : hlsStatus === 'live' ? 'Live' : 'Error'}</span>
+                </span>
+              )}
+            >
+              <div style={{ fontSize: '0.75rem', color: 'rgba(209, 213, 219, 0.9)', marginBottom: '0.65rem' }}>
+                {!hlsRoomReady
+                  ? 'Loading room… HLS controls will unlock once the Firestore roomId is known.'
+                  : !boundEmbedId
+                    ? 'This room is not connected to a Saved Embed yet. Create one in Settings → HLS Setup and join using that Saved Room to go live.'
+                    : 'Connected to your Saved Embed. Start HLS to begin broadcasting to its viewer link.'}
+              </div>
+              {boundEmbedId && (
+                <div style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '0.35rem',
+                  marginBottom: '0.75rem',
+                }}>
+                  <div style={{ fontSize: '0.75rem', color: '#9ca3af' }}>Connected Saved Embed</div>
+                  <div style={{
+                    padding: '0.5rem 0.6rem',
+                    borderRadius: '0.45rem',
+                    border: '1px solid rgba(75,85,99,0.7)',
+                    background: 'rgba(15,23,42,0.9)',
+                    color: '#e5e7eb',
+                    fontSize: '0.85rem',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '0.5rem',
+                  }}>
+                    <span>{boundEmbedName || boundEmbedId}</span>
+                    {boundEmbedLoading && (
+                      <span style={{ fontSize: '0.7rem', color: '#9ca3af' }}>Loading…</span>
+                    )}
+                  </div>
+                  {boundEmbedError && (
+                    <div style={{ fontSize: '0.75rem', color: '#fecaca' }}>❌ {boundEmbedError}</div>
+                  )}
+                </div>
+              )}
+
+              {!hlsAllowed && (
+                <div
+                  style={{
+                    marginBottom: '0.75rem',
+                    padding: '0.65rem 0.75rem',
+                    borderRadius: '0.5rem',
+                    background: 'rgba(30,64,175,0.25)',
+                    border: '1px solid rgba(59,130,246,0.6)',
+                    fontSize: '0.75rem',
+                    color: '#dbeafe',
+                  }}
+                >
+                  <div style={{ fontWeight: 600, marginBottom: '0.25rem' }}>HLS Broadcast Page not included in this plan.</div>
+                  <div style={{ marginBottom: '0.45rem' }}>
+                    Upgrade your plan to unlock a shareable /live viewer link for your audience.
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (onUpgradeHls) {
+                        onUpgradeHls();
+                      } else {
+                        window.location.href = "/settings/billing";
+                      }
+                    }}
+                    style={{
+                      padding: '0.45rem 0.8rem',
+                      borderRadius: '999px',
+                      border: 'none',
+                      background: 'linear-gradient(135deg,#3b82f6,#2563eb)',
+                      color: '#f9fafb',
+                      fontSize: '0.78rem',
+                      fontWeight: 600,
+                      cursor: 'pointer',
+                    }}
+                  >
+                    Upgrade to enable HLS
+                  </button>
+                </div>
+              )}
+
+              {hlsError && hlsStatus === 'error' && (
+                <div
+                  style={{
+                    marginTop: '0.5rem',
+                    fontSize: '0.75rem',
+                    color: '#fecaca',
+                    background: 'rgba(248,113,113,0.1)',
+                    border: '1px solid rgba(248,113,113,0.6)',
+                    borderRadius: '0.4rem',
+                    padding: '0.4rem 0.5rem',
+                  }}
+                >
+                  ❌ {hlsError}
+                </div>
+              )}
+
+              <div style={{ marginTop: '0.65rem', display: 'flex', gap: '0.5rem' }}>
+                <button
+                  type="button"
+                  onClick={handleStartHls}
+                  disabled={!hlsAllowed || !canStartStopHls || !hlsRoomReady || !boundEmbedId || hlsBusy || !(hlsStatus === 'idle' || hlsStatus === 'error')}
+                  style={{
+                    flex: 1,
+                    padding: '0.6rem 0.7rem',
+                    borderRadius: '0.45rem',
+                    border: 'none',
+                    background:
+                      !hlsAllowed || !canStartStopHls || !hlsRoomReady || !boundEmbedId || hlsBusy || !(hlsStatus === 'idle' || hlsStatus === 'error')
+                        ? 'rgba(37,99,235,0.4)'
+                        : 'linear-gradient(135deg, #22c55e, #16a34a)',
+                    color: '#ffffff',
+                    fontSize: '0.8rem',
+                    fontWeight: 600,
+                    cursor:
+                      !hlsAllowed || !canStartStopHls || !hlsRoomReady || !boundEmbedId || hlsBusy || !(hlsStatus === 'idle' || hlsStatus === 'error') ? 'not-allowed' : 'pointer',
+                    opacity:
+                      !hlsAllowed || !canStartStopHls || !hlsRoomReady || !boundEmbedId || hlsBusy || !(hlsStatus === 'idle' || hlsStatus === 'error') ? 0.6 : 1,
+                  }}
+                >
+                  {hlsBusy && (hlsStatus === 'starting' || hlsStatus === 'idle')
+                    ? 'Starting HLS…'
+                    : 'Start HLS'}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleStopHls}
+                  disabled={!canStartStopHls || !boundEmbedId || hlsBusy || !(hlsStatus === 'live' || hlsStatus === 'starting')}
+                  style={{
+                    flex: 1,
+                    padding: '0.6rem 0.7rem',
+                    borderRadius: '0.45rem',
+                    border: 'none',
+                    background:
+                      !canStartStopHls || !boundEmbedId || hlsBusy || !(hlsStatus === 'live' || hlsStatus === 'starting')
+                        ? 'rgba(248,113,113,0.35)'
+                        : 'linear-gradient(135deg, #dc2626, #b91c1c)',
+                    color: '#ffffff',
+                    fontSize: '0.8rem',
+                    fontWeight: 600,
+                    cursor:
+                      !canStartStopHls || !boundEmbedId || hlsBusy || !(hlsStatus === 'live' || hlsStatus === 'starting') ? 'not-allowed' : 'pointer',
+                    opacity:
+                      !canStartStopHls || !boundEmbedId || hlsBusy || !(hlsStatus === 'live' || hlsStatus === 'starting') ? 0.6 : 1,
+                  }}
+                >
+                  {hlsBusy && (hlsStatus === 'live' || hlsStatus === 'starting')
+                    ? 'Stopping HLS…'
+                    : 'Stop HLS'}
+                </button>
+              </div>
+
+              {boundEmbedId && (
+                <div style={{ marginTop: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.55rem' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                    <span style={{ fontSize: '0.75rem', color: '#9ca3af' }}>Viewer link</span>
+                    <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
+                      <input
+                        type="text"
+                        readOnly
+                        value={hlsViewerUrl}
+                        style={{
+                          flex: 1,
+                          padding: '0.4rem 0.55rem',
+                          borderRadius: '0.35rem',
+                          border: '1px solid rgba(75,85,99,0.7)',
+                          background: 'rgba(15,23,42,0.9)',
+                          color: '#e5e7eb',
+                          fontSize: '0.8rem',
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(hlsViewerUrl);
+                            alert('Viewer link copied');
+                          } catch {
+                            // ignore
+                          }
+                        }}
+                        style={{
+                          padding: '0.35rem 0.6rem',
+                          borderRadius: '0.35rem',
+                          border: '1px solid rgba(148,163,184,0.7)',
+                          background: 'rgba(15,23,42,0.95)',
+                          color: '#e5e7eb',
+                          fontSize: '0.75rem',
+                          cursor: 'pointer',
+                        }}
+                      >
+                        Copy
+                      </button>
+                    </div>
+                  </div>
+
+                  <div style={{
+                    borderTop: '1px solid rgba(148,163,184,0.25)',
+                    paddingTop: '0.65rem',
+                  }}>
+                    <button
+                      type="button"
+                      onClick={() => setHlsAdvancedOpen((v) => !v)}
+                      style={{
+                        width: '100%',
+                        textAlign: 'left',
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'rgba(226,232,240,0.85)',
+                        fontSize: '0.78rem',
+                        cursor: 'pointer',
+                        padding: '0.25rem 0',
+                        fontWeight: 600,
+                      }}
+                    >
+                      {hlsAdvancedOpen ? '▾' : '▸'} Advanced (debug)
+                    </button>
+                    {hlsAdvancedOpen && (
+                      <div style={{ marginTop: '0.5rem', display: 'flex', flexDirection: 'column', gap: '0.25rem' }}>
+                        <span style={{ fontSize: '0.75rem', color: '#9ca3af' }}>Debug playlist URL</span>
+                        <input
+                          type="text"
+                          readOnly
+                          value={hlsPlaylistUrl || ''}
+                          placeholder={hlsPlaylistUrl ? '' : 'Playlist URL will appear after Start HLS'}
+                          style={{
+                            width: '100%',
+                            padding: '0.4rem 0.55rem',
+                            borderRadius: '0.35rem',
+                            border: '1px solid rgba(75,85,99,0.7)',
+                            background: 'rgba(15,23,42,0.9)',
+                            color: '#e5e7eb',
+                            fontSize: '0.8rem',
+                            fontFamily: 'monospace',
+                          }}
+                        />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </CollapsibleSection>
+          )}
+
+          {/* HLS Setup section (branding/config). Does NOT start HLS. */}
+          {/* HLS Setup (embed creation + branding) lives in Settings → HLS Setup. */}
 
           {/* Help Text */}
           <div style={{ 

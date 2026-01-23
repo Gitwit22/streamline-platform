@@ -7,6 +7,8 @@ import { LoginPage } from "./pages/LoginPage";
 import { SignupPage } from "./pages/SignupPage";
 import Join from "./pages/Join";
 import Room from "./pages/Room";
+import InviteLanding from "./pages/InviteLanding";
+import Live from "./pages/Live";
 import SettingsDestinations from "./pages/SettingsDestinations";
 import RoomExitPage from "./pages/RoomExitPage";
 import Dashboard from "./pages/Dashboard";
@@ -43,6 +45,9 @@ function App() {
       <Route path="/login" element={<LoginPage />} />
       <Route path="/signup" element={<SignupPage />} />
       <Route path="/checkout" element={<Checkout />} />
+
+      {/* Invite landing */}
+      <Route path="/i/:inviteToken" element={<InviteLanding />} />
       {/* Policy & Support */}
       <Route path="/privacy" element={<Privacy />} />
       <Route path="/terms" element={<Terms />} />
@@ -57,7 +62,11 @@ function App() {
       <Route path="/admin/dashboard" element={<AdminDashboard />} />
       {/* Streaming flow */}
       <Route path="/join" element={<Join />} />
+      <Route path="/room" element={<Room />} />
       <Route path="/room/:roomName" element={<Room />} />
+      <Route path="/live" element={<Live />} />
+      {/* New stable viewer URL: /live/:savedEmbedId */}
+      <Route path="/live/:savedEmbedId" element={<Live />} />
       <Route path="/settings/destinations" element={<SettingsDestinations />} />
       <Route path="/room-exit/:recordingId" element={<RoomExitPage />} />
 

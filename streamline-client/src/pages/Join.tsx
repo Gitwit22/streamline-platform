@@ -1,9 +1,16 @@
 import { useState, useEffect, useMemo } from "react";
-import { useAuthMe } from "../hooks/useAuthMe";
+import { useAuthMe, isAuthUserInTestMode } from "../hooks/useAuthMe";
 import { PLAN_IDS, PlanId, isPlanId } from "../lib/planIds";
 import { API_BASE } from "../lib/apiBase";
 import { logAuthDebugContext } from "../lib/logAuthDebug";
 import { useNavigate, useSearchParams,} from "react-router-dom";
+import { apiFetch, clearAuthStorage } from "../lib/api";
+
+type SavedEmbedSummary = {
+  embedId: string;
+  label: string;
+  activeRoomId?: string | null;
+};
 
 
 type UsageData = {
@@ -13,6 +20,37 @@ type UsageData = {
   maxStorage: number;
   planId: PlanId;
 };
+
+// Restrict display names to a safe, URL/log-friendly subset:
+// letters, digits, space, hyphen, en dash, apostrophe, ampersand.
+function sanitizeDisplayName(input: string): string {
+  if (!input) return "";
+  return input.replace(/[^A-Za-z0-9 \-–'&]/g, "");
+}
+
+function applyIncrementingSuffix(baseName: string, lastRoom: string | null): string {
+  if (!lastRoom) return baseName;
+
+  // If the last room exactly matches the base name, start at #2
+  if (lastRoom === baseName) {
+    return `${baseName} #2`;
+  }
+
+  // If the last room already has a numeric suffix and shares the same base, increment it
+  const match = lastRoom.match(/^(.*) #(\d+)$/);
+  if (match) {
+    const [, priorBase, numStr] = match;
+    if (priorBase === baseName) {
+      const current = parseInt(numStr, 10);
+      if (!Number.isNaN(current) && current >= 2) {
+        return `${baseName} #${current + 1}`;
+      }
+    }
+  }
+
+  // Otherwise just use the base name
+  return baseName;
+}
 
 function formatDefaultRoomName(displayName: string) {
   const now = new Date();
@@ -41,16 +79,26 @@ export default function Join() {
       const rawUser = localStorage.getItem("sl_user");
       if (rawUser && rawUser !== "undefined") {
         const parsed = JSON.parse(rawUser);
-        if (parsed?.displayName) return parsed.displayName as string;
+        if (parsed?.displayName) return sanitizeDisplayName(parsed.displayName as string);
       }
     } catch {
       // ignore parse errors and fall back
     }
-    return localStorage.getItem("sl_displayName") || "";
+    const cached = localStorage.getItem("sl_displayName") || "";
+    return sanitizeDisplayName(cached);
   });
   const [didEditDisplayName, setDidEditDisplayName] = useState(false);
   const [roomName, setRoomName] = useState("");
+  const [inviteRoomId, setInviteRoomId] = useState<string | null>(null);
   const [showEditingModal, setShowEditingModal] = useState(false);
+  const [showLegacyJoinToast, setShowLegacyJoinToast] = useState(false);
+  const [hideLegacyJoinToast, setHideLegacyJoinToast] = useState(() => {
+    try {
+      return localStorage.getItem("sl_hide_legacy_join_toast") === "true";
+    } catch {
+      return false;
+    }
+  });
 
   // Usage state
   const [usageData, setUsageData] = useState<UsageData | null>(null);
@@ -69,14 +117,33 @@ export default function Join() {
     }
   });
 
-  // Check for invite link (room query parameter)
-  const isParticipant = searchParams.get("room") !== null;
-  const role = searchParams.get("role") || "guest"; // Get role from URL
+  // Invite handling:
+  // - New flow: /join?t=... (preferred, roomId-based)
+  // - Also accept /join?inviteToken=... for backward compatibility
+  // - Legacy guest link: /join?room=... (guest/viewer style)
+  const inviteTokenParam = searchParams.get("t") || searchParams.get("inviteToken");
+  const legacyInviteRoomParam = searchParams.get("room");
+  const isParticipant = !!inviteTokenParam || legacyInviteRoomParam !== null;
 
-// Use /api/auth/me for admin status
-const { user: authUser, loading: authLoading } = useAuthMe();
-const isAdmin = !!authUser?.isAdmin;
-const adminLoading = authLoading;
+  // Saved Embeds (for hosts joining a Saved Room)
+  const [savedEmbeds, setSavedEmbeds] = useState<SavedEmbedSummary[]>([]);
+  const [savedEmbedsLoading, setSavedEmbedsLoading] = useState(false);
+  const [savedEmbedsError, setSavedEmbedsError] = useState<string | null>(null);
+  const [selectedSavedEmbedId, setSelectedSavedEmbedId] = useState<string>("");
+
+  const [joinMode, setJoinMode] = useState<"new" | "saved">("new");
+
+  // Platform-level HLS flag (controls enablement of Saved Room join when HLS is disabled)
+  // Default to false so HLS-only UI is disabled until account flags load.
+  const [platformHlsEnabled, setPlatformHlsEnabled] = useState<boolean>(false);
+
+  // Use /api/auth/me for admin/test-mode status
+  const { user: authUser, loading: authLoading } = useAuthMe();
+  const isAdmin = !!authUser?.isAdmin;
+  // Only show Admin UI for true admins. Test-mode or internal plans alone
+  // are no longer sufficient to expose admin tools.
+  const showAdminUi = !authLoading && isAdmin;
+  const adminLoading = authLoading;
 
   // Auto-populate the name field from authenticated profile (test env often lacks sl_user localStorage)
   // Do not override if user has typed.
@@ -91,24 +158,111 @@ const adminLoading = authLoading;
       "";
 
     if (!candidate) return;
-    setDisplayName(candidate);
+    setDisplayName(sanitizeDisplayName(candidate));
     try {
-      localStorage.setItem("sl_displayName", candidate);
+      localStorage.setItem("sl_displayName", sanitizeDisplayName(candidate));
     } catch {
       // ignore
     }
   }, [authUser, didEditDisplayName, displayName]);
 
   useEffect(() => {
-    const inviteRoom = searchParams.get("room");
-    if (inviteRoom) {
-      const decodedRoom = decodeURIComponent(inviteRoom);
-      setRoomName(decodedRoom);
+    let cancelled = false;
 
-      // Store role for later use in room
-      localStorage.setItem("sl_current_role", role);
-    }
-  }, [searchParams, role]);
+    const run = async () => {
+      // Preferred: inviteToken resolves room+role server-side
+      if (inviteTokenParam) {
+        try {
+          const res = await fetch(`${API_BASE}/api/invites/resolve`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ inviteToken: inviteTokenParam }),
+          });
+
+          if (!res.ok) return;
+          const data = await res.json().catch(() => null);
+          if (!data || cancelled) return;
+
+          const decodedRoomId = String(data.roomId || "");
+          const decodedRoom = String(data.roomName || "");
+          // Use the resolved role from the server
+          const resolvedRole = String(data.role || "guest");
+          if (decodedRoomId) setInviteRoomId(decodedRoomId);
+          if (decodedRoom) setRoomName(decodedRoom);
+
+          try {
+            localStorage.setItem("sl_invite_token", inviteTokenParam);
+            localStorage.setItem("sl_current_role", resolvedRole);
+          } catch {
+            // ignore
+          }
+
+          // Let the host know that someone has opened the invite link
+          // and is viewing the join page.
+          try {
+            await fetch(`${API_BASE}/api/invites/track-landing`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ inviteToken: inviteTokenParam, stage: "join_page" }),
+            });
+          } catch {
+            // best-effort only
+          }
+          return;
+        } catch {
+          return;
+        }
+      }
+
+      // Legacy: /join?room=... (treat as guest)
+      if (legacyInviteRoomParam) {
+        const decodedRoom = decodeURIComponent(legacyInviteRoomParam);
+        setRoomName(decodedRoom);
+        try {
+          localStorage.removeItem("sl_invite_token");
+          localStorage.setItem("sl_current_role", "guest");
+        } catch {
+          // ignore
+        }
+      }
+    };
+
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [inviteTokenParam, legacyInviteRoomParam]);
+
+  // Load platform-level flags to know if HLS (and Saved Rooms join) should be available.
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/account/me`, { credentials: "include" });
+        if (!res.ok) {
+          if (!cancelled) setPlatformHlsEnabled(true);
+          return;
+        }
+        const me = await res.json().catch(() => null);
+        if (cancelled || !me) {
+          return;
+        }
+        const platformFlags = (me as any)?.platformFlags || {};
+        if (typeof platformFlags.hlsEnabled === "boolean") {
+          setPlatformHlsEnabled(platformFlags.hlsEnabled);
+        } else {
+          setPlatformHlsEnabled(true);
+        }
+      } catch {
+        if (!cancelled) setPlatformHlsEnabled(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const lastRoom = useMemo(() => {
     try {
@@ -124,18 +278,57 @@ const adminLoading = authLoading;
     }
   }, []);
 
+  // Load Saved Embeds for host flow so they can optionally
+  // bind the room to a Saved Embed at creation time.
+  useEffect(() => {
+    if (isParticipant) return;
+
+    let cancelled = false;
+    (async () => {
+      setSavedEmbedsLoading(true);
+      setSavedEmbedsError(null);
+      try {
+        const res = await fetch(`${API_BASE}/api/saved-embeds`, {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+        });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(payload?.error || "Failed to load Saved Rooms");
+        }
+        if (cancelled) return;
+        const list = Array.isArray(payload?.embeds) ? payload.embeds : [];
+        const next: SavedEmbedSummary[] = list
+          .map((e: any) => ({
+            embedId: String(e?.embedId || "").trim(),
+            label: String(e?.label || "").trim(),
+            activeRoomId: typeof e?.activeRoomId === "string" ? e.activeRoomId : null,
+          }))
+          .filter((e) => !!e.embedId);
+        setSavedEmbeds(next);
+      } catch (e: any) {
+        if (!cancelled) {
+          setSavedEmbedsError(e?.message || "Failed to load Saved Rooms");
+          setSavedEmbeds([]);
+        }
+      } finally {
+        if (!cancelled) setSavedEmbedsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isParticipant]);
+
   useEffect(() => {
     if (isParticipant) return; // never override invite room
     if (roomName.trim()) return; // respect user edits
 
-    // Prefer recent room name, else generate a deterministic friendly default
-    if (lastRoom) {
-      setRoomName(lastRoom);
-      return;
-    }
-
-    const fallback = formatDefaultRoomName(displayName.trim());
-    setRoomName(fallback);
+    const baseName = formatDefaultRoomName(displayName.trim());
+    const nextName = applyIncrementingSuffix(baseName, lastRoom);
+    setRoomName(nextName);
   }, [displayName, isParticipant, lastRoom, roomName]);
 
   // Fetch real usage summary (for all authenticated users)
@@ -186,31 +379,135 @@ const adminLoading = authLoading;
     };
   }, [user]);
 
-  function handleSubmit(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
 
-    const name = displayName.trim();
-    const room = roomName.trim();
-    if (!name || !room) return;
+    const name = sanitizeDisplayName(displayName).trim();
+    if (!name) {
+      alert("Please enter a valid name using letters, numbers, spaces, -, –, ', & only.");
+      return;
+    }
+
+    const roomLabel = roomName.trim();
+
+    const isUsingSaved = !isParticipant && joinMode === "saved";
+    if (isUsingSaved && !selectedSavedEmbedId) {
+      alert("Select a Saved Room or switch to Create New Room.");
+      return;
+    }
 
     localStorage.setItem("sl_displayName", name);
 
-    // Mark this room as created by this user (only if not joining via invite)
-    if (!isParticipant) {
-      const createdRooms = JSON.parse(
-        localStorage.getItem("sl_created_rooms") || "[]"
-      );
-      if (!createdRooms.includes(room)) {
-        createdRooms.push(room);
-        localStorage.setItem("sl_created_rooms", JSON.stringify(createdRooms));
+    // For invite-based joins, mark that the guest is proceeding into the room.
+    if (isParticipant && inviteTokenParam) {
+      try {
+        fetch(`${API_BASE}/api/invites/track-landing`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ inviteToken: inviteTokenParam, stage: "entered_room" }),
+        }).catch(() => {});
+      } catch {
+        // best-effort only
       }
-      localStorage.setItem("sl_last_room", room);
-      localStorage.setItem("sl_last_room_ts", String(Date.now()));
-      // Set role to 'host' when creating a room
-      localStorage.setItem("sl_current_role", "host");
     }
 
-    nav(`/room/${encodeURIComponent(room)}`);
+    // Host flow: create a Firestore room first, then navigate to /room/:roomId
+    if (!isParticipant) {
+      try {
+        if (!roomLabel) {
+          alert("Please enter a room name.");
+          return;
+        }
+
+        const res = await fetch(`${API_BASE}/api/rooms/create`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            livekitRoomName: roomLabel,
+            roomType: "rtc",
+            savedEmbedId: isUsingSaved ? selectedSavedEmbedId : undefined,
+          }),
+        });
+
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          console.error("Failed to create room", res.status, text);
+
+          // If auth is missing/expired, send host to login with a return URL
+          if (res.status === 401 || res.status === 403) {
+            const next = `${window.location.pathname}${window.location.search}`;
+            nav(`/login?next=${encodeURIComponent(next)}`, { replace: true });
+            return;
+          }
+
+          alert("Failed to create room. Please try again.");
+          return;
+        }
+
+        const data = await res.json().catch(() => null as any);
+        const roomId = String(data?.roomId || "").trim();
+        const livekitRoomName = String(data?.livekitRoomName || roomLabel).trim();
+
+        if (!roomId) {
+          console.error("Missing roomId in /api/rooms/create response", data);
+          alert("Failed to create room. Please try again.");
+          return;
+        }
+
+        // Mark this room as created by this user using the Firestore roomId
+        const createdRooms = JSON.parse(localStorage.getItem("sl_created_rooms") || "[]");
+        if (!createdRooms.includes(roomId)) {
+          createdRooms.push(roomId);
+          localStorage.setItem("sl_created_rooms", JSON.stringify(createdRooms));
+        }
+
+        localStorage.setItem("sl_last_room", livekitRoomName);
+        localStorage.setItem("sl_last_room_ts", String(Date.now()));
+        localStorage.setItem("sl_current_role", "host");
+
+        nav(`/room/${encodeURIComponent(roomId)}`, {
+          state: { livekitRoomName },
+        });
+        return;
+      } catch (err) {
+        console.error("Error creating room", err);
+        alert("Failed to create room. Please try again.");
+        return;
+      }
+    }
+
+    // Participant / invite flows:
+    // Prefer roomId-based navigation when we have an invite token.
+    if (isParticipant && inviteTokenParam && inviteRoomId) {
+      nav(`/room/${encodeURIComponent(inviteRoomId)}?t=${encodeURIComponent(inviteTokenParam)}`);
+      return;
+    }
+
+    // Legacy fallback: room name based join (to be fully removed later)
+    if (!hideLegacyJoinToast) {
+      setShowLegacyJoinToast(true);
+      console.log("[Join] Legacy room-name join fallback", { roomName: roomLabel });
+      try {
+        fetch(`${API_BASE}/api/telemetry/event`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            event: "legacy_roomname_join_attempt",
+            roomName: roomLabel,
+            source: "join",
+            ts: Date.now(),
+          }),
+        }).catch((err) => {
+          console.warn("Failed to send telemetry event", err);
+        });
+      } catch (err) {
+        console.warn("Error scheduling telemetry event", err);
+      }
+    }
+
+    nav(`/room/${encodeURIComponent(roomLabel)}`);
   }
 
   const streamingPercent =
@@ -485,8 +782,8 @@ const adminLoading = authLoading;
     ⚙️ Settings & Billing
   </button>
 
-  {/* Admin Dashboard button (admin only) */}
-  {!adminLoading && isAdmin === true && (
+  {/* Admin Dashboard button (admin, internal, or test-mode) */}
+  {showAdminUi && (
     <button
       onClick={() => nav("/admin/dashboard")}
       style={{
@@ -636,7 +933,8 @@ const adminLoading = authLoading;
                 value={displayName}
                 onChange={(e) => {
                   setDidEditDisplayName(true);
-                  setDisplayName(e.target.value);
+                  const safe = sanitizeDisplayName(e.target.value);
+                  setDisplayName(safe);
                 }}
                 required
                 style={{
@@ -652,8 +950,8 @@ const adminLoading = authLoading;
               />
             </div>
 
-            {/* ROOM NAME */}
-            {!searchParams.get("room") && (
+            {/* ROOM NAME (hosts only; participants never edit this) */}
+            {!isParticipant && !searchParams.get("room") && (
               <div style={{ marginBottom: "24px" }}>
                 <label
                   style={{
@@ -683,6 +981,126 @@ const adminLoading = authLoading;
                     outline: "none",
                   }}
                 />
+              </div>
+            )}
+
+            {/* HOST JOIN MODE TOGGLE (only shown when platform HLS/Saved Rooms join is enabled) */}
+            {!isParticipant && platformHlsEnabled && savedEmbeds.length > 0 && (
+              <div style={{ marginBottom: "20px" }}>
+                <div style={{ fontSize: "12px", color: "#9ca3af", marginBottom: "6px" }}>Join mode</div>
+                <div
+                  style={{
+                    display: "inline-flex",
+                    padding: "3px",
+                    borderRadius: "999px",
+                    background: "rgba(15,23,42,0.85)",
+                    border: "1px solid rgba(55,65,81,0.9)",
+                    gap: "4px",
+                  }}
+                >
+                  <button
+                    type="button"
+                    onClick={() => setJoinMode("new")}
+                    style={{
+                      padding: "6px 10px",
+                      borderRadius: "999px",
+                      border: "none",
+                      fontSize: "12px",
+                      cursor: "pointer",
+                      background: joinMode === "new" ? "#f97316" : "transparent",
+                      color: joinMode === "new" ? "#111827" : "#e5e7eb",
+                      fontWeight: joinMode === "new" ? 700 : 500,
+                    }}
+                  >
+                    Create New Room
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!platformHlsEnabled || savedEmbeds.length === 0}
+                    onClick={() => {
+                      if (!platformHlsEnabled || savedEmbeds.length === 0) return;
+                      setJoinMode("saved");
+                    }}
+                    style={{
+                      padding: "6px 10px",
+                      borderRadius: "999px",
+                      border: "none",
+                      fontSize: "12px",
+                      cursor:
+                        !platformHlsEnabled || savedEmbeds.length === 0 ? "not-allowed" : "pointer",
+                      background: joinMode === "saved" ? "#f97316" : "transparent",
+                      color:
+                        !platformHlsEnabled || savedEmbeds.length === 0
+                          ? "#6b7280"
+                          : joinMode === "saved"
+                          ? "#111827"
+                          : "#e5e7eb",
+                      fontWeight: joinMode === "saved" ? 700 : 500,
+                      opacity: !platformHlsEnabled || savedEmbeds.length === 0 ? 0.5 : 1,
+                    }}
+                  >
+                    Use Saved Room
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* HOST: Saved Room selector when using saved mode (only when platform HLS is enabled) */}
+            {!isParticipant && platformHlsEnabled && savedEmbeds.length > 0 && joinMode === "saved" && (
+              <div style={{ marginBottom: "24px" }}>
+                <label
+                  style={{
+                    display: "block",
+                    fontSize: "13px",
+                    fontWeight: 500,
+                    color: "#9ca3af",
+                    marginBottom: "8px",
+                  }}
+                >
+                  Saved Room
+                </label>
+                <select
+                  value={selectedSavedEmbedId}
+                  onChange={(e) => setSelectedSavedEmbedId(e.target.value)}
+                  disabled={savedEmbedsLoading}
+                  style={{
+                    width: "100%",
+                    padding: "12px 14px",
+                    background: "#ffffff",
+                    border: "1px solid rgba(255, 255, 255, 0.1)",
+                    borderRadius: "12px",
+                    color: "#000000",
+                    fontSize: "14px",
+                    outline: "none",
+                  }}
+                >
+                  <option
+                    value=""
+                    style={{ color: "#000000", backgroundColor: "#ffffff" }}
+                  >
+                    Select a Saved Room…
+                  </option>
+                  {savedEmbeds.map((embed) => (
+                    <option
+                      key={embed.embedId}
+                      value={embed.embedId}
+                      style={{ color: "#000000", backgroundColor: "#ffffff" }}
+                    >
+                      {embed.label || embed.embedId}
+                      {embed.activeRoomId ? " (Active)" : ""}
+                    </option>
+                  ))}
+                </select>
+                {selectedSavedEmbedId && (
+                  <div style={{ marginTop: "6px", fontSize: "12px", color: "#9ca3af" }}>
+                    This will broadcast to: <span style={{ color: "#e5e7eb" }}>/live/{selectedSavedEmbedId}</span>
+                  </div>
+                )}
+                {savedEmbedsError && (
+                  <div style={{ marginTop: "6px", fontSize: "12px", color: "#fecaca" }}>
+                    {savedEmbedsError}
+                  </div>
+                )}
               </div>
             )}
 
@@ -755,8 +1173,23 @@ const adminLoading = authLoading;
         {/* LOGOUT BUTTON */}
         <div style={{ textAlign: "center" }}>
           <button
-            onClick={() => {
-              localStorage.removeItem("sl_displayName");
+            onClick={async () => {
+              try {
+                await apiFetch("/api/auth/logout", { method: "POST" }, { allowNonOk: true });
+              } catch {
+                // ignore network errors; we'll still clear client state
+              }
+              try {
+                clearAuthStorage();
+                localStorage.removeItem("sl_displayName");
+                localStorage.removeItem("sl_created_rooms");
+                localStorage.removeItem("sl_current_role");
+                localStorage.removeItem("sl_invite_token");
+                localStorage.removeItem("sl_guestId");
+                localStorage.removeItem("sl_last_room");
+              } catch {
+                // best-effort only
+              }
               window.location.href = "/";
             }}
             style={{
@@ -780,6 +1213,115 @@ const adminLoading = authLoading;
           </button>
         </div>
       </div>
+
+      {/* Legacy room-name join deprecation toast */}
+      {showLegacyJoinToast && !hideLegacyJoinToast && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: 24,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 40,
+            maxWidth: "520px",
+            width: "calc(100% - 32px)",
+            background: "rgba(15,15,15,0.95)",
+            borderRadius: "12px",
+            border: "1px solid rgba(248,113,113,0.5)",
+            boxShadow: "0 20px 40px rgba(0,0,0,0.6)",
+            padding: "14px 16px",
+            display: "flex",
+            alignItems: "flex-start",
+            gap: "12px",
+          }}
+        >
+          <div
+            style={{
+              width: "32px",
+              height: "32px",
+              borderRadius: "999px",
+              background: "rgba(248,113,113,0.15)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            <span style={{ fontSize: "18px" }}>⚠️</span>
+          </div>
+          <div style={{ flex: 1 }}>
+            <div
+              style={{
+                fontSize: "14px",
+                fontWeight: 600,
+                marginBottom: "4px",
+              }}
+            >
+              Heads up
+            </div>
+            <div
+              style={{
+                fontSize: "13px",
+                color: "#e5e7eb",
+                marginBottom: "8px",
+              }}
+            >
+              Heads up: joining by room name is being phased out. Ask the host for an invite link.
+            </div>
+            <label
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                fontSize: "12px",
+                color: "#9ca3af",
+                cursor: "pointer",
+                userSelect: "none",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={hideLegacyJoinToast}
+                onChange={(e) => {
+                  const next = e.target.checked;
+                  setHideLegacyJoinToast(next);
+                  try {
+                    if (next) {
+                      localStorage.setItem("sl_hide_legacy_join_toast", "true");
+                    } else {
+                      localStorage.removeItem("sl_hide_legacy_join_toast");
+                    }
+                  } catch {
+                    // ignore
+                  }
+                }}
+                style={{
+                  width: "14px",
+                  height: "14px",
+                  borderRadius: "4px",
+                }}
+              />
+              Don't show again
+            </label>
+          </div>
+          <button
+            type="button"
+            onClick={() => setShowLegacyJoinToast(false)}
+            aria-label="Dismiss legacy join warning"
+            style={{
+              border: "none",
+              background: "transparent",
+              color: "#9ca3af",
+              cursor: "pointer",
+              padding: 0,
+              marginLeft: "4px",
+              fontSize: "16px",
+            }}
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {/* Editing Suite Coming Soon Modal */}
       {showEditingModal && (

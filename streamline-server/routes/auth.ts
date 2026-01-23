@@ -4,6 +4,7 @@ import bcrypt from "bcryptjs";
 import { requireAuth } from "../middleware/requireAuth";
 import { firestore as db } from "../firebaseAdmin";
 import { getUserAccount } from "../lib/userAccount";
+import { CURRENT_TOS_VERSION } from "../lib/tos";
 
 console.log("✅ auth router loaded");
 
@@ -11,11 +12,28 @@ const router = Router();
 
 // --- helpers ---
 function cookieOptions() {
-  const isProd = process.env.NODE_ENV === "production";
+  // On Render we always serve over HTTPS, but local dev runs on http://localhost.
+  // Derive a simple "isLocal" flag from CLIENT_URL so cookies stay usable in
+  // local dev while remaining Secure in hosted environments.
+  const clientUrl = process.env.CLIENT_URL || process.env.CLIENT_URL_2 || "";
+  const isLocal = clientUrl.startsWith("http://localhost") || clientUrl.startsWith("http://127.0.0.1");
+
+  // In hosted environments the API is typically on a different subdomain
+  // than the web app (e.g. api.onrender.com vs app.onrender.com). For the
+  // httpOnly auth cookie to be sent on cross-site XHR/fetch requests from
+  // the web origin, it must explicitly opt out of SameSite protections.
+  //
+  // - Local dev (localhost ↔ localhost) is same-site, so SameSite=Lax is
+  //   sufficient and avoids third-party-cookie semantics.
+  // - Hosted envs must use SameSite=None; Secure so that the browser will
+  //   attach the cookie on cross-site API calls made with credentials: 'include'.
+  const secure = !isLocal;
+  const sameSite: "none" | "lax" = secure ? "none" : "lax";
+
   return {
     httpOnly: true,
-    secure: isProd, // true on https (Render), false on localhost/http
-    sameSite: (isProd ? "none" : "lax") as "none" | "lax",
+    secure,
+    sameSite,
     path: "/",
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
   };
@@ -49,8 +67,7 @@ router.get("/me", requireAuth, async (req, res) => {
     const user = (req as any).user || {};
     const userId = user.id || user.uid;
     if (!userId) return res.status(401).json({ error: "Unauthorized" });
-
-    const account = await getUserAccount(userId);
+    const account = (req as any).account || await getUserAccount(userId);
 
     // Load the latest Firestore snapshot so we can strip sensitive fields
     const snap = await db.collection("users").doc(userId).get();
@@ -124,11 +141,13 @@ router.post("/login", async (req, res) => {
     // Token payload must match what requireAuth expects
     const token = jwt.sign({ uid }, JWT_SECRET, { expiresIn: "7d" });
 
-    // Set cookie
+    // Set cookie for httpOnly auth (legacy/secondary) and return token
+    // in the JSON body so the frontend can use Authorization headers.
     res.cookie("token", token, cookieOptions());
 
     return res.json({
       user: { id: uid, ...stripSensitiveUserFields(user) },
+      token,
     });
   } catch (err: any) {
     console.error("POST /api/auth/login failed:", err?.message || err);
@@ -139,17 +158,17 @@ router.post("/login", async (req, res) => {
   }
 });
 
-/**
- * POST /api/auth/signup
- * Body: { email, password, displayName?, timeZone? }
- * Creates user doc + sets auth cookie.
- */
 router.post("/signup", async (req, res) => {
   try {
-    const { email, password, displayName, timeZone } = (req.body || {}) as any;
+    const { email, password, displayName, timeZone, tosAccepted } = (req.body || {}) as any;
 
     if (!email || !password) {
       return res.status(400).json({ error: "Email and password required" });
+    }
+
+    // Require explicit Terms of Service acceptance for new accounts.
+    if (tosAccepted !== true) {
+      return res.status(400).json({ error: "tos_required" });
     }
 
     const emailNorm = String(email).trim().toLowerCase();
@@ -169,6 +188,8 @@ router.post("/signup", async (req, res) => {
     const userRef = db.collection("users").doc();
     const uid = userRef.id;
 
+    const now = Date.now();
+
     const userData = {
       email: emailNorm,
       displayName: displayName ? String(displayName) : "",
@@ -176,8 +197,12 @@ router.post("/signup", async (req, res) => {
       planId: "free",
       billingActive: false,
       billingStatus: "none",
-      createdAt: Date.now(),
+      createdAt: now,
       timeZone: timeZone ? String(timeZone) : "America/Chicago",
+      tosVersion: CURRENT_TOS_VERSION,
+      tosAcceptedAt: now,
+      tosAcceptedIp: req.ip || undefined,
+      tosUserAgent: req.get("user-agent") || undefined,
     };
 
     await userRef.set(userData);
@@ -185,9 +210,11 @@ router.post("/signup", async (req, res) => {
     const JWT_SECRET = mustGetEnv("JWT_SECRET");
     const token = jwt.sign({ uid }, JWT_SECRET, { expiresIn: "7d" });
 
+    // Set cookie for httpOnly auth (legacy/secondary) and return token
+    // in the JSON body so the frontend can use Authorization headers.
     res.cookie("token", token, cookieOptions());
 
-    return res.json({ user: { id: uid, ...stripSensitiveUserFields(userData) } });
+    return res.json({ user: { id: uid, ...stripSensitiveUserFields(userData) }, token });
   } catch (err: any) {
     console.error("POST /api/auth/signup failed:", err?.message || err);
     return res.status(500).json({

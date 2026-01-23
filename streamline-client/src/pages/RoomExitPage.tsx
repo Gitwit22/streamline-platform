@@ -550,7 +550,7 @@ export default function RoomExitPage() {
       </div>
 
       {/* DOWNLOAD PROGRESS MODAL */}
-      {downloading && downloadProgress && (
+      {downloading && (
         <div
           style={{
             position: 'fixed',
@@ -572,9 +572,9 @@ export default function RoomExitPage() {
               maxWidth: '400px',
               width: '90%',
               backdropFilter: 'blur(20px)',
+              textAlign: 'center',
             }}
           >
-            {/* Title */}
             <h2
               style={{
                 fontSize: '24px',
@@ -583,116 +583,14 @@ export default function RoomExitPage() {
                 color: '#ffffff',
               }}
             >
-              Downloading Stream
+              Preparing download…
             </h2>
-            <p style={{ color: '#9ca3af', marginBottom: '24px', fontSize: '14px' }}>
-              Your recording is being saved to your device
+            <p style={{ color: '#9ca3af', marginBottom: '8px', fontSize: '14px' }}>
+              Your recording is being prepared.
             </p>
-
-            {/* Progress Bar */}
-            <div
-              style={{
-                width: '100%',
-                height: '8px',
-                background: 'rgba(255, 255, 255, 0.1)',
-                borderRadius: '4px',
-                overflow: 'hidden',
-                marginBottom: '16px',
-              }}
-            >
-              <div
-                style={{
-                  height: '100%',
-                  background: 'linear-gradient(to right, #dc2626, #ef4444)',
-                  width: `${downloadProgress.percent}%`,
-                  transition: 'width 0.3s ease',
-                }}
-              />
-            </div>
-
-            {/* Stats Row */}
-            <div
-              style={{
-                display: 'grid',
-                gridTemplateColumns: '1fr 1fr',
-                gap: '16px',
-                marginBottom: '24px',
-              }}
-            >
-              {/* Percentage */}
-              <div
-                style={{
-                  background: 'rgba(0, 0, 0, 0.4)',
-                  border: '1px solid rgba(255, 255, 255, 0.05)',
-                  borderRadius: '12px',
-                  padding: '12px',
-                  textAlign: 'center',
-                }}
-              >
-                <div style={{ fontSize: '24px', fontWeight: 700, color: '#ef4444' }}>
-                  {Math.round(downloadProgress.percent)}%
-                </div>
-                <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '4px' }}>
-                  Complete
-                </div>
-              </div>
-
-              {/* Speed */}
-              <div
-                style={{
-                  background: 'rgba(0, 0, 0, 0.4)',
-                  border: '1px solid rgba(255, 255, 255, 0.05)',
-                  borderRadius: '12px',
-                  padding: '12px',
-                  textAlign: 'center',
-                }}
-              >
-                <div style={{ fontSize: '14px', fontWeight: 600, color: '#fecaca' }}>
-                  {downloadService.formatBytes(downloadProgress.speed)}/s
-                </div>
-                <div style={{ fontSize: '12px', color: '#6b7280', marginTop: '4px' }}>
-                  Speed
-                </div>
-              </div>
-            </div>
-
-            {/* Detailed Stats */}
-            <div
-              style={{
-                background: 'rgba(0, 0, 0, 0.4)',
-                border: '1px solid rgba(255, 255, 255, 0.05)',
-                borderRadius: '12px',
-                padding: '12px',
-                fontSize: '13px',
-              }}
-            >
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                  marginBottom: '8px',
-                }}
-              >
-                <span style={{ color: '#6b7280' }}>Downloaded:</span>
-                <span style={{ color: '#ffffff', fontWeight: 500 }}>
-                  {downloadService.formatBytes(downloadProgress.loaded)}{' '}
-                  <span style={{ color: '#6b7280' }}>
-                    / {downloadService.formatBytes(downloadProgress.total)}
-                  </span>
-                </span>
-              </div>
-              <div
-                style={{
-                  display: 'flex',
-                  justifyContent: 'space-between',
-                }}
-              >
-                <span style={{ color: '#6b7280' }}>Time Remaining:</span>
-                <span style={{ color: '#fecaca', fontWeight: 500 }}>
-                  {downloadService.formatTime(downloadProgress.timeRemaining)}
-                </span>
-              </div>
-            </div>
+            <p style={{ color: '#6b7280', fontSize: '12px' }}>
+              Keep this tab open until the download starts.
+            </p>
           </div>
         </div>
       )}

@@ -1,4 +1,6 @@
 import { firestore as db } from "../firebaseAdmin";
+import { resolveMaxDestinations } from "../lib/planLimits";
+import { getUserAccount, UserAccount } from "../lib/userAccount";
 
 type AccessResult = {
   allowed: boolean;
@@ -73,17 +75,18 @@ function billingBlocks(user: any): string | null {
 }
 
 export async function canAccessFeature(
-  uid: string,
+  uidOrAccount: string | UserAccount,
   featureKey: string
 ): Promise<AccessResult> {
-  // 1) Load user
-  const userSnap = await db.collection("users").doc(uid).get();
-  if (!userSnap.exists) {
-    return { allowed: false, reason: "User not found" };
-  }
+  // 1) Load normalized account + user snapshot (from cache when available)
+  const account =
+    typeof uidOrAccount === "string"
+      ? await getUserAccount(uidOrAccount)
+      : uidOrAccount;
 
-  const user = userSnap.data() as any;
-  const planId = user?.planId || "free";
+  const uid = account.uid;
+  const user = account.rawUser || {};
+  const planId = user?.planId || account.planId || "free";
   if (process.env.DEBUG_FEATURE_ACCESS === "1") {
     console.log(
       `[featureAccess] uid=${uid} feature=${featureKey} planId=${planId} adminOverride=${!!user?.adminOverride}`
@@ -93,6 +96,10 @@ export async function canAccessFeature(
   // Admin override grants access to all features
   // Source 1: flag on user doc
   if (user?.adminOverride) {
+    return { allowed: true };
+  }
+  // Source 1b: per-feature admin override for HLS only
+  if (featureKey === "hls" && user?.adminOverrideHls) {
     return { allowed: true };
   }
   // Source 2: membership in /admins collection
@@ -112,13 +119,18 @@ export async function canAccessFeature(
     return { allowed: true };
   }
 
-  // 2) STRICT BILLING BLOCK (NEW)
-  const billingBlockReason = billingBlocks(user);
-  if (billingBlockReason) {
-    return {
-      allowed: false,
-      reason: `Billing issue: ${billingBlockReason}`,
-    };
+  // 2) STRICT BILLING BLOCK (RESPECTS PLATFORM BILLING FLAG)
+  // When the platform billing flag disables billing (effectiveBillingEnabled === false),
+  // we bypass billing-based feature blocks so Test Mode users on paid plans can
+  // still access features like streaming/recording without a live subscription.
+  if (account.effectiveBillingEnabled !== false) {
+    const billingBlockReason = billingBlocks(user);
+    if (billingBlockReason) {
+      return {
+        allowed: false,
+        reason: `Billing issue: ${billingBlockReason}`,
+      };
+    }
   }
 
   // 3) Load plan
@@ -129,7 +141,7 @@ export async function canAccessFeature(
 
   const plan = planSnap.data() as any;
 
-  // 4) Feature flag check (with aliases for multistream)
+  // 4) Feature flag / limits check
   let enabled = Boolean(plan?.features?.[featureKey]);
   if (process.env.DEBUG_FEATURE_ACCESS === "1") {
     console.log(
@@ -139,15 +151,42 @@ export async function canAccessFeature(
 
   if (!enabled) {
     if (featureKey === "multistream") {
-      enabled = Boolean(
-        plan?.features?.multistream ||
-        plan?.features?.rtmp ||
-        plan?.features?.rtmpMultistream ||
-        plan?.multistreamEnabled
-      );
+      // Primary: numeric cap on RTMP destinations. This makes
+      // rtmpDestinationsMax/maxDestinations the source of truth for
+      // whether Stream Destinations are available at all.
+      const limits = (plan?.limits || {}) as any;
+      const maxDestinations = resolveMaxDestinations(limits);
+      enabled = maxDestinations > 0;
+
+      // Legacy fallback: if limits are missing but old feature flags
+      // are present, still honor them so existing plans keep working.
+      if (!enabled) {
+        enabled = Boolean(
+          plan?.features?.multistream ||
+          plan?.features?.rtmp ||
+          plan?.features?.rtmpMultistream ||
+          plan?.multistreamEnabled
+        );
+      }
       if (process.env.DEBUG_FEATURE_ACCESS === "1") {
         console.log(
           `[featureAccess] alias check result enabled=${enabled} via multistream|rtmp|rtmpMultistream|multistreamEnabled`
+        );
+      }
+    } else if (featureKey === "hls") {
+      enabled = Boolean(
+        plan?.features?.hls ||
+        plan?.features?.canHls ||
+        plan?.features?.hlsBroadcast ||
+        plan?.hlsEnabled ||
+        plan?.hlsBroadcastEnabled ||
+        plan?.canHls ||
+        // Legacy shape: plan.hls is an object
+        plan?.hls?.enabled
+      );
+      if (process.env.DEBUG_FEATURE_ACCESS === "1") {
+        console.log(
+          `[featureAccess] alias check result enabled=${enabled} via hls|canHls|hlsBroadcast`
         );
       }
     }

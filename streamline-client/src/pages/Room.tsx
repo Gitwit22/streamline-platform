@@ -1,19 +1,52 @@
 import { useEffect, useState, useRef } from "react";
 import { logAuthDebugContext } from "../lib/logAuthDebug";
-import { useNavigate, useParams } from "react-router-dom";
-import { apiStartRecording, apiStopRecording } from "../lib/api";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { apiStartRecording, apiStopRecording, apiFetch, getAuthToken, clearAuthStorage } from "../lib/api";
 import { LiveKitRoom, VideoConference } from "@livekit/components-react";
 import "@livekit/components-styles";
 import { fetchDestinations, preflight, type DestinationItem } from "../services/destinations";
 import StreamSetupModalV2 from "../components/StreamSetupModal";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import RoleOverlay from "../components/RoleOverlay";
-import { HostAVControls } from "../components/HostAVControls";
+import { RoleChangeToast } from "../components/RoleChangeToast";
 import { API_BASE } from "../lib/apiBase";
+import { APP_BASE } from "../lib/appBase";
+import { normalizeUiRolePresetId } from "../lib/roles";
+
+const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
 
 // Use relative paths - Vite proxy forwards /api/* to http://localhost:5137
 type StreamStatus = "idle" | "starting" | "live" | "stopping";
 type RecordingStatus = "idle" | "recording" | "stopping" | "stopped" | "error";
+
+type GuestStatus = "viewing_join" | "entered_room" | null;
+
+type RoomPermissions = {
+  canStream: boolean;
+  canRecord: boolean;
+  canDestinations: boolean;
+  canModerate: boolean;
+  canLayout: boolean;
+  canScreenShare: boolean;
+  canInvite: boolean;
+  canAnalytics: boolean;
+};
+type EffectiveControls = {
+  // Media/presence controls
+  canPublishAudio: boolean;
+  tileVisible: boolean;
+  canPublishVideo?: boolean;
+  canScreenShare?: boolean;
+
+  // In-room capability scopes
+  canMuteGuests?: boolean;
+  canRemoveGuests?: boolean;
+  canInviteLinks?: boolean;
+  canManageDestinations?: boolean;
+  canStartStopStream?: boolean;
+  canStartStopRecording?: boolean;
+  rolePresetId?: "participant" | "cohost";
+};
 
 function ThankYouScreen({ showHomeButton = false, onHome }: { showHomeButton?: boolean; onHome?: () => void }) {
   useEffect(() => {
@@ -73,37 +106,6 @@ function ThankYouScreen({ showHomeButton = false, onHome }: { showHomeButton?: b
           50% { transform: translateY(-20px) rotate(180deg); }
         }
       `}</style>
-          {recordingCountdown && (
-            <div
-              style={{
-                position: "absolute",
-                inset: 0,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "center",
-                pointerEvents: "none",
-                zIndex: 50,
-              }}
-            >
-              <div
-                key={recordingCountdown}
-                style={{
-                  padding: "14px 22px",
-                  borderRadius: "12px",
-                  background: "rgba(0, 0, 0, 0.65)",
-                  color: "#ffffff",
-                  fontSize: "30px",
-                  fontWeight: 700,
-                  letterSpacing: "0.04em",
-                  border: "1px solid rgba(255, 255, 255, 0.2)",
-                  boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
-                  animation: "fadeScale 0.9s ease",
-                }}
-              >
-                {recordingCountdown}
-              </div>
-            </div>
-          )}
 
       <div style={{
         background: 'rgba(39, 39, 42, 0.5)',
@@ -149,6 +151,47 @@ function ThankYouScreen({ showHomeButton = false, onHome }: { showHomeButton?: b
             🏠 Back to Home
           </button>
         )}
+      </div>
+    </div>
+  );
+}
+
+function PermissionsDebugOverlay({ dashboardRole }: { dashboardRole: "host" | "participant" }) {
+  const { localParticipant } = useLocalParticipant();
+  const localPermissions: any = useLocalParticipantPermissions();
+  const rawRolePresetId = ((localParticipant as any)?.identityMetadata as any)?.rolePresetId;
+  const normalizedRolePresetId = normalizeUiRolePresetId(rawRolePresetId);
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        bottom: 12,
+        left: 12,
+        padding: "8px 10px",
+        borderRadius: 8,
+        background: "rgba(15,23,42,0.9)",
+        border: "1px solid rgba(148,163,184,0.6)",
+        color: "#e5e7eb",
+        fontSize: 11,
+        maxWidth: 260,
+        zIndex: 40,
+      }}
+    >
+      <div style={{ fontWeight: 600, marginBottom: 4 }}>Permissions Debug</div>
+      <div>identity: {(localParticipant as any)?.identity || "(none)"}</div>
+      <div>
+        canPublish: {String(localPermissions?.canPublish ?? "n/a")} · canPublishData: {String(localPermissions?.canPublishData ?? "n/a")}
+      </div>
+      <div>
+        sources: {
+          Array.isArray(localPermissions?.canPublishSources)
+            ? (localPermissions.canPublishSources as any[]).map(String).join(", ") || "(none)"
+            : "n/a"
+        }
+      </div>
+      <div>
+        effectiveRole: {normalizedRolePresetId || dashboardRole}
       </div>
     </div>
   );
@@ -452,24 +495,182 @@ function getOrCreateUid() {
   }
   return uid;
 }
+ 
+type LiveKitShellProps = {
+  token: string;
+  serverUrl: string;
+  isHost: boolean;
+  isViewer: boolean;
+  roomId: string | null;
+  subjectToControls: boolean;
+  controlsAllowPublishAudio: boolean;
+  controlsTileVisible: boolean;
+  controlsAllowScreenShare: boolean;
+  watermarkEnabled: boolean;
+  dashboardOpen: boolean;
+  onCloseDashboard: () => void;
+  roomName: string;
+  roomAccessToken: string | null;
+  canMuteGuests: boolean;
+  canRemoveGuests: boolean;
+  canModerate: boolean;
+  effectivePermissionsMode: "simple" | "advanced";
+  dashboardGreenroomEnabled: boolean;
+  dashboardOverlaysEnabled: boolean;
+  dashboardRole: "host" | "moderator" | "participant";
+  onDisconnected: () => void;
+};
 
-export default function Room() {
-  useEffect(() => {
-    logAuthDebugContext("Arrive Room Page");
-  }, []);
+function LiveKitShell({
+  token,
+  serverUrl,
+  isHost,
+  isViewer,
+  roomId,
+  subjectToControls,
+  controlsAllowPublishAudio,
+  controlsTileVisible,
+   controlsAllowScreenShare,
+  watermarkEnabled,
+  dashboardOpen,
+  onCloseDashboard,
+  roomName,
+  roomAccessToken,
+  canMuteGuests,
+  canRemoveGuests,
+  canModerate,
+  effectivePermissionsMode,
+  dashboardGreenroomEnabled,
+  dashboardOverlaysEnabled,
+  dashboardRole,
+  onDisconnected,
+}: LiveKitShellProps) {
+  const [guestStatus, setGuestStatus] = useState<GuestStatus>(null);
+  const statusRef = useRef<GuestStatus>(null);
 
   useEffect(() => {
-    return () => {
-      recordingCountdownTimersRef.current.forEach(clearTimeout);
-      recordingCountdownTimersRef.current = [];
-      liveCountdownTimersRef.current.forEach(clearTimeout);
-      liveCountdownTimersRef.current = [];
+    if (!isHost || !roomId) return;
+
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/api/invites/room-status?roomId=${encodeURIComponent(roomId)}`,
+          {
+            credentials: "include",
+          },
+        );
+        if (!res.ok) return;
+        const data = await res.json();
+        let nextStatus: GuestStatus = null;
+        if (data?.hasEnteredRoom) {
+          nextStatus = "entered_room";
+        } else if (data?.hasJoinPageView) {
+          nextStatus = "viewing_join";
+        }
+        if (!cancelled && statusRef.current !== nextStatus) {
+          statusRef.current = nextStatus;
+          setGuestStatus(nextStatus);
+        }
+      } catch {
+        // ignore
+      }
     };
-  }, []);
 
-  const streamEgressRef = useRef<string | null>(null);
+    poll();
+    const id = setInterval(poll, 7000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [isHost, roomId]);
+
+  return (
+    <LiveKitRoom
+      data-lk-theme="default"
+      className={`sl-layout${isViewer ? " sl-viewer" : ""}${
+        subjectToControls && !controlsAllowPublishAudio ? " sl-controls-no-audio" : ""
+      }${subjectToControls && !controlsTileVisible ? " sl-controls-hide-self" : ""}${
+        subjectToControls && !controlsAllowScreenShare ? " sl-controls-no-screen" : ""
+      }`}
+      token={token}
+      serverUrl={serverUrl}
+      connect={true}
+      connectOptions={isViewer ? { autoSubscribe: true } : undefined}
+      onDisconnected={onDisconnected}
+      style={{
+        width: "100%",
+        height: "calc(100vh - 60px)",
+        position: "relative",
+      }}
+    >
+      <div style={{ width: "100%", height: "100%", position: "relative" }}>
+        {isHost && !isViewer && (
+          <div
+            style={{
+              position: "absolute",
+              top: 10,
+              left: "50%",
+              transform:
+                guestStatus === "viewing_join"
+                  ? "translateX(-50%) translateY(0)"
+                  : "translateX(-50%) translateY(-6px)",
+              padding: "6px 12px",
+              borderRadius: 999,
+              background: "rgba(15,23,42,0.9)",
+              border: "1px solid rgba(59,130,246,0.7)",
+              fontSize: 12,
+              color: "#bfdbfe",
+              zIndex: 20,
+              opacity: guestStatus === "viewing_join" ? 1 : 0,
+              pointerEvents: "none",
+              transition: "opacity 0.35s ease-in-out, transform 0.35s ease-in-out",
+            }}
+          >
+            Guest is viewing the join page.
+          </div>
+        )}
+        <VideoConference />
+        {watermarkEnabled && (
+          <img
+            src="/logo.png"
+            alt="StreamLine watermark"
+            className="sl-watermark"
+            style={{
+              top: "12px",
+              right: "12px",
+              width: "96px",
+            }}
+          />
+        )}
+        {dashboardOpen && !isViewer && (
+          <RoleOverlay
+            open={dashboardOpen}
+            onClose={onCloseDashboard}
+            role={dashboardRole}
+            roomName={roomName}
+            roomId={roomId || ""}
+            roomAccessToken={roomAccessToken || ""}
+            canMuteGuests={canMuteGuests}
+            canRemoveGuests={canRemoveGuests}
+            canModerate={canModerate}
+            advancedRolesEnabled={effectivePermissionsMode === "advanced"}
+            greenroomEnabled={dashboardGreenroomEnabled}
+            overlaysEnabled={dashboardOverlaysEnabled}
+          />
+        )}
+      </div>
+    </LiveKitRoom>
+  );
+}
+
+function RoomPage() {
+  const location = useLocation();
   const nav = useNavigate();
-  const { roomName } = useParams<{ roomName: string }>();
+  const { roomName: routeRoomNameParam } = useParams();
+  const routeRoomId = routeRoomNameParam ? decodeURIComponent(routeRoomNameParam) : null;
+  const [searchParams] = useSearchParams();
 
   const [displayName, setDisplayName] = useState(() => {
     // Prefer profile displayName if available, then fall back to cached value
@@ -496,8 +697,40 @@ export default function Room() {
   const [showStreamEndedModal, setShowStreamEndedModal] = useState(false);
   const currentUserId = getOrCreateUid();
   const [isHost, setIsHost] = useState(false);
-  const [userRole, setUserRole] = useState<string>("guest");
+  const [hostCheckReady, setHostCheckReady] = useState(false);
+  const [userRole, setUserRole] = useState<string>(() => {
+    try {
+      return localStorage.getItem("sl_current_role") || "guest";
+    } catch {
+      return "guest";
+    }
+  });
+  const [inviteToken, setInviteToken] = useState<string | null>(() => {
+    try {
+      return localStorage.getItem("sl_invite_token") || null;
+    } catch {
+      return null;
+    }
+  });
   const [isViewer, setIsViewer] = useState(false);
+  const [roomPermissions, setRoomPermissions] = useState<RoomPermissions | null>(null);
+  const [needsReauth, setNeedsReauth] = useState(false);
+  const roomTokenMintInFlightRef = useRef(false);
+  const [controlsPanelOpen, setControlsPanelOpen] = useState(false);
+  const [effectiveControls, setEffectiveControls] = useState<EffectiveControls>(() => ({
+    canPublishAudio: true,
+    tileVisible: true,
+    canPublishVideo: true,
+    canScreenShare: false,
+    canMuteGuests: false,
+    canRemoveGuests: false,
+    canInviteLinks: false,
+    canManageDestinations: false,
+    canStartStopStream: false,
+    canStartStopRecording: false,
+  }));
+  const [roleChangeMessage, setRoleChangeMessage] = useState<string | null>(null);
+  const roleToastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [recordingCountdown, setRecordingCountdown] = useState<string | null>(null);
   const [isRecordingCountdown, setIsRecordingCountdown] = useState(false);
   const recordingCountdownTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
@@ -505,15 +738,124 @@ export default function Room() {
   const [isLiveCountdown, setIsLiveCountdown] = useState(false);
   const liveCountdownTimersRef = useRef<Array<ReturnType<typeof setTimeout>>>([]);
 
-  useEffect(() => {
-    if (!roomName) return;
-    const createdRooms = JSON.parse(localStorage.getItem("sl_created_rooms") || "[]");
-    const willBeHost = createdRooms.includes(roomName);
-    setIsHost(willBeHost);
-    const currentRole = localStorage.getItem("sl_current_role") || "guest";
-    setUserRole(currentRole);
-    console.log('🏠 Host Check:', { roomName, createdRooms, isHost: willBeHost, role: currentRole });
-  }, [roomName, currentUserId]);
+  const currentRole = userRole;
+  const isGuestRole = currentRole === "guest";
+  const can = (key: keyof RoomPermissions) => !needsReauth && (isHost || !!roomPermissions?.[key]);
+  const canInviteLinks = !needsReauth && !isViewer && (isHost || !!effectiveControls.canInviteLinks || can("canInvite"));
+  const canManageStream =
+    !needsReauth &&
+    !isViewer &&
+    (isHost ||
+      !!effectiveControls.canStartStopStream ||
+      !!effectiveControls.canStartStopRecording ||
+      !!effectiveControls.canManageDestinations ||
+      can("canStream") ||
+      can("canRecord") ||
+      can("canDestinations"));
+  const canMuteGuestsUi =
+    !needsReauth &&
+    !isViewer &&
+    isHost &&
+    (!!effectiveControls.canMuteGuests || can("canModerate"));
+
+  const canRemoveGuestsUi =
+    !needsReauth &&
+    !isViewer &&
+    isHost &&
+    (!!effectiveControls.canRemoveGuests || can("canModerate"));
+
+  const canModerateUi =
+    !needsReauth &&
+    !isViewer &&
+    isHost &&
+    (can("canModerate") ||
+      !!effectiveControls.canRemoveGuests ||
+      !!effectiveControls.canMuteGuests);
+
+  const subjectToControls = !isHost && !isViewer;
+  const controlsAllowPublishAudio = !subjectToControls || effectiveControls.canPublishAudio !== false;
+  const controlsTileVisible = !subjectToControls || effectiveControls.tileVisible !== false;
+  const controlsAllowScreenShare = !subjectToControls || effectiveControls.canScreenShare !== false;
+
+  const openReauthInNewTab = () => {
+    try {
+      const next = `${window.location.pathname}${window.location.search}`;
+      const params = new URLSearchParams();
+      params.set("next", next);
+      window.open(`/login?${params.toString()}`, "_blank", "noopener,noreferrer");
+    } catch {
+      window.open("/login", "_blank", "noopener,noreferrer");
+    }
+  };
+
+  const confirmReauthed = async () => {
+    try {
+      const res = await apiFetch("/api/account/me", undefined, { allowNonOk: true });
+      if (res.ok) {
+        setAuthStatus("authed");
+        setNeedsReauth(false);
+        return;
+      }
+      if (res.status === 401 || res.status === 403) {
+        setAuthStatus("guest");
+        setNeedsReauth(true);
+      }
+    } catch (err: any) {
+      if (err?.status === 401 || err?.status === 403) {
+        setAuthStatus("guest");
+        setNeedsReauth(true);
+      }
+    }
+  };
+
+  const updateRoomControls = async (patch: Partial<EffectiveControls>) => {
+    if (!roomId || !roomAccessToken) return;
+    if (needsReauth) {
+      setNeedsReauth(true);
+      return;
+    }
+
+    try {
+      const res = await apiFetch(
+        `/api/rooms/${encodeURIComponent(roomId)}/controls`,
+        {
+          method: "PATCH",
+          headers: { "x-room-access-token": roomAccessToken },
+          body: JSON.stringify(patch),
+        },
+        { allowNonOk: true },
+      );
+
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        const c = data?.controls;
+        if (c && typeof c === "object") {
+          setEffectiveControls({
+            canPublishAudio: typeof c.canPublishAudio === "boolean" ? c.canPublishAudio : true,
+            tileVisible: typeof c.tileVisible === "boolean" ? c.tileVisible : true,
+            canPublishVideo: typeof c.canPublishVideo === "boolean" ? c.canPublishVideo : true,
+            canScreenShare: typeof c.canScreenShare === "boolean" ? c.canScreenShare : false,
+            canMuteGuests: typeof c.canMuteGuests === "boolean" ? c.canMuteGuests : false,
+                canRemoveGuests: typeof c.canRemoveGuests === "boolean" ? c.canRemoveGuests : false,
+            canInviteLinks: typeof c.canInviteLinks === "boolean" ? c.canInviteLinks : false,
+            canManageDestinations: typeof c.canManageDestinations === "boolean" ? c.canManageDestinations : false,
+            canStartStopStream: typeof c.canStartStopStream === "boolean" ? c.canStartStopStream : false,
+            canStartStopRecording: typeof c.canStartStopRecording === "boolean" ? c.canStartStopRecording : false,
+            rolePresetId:
+              c.role === "cohost" || c.role === "participant"
+                ? normalizeUiRolePresetId(c.role)
+                : undefined,
+          });
+        }
+      } else if (res.status === 401 || res.status === 403) {
+        setNeedsReauth(true);
+      }
+    } catch (err: any) {
+      if (err?.status === 401 || err?.status === 403) {
+        setNeedsReauth(true);
+      }
+    }
+  };
 
   const [recordingId, setRecordingId] = useState<string | null>(null);
   const [recordingStatus, setRecordingStatus] = useState<RecordingStatus>("idle");
@@ -524,16 +866,28 @@ export default function Room() {
   const [recordingPlanId, setRecordingPlanId] = useState<string | null>(null);
   const [maxRecordingMinutesPerClip, setMaxRecordingMinutesPerClip] = useState<number | null>(null);
   const [recordingToast, setRecordingToast] = useState<string | null>(null);
+  const [copiedInviteLabel, setCopiedInviteLabel] = useState<string | null>(null);
+  const copiedInviteTimeoutRef = useRef<number | null>(null);
   const lastStopWasAutoRef = useRef<boolean>(false);
   const autoStopTriggeredRef = useRef(false);
   const [viewerCount] = useState<number>(0);
   const [elapsedTime, setElapsedTime] = useState(0);
   const streamStartTimeRef = useRef<number | null>(null);
+  const streamEgressRef = useRef<string | null>(null);
   const lastElapsedRef = useRef(0);
   const usagePostedRef = useRef(false);
   const [didStreamThisSession, setDidStreamThisSession] = useState(false);
-  const [canMultistream, setCanMultistream] = useState<boolean>(false);
-  const [recordingEnabled, setRecordingEnabled] = useState<boolean>(true);
+  // Plan/entitlement flags are informational only; in-room gating is driven by roomPermissions.
+  const [planMultistreamEnabled, setPlanMultistreamEnabled] = useState<boolean>(false);
+  const [planRtmpDestinationsMax, setPlanRtmpDestinationsMax] = useState<number | null>(null);
+  const [planRecordingEnabled, setPlanRecordingEnabled] = useState<boolean>(false);
+  const [planHlsEnabled, setPlanHlsEnabled] = useState<boolean>(false);
+  const [planHlsCustomizationEnabled, setPlanHlsCustomizationEnabled] = useState<boolean>(false);
+  const [platformHlsEnabled, setPlatformHlsEnabled] = useState<boolean>(true);
+  const [platformRecordingEnabled, setPlatformRecordingEnabled] = useState<boolean>(true);
+  const [entitlementsReady, setEntitlementsReady] = useState(false);
+  const [dashboardGreenroomEnabled, setDashboardGreenroomEnabled] = useState<boolean>(false);
+  const [dashboardOverlaysEnabled, setDashboardOverlaysEnabled] = useState<boolean>(false);
   const [dualRecordingAllowed, setDualRecordingAllowed] = useState<boolean>(false);
   const [watermarkEnabled, setWatermarkEnabled] = useState<boolean>(false);
   const [maxGuestsAllowed, setMaxGuestsAllowed] = useState<number | null>(null);
@@ -549,6 +903,280 @@ export default function Room() {
   const [presetClamped, setPresetClamped] = useState(false);
   const [defaultLayoutPref, setDefaultLayoutPref] = useState<"speaker" | "grid">("speaker");
   const [defaultRecordingModePref, setDefaultRecordingModePref] = useState<"cloud" | "dual">("cloud");
+  const [firestoreRoomId, setFirestoreRoomId] = useState<string | null>(null);
+  const [roomAccessToken, setRoomAccessToken] = useState<string | null>(null);
+  const [participantIdentity, setParticipantIdentity] = useState<string | null>(null);
+  const [, setAuthStatus] = useState<"unknown" | "authed" | "guest">("unknown");
+    const [effectivePermissionsMode, setEffectivePermissionsMode] = useState<"simple" | "advanced">("simple");
+  const roomId = firestoreRoomId ?? routeRoomId ?? null;
+  const [roomName, setRoomName] = useState<string>(() => {
+    const fromState = (location.state as any)?.livekitRoomName;
+    if (typeof fromState === "string" && fromState.trim()) return fromState.trim();
+    const cached = localStorage.getItem("sl_last_room");
+    return cached || "";
+  });
+  const effectiveRoomName = roomName;
+
+  useEffect(() => {
+    // When navigating between rooms in a single SPA session, always
+    // require a fresh entitlements snapshot and clear plan-derived
+    // flags so we never briefly show stale caps.
+    setEntitlementsReady(false);
+    setPlanRecordingEnabled(false);
+    setPlanHlsEnabled(false);
+    setPlanRtmpDestinationsMax(null);
+    setPlanHlsCustomizationEnabled(false);
+    setPlanMultistreamEnabled(false);
+    setDualRecordingAllowed(false);
+    setWatermarkEnabled(false);
+    setMaxGuestsAllowed(null);
+    setMaxRecordingMinutesPerClip(null);
+  }, [roomId]);
+
+  useEffect(() => {
+    setHostCheckReady(true);
+    const candidateKey = roomId;
+    if (!candidateKey) return;
+    const createdRooms = JSON.parse(localStorage.getItem("sl_created_rooms") || "[]");
+    const willBeHost = createdRooms.includes(candidateKey);
+    setIsHost(willBeHost);
+    const storedRole = (() => {
+      try {
+        return localStorage.getItem("sl_current_role") || "guest";
+      } catch {
+        return "guest";
+      }
+    })();
+    const nextRole = willBeHost ? "host" : storedRole;
+    setUserRole(nextRole);
+    try {
+      if (willBeHost) localStorage.setItem("sl_current_role", "host");
+      setInviteToken(localStorage.getItem("sl_invite_token") || null);
+    } catch {
+      // ignore
+    }
+    console.log("🏠 Host Check:", { roomKey: candidateKey, roomId, createdRooms, isHost: willBeHost, role: nextRole });
+  }, [currentUserId, roomId]);
+
+  // Realtime controls subscription (SSE over the roomAccessToken).
+  // This must NOT trigger LiveKit token refresh/reconnect.
+  useEffect(() => {
+    if (!roomId || !roomAccessToken) return;
+
+    const base = API_BASE || "";
+
+    const qs = new URLSearchParams();
+    qs.set("t", roomAccessToken);
+    if (participantIdentity) qs.set("identity", participantIdentity);
+    const url = `${base}/api/rooms/${encodeURIComponent(roomId)}/controls/stream?${qs.toString()}`;
+
+    console.log("[Room controls SSE] identity from roomToken:", participantIdentity, "url:", url);
+
+    let closed = false;
+    const es = new EventSource(url, { withCredentials: true } as any);
+
+    let lastRole: "cohost" | "participant" | undefined = undefined;
+
+    es.onmessage = (ev) => {
+      if (closed) return;
+      try {
+        const data = JSON.parse(ev.data);
+
+        const rawRole = data?.role;
+        const nextRole = rawRole === "cohost" || rawRole === "participant" ? normalizeUiRolePresetId(rawRole) : undefined;
+
+        if (nextRole && lastRole && nextRole !== lastRole) {
+          const roleName = nextRole === "cohost" ? "Co-host" : "Participant";
+
+          const msg = `You're now a ${roleName}`;
+          setRoleChangeMessage(msg);
+
+          if (roleToastTimeoutRef.current) {
+            clearTimeout(roleToastTimeoutRef.current);
+          }
+          roleToastTimeoutRef.current = setTimeout(() => {
+            setRoleChangeMessage(null);
+            roleToastTimeoutRef.current = null;
+          }, 2800);
+        }
+
+        if (!lastRole && nextRole) {
+          lastRole = nextRole;
+        } else if (nextRole && nextRole !== lastRole) {
+          lastRole = nextRole;
+        }
+
+        const normalizedRolePresetId = nextRole ? normalizeUiRolePresetId(nextRole) : undefined;
+
+        setEffectiveControls({
+          canPublishAudio: typeof data?.canPublishAudio === "boolean" ? data.canPublishAudio : true,
+          tileVisible: typeof data?.tileVisible === "boolean" ? data.tileVisible : true,
+          canPublishVideo: typeof data?.canPublishVideo === "boolean" ? data.canPublishVideo : true,
+          canScreenShare: typeof data?.canScreenShare === "boolean" ? data.canScreenShare : false,
+          canMuteGuests: typeof data?.canMuteGuests === "boolean" ? data.canMuteGuests : false,
+          canRemoveGuests: typeof data?.canRemoveGuests === "boolean" ? data.canRemoveGuests : false,
+          canInviteLinks: typeof data?.canInviteLinks === "boolean" ? data.canInviteLinks : false,
+          canManageDestinations: typeof data?.canManageDestinations === "boolean" ? data.canManageDestinations : false,
+          canStartStopStream: typeof data?.canStartStopStream === "boolean" ? data.canStartStopStream : false,
+          canStartStopRecording: typeof data?.canStartStopRecording === "boolean" ? data.canStartStopRecording : false,
+          rolePresetId: normalizedRolePresetId,
+        });
+      } catch {
+        // ignore
+      }
+    };
+
+    es.onerror = () => {
+      // Keep last-known controls; EventSource will retry.
+    };
+
+    return () => {
+      closed = true;
+      if (roleToastTimeoutRef.current) {
+        clearTimeout(roleToastTimeoutRef.current);
+        roleToastTimeoutRef.current = null;
+      }
+      try {
+        es.close();
+      } catch {
+        // ignore
+      }
+    };
+  }, [API_BASE, roomId, roomAccessToken, participantIdentity]);
+
+  // If we have an inviteToken but the role isn't set (or got reset), resolve it here
+  // so we mint the correct room token and permissions.
+  useEffect(() => {
+    if (!inviteToken) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/invites/resolve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ inviteToken }),
+        });
+        if (!res.ok) return;
+        const data = await res.json().catch(() => null);
+        if (!data || cancelled) return;
+
+        const resolvedId = String(data.roomId || "");
+        const resolvedName = String(data.roomName || "");
+        const rawResolvedRole = String(data.role || "guest");
+        const resolvedRole = rawResolvedRole === "cohost" ? "guest" : rawResolvedRole;
+        const expectedId = roomId || "";
+        const expectedName = effectiveRoomName || "";
+        const clearStaleInvite = () => {
+          setInviteToken(null);
+          try {
+            localStorage.removeItem("sl_invite_token");
+          } catch {
+            // ignore
+          }
+        };
+        if (expectedId && resolvedId && resolvedId !== expectedId) {
+          clearStaleInvite();
+          return;
+        }
+        if (!expectedId && expectedName && resolvedName && resolvedName !== expectedName) {
+          clearStaleInvite();
+          return;
+        }
+
+        // Only override when we're not host and our role is low-trust.
+        if (!isHost && (userRole === "guest" || userRole === "participant")) {
+          setUserRole(resolvedRole);
+          try {
+            localStorage.setItem("sl_current_role", resolvedRole);
+          } catch {
+            // ignore
+          }
+        }
+      } catch {
+        // ignore
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [API_BASE, roomId, effectiveRoomName, inviteToken, isHost, userRole]);
+
+  // Token-only routing support: /room?t=<token>
+  // Prefer treating `t` as a room access/share token and resolving it via
+  // /api/rooms/resolve using Authorization headers. If resolution fails,
+  // fall back to treating it as an invite token for older links.
+  useEffect(() => {
+    const t = String(searchParams.get("t") || "").trim();
+    if (!t) return;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/rooms/resolve`, {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${t}`,
+          },
+          credentials: "include",
+        });
+
+        if (cancelled) return;
+
+        if (res.ok) {
+          const data = await res.json().catch(() => null as any);
+          if (!data || cancelled) return;
+
+          const resolvedRoomId = String(data.roomId || "").trim();
+          const resolvedRoomName = String(data.roomName || "").trim();
+          const resolvedRole = String(data.role || "").trim();
+
+          if (resolvedRoomId) setFirestoreRoomId(resolvedRoomId);
+          if (resolvedRoomName) setRoomName(resolvedRoomName);
+
+          if (resolvedRole && !isHost) {
+            setUserRole(resolvedRole);
+            try {
+              localStorage.setItem("sl_current_role", resolvedRole);
+            } catch {
+              // ignore
+            }
+          }
+
+          // Treat the incoming token as a roomAccessToken for downstream
+          // APIs (HLS, status, etc.). /api/roomToken will return a refreshed
+          // token which will overwrite this state when available.
+          setRoomAccessToken(t);
+          return;
+        }
+
+        // If resolve fails (legacy tokens, pure invites, etc.), fall back to
+        // the previous behavior of treating `t` as an invite token only.
+        console.warn("[Room] /api/rooms/resolve failed for token route", res.status);
+        setInviteToken(t);
+        try {
+          localStorage.setItem("sl_invite_token", t);
+        } catch {
+          // ignore
+        }
+      } catch (err) {
+        if (cancelled) return;
+        console.warn("[Room] /api/rooms/resolve error; treating t as invite", err);
+        setInviteToken(t);
+        try {
+          localStorage.setItem("sl_invite_token", t);
+        } catch {
+          // ignore
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [API_BASE, searchParams, isHost]);
 
   const presetLabelFor = (id?: string | null) => {
     if (!id) return "Standard 720p30";
@@ -562,53 +1190,241 @@ export default function Room() {
     setPresetClamped(false);
   };
 
+  const applyEntitlementsAndPlatform = (eff: any, platformFlags: any) => {
+    const platform = platformFlags && typeof platformFlags === "object" ? platformFlags : {};
+
+    if (platform && Object.prototype.hasOwnProperty.call(platform, "hlsEnabled")) {
+      if (typeof (platform as any).hlsEnabled === "boolean") {
+        setPlatformHlsEnabled((platform as any).hlsEnabled);
+      }
+    }
+
+    if (platform && Object.prototype.hasOwnProperty.call(platform, "recordingEnabled")) {
+      if (typeof (platform as any).recordingEnabled === "boolean") {
+        setPlatformRecordingEnabled((platform as any).recordingEnabled);
+      }
+    }
+
+    const dashboardGreenroomFlag =
+      (platform as any).dashboardGreenroomEnabled ?? (platform as any).greenroomDashboard;
+    if (typeof dashboardGreenroomFlag === "boolean") {
+      setDashboardGreenroomEnabled(dashboardGreenroomFlag);
+    }
+
+    const dashboardOverlaysFlag =
+      (platform as any).dashboardOverlaysEnabled ?? (platform as any).overlaysDashboard;
+    if (typeof dashboardOverlaysFlag === "boolean") {
+      setDashboardOverlaysEnabled(dashboardOverlaysFlag);
+    }
+
+    let appliedEff = false;
+
+    if (eff && typeof eff === "object") {
+      const features = eff.features || {};
+      const limits = eff.limits || {};
+
+      if (typeof eff.planId === "string") {
+        setRecordingPlanId(eff.planId);
+      }
+
+      if (Object.prototype.hasOwnProperty.call(features, "recording")) {
+        if (typeof (features as any).recording === "boolean") {
+          setPlanRecordingEnabled((features as any).recording);
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(features, "dualRecording")) {
+        if (typeof (features as any).dualRecording === "boolean") {
+          setDualRecordingAllowed((features as any).dualRecording);
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(features, "watermark")) {
+        if (typeof (features as any).watermark === "boolean") {
+          setWatermarkEnabled((features as any).watermark);
+        }
+      }
+
+      const hasRtmpLimit =
+        Object.prototype.hasOwnProperty.call(limits, "rtmpDestinationsMax") ||
+        Object.prototype.hasOwnProperty.call(limits as any, "maxDestinations");
+      if (hasRtmpLimit) {
+        const maxRtmpFromLimits =
+          typeof limits.rtmpDestinationsMax === "number"
+            ? limits.rtmpDestinationsMax
+            : typeof (limits as any).maxDestinations === "number"
+            ? (limits as any).maxDestinations
+            : 0;
+        setPlanRtmpDestinationsMax(maxRtmpFromLimits);
+        if (Object.prototype.hasOwnProperty.call(features as any, "rtmpMultistream")) {
+          if (typeof (features as any).rtmpMultistream === "boolean") {
+            setPlanMultistreamEnabled((features as any).rtmpMultistream);
+          }
+        } else {
+          setPlanMultistreamEnabled(maxRtmpFromLimits > 1);
+        }
+      }
+
+      const runtimeHls = (features as any).hls ?? (features as any).hlsEnabled;
+      const legacyHls = (features as any).canHls;
+      if (
+        Object.prototype.hasOwnProperty.call(features as any, "hls") ||
+        Object.prototype.hasOwnProperty.call(features as any, "hlsEnabled") ||
+        Object.prototype.hasOwnProperty.call(features as any, "canHls")
+      ) {
+        if (typeof runtimeHls === "boolean") {
+          setPlanHlsEnabled(runtimeHls);
+        } else if (typeof legacyHls === "boolean") {
+          setPlanHlsEnabled(legacyHls);
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(features as any, "hlsCustomizationEnabled")) {
+        const customizationHls = (features as any).hlsCustomizationEnabled;
+        if (typeof customizationHls === "boolean") {
+          setPlanHlsCustomizationEnabled(customizationHls);
+        }
+      } else if (
+        Object.prototype.hasOwnProperty.call(features as any, "hls") ||
+        Object.prototype.hasOwnProperty.call(features as any, "hlsEnabled") ||
+        Object.prototype.hasOwnProperty.call(features as any, "canHls")
+      ) {
+        const customizationHls = (features as any).hlsCustomizationEnabled;
+        const runtime = (features as any).hls ?? (features as any).hlsEnabled;
+        const legacy = (features as any).canHls;
+        setPlanHlsCustomizationEnabled(
+          typeof customizationHls === "boolean"
+            ? customizationHls
+            : typeof runtime === "boolean"
+            ? runtime
+            : !!legacy,
+        );
+      }
+
+      if (Object.prototype.hasOwnProperty.call(limits, "maxGuests")) {
+        if (typeof limits.maxGuests === "number") {
+          setMaxGuestsAllowed(limits.maxGuests);
+        }
+      }
+
+      if (Object.prototype.hasOwnProperty.call(limits, "maxRecordingMinutesPerClip")) {
+        if (
+          typeof limits.maxRecordingMinutesPerClip === "number" &&
+          limits.maxRecordingMinutesPerClip > 0
+        ) {
+          setMaxRecordingMinutesPerClip(limits.maxRecordingMinutesPerClip);
+        } else {
+          setMaxRecordingMinutesPerClip(null);
+        }
+      }
+
+      appliedEff = true;
+    }
+
+    if (appliedEff) {
+      setEntitlementsReady(true);
+    }
+  };
+
   useEffect(() => {
-    if (!roomName || !displayName) return;
-    const role = localStorage.getItem("sl_current_role") || userRole;
+    if (!hostCheckReady) return;
+    if (!displayName) return;
+    if (!roomId && !effectiveRoomName) return;
+    // If we already have a valid token+serverUrl for this mount, avoid
+    // refetching room tokens on every minor state change. This prevents
+    // duplicate /api/roomToken calls that can cause spurious 401s and
+    // disconnects, while still allowing a fresh token on initial join.
+    if (token && serverUrl) return;
+    if (roomTokenMintInFlightRef.current) return;
+    // Role used to mint the LiveKit token + roomAccessToken.
+    // IMPORTANT: Hosts must request role="host" so /api/hls/start isn't rejected as insufficient_role.
+    const requestedRole = isHost ? "host" : userRole === "moderator" ? "participant" : userRole;
+    const roleNeedsAuth = requestedRole === "cohost" || requestedRole === "host";
+    const role = requestedRole;
     const isGuest = role === "guest";
 
     const fetchToken = async () => {
       try {
+        roomTokenMintInFlightRef.current = true;
         console.log(`[Room] Fetching room token (role=${role || "host"})...`);
         const buildRoomTokenRequest = (mode: "auth" | "guest") => {
           const endpoint = mode === "guest" ? `${API_BASE}/api/roomToken/guest` : `${API_BASE}/api/roomToken`;
-          const payload: any = { roomName, identity: displayName };
+          const payload: any = { identity: displayName };
+
+          // If we have a canonical roomId, send only that.
+          // Otherwise, fall back to roomName so the server can resolve.
+          if (roomId) {
+            payload.roomId = roomId;
+          } else {
+            payload.roomName = effectiveRoomName;
+          }
+
+          // Hosts should never rely on invite tokens for room access.
+          // Using a stale invite for a different room can cause
+          // invite_room_mismatch 403 errors when minting host tokens.
+          if (inviteToken && !isHost) {
+            payload.inviteToken = inviteToken;
+          }
+
+          // Tell the backend what role we want this token minted as.
+          // The backend will clamp/lock it as needed.
+          payload.role = role;
 
           if (mode === "guest") {
             payload.displayName = displayName;
             payload.guestId = getOrCreateUid();
           } else {
             payload.uid = getOrCreateUid();
-            // Pass invite role through so cohost/moderator links work for logged-in users.
-            // Never send "host" (localStorage can be spoofed; host is derived separately).
-            if (role === "participant" || role === "cohost" || role === "moderator") {
-              payload.role = role;
-            }
+            payload.displayName = displayName;
+            // Invites are currently guest/participant-only (no elevated roles).
           }
 
           return { endpoint, payload };
         };
 
-        const tryFetch = async (mode: "auth" | "guest") => {
+        const tryFetch = async (mode: "auth" | "guest", opts?: { omitInvite?: boolean }) => {
           const { endpoint, payload } = buildRoomTokenRequest(mode);
-          const res = await fetch(endpoint, {
+          if (opts?.omitInvite) {
+            delete (payload as any).inviteToken;
+          }
+          // endpoint is a relative path (e.g. "/api/roomToken"); apiFetch
+          // will prepend API_BASE and attach Authorization and cookies.
+          const res = await apiFetch(endpoint, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
             body: JSON.stringify(payload),
-            credentials: "include",
-          });
+          }, { allowNonOk: true });
           return { res, mode };
         };
 
-        // Primary: if role is not guest, try auth token first. If it fails due to auth, fall back to guest token.
+        // Primary: if role is not guest, try auth token first.
+        // If denied due to auth, we only fall back to guest for low-trust roles.
         let attempt = await tryFetch(isGuest ? "guest" : "auth");
         if (!attempt.res.ok && !isGuest && (attempt.res.status === 401 || attempt.res.status === 403)) {
+          // For privileged roles: degrade gracefully to a guest token and surface re-auth banner.
+          if (roleNeedsAuth) {
+            setNeedsReauth(true);
+            setAuthStatus("guest");
+          }
           console.warn("[Room] auth roomToken denied; falling back to guest token", attempt.res.status);
           attempt = await tryFetch("guest");
         }
 
+        // If a guest token request fails with 403 (e.g. stale or mismatched invite),
+        // retry once without the invite token so a valid participant link doesn't leave
+        // the user stuck without video.
+        if (isGuest && !attempt.res.ok && attempt.res.status === 403) {
+          console.warn("[Room] guest roomToken denied; retrying without invite token", attempt.res.status);
+          attempt = await tryFetch("guest", { omitInvite: true });
+        }
+
         const res = attempt.res;
         console.log("[Room] roomToken status:", res.status, "mode:", attempt.mode);
+
+        // If an authenticated mint succeeds, we can clear the banner without probing /me in the background.
+        if (res.ok && attempt.mode === "auth") {
+          setAuthStatus("authed");
+          setNeedsReauth(false);
+        }
 
         let data: any = null;
         let rawText: string | null = null;
@@ -644,7 +1460,45 @@ export default function Room() {
           console.error("[Room] Invalid token returned:", data);
           return;
         }
-        const { token, serverUrl } = data;
+
+        if (typeof data?.roomName === "string" && data.roomName.trim()) {
+          setRoomName(data.roomName.trim());
+        }
+
+        if (data?.permissions && typeof data.permissions === "object") {
+          setRoomPermissions({
+            canStream: !!data.permissions.canStream,
+            canRecord: !!data.permissions.canRecord,
+            canDestinations: !!data.permissions.canDestinations,
+            canModerate: !!data.permissions.canModerate,
+            canLayout: !!data.permissions.canLayout,
+            canScreenShare: !!data.permissions.canScreenShare,
+            canInvite: !!data.permissions.canInvite,
+            canAnalytics: !!data.permissions.canAnalytics,
+          });
+        } else {
+          setRoomPermissions(null);
+        }
+        if (data.effectiveEntitlements || data.platformFlags) {
+          applyEntitlementsAndPlatform(data.effectiveEntitlements, data.platformFlags || {});
+        }
+        const { token, serverUrl, roomId: returnedRoomId, roomAccessToken: roomAccessTokenRaw, participantIdentity: participantIdentityRaw } = data as any;
+        if (typeof returnedRoomId === "string" && returnedRoomId.trim()) {
+          setFirestoreRoomId(returnedRoomId.trim());
+        } else {
+          console.warn("[Room] /roomToken did not return roomId; leaving firestoreRoomId null", data);
+          setFirestoreRoomId(null);
+        }
+        if (typeof roomAccessTokenRaw === "string" && roomAccessTokenRaw.trim()) {
+          setRoomAccessToken(roomAccessTokenRaw.trim());
+        } else {
+          setRoomAccessToken(null);
+        }
+        if (typeof participantIdentityRaw === "string" && participantIdentityRaw.trim()) {
+          setParticipantIdentity(participantIdentityRaw.trim());
+        } else {
+          setParticipantIdentity(null);
+        }
         const finalServerUrl = serverUrl || import.meta.env.VITE_LIVEKIT_URL;
         console.log("[Room] token received:", !!token, "serverUrl:", finalServerUrl);
         setToken(token);
@@ -668,11 +1522,15 @@ export default function Room() {
         }
       } catch (err) {
         console.error("[Room] fetchToken error:", err);
+      } finally {
+        roomTokenMintInFlightRef.current = false;
       }
     };
 
     fetchToken();
-  }, [roomName, displayName]);
+  }, [displayName, roomId, effectiveRoomName, inviteToken, userRole, isHost, hostCheckReady, token, serverUrl]);
+
+  
 
   useEffect(() => {
     if (isViewer && showStreamSetup) {
@@ -680,18 +1538,22 @@ export default function Room() {
     }
   }, [isViewer, showStreamSetup]);
 
-  // Load effective entitlements + media presets (hosts only)
+  // Load effective entitlements + media presets only when the user explicitly opens host tools.
+  // (Nuclear option 2: avoid background /me calls after connect.)
   useEffect(() => {
     const role = localStorage.getItem("sl_current_role") || userRole;
     if (role === "guest") return;
+    if (!showStreamSetup && !(dashboardOpen && canManageStream)) return;
+    if (needsReauth) return;
+    if (!canManageStream) return;
 
     let cancelled = false;
 
     (async () => {
       try {
         const [presetsRes, meRes] = await Promise.all([
-          fetch(`${API_BASE}/api/account/presets`, { credentials: "include" }),
-          fetch(`${API_BASE}/api/account/me`, { credentials: "include" }),
+          apiFetch("/api/account/presets"),
+          apiFetch("/api/account/me"),
         ]);
 
         if (!cancelled && presetsRes.ok) {
@@ -707,7 +1569,14 @@ export default function Room() {
           }
         }
 
+        if (!cancelled && (meRes.status === 401 || meRes.status === 403)) {
+          setAuthStatus("guest");
+          setNeedsReauth(true);
+          return;
+        }
+
         if (!cancelled && meRes.ok) {
+          setAuthStatus("authed");
           const me = await meRes.json();
           const prefs = me?.mediaPrefs || {};
           if (prefs.defaultLayout === "grid" || prefs.defaultLayout === "speaker") {
@@ -722,33 +1591,14 @@ export default function Room() {
           }
 
           const eff = (me as any)?.effectiveEntitlements;
-          if (eff && typeof eff === "object") {
-            const features = eff.features || {};
-            const limits = eff.limits || {};
-            if (typeof eff.planId === "string") {
-              setRecordingPlanId(eff.planId);
-            }
-            if (typeof features.recording === "boolean") {
-              setRecordingEnabled(features.recording);
-            }
-            if (typeof features.dualRecording === "boolean") {
-              setDualRecordingAllowed(features.dualRecording);
-            }
-            if (typeof features.watermark === "boolean") {
-              setWatermarkEnabled(features.watermark);
-            }
-            if (typeof features.rtmpMultistream === "boolean") {
-              setCanMultistream(features.rtmpMultistream);
-            }
-            if (typeof limits.maxGuests === "number") {
-              setMaxGuestsAllowed(limits.maxGuests);
-            }
-            if (typeof limits.maxRecordingMinutesPerClip === "number" && limits.maxRecordingMinutesPerClip > 0) {
-              setMaxRecordingMinutesPerClip(limits.maxRecordingMinutesPerClip);
-            } else {
-              setMaxRecordingMinutesPerClip(null);
-            }
+          const effPermMode = (me as any)?.effectivePermissionsMode;
+          if (effPermMode === "advanced") {
+            setEffectivePermissionsMode("advanced");
+          } else {
+            setEffectivePermissionsMode("simple");
           }
+          const platformFlags = (me as any)?.platformFlags || {};
+          applyEntitlementsAndPlatform(eff, platformFlags);
         }
       } catch (err) {
         if (!cancelled) {
@@ -768,14 +1618,13 @@ export default function Room() {
     return () => {
       cancelled = true;
     };
-  }, [API_BASE, userRole]);
+  }, [API_BASE, userRole, showStreamSetup, dashboardOpen, canManageStream, needsReauth]);
 
   useEffect(() => {
     if (
       recordingStatus === "stopped" &&
       recordingId &&
-      lastRecordingStatusRef.current !== "stopped" &&
-      streamStatus !== "live"
+      lastRecordingStatusRef.current !== "stopped"
     ) {
       setShowStreamEndedModal(true);
     } else if (recordingStatus !== "stopped") {
@@ -783,7 +1632,7 @@ export default function Room() {
     }
 
     lastRecordingStatusRef.current = recordingStatus;
-  }, [recordingStatus, recordingId, streamStatus]);
+  }, [recordingStatus, recordingId]);
 
   useEffect(() => {
     if (streamStatus === "live") {
@@ -852,10 +1701,13 @@ export default function Room() {
     }
   }, [recordingElapsed, recordingStatus, maxRecordingMinutesPerClip, recordingPlanId]);
 
-  // Load destinations (soft gate) - hosts only
+  // Load destinations only when the user explicitly opens host tools.
   useEffect(() => {
     const role = localStorage.getItem("sl_current_role") || userRole;
     if (role === "guest") return;
+    if (!showStreamSetup && !(dashboardOpen && canManageStream)) return;
+    if (needsReauth) return;
+    if (!canManageStream) return;
 
     const loadDestinations = async () => {
       try {
@@ -873,11 +1725,16 @@ export default function Room() {
       }
     };
     loadDestinations();
-  }, [userRole]);
+  }, [userRole, showStreamSetup, dashboardOpen, canManageStream, needsReauth]);
 
   async function refreshDestinations() {
     const role = localStorage.getItem("sl_current_role") || userRole;
     if (role === "guest") return;
+    if (needsReauth) {
+      setNeedsReauth(true);
+      return;
+    }
+    if (!canManageStream) return;
     try {
       const res = await fetchDestinations({ includeDisabled: false });
       const items = res.items || [];
@@ -893,6 +1750,7 @@ export default function Room() {
   useEffect(() => {
     const role = localStorage.getItem("sl_current_role") || userRole;
     if (role === "guest") return;
+    if (!canManageStream) return;
     const runPreflight = async () => {
       setPreflightLoading(true);
       try {
@@ -908,7 +1766,7 @@ export default function Room() {
       }
     };
     if (showStreamSetup) runPreflight();
-  }, [showStreamSetup, userRole]);
+  }, [showStreamSetup, userRole, canManageStream]);
 
   function buildPreflightItems(): Array<{ id: string; label: string; ok: boolean; detail?: string }> {
     const dests = (preflightResult?.destinations || []) as Array<{ id: string; platform: string; status: string; statusReason?: string | null }>;
@@ -975,6 +1833,35 @@ export default function Room() {
 
   const handleLeftRoom = () => {
     sendUsageOnExit();
+    // Drop elevated cohost roles on leave; a fresh invite
+    // (or host/participant flow) must re-establish them on rejoin.
+    try {
+      const storedRole = localStorage.getItem("sl_current_role");
+      if (storedRole === "cohost") {
+        localStorage.setItem("sl_current_role", "participant");
+      }
+    } catch {}
+
+    // When the host leaves, request that the server
+    // disconnect all remaining participants from this room.
+    if (isHost && effectiveRoomName && roomAccessToken) {
+      try {
+        fetch(`${API_BASE}/api/roomModeration/remove-all`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-room-access-token": roomAccessToken,
+          },
+          credentials: "include",
+          body: JSON.stringify({ room: effectiveRoomName }),
+        }).catch(() => {
+          // best-effort only
+        });
+      } catch {
+        // ignore network errors here; clients will still leave locally
+      }
+    }
+
     if (isHost) {
       nav('/join', { replace: true });
     } else {
@@ -1002,8 +1889,20 @@ export default function Room() {
       console.warn("startRecording blocked for viewer role");
       return;
     }
-    if (!roomName) {
-      console.log("❌ No roomName, can't start recording");
+    if (needsReauth) {
+      setNeedsReauth(true);
+      return;
+    }
+    if (isGuestRole) {
+      alert("Recording requires an account. Please sign in.");
+      return;
+    }
+    if (!can("canRecord")) {
+      alert("You don't have permission to start recording in this room.");
+      return;
+    }
+    if (!roomId) {
+      console.log("❌ No roomId, can't start recording");
       return;
     }
     if (recordingRef.current || recordingStatus === "recording" || isRecordingCountdown) {
@@ -1016,7 +1915,7 @@ export default function Room() {
       console.warn("Dual recording requested but not allowed; falling back to cloud mode.");
     }
 
-    console.log("🎬 startRecording called. roomName:", roomName, "layout:", layout, "mode:", requestedMode);
+    console.log("🎬 startRecording called. roomId:", roomId, "layout:", layout, "mode:", requestedMode);
 
     autoStopTriggeredRef.current = false;
 
@@ -1037,7 +1936,7 @@ export default function Room() {
       setRecordingCountdown("You're recording");
       try {
         console.log("📡 Calling apiStartRecording...");
-        const response = await apiStartRecording(roomName, layout, requestedMode, presetId || selectedPresetId);
+        const response = await apiStartRecording(roomId, layout, requestedMode, presetId || selectedPresetId, roomAccessToken || undefined);
         console.log("📡 Got response:", response);
         const recId = response?.data?.recordingId ?? response?.recordingId;
         console.log("🎬 Extracted recordingId:", recId);
@@ -1078,6 +1977,18 @@ export default function Room() {
       console.warn("stopRecording blocked for viewer role");
       return;
     }
+    if (needsReauth) {
+      setNeedsReauth(true);
+      return;
+    }
+    if (isGuestRole) {
+      alert("Recording requires an account. Please sign in.");
+      return;
+    }
+    if (!can("canRecord")) {
+      alert("You don't have permission to stop recording in this room.");
+      return;
+    }
     console.log("🛑 stopRecording called");
     const id = recordingRef.current;
     if (!id || id === "unknown") {
@@ -1088,7 +1999,7 @@ export default function Room() {
     console.log("🛑 Stopping recording with ID:", id);
     setRecordingStatus("stopping");
     try {
-      await apiStopRecording(id);
+      await apiStopRecording(id, roomAccessToken || undefined);
       console.log("✅ Recording stopped successfully");
       setRecordingStatus("stopped");
       setRecordingId(id);
@@ -1103,11 +2014,11 @@ export default function Room() {
   };
 
   const handleEndStream = async () => {
-    if (isHost && streamStatus === "live") {
+    if (canManageStream && streamStatus === "live") {
       alert("⏹️ Stream is still live. Stop the stream first.");
       return;
     }
-    if (isHost && recordingStatus === "recording") {
+    if (canManageStream && recordingStatus === "recording") {
       alert("⏹️ Recording is still active. Stop the stream first.");
       return;
     }
@@ -1133,6 +2044,14 @@ export default function Room() {
     rtmpUrlBase?: string;
   };
 
+  type ExtraRtmpDestination = {
+    type: "instagram";
+    protocol: "rtmp";
+    rtmpUrl: string;
+    streamKey: string;
+    label?: string;
+  };
+
   const handleStartMultistream = async (keys: {
     youtubeKey?: string;
     facebookKey?: string;
@@ -1142,19 +2061,28 @@ export default function Room() {
     enabledTargetIds?: string[];
     sessionKeys?: Record<string, { rtmpUrlBase?: string; streamKey?: string }>;
     destinations?: EffectiveDestinationInput[];
+    extraDestinations?: ExtraRtmpDestination[];
   }) => {
     if (isViewer) {
       alert("View-only mode: publishing controls are disabled.");
       return;
     }
-    if (streamStatus === "starting" || streamStatus === "live") return;
-    if (isLiveCountdown) return;
-    if (!roomName) {
-      alert("No room name");
+    if (needsReauth) {
+      setNeedsReauth(true);
       return;
     }
-    if (!canMultistream) {
-      alert("Multistream is not available on your current plan. Please upgrade to enable streaming to external platforms.");
+    if (isGuestRole) {
+      alert("Going live requires an account. Please sign in.");
+      return;
+    }
+    if (!can("canStream") && !can("canDestinations")) {
+      alert("You don't have permission to manage streaming in this room.");
+      return;
+    }
+    if (streamStatus === "starting" || streamStatus === "live") return;
+    if (isLiveCountdown) return;
+    if (!roomId) {
+      alert("No room id");
       return;
     }
     console.log("🎬 Room.tsx - handleStartMultistream called");
@@ -1164,6 +2092,7 @@ export default function Room() {
     let twitchKey = keys.twitchKey;
     let enabledTargetIds = Array.isArray(keys.enabledTargetIds) ? keys.enabledTargetIds.filter((id) => !!id) : [];
     let sessionKeyMap: Record<string, { rtmpUrlBase?: string; streamKey?: string }> = keys.sessionKeys ? { ...keys.sessionKeys } : {};
+    const extraDestinations = Array.isArray(keys.extraDestinations) ? keys.extraDestinations : [];
 
     if (destinationInputs.length) {
       const fromDestinations: string[] = [];
@@ -1216,7 +2145,7 @@ export default function Room() {
     const hasDirectKeys = !!(youtubeKey || facebookKey || twitchKey);
 
     if (!hasDirectKeys && !hasSessionKeys && destIds.length === 0) {
-      alert("Select at least one saved destination or enter a stream key.");
+      alert("Select at least one saved stream destination or enter a stream key.");
       return;
     }
     const sequence = ["3", "2", "1"];
@@ -1243,15 +2172,19 @@ export default function Room() {
           sessionKeys: hasSessionKeys ? sessionKeyMap : undefined,
           userId: getOrCreateUid(),
           presetId: selectedPresetId,
+          extraDestinations: extraDestinations.length ? extraDestinations : undefined,
         };
         console.log("   Sending to API:", requestBody);
         const res = await fetch(
-          `${API_BASE}/api/rooms/${encodeURIComponent(roomName)}/start-multistream`,
+          `${API_BASE}/api/multistream/${encodeURIComponent(roomId)}/start-multistream`,
           {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: {
+              "Content-Type": "application/json",
+              ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
+            },
             body: JSON.stringify(requestBody),
-            credentials: 'include',
+            credentials: "include",
           }
         );
         const raw = await res.text();
@@ -1270,13 +2203,13 @@ export default function Room() {
         console.log("🔍 startMultistream full response:", data);
         if (!res.ok) {
           console.error("Start multistream failed", data);
-          alert(`Failed to start multistream: ${data.error || data.message || "Unknown error"}`);
+          alert(`Failed to start streaming to Stream Destinations: ${data.error || data.message || "Unknown error"}`);
           setStreamStatus("idle");
           return;
         }
         if (data?.success === false || data?.error) {
           console.error("Start multistream API indicated failure", data);
-          alert(`Failed to start multistream: ${data.error || data.message || "Unknown error"}`);
+          alert(`Failed to start streaming to Stream Destinations: ${data.error || data.message || "Unknown error"}`);
           setStreamStatus("idle");
           return;
         }
@@ -1294,7 +2227,7 @@ export default function Room() {
         console.log("✅ Stream started! Egress ID:", egressIdVal);
       } catch (err) {
         console.error("Error starting multistream:", err);
-        alert("Error starting multistream");
+        alert("Error starting stream");
         setStreamStatus("idle");
       } finally {
         const clearTimer = setTimeout(() => {
@@ -1313,71 +2246,130 @@ export default function Room() {
       alert("View-only mode: publishing controls are disabled.");
       return;
     }
+    if (needsReauth) {
+      setNeedsReauth(true);
+      return;
+    }
+    if (isGuestRole) {
+      alert("Going live requires an account. Please sign in.");
+      return;
+    }
+    if (!can("canStream") && !can("canDestinations")) {
+      alert("You don't have permission to manage streaming in this room.");
+      return;
+    }
     const streamEgressId = streamEgressRef.current;
     if (!streamEgressId) {
       alert("No active stream");
       return;
     }
-    if (!roomName) {
-      alert("No room name");
+    if (!roomId) {
+      alert("No room id");
       return;
     }
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => {
+      console.warn("stop-multistream request timed out; aborting");
+      controller.abort();
+    }, 10000);
     try {
       setStreamStatus("stopping");
       const res = await fetch(
-        `${API_BASE}/api/rooms/${encodeURIComponent(roomName)}/stop-multistream`,
+        `${API_BASE}/api/multistream/${encodeURIComponent(roomId)}/stop-multistream`,
         {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
+          },
           body: JSON.stringify({ egressId: streamEgressId }),
-          credentials: 'include',
+          credentials: "include",
+          signal: controller.signal,
         }
       );
       if (!res.ok) {
-        alert("Failed to stop multistream");
-        setStreamStatus("live");
-        return;
+        const text = await res.text().catch(() => "");
+        console.error("Failed to stop multistream", res.status, text);
+        alert(
+          "We couldn't confirm that the stream fully stopped. If it still appears live, try refreshing or stopping it from the platform dashboard."
+        );
       }
+    } catch (err) {
+      if ((err as any)?.name === "AbortError") {
+        console.warn("stop-multistream aborted due to timeout", err);
+      } else {
+        console.error("Error stopping multistream", err);
+      }
+      alert(
+        "We couldn't confirm that the stream fully stopped. If it still appears live, try refreshing or stopping it from the platform dashboard."
+      );
+    } finally {
+      window.clearTimeout(timeoutId);
       setEgressId(null);
       setStreamStatus("idle");
       streamEgressRef.current = null;
       if (recordingStatus === "recording") {
         console.log("ℹ️ Stream stopped but recording still active");
       }
-    } catch (err) {
-      console.error("Error stopping multistream", err);
-      alert("Error stopping multistream");
-      setStreamStatus("live");
     }
   };
 
-  const [roleProfiles, setRoleProfiles] = useState<Array<{ id: string; label: string }>>([]);
-  const [quickRoleIds, setQuickRoleIds] = useState<string[]>([]);
-
-  useEffect(() => {
+  const copyInviteLink = (_role: "participant", label: string) => {
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/account/roles`, { credentials: "include" });
-        if (!res.ok) throw new Error("roles failed");
-        const data = await res.json();
-        if (Array.isArray(data?.roles)) setRoleProfiles(data.roles);
-        if (Array.isArray(data?.quickRoleIds)) setQuickRoleIds(data.quickRoleIds);
+        if (!roomId && !effectiveRoomName) {
+          alert("No room identity available yet");
+          return;
+        }
+        const res = await fetch(`${API_BASE}/api/invites/create`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ roomId: roomId || undefined, roomName: effectiveRoomName || undefined, role: _role }),
+        });
+
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.inviteToken) {
+          alert("Failed to create invite link");
+          return;
+        }
+
+        const base = APP_BASE || window.location.origin;
+        const relativeUrl = typeof data?.url === "string" && data.url.startsWith("/")
+          ? data.url
+          : `/room?t=${encodeURIComponent(data.inviteToken)}`;
+        const url = `${base}${relativeUrl}`;
+        await navigator.clipboard.writeText(url);
+
+        setCopiedInviteLabel(label);
+        if (copiedInviteTimeoutRef.current) {
+          window.clearTimeout(copiedInviteTimeoutRef.current);
+        }
+        copiedInviteTimeoutRef.current = window.setTimeout(() => {
+          setCopiedInviteLabel(null);
+          copiedInviteTimeoutRef.current = null;
+        }, 4000);
       } catch (err) {
-        console.warn("roles load failed, using defaults", err);
-        setRoleProfiles([
-          { id: "participant", label: "Participant" },
-          { id: "cohost", label: "Co-host" },
-          { id: "moderator", label: "Moderator" },
-        ]);
-        setQuickRoleIds(["participant", "cohost", "moderator"]);
+        console.error("invite create failed", err);
+        alert("Failed to create invite link");
       }
     })();
-  }, []);
+  };
 
-  const copyInviteLink = (role: string, label: string) => {
-    const url = `${window.location.origin}/join?room=${encodeURIComponent(roomName || '')}&role=${encodeURIComponent(role)}`;
-    navigator.clipboard.writeText(url);
-    alert(`${label} link copied!\n${url}`);
+  const copyViewerLink = async () => {
+    if (!roomId) {
+      alert("Viewer link is unavailable until roomId is known");
+      return;
+    }
+    const base = APP_BASE || window.location.origin;
+    const url = `${base}/live/${encodeURIComponent(roomId)}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      alert(`Viewer link copied!\n${url}`);
+    } catch (err) {
+      console.error("copy viewer link failed", err);
+      alert("Copy failed");
+    }
   };
 
   // ==================== RENDER ====================
@@ -1534,17 +2526,154 @@ export default function Room() {
   }
 
   const guestCapLabel = typeof maxGuestsAllowed === "number" && maxGuestsAllowed > 0 ? `${maxGuestsAllowed}` : "—";
-  const entitlementSummary = `Rec:${recordingEnabled ? "on" : "off"} • Dual:${dualRecordingAllowed ? "on" : "off"} • Multi:${canMultistream ? "on" : "off"} • Guests:${guestCapLabel}`;
+  const rtmpCap = planRtmpDestinationsMax ?? 0;
+  const entitlementSummary = `Rec:${planRecordingEnabled ? "on" : "off"} • Dual:${dualRecordingAllowed ? "on" : "off"} • RTMP:${rtmpCap === 0 ? "off" : rtmpCap === 1 ? "1" : `up to ${rtmpCap}`} • HLS:${planHlsEnabled ? "on" : "off"} • HLS Setup:${planHlsCustomizationEnabled ? "on" : "off"} • Guests:${guestCapLabel}`;
+  const recordingEnabled =
+    planRecordingEnabled &&
+    platformRecordingEnabled &&
+    !needsReauth &&
+    !isViewer &&
+    (isHost || can("canRecord") || !!effectiveControls.canStartStopRecording);
+  const canMultistream = (rtmpCap > 0) && !needsReauth && !isViewer && (isHost || can("canDestinations") || !!effectiveControls.canManageDestinations);
+  const hlsAvailable =
+    planHlsEnabled &&
+    platformHlsEnabled &&
+    !needsReauth;
+  const canStartStopHls =
+    !isViewer &&
+    (isHost || can("canStream") || !!effectiveControls.canStartStopStream);
+
+  const handleUpgradeHls = () => {
+    nav("/settings/billing");
+  };
 
   return (
     <>
+      <RoleChangeToast message={roleChangeMessage} />
       {isViewer && (
         <div className="w-full bg-amber-500 text-black text-sm font-semibold px-4 py-2 flex items-center gap-2">
           👀 View-only mode — publishing controls are disabled.
         </div>
       )}
+      {!isViewer && needsReauth && (
+        <div className="w-full bg-red-600 text-white text-sm font-semibold px-4 py-2 flex items-center justify-between gap-3">
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span>Session expired — re-auth to enable host tools.</span>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button
+              onClick={openReauthInNewTab}
+              className="px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded text-sm font-semibold"
+              title="Opens login in a new tab"
+            >
+              Re-auth
+            </button>
+            <button
+              onClick={confirmReauthed}
+              className="px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded text-sm font-semibold"
+              title="Checks auth once, without reconnecting"
+            >
+              Enable tools
+            </button>
+          </div>
+        </div>
+      )}
+
+      {DEV_CONTROLS && canManageStream && roomId && roomAccessToken && (
+        <div style={{ position: "fixed", top: 72, right: 16, zIndex: 1200 }}>
+          <button
+            onClick={() => setControlsPanelOpen((v) => !v)}
+            style={{
+              padding: "0.4rem 0.6rem",
+              borderRadius: 8,
+              border: "1px solid rgba(255,255,255,0.25)",
+              background: "rgba(0,0,0,0.4)",
+              color: "#fff",
+              fontSize: 12,
+              cursor: "pointer",
+            }}
+            title="Realtime guest controls"
+          >
+            Guest controls
+          </button>
+
+          {controlsPanelOpen && (
+            <div
+              style={{
+                marginTop: 8,
+                width: 220,
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid rgba(255,255,255,0.18)",
+                background: "rgba(15, 23, 42, 0.92)",
+                color: "#e5e7eb",
+                boxShadow: "0 18px 50px rgba(0,0,0,0.55)",
+              }}
+            >
+              <div style={{ fontSize: 12, fontWeight: 700, marginBottom: 8, color: "#fff" }}>
+                Room controls (live)
+              </div>
+
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, marginBottom: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={effectiveControls.canPublishAudio}
+                  onChange={(e) => updateRoomControls({ canPublishAudio: e.target.checked })}
+                />
+                Guests can publish audio
+              </label>
+
+              <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12 }}>
+                <input
+                  type="checkbox"
+                  checked={effectiveControls.tileVisible}
+                  onChange={(e) => updateRoomControls({ tileVisible: e.target.checked })}
+                />
+                Guest tile visible
+              </label>
+
+              {needsReauth && (
+                <div style={{ marginTop: 10, fontSize: 11, color: "#fecaca" }}>
+                  Session expired — re-auth to edit.
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      {recordingCountdown && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            pointerEvents: "none",
+            zIndex: 50,
+          }}
+        >
+          <div
+            key={recordingCountdown}
+            style={{
+              padding: "14px 22px",
+              borderRadius: "12px",
+              background: "rgba(0, 0, 0, 0.65)",
+              color: "#ffffff",
+              fontSize: "30px",
+              fontWeight: 700,
+              letterSpacing: "0.04em",
+              border: "1px solid rgba(255, 255, 255, 0.2)",
+              boxShadow: "0 12px 40px rgba(0,0,0,0.35)",
+              animation: "fadeScale 0.9s ease",
+            }}
+          >
+            {recordingCountdown}
+          </div>
+        </div>
+      )}
       {recordingStatus === "recording" && (
-        <div className="fixed bottom-4 left-4 flex items-center gap-2 bg-red-600 px-4 py-3 rounded-lg shadow-lg z-40">
+        <div className="fixed bottom-16 left-4 flex items-center gap-2 bg-red-600 px-4 py-3 rounded-lg shadow-lg z-40">
           <div className="w-3 h-3 bg-white rounded-full animate-pulse" />
           <span className="text-sm font-bold">RECORDING</span>
           <span className="text-xs text-gray-200 ml-2">{recordingId}</span>
@@ -1563,7 +2692,7 @@ export default function Room() {
 
           <span className="text-sm opacity-80">{roomName}</span>
 
-          {isHost && (
+          {canInviteLinks && (
             <button
               onClick={() => setInviteModalOpen(true)}
               style={{
@@ -1604,30 +2733,34 @@ export default function Room() {
           )}
         </div>
 
-        {isHost && !isViewer && (
+        {!isViewer && (
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-            <div style={{
-              padding: '0.35rem 0.6rem',
-              borderRadius: '0.375rem',
-              border: '1px solid rgba(148, 163, 184, 0.4)',
-              color: '#e5e7eb',
-              fontSize: '0.7rem',
-              background: 'rgba(255, 255, 255, 0.04)',
-              whiteSpace: 'nowrap'
-            }}>
-              {entitlementSummary}
-            </div>
-            <div style={{
-              padding: '0.35rem 0.6rem',
-              borderRadius: '0.375rem',
-              border: presetClamped ? '1px solid rgba(251,191,36,0.6)' : '1px solid rgba(148, 163, 184, 0.35)',
-              color: presetClamped ? '#fbbf24' : '#e5e7eb',
-              fontSize: '0.7rem',
-              background: presetClamped ? 'rgba(251,191,36,0.12)' : 'rgba(255, 255, 255, 0.04)',
-              whiteSpace: 'nowrap'
-            }}>
-              Preset: {activePresetLabel}{presetClamped ? " (clamped)" : ""}
-            </div>
+            {isHost && (
+              <>
+                <div style={{
+                  padding: '0.35rem 0.6rem',
+                  borderRadius: '0.375rem',
+                  border: '1px solid rgba(148, 163, 184, 0.4)',
+                  color: '#e5e7eb',
+                  fontSize: '0.7rem',
+                  background: 'rgba(255, 255, 255, 0.04)',
+                  whiteSpace: 'nowrap'
+                }}>
+                  {entitlementSummary}
+                </div>
+                <div style={{
+                  padding: '0.35rem 0.6rem',
+                  borderRadius: '0.375rem',
+                  border: presetClamped ? '1px solid rgba(251,191,36,0.6)' : '1px solid rgba(148, 163, 184, 0.35)',
+                  color: presetClamped ? '#fbbf24' : '#e5e7eb',
+                  fontSize: '0.7rem',
+                  background: presetClamped ? 'rgba(251,191,36,0.12)' : 'rgba(255, 255, 255, 0.04)',
+                  whiteSpace: 'nowrap'
+                }}>
+                  Preset: {activePresetLabel}{presetClamped ? " (clamped)" : ""}
+                </div>
+              </>
+            )}
             <button
               onClick={() => setDashboardOpen(v => !v)}
               style={{
@@ -1644,82 +2777,71 @@ export default function Room() {
               Dashboard
             </button>
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', color: '#ffffff' }}>
-              <span
-                style={{
-                  display: 'inline-block',
-                  width: '8px',
-                  height: '8px',
-                  borderRadius: '50%',
-                  backgroundColor: streamStatus === "live" ? "#ef4444" : "#6b7280"
-                }}
-              />
-              <span>{streamStatus === "live" ? "LIVE" : "OFFLINE"}</span>
-            </div>
+            {canManageStream && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', color: '#ffffff' }}>
+                  <span
+                    style={{
+                      display: 'inline-block',
+                      width: '8px',
+                      height: '8px',
+                      borderRadius: '50%',
+                      backgroundColor: streamStatus === "live" ? "#ef4444" : "#6b7280"
+                    }}
+                  />
+                  <span>{streamStatus === "live" ? "LIVE" : "OFFLINE"}</span>
+                </div>
 
-            <button
-              onClick={() => setShowStreamSetup(v => !v)}
-              style={{
-                padding: '0.375rem 0.75rem',
-                fontSize: '0.75rem',
-                borderRadius: '0.375rem',
-                background: 'linear-gradient(135deg, #dc2626, #ef4444)',
-                color: '#ffffff',
-                border: 'none',
-                cursor: 'pointer',
-                transition: 'all 0.3s ease',
-                fontWeight: '500'
-              }}
-            >
-              {streamStatus === "live" ? "Manage Stream" : "Setup Stream"}
-            </button>
+                <button
+                  onClick={() => setShowStreamSetup(v => !v)}
+                  style={{
+                    padding: '0.375rem 0.75rem',
+                    fontSize: '0.75rem',
+                    borderRadius: '0.375rem',
+                    background: 'linear-gradient(135deg, #dc2626, #ef4444)',
+                    color: '#ffffff',
+                    border: 'none',
+                    cursor: 'pointer',
+                    transition: 'all 0.3s ease',
+                    fontWeight: '500'
+                  }}
+                >
+                  {streamStatus === "live" ? "Manage Stream" : "Setup Stream"}
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>
 
       {token && serverUrl && (
-        <LiveKitRoom
-          data-lk-theme="default"
-          className={`sl-layout${isViewer ? " sl-viewer" : ""}`}
+        <LiveKitShell
           token={token}
           serverUrl={serverUrl}
-          connect={true}
-          connectOptions={isViewer ? { audio: false, video: false } : undefined}
+          isHost={isHost}
+          isViewer={isViewer}
+          roomId={roomId}
+          subjectToControls={subjectToControls}
+          controlsAllowPublishAudio={controlsAllowPublishAudio}
+          controlsTileVisible={controlsTileVisible}
+          controlsAllowScreenShare={controlsAllowScreenShare}
+          watermarkEnabled={watermarkEnabled}
+          dashboardOpen={dashboardOpen}
+          onCloseDashboard={() => setDashboardOpen(false)}
+          roomName={roomName || ""}
+          roomAccessToken={roomAccessToken}
+          canMuteGuests={canMuteGuestsUi}
+          canRemoveGuests={canRemoveGuestsUi}
+          canModerate={canModerateUi}
+          effectivePermissionsMode={effectivePermissionsMode}
+          dashboardGreenroomEnabled={dashboardGreenroomEnabled}
+          dashboardOverlaysEnabled={dashboardOverlaysEnabled}
+          dashboardRole={isHost ? "host" : "participant"}
           onDisconnected={handleLeftRoom}
-          style={{
-            width: "100%",
-            height: "calc(100vh - 60px)",
-            position: "relative",
-          }}
-        >
-          <div style={{ width: "100%", height: "100%", position: "relative" }}>
-            {isHost && !isViewer && <HostAVControls />}
-            <VideoConference />
-            {watermarkEnabled && (
-              <img
-                src="/logo.png"
-                alt="StreamLine watermark"
-                className="sl-watermark"
-                style={{
-                  top: "12px",
-                  right: "12px",
-                  width: "96px",
-                  opacity: 0.8,
-                }}
-              />
-            )}
-          </div>
-
-          <RoleOverlay
-            open={dashboardOpen}
-            onClose={() => setDashboardOpen(false)}
-            role={isHost ? "host" : (userRole === "moderator" ? "moderator" : "participant")}
-            roomName={roomName || ''}
-          />
-        </LiveKitRoom>
+        />
       )}
 
-      {inviteModalOpen && isHost && (
+      {inviteModalOpen && canInviteLinks && (
         <div
           style={{
             position: "fixed",
@@ -1762,47 +2884,44 @@ export default function Room() {
             </div>
 
             <p style={{ marginTop: 0, marginBottom: 14, color: "#94a3b8", fontSize: 13 }}>
-              Copy the right link for your guest role. Moderator requires admin access; we’ll downgrade if missing.
+              Copy a participant link to invite someone on stage.
             </p>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {(quickRoleIds.length ? quickRoleIds : ["participant", "cohost", "moderator"]).map((roleId) => {
-                const roleLabel = roleProfiles.find((r) => r.id === roleId)?.label || roleId;
-                return { role: roleId, label: roleLabel };
-              }).map((item) => (
-                <div
-                  key={item.role}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  padding: "10px 12px",
+                  borderRadius: 8,
+                  border: "1px solid #1f2937",
+                  background: "rgba(255,255,255,0.02)",
+                }}
+              >
+                <div style={{ display: "flex", flexDirection: "column" }}>
+                  <span style={{ fontWeight: 600, fontSize: 14 }}>Participant</span>
+                  <span style={{ fontSize: 12, color: "#9ca3af" }}>Join the room on stage</span>
+                </div>
+                <button
+                  onClick={() => copyInviteLink("participant", "Participant")}
                   style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    padding: "10px 12px",
-                    borderRadius: 8,
-                    border: "1px solid #1f2937",
-                    background: "rgba(255,255,255,0.02)",
+                    fontSize: 12,
+                    padding: "6px 10px",
+                    borderRadius: 6,
+                    border: "1px solid rgba(34, 197, 94, 0.4)",
+                    background:
+                      copiedInviteLabel === "Participant"
+                        ? "rgba(34, 197, 94, 0.18)"
+                        : "rgba(34, 197, 94, 0.08)",
+                    color: copiedInviteLabel === "Participant" ? "#bbf7d0" : "#22c55e",
+                    cursor: "pointer",
+                    fontWeight: 600,
                   }}
                 >
-                  <div style={{ display: "flex", flexDirection: "column" }}>
-                    <span style={{ fontWeight: 600, fontSize: 14 }}>{item.label}</span>
-                    <span style={{ fontSize: 12, color: "#9ca3af" }}>{item.role === "participant" ? "Standard guest join" : item.role === "cohost" ? "Co-host profile" : item.role === "moderator" ? "Moderator controls" : "Custom role (uses participant token)"}</span>
-                  </div>
-                  <button
-                    onClick={() => copyInviteLink(item.role, item.label)}
-                    style={{
-                      fontSize: 12,
-                      padding: "6px 10px",
-                      borderRadius: 6,
-                      border: "1px solid rgba(34, 197, 94, 0.4)",
-                      background: "rgba(34, 197, 94, 0.08)",
-                      color: "#22c55e",
-                      cursor: "pointer",
-                      fontWeight: 600,
-                    }}
-                  >
-                    Copy link
-                  </button>
-                </div>
-              ))}
+                  {copiedInviteLabel === "Participant" ? "Copied" : "Copy link"}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1832,13 +2951,33 @@ export default function Room() {
               Try closing this panel and reopening it. If it keeps happening, grab a screenshot of the browser console
               and send it to support.
             </div>
+            <button
+              type="button"
+              onClick={() => nav("/join", { replace: true })}
+              style={{
+                marginTop: "0.5rem",
+                padding: "0.4rem 0.9rem",
+                borderRadius: "999px",
+                border: "1px solid rgba(248,113,113,0.8)",
+                background: "rgba(127,29,29,0.7)",
+                color: "#fee2e2",
+                fontSize: "0.75rem",
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              ⬅ Back to Join Room
+            </button>
           </div>
         }
       >
         <StreamSetupModalV2
-          open={showStreamSetup && !isViewer}
+          open={showStreamSetup && canManageStream}
           onClose={() => setShowStreamSetup(false)}
           roomName={roomName ?? ""}
+          roomId={roomId || ""}
+          roomAccessToken={roomAccessToken || undefined}
+          
           selectedPresetId={selectedPresetId}
           defaultLayout={defaultLayoutPref}
           defaultRecordingMode={defaultRecordingModePref}
@@ -1849,7 +2988,14 @@ export default function Room() {
           onStartRecording={startRecording}
           onStopRecording={stopRecording}
           recordingEnabled={recordingEnabled}
+          rtmpDestinationsMax={planRtmpDestinationsMax ?? undefined}
           multistreamAllowed={canMultistream}
+          hlsEnabled={hlsAvailable}
+          hlsCustomizationEnabled={planHlsCustomizationEnabled && (isHost || can("canLayout"))}
+          showHlsSection={hlsAvailable}
+          canStartStopHls={canStartStopHls}
+          entitlementsReady={entitlementsReady}
+          onUpgradeHls={handleUpgradeHls}
           dualRecordingAllowed={dualRecordingAllowed}
           maxGuests={maxGuestsAllowed === null ? undefined : maxGuestsAllowed || undefined}
           planId={recordingPlanId || undefined}
@@ -1861,6 +3007,8 @@ export default function Room() {
               id: d.id,
               targetId: d.targetId || d.id,
               platform: d.platform,
+              name: d.name,
+              enabled: d.enabled,
               label: d.name ? `${d.platform} – ${d.name}` : d.platform,
               status: d.status,
               hasKey: d.hasKey,
@@ -1930,7 +3078,35 @@ export default function Room() {
           display: none !important;
         }
         ` : ""}
+
+        /* Realtime room controls: disable screen share for roles
+           whose effective controls do not allow it. */
+        .sl-layout.sl-controls-no-screen .lk-control-bar .lk-button-screen-share,
+        .sl-layout.sl-controls-no-screen .lk-control-bar [data-lk-button="toggle_screen_share"],
+        .sl-layout.sl-controls-no-screen .lk-control-bar button[aria-label*="Screen"] {
+          opacity: 0.6 !important;
+          filter: grayscale(1);
+        }
+
+        /* Realtime room controls (Phase 1): disable guest mic UI */
+        .sl-layout.sl-controls-no-audio .lk-control-bar .lk-button-microphone,
+        .sl-layout.sl-controls-no-audio .lk-control-bar [data-lk-button="toggle_mic"],
+        .sl-layout.sl-controls-no-audio .lk-control-bar button[aria-label*="Microphone"] {
+          pointer-events: none !important;
+          opacity: 0.35 !important;
+          filter: grayscale(1);
+        }
+
+        /* Best-effort self-tile fade (LiveKit DOM varies by version) */
+        .sl-layout.sl-controls-hide-self [data-lk-local-participant="true"],
+        .sl-layout.sl-controls-hide-self [data-lk-participant-tile][data-lk-local-participant="true"],
+        .sl-layout.sl-controls-hide-self .lk-participant-tile[data-lk-local-participant="true"] {
+          opacity: 0.08 !important;
+          pointer-events: none !important;
+        }
       `}</style>
     </>
   );
 };
+
+export default RoomPage;

@@ -11,6 +11,8 @@ export interface UserAccount {
   /** Effective flag used for Stripe / billing operations = platform && user. */
   effectiveBillingEnabled: boolean;
   isAdmin: boolean;
+   /** Optional per-feature override for HLS access. */
+   adminOverrideHls?: boolean;
   rawUser: any;
 }
 
@@ -73,6 +75,7 @@ export async function getUserAccount(uid: string): Promise<UserAccount> {
       planId: "free" as PlanId,
       billingEnabled: true,
       isAdmin: false,
+       adminOverrideHls: false,
       createdAt: now,
       updatedAt: now,
     };
@@ -114,6 +117,8 @@ export async function getUserAccount(uid: string): Promise<UserAccount> {
 
   const isAdmin = !!data.isAdmin;
 
+  const adminOverrideHls = !!(data as any).adminOverrideHls;
+
   const platformBillingEnabled = await getPlatformBillingEnabled();
   const effectiveBillingEnabled = platformBillingEnabled && billingEnabled;
 
@@ -124,6 +129,7 @@ export async function getUserAccount(uid: string): Promise<UserAccount> {
     platformBillingEnabled,
     effectiveBillingEnabled,
     isAdmin,
+    adminOverrideHls,
   };
 
   // Backfill createdAt/updatedAt minimally without overwriting other fields.
@@ -141,6 +147,7 @@ export async function getUserAccount(uid: string): Promise<UserAccount> {
     platformBillingEnabled,
     effectiveBillingEnabled,
     isAdmin,
+    adminOverrideHls,
     rawUser: mergedRaw,
   };
 }

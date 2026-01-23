@@ -15,100 +15,200 @@ export default function Terms() {
       <div style={styles.orb2} />
 
       <div style={styles.content}>
-        {/* Back Button */}
-        <button onClick={() => nav(-1)} style={styles.backButton}>
-          ← Back
-        </button>
-
         {/* Header */}
         <div style={styles.header}>
-          <h1 style={styles.title}>Terms of Service</h1>
+          <h1 style={styles.title}>Terms &amp; Conditions</h1>
           <p style={styles.subtitle}>Nxt Lvl Technology Solutions LLC</p>
-          <p style={styles.updated}>Last updated: January 2026</p>
+          <p style={styles.updated}>Last Updated: January 12, 2026</p>
         </div>
 
         {/* Content Card */}
         <div style={styles.card}>
           <p style={styles.intro}>
-            By accessing or using our services ("Services"), you agree to these Terms.
+            These Terms &amp; Conditions ("Terms") govern your access to and use of StreamLine, a
+            platform owned and operated by Nxt Lvl Technology Solutions LLC ("we," "us," or "our").
+            By accessing or using StreamLine, you acknowledge that you have read, understood, and
+            agree to be bound by these Terms. If you do not agree, you may not use the platform.
           </p>
 
           <section style={styles.section}>
-            <h2 style={styles.sectionTitle}>Services</h2>
+            <h2 style={styles.sectionTitle}>Eligibility and Accounts</h2>
             <p style={styles.text}>
-              Nxt Lvl Technology Solutions LLC provides streaming, content creation, and related 
-              software services, including StreamLine.
+              You must be at least eighteen (18) years of age to create an account or use
+              StreamLine. By registering, you represent that you meet this requirement.
+            </p>
+            <p style={styles.text}>
+              You are responsible for maintaining the confidentiality of your account credentials
+              and for all activity that occurs under your account. You agree to provide accurate,
+              current, and complete information and to keep your account information updated.
+            </p>
+            <p style={styles.text}>
+              You may not impersonate another individual or entity, misrepresent your identity, or
+              use another person&apos;s account without authorization.
             </p>
           </section>
 
           <section style={styles.section}>
-            <h2 style={styles.sectionTitle}>Accounts</h2>
-            <p style={styles.text}>You are responsible for:</p>
-            <ul style={styles.list}>
-              <li style={styles.listItem}>Maintaining the confidentiality of your account</li>
-              <li style={styles.listItem}>All activity under your account</li>
-              <li style={styles.listItem}>Providing accurate information</li>
-            </ul>
-          </section>
-
-          <section style={styles.section}>
-            <h2 style={styles.sectionTitle}>Subscriptions & Billing</h2>
-            <ul style={styles.list}>
-              <li style={styles.listItem}>Paid plans are billed on a recurring basis</li>
-              <li style={styles.listItem}>Plan changes take effect at the end of the billing period</li>
-              <li style={styles.listItem}>Failed payments may result in temporary feature restrictions</li>
-              <li style={styles.listItem}>Refunds are not guaranteed and evaluated case-by-case</li>
-            </ul>
-          </section>
-
-          <section style={styles.section}>
-            <h2 style={styles.sectionTitle}>Acceptable Use</h2>
-            <p style={styles.text}>You agree not to:</p>
-            <ul style={styles.list}>
-              <li style={styles.listItem}>Violate any laws or regulations</li>
-              <li style={styles.listItem}>Infringe on intellectual property</li>
-              <li style={styles.listItem}>Abuse platform resources</li>
-              <li style={styles.listItem}>Stream illegal, harmful, or unauthorized content</li>
-            </ul>
-          </section>
-
-          <section style={styles.section}>
-            <h2 style={styles.sectionTitle}>Service Availability</h2>
+            <h2 style={styles.sectionTitle}>Acceptable Use of the Platform</h2>
             <p style={styles.text}>
-              We strive for reliability but do not guarantee uninterrupted service. Features may 
-              change or be discontinued.
+              StreamLine is provided for lawful streaming, recording, broadcasting, and related
+              content creation purposes. You agree to use the platform only in compliance with
+              applicable laws and these Terms.
+            </p>
+            <p style={styles.text}>
+              You may not use StreamLine in any manner that interferes with, disrupts, or degrades
+              the service, the servers, or the experience of other users. Any attempt to exploit,
+              manipulate, or reverse-engineer platform features is prohibited.
             </p>
           </section>
 
           <section style={styles.section}>
-            <h2 style={styles.sectionTitle}>Termination</h2>
+            <h2 style={styles.sectionTitle}>Prohibited Content</h2>
             <p style={styles.text}>
-              We reserve the right to suspend or terminate accounts for violations of these Terms.
+              You may not create, stream, upload, record, distribute, or otherwise make available
+              content that is unlawful, harmful, or abusive. This includes, but is not limited to,
+              content that promotes or facilitates illegal activity, violence, terrorism, or
+              criminal conduct.
             </p>
+            <p style={styles.text}>
+              You may not engage in harassment, hate speech, threats, intimidation, or
+              discriminatory conduct directed at individuals or groups. Content that exploits,
+              endangers, or sexually involves minors is strictly prohibited.
+            </p>
+            <p style={styles.text}>
+              You may not stream or distribute content that infringes on intellectual property
+              rights, including copyrighted material for which you do not have proper
+              authorization.
+            </p>
+            <p style={styles.text}>
+              You may not share non-consensual recordings, private communications, or surveillance
+              content without the explicit permission of all parties involved.
+            </p>
+            <p style={styles.text}>
+              You may not use StreamLine to bypass platform safeguards, abuse usage limits, share
+              access tokens, interfere with other users&apos; rooms, or automate activity in ways not
+              expressly permitted.
+            </p>
+          </section>
+
+          <section style={styles.section}>
+            <h2 style={styles.sectionTitle}>Streaming, Recording, and HLS Broadcasts</h2>
+            <p style={styles.text}>
+              Only authorized users may initiate or control live streams, recordings,
+              multistreaming, or HLS broadcast pages. Access to certain features, including HLS
+              broadcast pages, is subject to plan availability and usage limits.
+            </p>
+            <p style={styles.text}>
+              Broadcast time initiated by a host counts toward the host&apos;s usage limits. Viewers
+              accessing HLS broadcast pages do not contribute to usage calculations.
+            </p>
+            <p style={styles.text}>
+              You are solely responsible for ensuring that your streams and recordings comply with
+              all applicable consent, recording, and privacy laws.
+            </p>
+          </section>
+
+          <section style={styles.section}>
+            <h2 style={styles.sectionTitle}>Roles, Permissions, and Access Control</h2>
+            <p style={styles.text}>
+              Room owners control participant roles and permissions within their rooms. Permissions
+              are enforced server-side and cannot be overridden or escalated through client-side
+              manipulation.
+            </p>
+            <p style={styles.text}>
+              You may not attempt to gain unauthorized access, elevate privileges, or bypass
+              permission checks. Any such attempts may result in suspension or termination.
+            </p>
+          </section>
+
+          <section style={styles.section}>
+            <h2 style={styles.sectionTitle}>Billing, Plans, and Usage Enforcement</h2>
+            <p style={styles.text}>
+              Certain features of StreamLine require a paid subscription. Feature availability,
+              limits, and pricing are determined by your active plan.
+            </p>
+            <p style={styles.text}>
+              Usage limits are enforced automatically. Attempts to circumvent plan restrictions,
+              usage tracking, or billing systems may result in immediate suspension or termination
+              without refund.
+            </p>
+            <p style={styles.text}>
+              We reserve the right to modify plans, pricing, or feature availability, subject to
+              reasonable notice.
+            </p>
+          </section>
+
+          <section style={styles.section}>
+            <h2 style={styles.sectionTitle}>Data, Content, and Privacy</h2>
+            <p style={styles.text}>
+              You retain ownership of the content you create. By using StreamLine, you grant Nxt
+              Lvl Technology Solutions LLC the rights necessary to host, process, store, transmit,
+              and display your content solely for the purpose of operating and improving the
+              platform.
+            </p>
+            <p style={styles.text}>
+              Your use of StreamLine is subject to our Privacy Policy, which governs how data is
+              collected and processed.
+            </p>
+          </section>
+
+          <section style={styles.section}>
+            <h2 style={styles.sectionTitle}>Service Availability and Changes</h2>
+            <p style={styles.text}>
+              StreamLine is provided on an &quot;as-is&quot; and &quot;as-available&quot; basis. We do not guarantee
+              uninterrupted or error-free service.
+            </p>
+            <p style={styles.text}>
+              We may update, modify, suspend, or discontinue features or services at any time. We
+              are not liable for any resulting impact on your content, usage, or access.
+            </p>
+          </section>
+
+          <section style={styles.section}>
+            <h2 style={styles.sectionTitle}>Suspension and Termination</h2>
+            <p style={styles.text}>
+              We reserve the right to suspend or terminate your account if you violate these Terms,
+              misuse the platform, engage in prohibited conduct, or if required by law or safety
+              concerns.
+            </p>
+            <p style={styles.text}>You may discontinue use of StreamLine at any time.</p>
           </section>
 
           <section style={styles.section}>
             <h2 style={styles.sectionTitle}>Limitation of Liability</h2>
             <p style={styles.text}>
-              Services are provided "as is." Nxt Lvl Technology Solutions LLC is not liable for 
-              indirect, incidental, or consequential damages.
+              To the fullest extent permitted by law, Nxt Lvl Technology Solutions LLC shall not be
+              liable for indirect, incidental, consequential, or punitive damages arising from your
+              use of the platform.
+            </p>
+            <p style={styles.text}>
+              We are not responsible for user-generated content or the actions of other users. You
+              use StreamLine at your own risk.
             </p>
           </section>
 
           <section style={styles.section}>
             <h2 style={styles.sectionTitle}>Governing Law</h2>
             <p style={styles.text}>
-              These Terms are governed by the laws of the State of Michigan.
+              These Terms are governed by and construed in accordance with the laws applicable to
+              Nxt Lvl Technology Solutions LLC, without regard to conflict-of-law principles.
             </p>
           </section>
 
           <section style={styles.section}>
-            <h2 style={styles.sectionTitle}>Contact</h2>
+            <h2 style={styles.sectionTitle}>Contact Information</h2>
             <div style={styles.contactInfo}>
+              <p style={styles.text}>Nxt Lvl Technology Solutions LLC</p>
               <p style={styles.text}>
-                📧{" "}
+                Email: {" "}
                 <a href="mailto:nxtlvltechllc@gmail.com" style={styles.link}>
                   nxtlvltechllc@gmail.com
+                </a>
+              </p>
+              <p style={styles.text}>
+                Website: {" "}
+                <a href="https://nxtlvlts.com" target="_blank" rel="noopener noreferrer" style={styles.link}>
+                  https://nxtlvlts.com
                 </a>
               </p>
             </div>

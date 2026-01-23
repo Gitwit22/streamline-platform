@@ -1,17 +1,75 @@
 
 
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { PLAN_IDS, PlanId, isPlanId } from "../lib/planIds";
 import { useLocation, useNavigate } from "react-router-dom";
 import "./SettingsBilling.css";
 import { S } from "./SettingsBilling.styles";
 import SettingsDestinations from "./SettingsDestinations";
-import { apiFetch } from "../lib/api";
+import { apiFetch, clearAuthStorage } from "../lib/api";
 import { useAuthMe, isAuthUserInTestMode } from "../hooks/useAuthMe";
 import { formatLimitLabel } from "../lib/entitlements";
+import SettingsHlsSetup from "./settings/SettingsHlsSetup";
+import { getMeCached, clearMeCache } from "../lib/meCache";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
+
+type RolePresetId = "participant" | "cohost";
+
+type RolePresetDoc = {
+  role: RolePresetId;
+  // Publishing / presence controls (fixed sensible defaults; not exposed in UI)
+  canPublishAudio: boolean;
+  canPublishVideo: boolean;
+  canScreenShare: boolean;
+  tileVisible: boolean;
+  // Access scopes (in-room gated UI)
+  // NOTE: moderation powers are host-only and not driven by templates.
+  canMuteGuests: boolean;
+  canInviteLinks: boolean;
+  canManageDestinations: boolean;
+  canStartStopStream: boolean;
+  canStartStopRecording: boolean;
+  // Optional future scopes
+  canViewAnalytics?: boolean;
+  canChangeLayoutScene?: boolean;
+  updatedAt?: number;
+};
+
+type RolePresetToggleKey =
+  | "canScreenShare"
+  | "canInviteLinks"
+  | "canManageDestinations"
+  | "canStartStopStream"
+  | "canStartStopRecording"
+  | "canChangeLayoutScene"
+  | "canViewAnalytics";
+
+const ROLE_PRESET_LABELS: Record<RolePresetId, string> = {
+  participant: "Participant",
+  cohost: "Co-host",
+};
+
+const ROLE_PRESET_GROUPS: Array<{ title: string; keys: Array<{ key: RolePresetToggleKey; label: string }> }> = [
+  {
+    title: "Core actions",
+    keys: [
+      { key: "canScreenShare", label: "Share Screen" },
+      { key: "canInviteLinks", label: "Invite/Generate Links" },
+    ],
+  },
+  {
+    title: "Stream controls",
+    keys: [
+      { key: "canStartStopStream", label: "Start/Stop Stream" },
+      { key: "canStartStopRecording", label: "Start/Stop Recording" },
+      { key: "canManageDestinations", label: "Manage Destinations" },
+      { key: "canChangeLayoutScene", label: "Change Layout/Scene" },
+      { key: "canViewAnalytics", label: "View Analytics" },
+    ],
+  },
+];
 
 const EMPTY_PERMISSIONS = {
   canStream: false,
@@ -31,7 +89,7 @@ const PERMISSION_ITEMS = [{
 }, { key: "canLayout", label: "Change Layout/Scene" }, { key: "canScreenShare", label: "Share Screen" }, {
   key: "canInvite", label: "Invite/Generate Links",
 }, { key: "canAnalytics", label: "View Analytics" }];
-
+// Temporary fallback; canonical defaults come from the server.
 const SIMPLE_ROLE_DEFAULTS = {
   participant: {
     label: "Participant",
@@ -46,29 +104,16 @@ const SIMPLE_ROLE_DEFAULTS = {
       canAnalytics: false,
     },
   },
-  moderator: {
-    label: "Moderator",
-    permissions: {
-      canStream: false,
-      canRecord: false,
-      canDestinations: false,
-      canModerate: true,
-      canLayout: true,
-      canScreenShare: false,
-      canInvite: false,
-      canAnalytics: false,
-    },
-  },
   cohost: {
     label: "Co-host",
     permissions: {
-      canStream: false,
-      canRecord: false,
-      canDestinations: false,
+      canStream: true,
+      canRecord: true,
+      canDestinations: true,
       canModerate: false,
       canLayout: true,
       canScreenShare: true,
-      canInvite: false,
+      canInvite: true,
       canAnalytics: false,
     },
     expiresHours: 24,
@@ -76,315 +121,197 @@ const SIMPLE_ROLE_DEFAULTS = {
   },
 };
 
-// ============================================================================
-// TYPES
-// ============================================================================
+const DEFAULT_ENTITLEMENTS = {
+  planId: "free",
+  planName: "Free",
+  recording: false,
+  dualRecording: false,
+  rtmpMultistream: false,
+  canHls: false,
+  hlsCustomizationEnabled: false,
+  maxGuests: 0,
+  maxDestinations: 0,
+  participantMinutes: 0,
+  transcodeMinutes: 0,
+};
 
-interface BillingInfo {
-  provider?: string;
-  customerId?: string;
-  subscriptionId?: string;
-  priceId?: string;
-  cancelAtPeriodEnd?: boolean;
-  currentPeriodEnd?: number;
-  updatedAt?: number;
-  hasHadTrial?: boolean;
+const DEFAULT_USAGE = {
+  streamingMinutes: { used: 0, limit: 0, lifetime: 0 },
+  recordingMinutes: { used: 0, lifetime: 0 },
+  rtmpDestinations: { used: 0, limit: 0 },
+  storage: { used: 0, limit: 0 },
+  projects: { used: 0, limit: 0 },
+};
+
+const DEFAULT_MEDIA_PREFS = {
+  defaultPresetId: "standard_720p30",
+  defaultLayout: "speaker" as "speaker" | "grid",
+  defaultRecordingMode: "cloud" as "cloud" | "dual",
+  destinationsDefaultMode: "last_used" as "last_used" | "pick_each_time",
+  warnOnHighQuality: true,
+  permissionsMode: "simple" as "simple" | "advanced",
+};
+
+type CheckoutPlanVariant = "starter_trial" | "starter_paid" | "basic" | "pro";
+
+function formatDate(input: any): string {
+  if (!input) return "—";
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
-interface UserData {
-  id: string;
-  email?: string;
-  displayName?: string;
-  planId: string;
-  pendingPlan?: string | null;
-  billingStatus?: string;
-  billingActive?: boolean;
-  billing?: BillingInfo;
-  hasHadTrial?: boolean;
-  billingEnabled?: boolean;
-  billingMode?: "test" | "live";
+function getDaysUntil(input: any): number {
+  if (!input) return 0;
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return 0;
+  const diffMs = d.getTime() - Date.now();
+  return Math.max(0, Math.round(diffMs / (1000 * 60 * 60 * 24)));
 }
 
-interface PlanDefinition {
-  id: string;
-  name: string;
-  price: number;
-  description?: string;
-  limits: {
-    monthlyMinutesIncluded: number;
-    maxGuests: number;
-    rtmpDestinationsMax: number;
-    maxSessionMinutes: number;
-    maxHoursPerMonth: number;
-  };
-  features: {
-    recording: boolean;
-    rtmp: boolean;
-    multistream?: boolean;
-    advancedPermissions?: boolean;
-  };
-  editing?: {
-    access: boolean;
-    maxProjects: number;
-    maxStorageGB: number;
-  };
-}
-
-interface UsageData {
-  streamingMinutes: { used: number; limit: number; lifetime?: number };
-  recordingMinutes: { used: number; lifetime: number };
-  rtmpDestinations: { used: number; limit: number };
-  storage: { used: number; limit: number };
-  projects: { used: number; limit: number };
-}
-
-interface Entitlements {
-  planId: string;
-  planName?: string;
-  recording: boolean;
-  dualRecording: boolean;
-  rtmpMultistream: boolean;
-  maxGuests: number;
-  maxDestinations: number;
-  participantMinutes: number;
-  transcodeMinutes: number;
-}
-
-interface MediaPrefs {
-  defaultLayout: "speaker" | "grid";
-  defaultRecordingMode: "cloud" | "dual";
-  defaultPresetId: string;
-  warnOnHighQuality: boolean;
-  destinationsDefaultMode: "last_used" | "pick_each_time";
-  autoClamp?: boolean;
-  permissionsMode?: "simple" | "advanced";
-}
-
-interface AdvancedPermissionsState {
-  enabled: boolean;
-  plan: boolean;
-  override: boolean;
-  globalLock?: boolean;
-  lockReason?: string | null;
-  effectivePermissionsMode?: "simple" | "advanced";
-  permissionsModeLockReason?: string | null;
-}
-
-// Plans are loaded from the API; no hardcoded defaults to keep the DB/admin as source of truth.
-
-
-// ============================================================================
-// HELPER FUNCTIONS
-// ============================================================================
-
-function formatDate(timestamp: number | undefined): string {
-  if (!timestamp) return "—";
-  return new Date(timestamp).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-
-function getDaysUntil(timestamp: number | undefined): number {
-  if (!timestamp) return 0;
-  const now = Date.now();
-  const diff = timestamp - now;
-  return Math.max(0, Math.ceil(diff / (1000 * 60 * 60 * 24)));
-}
-
-function getStatusBadge(status: string | undefined, cancelAtPeriodEnd?: boolean): { text: string; color: string; bg: string; icon: string } {
-  if (cancelAtPeriodEnd && (status === "active" || status === "trialing")) {
-    return { text: "Canceling", color: "#f59e0b", bg: "rgba(245,158,11,0.15)", icon: "⏳" };
+function getStatusBadge(status: string | undefined, cancelAtPeriodEnd?: boolean) {
+  if (!status || status === "none") {
+    return { text: "Free", icon: "💸", color: "#6b7280", bg: "rgba(55,65,81,0.35)" };
   }
-  switch (status) {
-    case "active":
-      return { text: "Active", color: "#22c55e", bg: "rgba(34,197,94,0.15)", icon: "✓" };
-    case "trialing":
-      return { text: "Trial", color: "#3b82f6", bg: "rgba(59,130,246,0.15)", icon: "🧪" };
-    case "past_due":
-      return { text: "Past Due", color: "#ef4444", bg: "rgba(239,68,68,0.15)", icon: "⚠️" };
-    case "unpaid":
-      return { text: "Unpaid", color: "#ef4444", bg: "rgba(239,68,68,0.15)", icon: "⛔" };
-    case "canceled":
-      return { text: "Canceled", color: "#6b7280", bg: "rgba(107,114,128,0.15)", icon: "✕" };
-    default:
-      return { text: "Free", color: "#6b7280", bg: "rgba(107,114,128,0.15)", icon: "○" };
+  if (status === "trialing") {
+    return { text: "Trialing", icon: "🧪", color: "#22c55e", bg: "rgba(34,197,94,0.16)" };
   }
-}
-// Button label logic (frontend-only)
-function getPlanActionLabel(
-  currentPlan: string,
-  targetPlan: "free" | "starter" | "basic" |"pro",
-  isProcessing: boolean
-) {
-  // Normalize variants to canonical plan ids
-  const plan =
-    currentPlan === "starter_paid" || currentPlan === "starter_trial"
-      ? "starter"
-      : currentPlan;
-
-  // Current plan label
-  if (plan === targetPlan) return "Current";
-
-  // Moving to Free is managed in portal; keep label readable
-  if ((plan === "pro" || plan === "starter") && targetPlan === "free") return "Manage";
-
-  // For all other non-current targets, prefer a simple CTA
-  return "Choose Plan";
+  if (status === "active") {
+    if (cancelAtPeriodEnd) {
+      return { text: "Canceling", icon: "⏳", color: "#f97316", bg: "rgba(245,158,11,0.16)" };
+    }
+    return { text: "Active", icon: "✅", color: "#22c55e", bg: "rgba(34,197,94,0.16)" };
+  }
+  if (status === "past_due" || status === "unpaid") {
+    return { text: "Payment issue", icon: "⚠️", color: "#f97316", bg: "rgba(245,158,11,0.18)" };
+  }
+  if (status === "canceled") {
+    return { text: "Canceled", icon: "⏹️", color: "#f97316", bg: "rgba(245,158,11,0.18)" };
+  }
+  return { text: status, icon: "ℹ️", color: "#6b7280", bg: "rgba(55,65,81,0.35)" };
 }
 
-
-// Map canonical plan id to checkout variant for resubscribe
-type CheckoutPlanVariant = "starter_paid" | "starter_trial" | "pro" | "basic";
-
-// Loading state key for actions like checkout and portal
-type ActionLoading = CheckoutPlanVariant | "portal" | null;
+function getPlanActionLabel(current: PlanId, target: PlanId, isProcessing: boolean): string {
+  if (isProcessing) return "Pending change";
+  if (current === target) return "Current plan";
+  const order: PlanId[] = ["free", "basic", "starter", "pro"];
+  const curIdx = order.indexOf(current);
+  const tgtIdx = order.indexOf(target);
+  if (curIdx === -1 || tgtIdx === -1) return "Change plan";
+  if (tgtIdx > curIdx) return "Upgrade";
+  if (tgtIdx < curIdx) return "Downgrade";
+  return "Change plan";
+}
 
 function checkoutPlanForResubscribe(user: any): CheckoutPlanVariant {
-  const p = getCanonicalPlanId(user); // expected: "free" | "starter" | "pro" | ...
-  if (p === "pro" || p === "internal_unlimited") return "pro";
-  // default resubscribe goes to paid Starter
+  const canonical = (user && (user.planId as string)) || "starter";
+  if (canonical.includes("pro")) return "pro";
+  if (canonical.includes("basic")) return "basic";
+  if (canonical.includes("starter")) return "starter_paid";
   return "starter_paid";
 }
 
-
-// ============================================================================
-// MAIN COMPONENT
-// ============================================================================
-
 export default function SettingsBilling() {
   const nav = useNavigate();
-  const location = useLocation();
-  const { refresh: refreshAuth } = useAuthMe();
+  const { user: authUser, refresh: refreshAuth } = useAuthMe();
 
-  
-  const DEFAULT_USAGE: UsageData = {
-    streamingMinutes: { used: 0, limit: 60, lifetime: 0 },
-    recordingMinutes: { used: 0, lifetime: 0 },
-    rtmpDestinations: { used: 0, limit: 1 },
-    storage: { used: 0, limit: 5 },
-    projects: { used: 0, limit: 1 },
-  };
+  const [user, setUser] = useState<any | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const DEFAULT_ENTITLEMENTS: Entitlements = {
-    planId: "free",
-    planName: "Free",
-    recording: false,
-    dualRecording: false,
-    rtmpMultistream: false,
-    maxGuests: 1,
-    maxDestinations: 1,
-    participantMinutes: 60,
-    transcodeMinutes: 0,
-  };
+  const [plans, setPlans] = useState<any[]>([]);
+  const [entitlements, setEntitlements] = useState<typeof DEFAULT_ENTITLEMENTS>(DEFAULT_ENTITLEMENTS);
+  const [usage, setUsage] = useState<typeof DEFAULT_USAGE | null>(null);
 
-  const DEFAULT_MEDIA_PREFS: MediaPrefs = {
-    defaultLayout: "speaker",
-    defaultRecordingMode: "cloud",
-    defaultPresetId: "standard_720p30",
-    warnOnHighQuality: true,
-    destinationsDefaultMode: "last_used",
-    autoClamp: true,
-    permissionsMode: "simple",
-  };
+  const [platformHlsEnabled, setPlatformHlsEnabled] = useState<boolean>(true);
+  const [platformTranscodeEnabled, setPlatformTranscodeEnabled] = useState<boolean>(true);
+  const [platformHlsSettingsTabEnabled, setPlatformHlsSettingsTabEnabled] = useState<boolean>(true);
 
-  const [user, setUser] = useState<UserData | null>(null);
-  const [plans, setPlans] = useState<PlanDefinition[]>([]);
-  const [usage, setUsage] = useState<UsageData>(DEFAULT_USAGE);
-  const [showLifetimeDetails, setShowLifetimeDetails] = useState(false);
-  const [entitlements, setEntitlements] = useState<Entitlements>(DEFAULT_ENTITLEMENTS);
-  const [mediaPrefs, setMediaPrefs] = useState<MediaPrefs>(DEFAULT_MEDIA_PREFS);
-  const [advancedPermissions, setAdvancedPermissions] = useState<AdvancedPermissionsState>({ enabled: false, plan: false, override: false, globalLock: false, lockReason: null, effectivePermissionsMode: "simple", permissionsModeLockReason: null });
+  const [mediaPrefs, setMediaPrefs] = useState<typeof DEFAULT_MEDIA_PREFS>(DEFAULT_MEDIA_PREFS);
   const [presetOptions, setPresetOptions] = useState<Array<{ id: string; label: string }>>([]);
+
+  const [advancedPermissions, setAdvancedPermissions] = useState<{
+    enabled: boolean;
+    plan: boolean;
+    override: boolean;
+    globalLock: boolean;
+    lockReason: string | null;
+    effectivePermissionsMode: "simple" | "advanced";
+    permissionsModeLockReason: string | null;
+  }>(
+    {
+      enabled: false,
+      plan: false,
+      override: false,
+      globalLock: false,
+      lockReason: null,
+      effectivePermissionsMode: "simple",
+      permissionsModeLockReason: null,
+    }
+  );
+
+  const [cohostProfile, setCohostProfile] = useState<any>({
+    label: SIMPLE_ROLE_DEFAULTS.cohost.label,
+    expiresHours: SIMPLE_ROLE_DEFAULTS.cohost.expiresHours || 24,
+    maxUses: SIMPLE_ROLE_DEFAULTS.cohost.maxUses || 1,
+    ...SIMPLE_ROLE_DEFAULTS.cohost.permissions,
+  });
+  const [cohostSaving, setCohostSaving] = useState(false);
+  const [cohostMessage, setCohostMessage] = useState<string | null>(null);
+
+  const [serverDefaultRoleProfiles, setServerDefaultRoleProfiles] = useState<any[] | null>(null);
+  const [roleProfiles, setRoleProfiles] = useState<any[]>([]);
+  const [rolePresets, setRolePresets] = useState<Record<RolePresetId, RolePresetDoc> | null>(null);
+  const [rolePresetsSaving, setRolePresetsSaving] = useState<Record<RolePresetId, "idle" | "saving" | "saved" | "error">>({
+    participant: "idle",
+    cohost: "idle",
+  });
+  const [quickRoleIds, setQuickRoleIds] = useState<string[]>(["participant", "cohost"]);
+  const [roleLabelInput, setRoleLabelInput] = useState("");
+  const [roleMessage, setRoleMessage] = useState<string | null>(null);
+  const [roleSaveStatus, setRoleSaveStatus] = useState<Record<string, "idle" | "saving" | "saved" | "error">>({});
+  const roleSaveTimersRef = useRef<Record<string, number | undefined>>({});
+  const cohostProfileSaveTimerRef = useRef<number | null>(null);
+
   const [mediaPrefsSaving, setMediaPrefsSaving] = useState(false);
   const [mediaPrefsMessage, setMediaPrefsMessage] = useState<string | null>(null);
   const [mediaPrefsError, setMediaPrefsError] = useState<string | null>(null);
 
-  const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState<ActionLoading>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [showManagePicker, setShowManagePicker] = useState(false);
-  const [activeTab, setActiveTab] = useState<"plan" | "usage" | "destinations" | "defaults" | "roles">("plan");
-  const [cohostProfile, setCohostProfile] = useState({
-    label: "Co-Host",
-    canStream: false,
-    canRecord: false,
-    canDestinations: false,
-    canModerate: false,
-    canLayout: false,
-    canScreenShare: false,
-    canInvite: false,
-    canAnalytics: false,
-    expiresHours: 24,
-    maxUses: 1,
-  });
-  const [roleProfiles, setRoleProfiles] = useState<any[]>([]);
-  const [quickRoleIds, setQuickRoleIds] = useState<string[]>([]);
-  const [roleLabelInput, setRoleLabelInput] = useState("");
-  const [editingRoleId, setEditingRoleId] = useState<string | null>(null);
-  const [editingDraft, setEditingDraft] = useState<any | null>(null);
-  const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
-  const [roleMessage, setRoleMessage] = useState<string | null>(null);
-  const [cohostSaving, setCohostSaving] = useState(false);
-  const [cohostMessage, setCohostMessage] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const [emergencyLoading, setEmergencyLoading] = useState(false);
   const [emergencyMessage, setEmergencyMessage] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+
+  const [actionLoading, setActionLoading] = useState<CheckoutPlanVariant | "portal" | null>(null);
+
+  const [checkoutTosAccepted, setCheckoutTosAccepted] = useState(false);
+  const [checkoutTosError, setCheckoutTosError] = useState<string | null>(null);
+  const [checkoutTosSubmitting, setCheckoutTosSubmitting] = useState(false);
+
   const [testModeTargetPlan, setTestModeTargetPlan] = useState<PlanId | null>(null);
+  const [testModeSummary, setTestModeSummary] = useState<string | null>(null);
   const [testModeModalOpen, setTestModeModalOpen] = useState(false);
   const [testModeLoading, setTestModeLoading] = useState(false);
-  const [testModeSummary, setTestModeSummary] = useState<string | null>(null);
-  const effectivePermissionsMode = advancedPermissions.effectivePermissionsMode || ((advancedPermissions.enabled && (mediaPrefs.permissionsMode ?? "simple") === "advanced") ? "advanced" : "simple");
-  const simpleMode = effectivePermissionsMode === "simple";
-  useEffect(() => {
-    loadAllData();
-  }, []);
 
-  // Sync tab from URL query (?tab=destinations|plan|usage) so deep links open the correct view
-  useEffect(() => {
-    const params = new URLSearchParams(location.search);
-    const tabParam = params.get("tab");
-    if (tabParam === "plan" || tabParam === "usage" || tabParam === "destinations" || tabParam === "defaults" || tabParam === "roles") {
-      setActiveTab(tabParam as any);
-    }
-  }, [location.search]);
+  const [showManagePicker, setShowManagePicker] = useState(false);
+  const [showLifetimeDetails, setShowLifetimeDetails] = useState(false);
 
-  // Safe pending cleanup: only clear under safe conditions
-  useEffect(() => {
-    (async () => {
-      if (!user?.pendingPlan) return;
-      try {
-        const res = await apiFetch(`${API_BASE}/api/billing/pending-change`);
-        const info = await res.json();
-        const isFreeNoSub = user.planId === "free" && !info?.hasSubscription && !info?.billingActive;
-        const noScheduled = info?.scheduledChange === false;
-        const completed = user.billingStatus === "active" || user.billingStatus === "trialing";
-        if (isFreeNoSub || noScheduled || completed) {
-          try {
-            await apiFetch(`${API_BASE}/api/billing/clear-pending`, { method: "POST" });
-          } catch {}
-          setUser((prev) => (prev ? { ...prev, pendingPlan: null } : prev));
-        }
-      } catch {}
-    })();
-  }, [user?.planId, user?.pendingPlan, user?.billingStatus]);
+  const [activeTab, setActiveTab] = useState<"plan" | "usage" | "destinations" | "hls" | "defaults" | "roles">("plan");
+
+  const simpleMode = advancedPermissions.effectivePermissionsMode !== "advanced";
 
   // If billing is active or trialing, ensure pendingPlan is cleared to avoid stuck UI
   useEffect(() => {
     if (!user) return;
     if ((user.billingStatus === "active" || user.billingStatus === "trialing") && user.pendingPlan) {
-      setUser((prev) => (prev ? { ...prev, pendingPlan: null } : prev));
+      setUser((prev: any) => (prev ? { ...prev, pendingPlan: null } : prev));
     }
-  }, [user?.billingStatus]);
+  }, [user?.billingStatus, user?.pendingPlan]);
 
   // Reset transient actionLoading when page regains visibility (e.g., returning from Stripe)
   useEffect(() => {
     const onVis = () => {
       if (document.visibilityState === "visible") {
         setActionLoading(null);
-        // Refresh data to clear any stale pendingPlan
-        loadAllData();
       }
     };
     const onPageShow = () => {
@@ -403,7 +330,17 @@ export default function SettingsBilling() {
     setLoading(true);
     setError(null);
     try {
-      await Promise.all([loadUser(), loadPlans(), loadUsage(), loadEntitlements(), loadMediaPrefs(), loadCohostProfile(), loadRoles()]);
+      // Ensure we have a baseline user object before applying entitlements/TOS metadata
+      await loadUser();
+
+      await Promise.all([
+        loadPlans(),
+        loadUsage(),
+        loadEntitlements(),
+        loadMediaPrefs(),
+        loadCohostProfile(),
+        loadRolePresets(),
+      ]);
     } catch (err: any) {
       setError(err?.message || "Failed to load data");
     } finally {
@@ -411,16 +348,33 @@ export default function SettingsBilling() {
     }
   };
 
-  const loadUser = async () => {
-    const res = await apiFetch(`${API_BASE}/api/auth/me`);
-    const data = await res.json();
-    setUser(data);
+  useEffect(() => {
+    loadAllData();
+  }, []);
+
+  const loadUser = async (opts?: { forceRefresh?: boolean }) => {
     try {
-      window.localStorage.setItem("sl_user", JSON.stringify(data));
-      if ((data as any)?.id || (data as any)?.uid) {
-        window.localStorage.setItem("sl_userId", String((data as any).id || (data as any).uid));
+      if (opts?.forceRefresh) {
+        clearMeCache();
       }
-    } catch {}
+
+      const data = await getMeCached();
+      setUser(data);
+      try {
+        if (data) {
+          window.localStorage.setItem("sl_user", JSON.stringify(data));
+          if ((data as any)?.id || (data as any)?.uid) {
+            window.localStorage.setItem("sl_userId", String((data as any).id || (data as any).uid));
+          }
+        }
+      } catch {}
+    } catch (err: any) {
+      if (err?.status === 401 || err?.status === 403) {
+        clearAuthStorage();
+        setUser(null);
+      }
+      throw err;
+    }
   };
 
   const loadPlans = async () => {
@@ -445,33 +399,93 @@ export default function SettingsBilling() {
   const loadEntitlements = async () => {
     try {
       // Prefer canonical effectiveEntitlements from /api/account/me
-      const res = await apiFetch(`${API_BASE}/api/account/me`);
-      if (!res.ok) {
-        throw new Error("account/me failed");
+      const data = await getMeCached();
+
+      try {
+        const platformFlags = (data as any)?.platformFlags || {};
+        if (typeof platformFlags.hlsEnabled === "boolean") {
+          setPlatformHlsEnabled(platformFlags.hlsEnabled);
+        } else {
+          setPlatformHlsEnabled(true);
+        }
+
+        if (typeof platformFlags.transcodeEnabled === "boolean") {
+          setPlatformTranscodeEnabled(platformFlags.transcodeEnabled);
+        } else {
+          setPlatformTranscodeEnabled(true);
+        }
+
+        // Settings gate: default to visible unless explicitly disabled.
+        // Prefer platformFlags.hlsSettingsTab, fall back to platformFlags.hlsEnabled.
+        const hlsTabFlag =
+          typeof platformFlags.hlsSettingsTab === "boolean"
+            ? platformFlags.hlsSettingsTab
+            : typeof platformFlags.hlsEnabled === "boolean"
+              ? platformFlags.hlsEnabled
+              : true;
+        setPlatformHlsSettingsTabEnabled(hlsTabFlag);
+      } catch {
+        setPlatformHlsEnabled(true);
+        setPlatformHlsSettingsTabEnabled(true);
+        setPlatformTranscodeEnabled(true);
       }
-      const data = await res.json();
+
+      // Capture Terms of Service metadata for display and gating.
+      setUser((prev) =>
+        prev
+          ? {
+              ...prev,
+              tosVersion: (data as any)?.tosVersion ?? null,
+              tosAcceptedAt: (data as any)?.tosAcceptedAt ?? null,
+              currentTosVersion: (data as any)?.currentTosVersion ?? null,
+            }
+          : prev
+      );
 
       const eff = (data as any)?.effectiveEntitlements;
 
       if (eff && typeof eff === "object") {
         const features = eff.features || {};
         const limits = eff.limits || {};
+
+        // Canonical RTMP destinations cap comes from rtmpDestinationsMax
+        // on the normalized plan limits; fall back to any legacy
+        // maxDestinations field if present.
+        const maxDestinations = Number(
+          (limits as any).rtmpDestinationsMax ??
+            (limits as any).maxDestinations ??
+            0
+        );
+
+        const canHls = Boolean((features as any).hls ?? (features as any).hlsEnabled ?? (features as any).canHls);
+        const hlsCustomizationEnabled = (() => {
+          const explicit = (features as any).hlsCustomizationEnabled;
+          if (typeof explicit === "boolean") return explicit;
+          const legacy = (features as any).canCustomizeHlsPage;
+          if (typeof legacy === "boolean") return legacy;
+          return canHls;
+        })();
+
         setEntitlements({
           planId: eff.planId || data.planId || "free",
           planName: eff.planName || data.planId || eff.planId || "Free",
           recording: !!features.recording,
           dualRecording: !!features.dualRecording,
-          rtmpMultistream: !!features.rtmpMultistream,
+          // Treat "multistream" as "more than 1 RTMP destination" so
+          // a cap of 1 is a valid single-destination plan.
+          rtmpMultistream: maxDestinations > 1,
+          canHls,
+          hlsCustomizationEnabled,
           maxGuests: Number(limits.maxGuests ?? 0),
-          maxDestinations: Number(limits.maxDestinations ?? 0),
-          participantMinutes: Number(limits.participantMinutes ?? 0),
+          maxDestinations,
+          participantMinutes: Number((limits as any).participantMinutes ?? 0),
           transcodeMinutes: Number(limits.transcodeMinutes ?? 0),
         });
         return;
       }
 
       // Fallback: legacy usage entitlements endpoint
-      const legacyRes = await apiFetch(`${API_BASE}/api/usage/entitlements`);
+      const legacyRes = await apiFetch("/api/usage/entitlements");
       if (!legacyRes.ok) throw new Error("usage/entitlements failed");
       const legacy = await legacyRes.json();
       setEntitlements({
@@ -480,6 +494,8 @@ export default function SettingsBilling() {
         recording: !!legacy?.recording,
         dualRecording: !!legacy?.dualRecording,
         rtmpMultistream: !!legacy?.rtmpMultistream,
+        canHls: !!legacy?.canHls,
+        hlsCustomizationEnabled: !!legacy?.canHls,
         maxGuests: Number(legacy?.maxGuests ?? 0),
         maxDestinations: Number(legacy?.maxDestinations ?? 0),
         participantMinutes: Number(legacy?.participantMinutes ?? 0),
@@ -488,13 +504,15 @@ export default function SettingsBilling() {
     } catch (err) {
       console.warn("loadEntitlements failed; using defaults", err);
       setEntitlements((prev) => prev || DEFAULT_ENTITLEMENTS);
+      setPlatformHlsEnabled(true);
+      setPlatformTranscodeEnabled(true);
     }
   };
 
  
   const loadUsage = async () => {
     try {
-      const res = await apiFetch(`${API_BASE}/api/usage/me`);
+      const res = await apiFetch("/api/usage/me");
       const data = await res.json();
       const limits = data?.plan?.limits || {};
 
@@ -559,9 +577,9 @@ export default function SettingsBilling() {
 
   const loadMediaPrefs = async () => {
     try {
-      const [presetsRes, meRes] = await Promise.all([
+      const [presetsRes, me] = await Promise.all([
         fetch(`${API_BASE}/api/account/presets`, { credentials: "include" }),
-        fetch(`${API_BASE}/api/account/me`, { credentials: "include" }),
+        getMeCached(),
       ]);
 
       let availablePresets: Array<{ id: string; label: string }> = [{ id: "standard_720p30", label: "Standard (720p30)" }];
@@ -578,18 +596,20 @@ export default function SettingsBilling() {
         }
       }
 
-      if (meRes.ok) {
+      if (me) {
         try {
-          const me = await meRes.json();
           const prefs = me?.mediaPrefs ? { ...DEFAULT_MEDIA_PREFS, ...me.mediaPrefs } : DEFAULT_MEDIA_PREFS;
           const adv = me?.advancedPermissions || { enabled: false, plan: false, override: false, global: false, lockReason: me?.advancedPermissionsLockedReason };
+          const lockReason = adv.lockReason || me?.advancedPermissionsLockedReason || null;
+          // Treat "coming_soon" as a soft label only; do not block enabling Advanced mode.
+          const advEnabled = !!(adv.enabled || lockReason === "coming_soon");
           setAdvancedPermissions({
-            enabled: !!adv.enabled,
+            enabled: advEnabled,
             plan: !!adv.plan,
             override: !!adv.override,
             globalLock: !!adv.global,
-            lockReason: adv.lockReason || me?.advancedPermissionsLockedReason || null,
-            effectivePermissionsMode: me?.effectivePermissionsMode || (adv.enabled && prefs.permissionsMode === "advanced" ? "advanced" : "simple"),
+            lockReason,
+            effectivePermissionsMode: me?.effectivePermissionsMode || (advEnabled && prefs.permissionsMode === "advanced" ? "advanced" : "simple"),
             permissionsModeLockReason: me?.permissionsModeLockReason || null,
           });
 
@@ -613,8 +633,11 @@ export default function SettingsBilling() {
           }
 
           setMediaPrefs(prefs);
+          if (Array.isArray(me?.defaultRoleProfiles)) {
+            setServerDefaultRoleProfiles(me.defaultRoleProfiles);
+          }
         } catch (err) {
-          console.error("Failed to parse /account/me", err);
+          console.error("Failed to apply /account/me media prefs", err);
           setMediaPrefs(DEFAULT_MEDIA_PREFS);
           setPresetOptions(availablePresets);
           setAdvancedPermissions({ enabled: false, plan: false, override: false, globalLock: false, lockReason: null, effectivePermissionsMode: "simple", permissionsModeLockReason: null });
@@ -644,10 +667,41 @@ export default function SettingsBilling() {
     }
   };
 
+  const loadRolePresets = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/account/role-presets`, { credentials: "include" });
+      if (!res.ok) throw new Error("role-presets endpoint failed");
+      const data = await res.json();
+      if (data?.presets) {
+        const p = data.presets as any;
+        const next: Record<RolePresetId, RolePresetDoc> = {
+          participant: p.participant,
+          cohost: p.cohost,
+        };
+        setRolePresets(next);
+      }
+    } catch (err) {
+      console.warn("loadRolePresets failed", err);
+      setRolePresets(null);
+    }
+  };
+
   const applySimpleRoleDefaults = () => {
-    const simpleList = ["participant", "cohost", "moderator"].map((key) => {
-      const roleKey = key as keyof typeof SIMPLE_ROLE_DEFAULTS;
-      const def = SIMPLE_ROLE_DEFAULTS[roleKey];
+    const source = serverDefaultRoleProfiles ?? null;
+    const ensureDefaults = (id: string) => {
+      const fromServer = source?.find((p) => p.id === id);
+      if (fromServer) {
+        return {
+          label: fromServer.name,
+          permissions: fromServer.permissions,
+        };
+      }
+      const key = id as keyof typeof SIMPLE_ROLE_DEFAULTS;
+      return SIMPLE_ROLE_DEFAULTS[key];
+    };
+
+    const simpleList = ["participant", "cohost"].map((key) => {
+      const def = ensureDefaults(key);
       return {
         id: key,
         label: def.label,
@@ -657,31 +711,7 @@ export default function SettingsBilling() {
       };
     });
     setRoleProfiles(simpleList);
-    setQuickRoleIds(["participant", "cohost", "moderator"]);
-  };
-
-  const loadRoles = async () => {
-    try {
-      if ((mediaPrefs.permissionsMode ?? "simple") === "simple") {
-        applySimpleRoleDefaults();
-        return;
-      }
-      const res = await fetch(`${API_BASE}/api/account/roles`, { credentials: "include" });
-      if (!res.ok) throw new Error("roles endpoint failed");
-      const data = await res.json();
-      if (Array.isArray(data?.roles)) {
-        setRoleProfiles(data.roles);
-        if (!selectedRoleId && data.roles.length) {
-          const preferred = data.roles.find((r: any) => r.id === "cohost" || r.slug === "cohost") || data.roles[0];
-          setSelectedRoleId(preferred?.id || null);
-        }
-      }
-      if (Array.isArray(data?.quickRoleIds)) setQuickRoleIds(data.quickRoleIds);
-      const currentEdit = data?.roles?.find((r: any) => r.id === editingRoleId);
-      if (currentEdit) setEditingDraft({ ...(currentEdit.permissions || EMPTY_PERMISSIONS) });
-    } catch (err) {
-      console.warn("loadRoles failed", err);
-    }
+    setQuickRoleIds(["participant", "cohost"]);
   };
 
   const saveCohostProfile = async () => {
@@ -734,117 +764,44 @@ export default function SettingsBilling() {
     }
   };
 
-  const saveRoles = async (payload: any, method: string, path: string) => {
-    const res = await fetch(`${API_BASE}/api/account/${path}`, {
-      method,
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: payload ? JSON.stringify(payload) : undefined,
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(text || "role update failed");
-    }
-    const data = await res.json();
-    if (Array.isArray(data?.roles)) setRoleProfiles(data.roles);
-    if (Array.isArray(data?.quickRoleIds)) setQuickRoleIds(data.quickRoleIds);
-  };
-
-  const addRole = async () => {
-    const label = roleLabelInput.trim();
-    if (!label) return;
+  const saveRolePreset = async (presetId: RolePresetId, patch: Partial<RolePresetDoc>) => {
+    setRolePresetsSaving((prev) => ({ ...prev, [presetId]: "saving" }));
     try {
-      await saveRoles({ label, permissions: EMPTY_PERMISSIONS }, "POST", "roles");
-      setRoleLabelInput("");
-    } catch (err: any) {
-      setError(err?.message || "Failed to add role");
-    }
-  };
-
-  const updateRolePermissions = async (roleId: string, permissions: any, label?: string) => {
-    try {
-      await saveRoles({ permissions, label }, "PATCH", `roles/${roleId}`);
-      setRoleMessage("Role updated");
-      setTimeout(() => setRoleMessage(null), 2000);
-    } catch (err: any) {
-      setError(err?.message || "Failed to update role");
-    }
-  };
-
-  useEffect(() => {
-    if (!editingRoleId) {
-      setEditingDraft(null);
-      return;
-    }
-    const role = roleProfiles.find((r) => r.id === editingRoleId);
-    if (role) {
-      setEditingDraft({ ...(role.permissions || EMPTY_PERMISSIONS) });
-    }
-  }, [editingRoleId, roleProfiles]);
-
-  const deleteRole = async (roleId: string) => {
-    try {
-      await saveRoles(null, "DELETE", `roles/${roleId}`);
-    } catch (err: any) {
-      setError(err?.message || "Failed to delete role");
-    }
-  };
-
-  const updateQuickRoles = async (next: string[]) => {
-    setQuickRoleIds(next);
-    try {
-      await saveRoles({ roleIds: next }, "PUT", "roles/quick");
-    } catch (err: any) {
-      setError(err?.message || "Failed to update quick roles");
-    }
-  };
-
-  const updatePermissionsMode = async (mode: "simple" | "advanced") => {
-    if (mode === "advanced" && (!advancedPermissions.enabled || advancedPermissions.globalLock)) {
-      if (advancedPermissions.lockReason === "global_lock") {
-        setError("Advanced Permissions are temporarily disabled during an upgrade. Check back soon.");
-      } else {
-        setError("Advanced permissions are not available on your plan. Upgrade or request an override.");
-      }
-      return;
-    }
-    try {
-      const res = await fetch(`${API_BASE}/api/account/media-prefs`, {
+      const res = await fetch(`${API_BASE}/api/account/role-presets/${presetId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ permissionsMode: mode }),
+        body: JSON.stringify(patch),
       });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || "Failed to update permissions mode");
+      const data = await res.json().catch(() => null);
+      if (!res.ok || (data as any)?.error) {
+        throw new Error(((data as any)?.error as string) || "Failed to update role defaults");
       }
-      const data = await res.json();
-      if (data?.mediaPrefs) {
-        setMediaPrefs((prev) => ({ ...prev, ...data.mediaPrefs, permissionsMode: mode }));
+      if (data?.preset && rolePresets) {
+        setRolePresets({ ...rolePresets, [presetId]: data.preset as RolePresetDoc });
       } else {
-        setMediaPrefs((prev) => ({ ...prev, permissionsMode: mode }));
+        // Fallback: just merge the patch locally.
+        setRolePresets((prev) =>
+          prev
+            ? {
+                ...prev,
+                [presetId]: { ...(prev[presetId] as RolePresetDoc), ...(patch as any) },
+              }
+            : prev,
+        );
       }
-      setAdvancedPermissions((prev) => ({ ...prev, effectivePermissionsMode: mode }));
-      if (mode === "simple") {
-        setEditingRoleId(null);
-        setEditingDraft(null);
-        setSelectedRoleId(null);
-        setCohostProfile((prev) => ({
-          ...prev,
-          ...SIMPLE_ROLE_DEFAULTS.cohost.permissions,
-          label: SIMPLE_ROLE_DEFAULTS.cohost.label,
-          expiresHours: SIMPLE_ROLE_DEFAULTS.cohost.expiresHours || 24,
-          maxUses: SIMPLE_ROLE_DEFAULTS.cohost.maxUses || 1,
-        }));
-        applySimpleRoleDefaults();
-      } else {
-        await loadRoles();
-      }
+      setRolePresetsSaving((prev) => ({ ...prev, [presetId]: "saved" }));
+      window.setTimeout(() => {
+        setRolePresetsSaving((prev) => ({ ...prev, [presetId]: "idle" }));
+      }, 1500);
     } catch (err: any) {
-      setError(err?.message || "Failed to update permissions mode");
+      setRolePresetsSaving((prev) => ({ ...prev, [presetId]: "error" }));
+      setError(err?.message || "Failed to update role defaults");
     }
   };
+
+  // Advanced Permissions mode is now controlled server-side; the settings
+  // UI only exposes simple role defaults (participant/co-host templates).
 
   const saveMediaPrefs = async () => {
     setMediaPrefsSaving(true);
@@ -885,6 +842,26 @@ export default function SettingsBilling() {
   const showToast = (msg: string) => {
     setToast(msg);
     window.setTimeout(() => setToast(null), 3000);
+  };
+
+  const scheduleCohostProfileSave = (nextProfile: any) => {
+    if (cohostProfileSaveTimerRef.current) {
+      window.clearTimeout(cohostProfileSaveTimerRef.current);
+    }
+    setCohostSaving(true);
+    setCohostMessage("Saving…");
+    cohostProfileSaveTimerRef.current = window.setTimeout(async () => {
+      try {
+        await saveCohostProfileWith(nextProfile);
+        setCohostSaving(false);
+        setCohostMessage("Saved");
+        window.setTimeout(() => setCohostMessage(null), 1800);
+      } catch (err: any) {
+        setCohostSaving(false);
+        setCohostMessage("Couldn't save — retry");
+        setError(err?.message || "Failed to save co-host defaults");
+      }
+    }, 700);
   };
 
   const handleEmergencyDownload = async () => {
@@ -943,13 +920,23 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
     return;
   }
 
+  // Require Terms of Service agreement before starting checkout.
+  const hasAcceptedCurrentTos = Boolean(
+    user && user.tosVersion && user.currentTosVersion && user.tosVersion === user.currentTosVersion && user.tosAcceptedAt
+  );
+  if (!hasAcceptedCurrentTos && !checkoutTosAccepted) {
+    setCheckoutTosError("You must agree to the Terms of Service before changing plans.");
+    setActionLoading(null);
+    return;
+  }
+
   setActionLoading(plan);
   const requestId = `${plan}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
   try {
-    const res = await apiFetch(`${API_BASE}/api/billing/checkout`, {
+    const res = await apiFetch("/api/billing/checkout", {
       method: "POST",
-      body: JSON.stringify({ plan, requestId }),
+      body: JSON.stringify({ plan, requestId, tosAccepted: true }),
     });
 
     const data = await res.json();
@@ -961,6 +948,8 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
   } catch (err: any) {
     if (err?.status === 403 && err?.body?.error === "billing_disabled") {
       setError("Billing is disabled for this account. Use Test Mode plan switching instead.");
+    } else if (err?.status === 403 && err?.body?.error === "tos_not_accepted") {
+      setCheckoutTosError("You must agree to the Terms of Service before changing plans.");
     } else if (err?.body?.error) {
       setError(err.body.error);
     } else {
@@ -987,7 +976,7 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
         setActionLoading(null);
         return;
       }
-      const res = await apiFetch(`${API_BASE}/api/billing/portal`, {
+      const res = await apiFetch("/api/billing/portal", {
         method: "POST",
       });
       const data = await res.json();
@@ -998,6 +987,35 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
       setActionLoading(null);
     }
   };
+
+    const submitTosAcceptance = async () => {
+      if (!checkoutTosAccepted || checkoutTosSubmitting) return;
+      setCheckoutTosSubmitting(true);
+      setCheckoutTosError(null);
+      try {
+        const res = await apiFetch("/api/account/accept-tos", {
+          method: "POST",
+        });
+        const data = await res.json();
+        if (!res.ok || data.error) {
+          throw new Error(data.error || "Failed to record Terms acceptance.");
+        }
+        setUser((prev) =>
+          prev
+            ? {
+                ...prev,
+                tosVersion: data.tosVersion ?? prev.tosVersion ?? null,
+                tosAcceptedAt: data.tosAcceptedAt ?? prev.tosAcceptedAt ?? null,
+                currentTosVersion: data.tosVersion ?? prev.currentTosVersion ?? null,
+              }
+            : prev
+        );
+      } catch (err: any) {
+        setCheckoutTosError(err.message || "Failed to submit Terms acceptance. Please try again.");
+      } finally {
+        setCheckoutTosSubmitting(false);
+      }
+    };
 
   const openTestPlanModal = (planId: PlanId) => {
     setTestModeTargetPlan(planId);
@@ -1016,7 +1034,7 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
     setTestModeLoading(true);
     setError(null);
     try {
-      const res = await apiFetch(`${API_BASE}/api/billing/test/change-plan`, {
+      const res = await apiFetch("/api/billing/test/change-plan", {
         method: "POST",
         body: JSON.stringify({ newPlanId: testModeTargetPlan }),
       });
@@ -1026,6 +1044,7 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
       setUser((prev) => (prev ? { ...prev, planId: newPlanId, pendingPlan: null } : prev));
 
       try {
+        clearMeCache();
         await Promise.all([refreshAuth(), loadEntitlements(), loadUsage()]);
       } catch {}
 
@@ -1069,9 +1088,17 @@ const currentPlan = plans.find((p) => canonicalPlanId(p.id) === userPlanId);
 const status = user?.billingStatus;
 const hasStripeCustomer = !!(user?.billing?.customerId || (user as any)?.stripeCustomerId);
 
-// Canonical Test Mode detection prefers effectiveBillingEnabled, with legacy fallbacks
-// handled by the shared auth helper.
-const isTestMode = isAuthUserInTestMode(user as any);
+const hasAcceptedCurrentTosForUi = Boolean(
+  user &&
+  user.tosVersion &&
+  user.currentTosVersion &&
+  user.tosVersion === user.currentTosVersion &&
+  user.tosAcceptedAt
+);
+
+// Canonical Test Mode detection prefers the auth user payload from /api/auth/me,
+// with a fallback to the local /api/account/me user shape.
+const isTestMode = isAuthUserInTestMode(authUser || (user as any));
 
 const targetPlanForModal = testModeTargetPlan
   ? plans.find((p) => canonicalPlanId(p.id) === testModeTargetPlan)
@@ -1240,6 +1267,15 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
           >
             Stream Keys
           </button>
+          {platformHlsSettingsTabEnabled !== false && (
+            <button
+              type="button"
+              style={activeTab === "hls" ? { ...S.tab, ...S.tabActive } : S.tab}
+              onClick={() => setActiveTab("hls")}
+            >
+              HLS
+            </button>
+          )}
           <button
             type="button"
             style={activeTab === "defaults" ? { ...S.tab, ...S.tabActive } : S.tab}
@@ -1257,422 +1293,181 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
         </div>
 
         {/* ================================================================ */}
-        {/* SECTION 4: MOD/GUEST SETUP (Cohost profile) */}
+        {/* SECTION: HLS (Viewer page setup per room) */}
+        {/* ================================================================ */}
+        {platformHlsSettingsTabEnabled !== false && (
+          <div style={{
+            ...S.card,
+            opacity: isBlocked ? 0.6 : 1,
+            display: activeTab === "hls" ? "block" : "none",
+          }}>
+            <div style={S.cardHeader}>
+              <h2 style={S.cardTitle}>📺 HLS</h2>
+            </div>
+
+            {!platformHlsEnabled && (
+              <div style={{
+                marginBottom: 12,
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: "1px solid rgba(245,158,11,0.35)",
+                background: "rgba(245,158,11,0.10)",
+                color: "#fde68a",
+                fontSize: 13,
+                fontWeight: 700,
+              }}>
+                HLS settings are currently disabled platform-wide.
+              </div>
+            )}
+
+            <div style={{ color: "#94a3b8", fontSize: 13, lineHeight: 1.5 }}>
+              Create saved viewer links (channels), copy viewer link/iframe code, and edit viewer branding. No roomId paste required.
+            </div>
+
+            <div style={{ marginTop: 12, display: "grid", gap: 12 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, fontWeight: 800, color: "#e5e7eb" }}>Plan access:</div>
+                <div style={{ fontSize: 12, color: entitlements.canHls ? "#22c55e" : "#f97316", fontWeight: 800 }}>
+                  Runtime: {entitlements.canHls ? "Enabled" : "Not included"}
+                </div>
+                <div style={{ fontSize: 12, color: entitlements.hlsCustomizationEnabled ? "#22c55e" : "#f97316", fontWeight: 800 }}>
+                  Setup: {entitlements.hlsCustomizationEnabled ? "Enabled" : "Upgrade required"}
+                </div>
+              </div>
+
+              <SettingsHlsSetup
+                platformEnabled={platformHlsEnabled}
+                canCustomize={!!entitlements.hlsCustomizationEnabled}
+                onUpgrade={() => setActiveTab("plan")}
+              />
+            </div>
+          </div>
+        )}
+
+        {/* ================================================================ */}
+        {/* SECTION 4: ROLE DEFAULTS (Participant / Co-host templates) */}
         {/* ================================================================ */}
         {activeTab === "roles" && (
           <div style={{ ...S.card, opacity: isBlocked ? 0.6 : 1 }}>
             <div style={S.cardHeader}>
-              <h2 style={S.cardTitle}>🛡️ Mod/Guest Setup</h2>
-              {cohostMessage && <div style={S.successPill}>{cohostMessage}</div>}
+              <h2 style={S.cardTitle}>🛡️ Role Defaults</h2>
             </div>
-            {simpleMode ? (
-              <div style={{ display: "grid", gap: 12 }}>
-                <p style={{ color: "#94a3b8", marginBottom: 0 }}>
-                  Simple permissions keep Participant, Co-host, and Moderator fixed. Switch to Advanced to customize.
-                </p>
-                {["participant", "cohost", "moderator"].map((key) => {
-                  const roleKey = key as keyof typeof SIMPLE_ROLE_DEFAULTS;
-                  const role = SIMPLE_ROLE_DEFAULTS[roleKey];
-                  const perms = role.permissions;
-                  return (
-                    <div key={roleKey} style={{
+
+            <p style={{ color: "#94a3b8", marginBottom: 14 }}>
+              Configure what Participants and Co-hosts can do in-room. These templates apply whenever you change a guest's
+              role from the Host Dashboard. Moderation (mute/remove) always stays host-only.
+            </p>
+
+            <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
+              {(["participant", "cohost"] as RolePresetId[]).map((id) => {
+                const preset = rolePresets?.[id];
+                const savingState = rolePresetsSaving[id];
+                const label = ROLE_PRESET_LABELS[id];
+                const description =
+                  id === "participant"
+                    ? "Guests who join as standard participants. Usually limited to screen share and invites."
+                    : "Elevated guests who can help run the stream (destinations, layout, recording).";
+
+                return (
+                  <div
+                    key={id}
+                    style={{
                       border: "1px solid #1f2937",
                       borderRadius: 10,
                       padding: "10px 12px",
-                      background: "rgba(255,255,255,0.02)",
+                      background: "rgba(15,23,42,0.85)",
                       display: "grid",
-                      gap: 8,
-                    }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                          <span style={{ fontWeight: 700 }}>{role.label}</span>
-                          <span style={{
-                            color: "#22c55e",
-                            background: "rgba(34,197,94,0.12)",
-                            border: "1px solid rgba(34,197,94,0.4)",
-                            borderRadius: 999,
-                            padding: "2px 8px",
-                            fontSize: 11,
-                            fontWeight: 700,
-                          }}>System</span>
-                        </div>
-                        <span style={{ color: "#9ca3af", fontSize: 12 }}>Standard access</span>
-                      </div>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        {PERMISSION_ITEMS.map((item) => {
-                          const enabled = !!(perms as any)[item.key];
-                          return (
-                            <span key={item.key} style={{
-                              padding: "3px 7px",
-                              borderRadius: 999,
-                              border: `1px solid ${enabled ? "rgba(34,197,94,0.5)" : "#1f2937"}`,
-                              background: enabled ? "rgba(34,197,94,0.1)" : "rgba(255,255,255,0.02)",
-                              color: enabled ? "#22c55e" : "#94a3b8",
-                              fontSize: 11,
-                              fontWeight: 600,
-                            }}>
-                              {item.label}
-                            </span>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  );
-                })}
-
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginTop: 4 }}>
-                  <span style={{ color: "#94a3b8", fontSize: 12 }}>
-                    {advancedPermissions.lockReason === "global_lock"
-                      ? "Advanced Permissions temporarily disabled during an upgrade. Check back soon."
-                      : advancedPermissions.enabled
-                        ? "Need custom roles and fine-grained permissions? Enable Advanced Permissions Mode."
-                        : "Advanced Permissions Mode is not included on this plan. Upgrade or ask an admin for an override."}
-                  </span>
-                  <button
-                    onClick={() => updatePermissionsMode("advanced")}
-                    style={advancedPermissions.enabled && advancedPermissions.lockReason !== "global_lock" ? S.primaryBtn : { ...S.primaryBtn, opacity: 0.5, cursor: "not-allowed" }}
-                    disabled={!advancedPermissions.enabled || advancedPermissions.lockReason === "global_lock"}
+                      gap: 10,
+                    }}
                   >
-                    {advancedPermissions.lockReason === "global_lock"
-                      ? "Temporarily disabled"
-                      : advancedPermissions.enabled
-                        ? "Enable Advanced Permissions Mode"
-                        : "Locked on current plan"}
-                  </button>
-                </div>
-              </div>
-            ) : (
-              <>
-                <p style={{ color: "#94a3b8", marginBottom: 14 }}>
-                  Define what a Co-Host can do. Links will carry this profile.
-                </p>
-
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
-                  {PERMISSION_ITEMS.map((item) => (
-                    <label key={item.key} style={{
-                      border: "1px solid #1f2937",
-                      borderRadius: 10,
-                      padding: "10px 12px",
-                      display: "grid",
-                      gap: 6,
-                      background: "rgba(255,255,255,0.02)",
-                    }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <input
-                          type="checkbox"
-                          checked={(cohostProfile as any)[item.key]}
-                          onChange={(e) => setCohostProfile((prev) => ({ ...prev, [item.key]: e.target.checked }))}
-                        />
-                        <span style={{ fontWeight: 600 }}>{item.label}</span>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                        <span style={{ fontWeight: 700 }}>{label}</span>
+                        <span style={{ color: "#9ca3af", fontSize: 12 }}>{description}</span>
                       </div>
-                      <span style={{ color: "#9ca3af", fontSize: 12 }}>
-                        {item.label === "Start/Stop Stream" ? "Allow controlling broadcast egress." :
-                         item.label === "Start/Stop Recording" ? "Control recording sessions." :
-                         item.label === "Manage Destinations" ? "Edit stream keys and platforms." :
-                         item.label === "Mute/Kick Guests" ? "Basic moderation tools." :
-                         item.label === "Change Layout/Scene" ? "Switch layouts or scenes." :
-                         item.label === "Share Screen" ? "Allow co-host screen share." :
-                         item.label === "Invite/Generate Links" ? "Create guest invites from the room." : "Read-only analytics/usage view."}
+                      <span
+                        style={{
+                          color: "#22c55e",
+                          background: "rgba(34,197,94,0.12)",
+                          border: "1px solid rgba(34,197,94,0.4)",
+                          borderRadius: 999,
+                          padding: "2px 8px",
+                          fontSize: 11,
+                          fontWeight: 700,
+                        }}
+                      >
+                        Template
                       </span>
-                    </label>
-                  ))}
-                </div>
-
-                <div style={{ marginTop: 16, display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))" }}>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <label style={{ fontWeight: 700 }}>Role Display Name</label>
-                    <input
-                      type="text"
-                      value={cohostProfile.label}
-                      onChange={(e) => setCohostProfile((prev) => ({ ...prev, label: e.target.value }))}
-                      style={{ ...S.input, color: "#000", background: "#fff" }}
-                      placeholder="Co-Host"
-                    />
-                  </div>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <label style={{ fontWeight: 700 }}>Link Expiry (hours)</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={168}
-                      value={cohostProfile.expiresHours}
-                      onChange={(e) => setCohostProfile((prev) => ({ ...prev, expiresHours: Number(e.target.value) }))}
-                      style={{ ...S.input, color: "#000", background: "#fff" }}
-                    />
-                  </div>
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <label style={{ fontWeight: 700 }}>Max Uses</label>
-                    <input
-                      type="number"
-                      min={1}
-                      max={20}
-                      value={cohostProfile.maxUses}
-                      onChange={(e) => setCohostProfile((prev) => ({ ...prev, maxUses: Number(e.target.value) }))}
-                      style={{ ...S.input, color: "#000", background: "#fff" }}
-                    />
-                  </div>
-                </div>
-
-                <div style={{ marginTop: 16, display: "grid", gap: 10 }}>
-                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
-                    <div style={{ fontWeight: 700 }}>Roles & Presets</div>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <input
-                        type="text"
-                        value={roleLabelInput}
-                        onChange={(e) => setRoleLabelInput(e.target.value)}
-                        placeholder="Add custom role"
-                        style={{ ...S.input, color: "#000", background: "#fff", width: 180 }}
-                      />
-                      <button onClick={addRole} style={S.secondaryBtn}>Add</button>
                     </div>
-                  </div>
 
-                  {roleMessage && (
-                    <div style={{ color: "#22c55e", fontWeight: 600 }}>{roleMessage}</div>
-                  )}
+                    {savingState === "saving" && (
+                      <div style={{ color: "#6366f1", fontSize: 12, fontWeight: 600 }}>Saving…</div>
+                    )}
+                    {savingState === "saved" && (
+                      <div style={{ color: "#16a34a", fontSize: 12, fontWeight: 600 }}>Saved</div>
+                    )}
+                    {savingState === "error" && (
+                      <div style={{ color: "#f97316", fontSize: 12, fontWeight: 600 }}>Error — retry</div>
+                    )}
 
-                  <div style={{ display: "grid", gap: 8 }}>
-                    {roleProfiles.map((role) => {
-                      const isViewer = role.id === "viewer" || role.slug === "viewer";
-                      const isSystem = !!role.system || isViewer;
-                      const isEditing = editingRoleId === role.id;
-                      const isSelected = selectedRoleId === role.id;
-                      return (
-                        <div
-                          key={role.id}
-                          style={{
-                            display: "grid",
-                            gap: 8,
-                            padding: "10px 12px",
-                            borderRadius: 8,
-                            border: isEditing ? "1px solid #6366f1" : isSelected ? "1px solid rgba(34,197,94,0.5)" : "1px solid #1f2937",
-                            background: isEditing ? "rgba(99,102,241,0.08)" : isSelected ? "rgba(34,197,94,0.06)" : "rgba(255,255,255,0.02)",
-                          }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                              <span style={{ fontWeight: 600 }}>{role.label}</span>
-                              <span style={{
-                                color: isSystem ? "#22c55e" : "#38bdf8",
-                                background: isSystem ? "rgba(34,197,94,0.12)" : "rgba(56,189,248,0.12)",
-                                border: isSystem ? "1px solid rgba(34,197,94,0.4)" : "1px solid rgba(56,189,248,0.4)",
-                                borderRadius: 999,
-                                padding: "2px 8px",
-                                fontSize: 11,
-                                fontWeight: 700,
-                              }}>
-                                {isSystem ? "System" : "Custom"}
-                              </span>
-                              {isEditing && (
-                                <span style={{ color: "#6366f1", fontSize: 12, fontWeight: 700 }}>Editing</span>
-                              )}
-                              {!isEditing && isSelected && (
-                                <span style={{ color: "#16a34a", fontSize: 12, fontWeight: 700 }}>Applied</span>
-                              )}
-                            </div>
-                            <div style={{ display: "flex", gap: 8 }}>
+                    {ROLE_PRESET_GROUPS.map((group) => (
+                      <div key={group.title} style={{ display: "grid", gap: 6 }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, color: "#e5e7eb" }}>{group.title}</div>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {group.keys.map(({ key, label: chipLabel }) => {
+                            const enabled = !!(preset as any)?.[key];
+                            return (
                               <button
+                                key={key}
+                                type="button"
                                 onClick={() => {
-                                  const next = {
-                                    ...cohostProfile,
-                                    ...role.permissions,
-                                  };
-                                  setCohostProfile(next);
-                                  saveCohostProfileWith(next);
-                                  setSelectedRoleId(role.id);
+                                  const nextValue = !enabled;
+                                  saveRolePreset(id, { [key]: nextValue } as any);
+                                  setRolePresets((prev) =>
+                                    prev
+                                      ? {
+                                          ...prev,
+                                          [id]: {
+                                            ...(prev[id] as RolePresetDoc),
+                                            [key]: nextValue,
+                                          } as RolePresetDoc,
+                                        }
+                                      : prev,
+                                  );
                                 }}
                                 style={{
-                                  ...S.primaryBtn,
-                                  ...(isSelected ? { background: "#16a34a", border: "1px solid #16a34a" } : {}),
-                                  opacity: cohostSaving ? 0.7 : 1,
+                                  padding: "3px 7px",
+                                  borderRadius: 999,
+                                  border: `1px solid ${enabled ? "rgba(34,197,94,0.5)" : "#1f2937"}`,
+                                  background: enabled ? "rgba(34,197,94,0.1)" : "rgba(255,255,255,0.02)",
+                                  color: enabled ? "#22c55e" : "#94a3b8",
+                                  fontSize: 11,
+                                  fontWeight: 600,
+                                  cursor: "pointer",
                                 }}
-                                disabled={cohostSaving}
                               >
-                                {isSelected ? "Applied" : "Apply"}
+                                {chipLabel}
                               </button>
-                              {isEditing ? (
-                                <button
-                                  onClick={async () => {
-                                    const roleRef = roleProfiles.find((r) => r.id === role.id);
-                                    if (roleRef && editingDraft) {
-                                      await updateRolePermissions(roleRef.id, editingDraft, roleRef.label);
-                                      if (selectedRoleId === roleRef.id) {
-                                        const next = { ...cohostProfile, ...editingDraft };
-                                        setCohostProfile(next);
-                                        await saveCohostProfileWith(next);
-                                      }
-                                      setEditingRoleId(null);
-                                      setEditingDraft(null);
-                                    }
-                                  }}
-                                  style={S.primaryBtn}
-                                >
-                                  Save
-                                </button>
-                              ) : (
-                                <button
-                                  onClick={() => {
-                                    if (isViewer) return;
-                                    setEditingRoleId(role.id);
-                                    setEditingDraft({ ...(role.permissions || EMPTY_PERMISSIONS) });
-                                  }}
-                                  style={S.secondaryBtn}
-                                  disabled={isViewer}
-                                >
-                                  Edit
-                                </button>
-                              )}
-                              {isEditing && (
-                                <button
-                                  onClick={() => {
-                                    setEditingRoleId(null);
-                                    setEditingDraft(null);
-                                  }}
-                                  style={S.secondaryBtn}
-                                >
-                                  Cancel
-                                </button>
-                              )}
-                              {!isSystem && (
-                                <button onClick={() => deleteRole(role.id)} style={S.dangerGhostBtn}>Delete</button>
-                              )}
-                            </div>
-                          </div>
-
-                          {isEditing ? (
-                            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                              {PERMISSION_ITEMS.map((item) => {
-                                const enabled = !!editingDraft?.[item.key];
-                                return (
-                                  <button
-                                    key={item.key}
-                                    onClick={() => setEditingDraft((prev: any) => ({ ...(prev || {}), [item.key]: !enabled }))}
-                                    style={{
-                                      padding: "6px 10px",
-                                      borderRadius: 999,
-                                      border: enabled ? "1px solid rgba(34,197,94,0.6)" : "1px solid #1f2937",
-                                      background: enabled ? "rgba(34,197,94,0.14)" : "rgba(255,255,255,0.04)",
-                                      color: enabled ? "#22c55e" : "#94a3b8",
-                                      fontSize: 12,
-                                      fontWeight: 700,
-                                      cursor: "pointer",
-                                    }}
-                                  >
-                                    {item.label}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          ) : (
-                            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                              {PERMISSION_ITEMS.map((item) => {
-                                const enabled = !!role.permissions?.[item.key];
-                                return (
-                                  <span key={item.key} style={{
-                                    padding: "3px 7px",
-                                    borderRadius: 999,
-                                    border: `1px solid ${enabled ? "rgba(34,197,94,0.5)" : "#1f2937"}`,
-                                    background: enabled ? "rgba(34,197,94,0.1)" : "rgba(255,255,255,0.02)",
-                                    color: enabled ? "#22c55e" : "#94a3b8",
-                                    fontSize: 11,
-                                    fontWeight: 600,
-                                  }}>
-                                    {item.label}
-                                  </span>
-                                );
-                              })}
-                            </div>
-                          )}
+                            );
+                          })}
                         </div>
-                      );
-                    })}
+                      </div>
+                    ))}
                   </div>
-                </div>
+                );
+              })}
+            </div>
 
-                <div style={{ marginTop: 12 }}>
-                  <div style={{ fontWeight: 700, marginBottom: 6 }}>Current saved defaults</div>
-                  <div style={{
-                    border: "1px solid #1f2937",
-                    borderRadius: 10,
-                    padding: "10px 12px",
-                    background: "rgba(255,255,255,0.02)",
-                    display: "grid",
-                    gap: 6,
-                  }}>
-                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-                      <span style={{ fontWeight: 600 }}>{cohostProfile.label || "Co-Host"}</span>
-                      <span style={{ color: "#9ca3af", fontSize: 12 }}>Expires: {cohostProfile.expiresHours}h</span>
-                      <span style={{ color: "#9ca3af", fontSize: 12 }}>Max uses: {cohostProfile.maxUses}</span>
-                    </div>
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      {PERMISSION_ITEMS.map((item) => {
-                        const enabled = (cohostProfile as any)[item.key];
-                        return (
-                          <span
-                            key={item.key}
-                            style={{
-                              padding: "4px 8px",
-                              borderRadius: 999,
-                              border: `1px solid ${enabled ? "rgba(34,197,94,0.5)" : "#1f2937"}`,
-                              background: enabled ? "rgba(34,197,94,0.1)" : "rgba(255,255,255,0.02)",
-                              color: enabled ? "#22c55e" : "#94a3b8",
-                              fontSize: 12,
-                              fontWeight: 600,
-                            }}
-                          >
-                            {item.label}
-                          </span>
-                        );
-                      })}
-                    </div>
-                  </div>
-                </div>
-
-                <div style={{ marginTop: 10 }}>
-                  <button
-                    onClick={() => {
-                      if (window.confirm("Switch to Simple Permissions? Custom roles will be hidden until you re-enable Advanced.")) {
-                        updatePermissionsMode("simple");
-                      }
-                    }}
-                    style={S.secondaryBtn}
-                  >
-                    Switch to Simple
-                  </button>
-                </div>
-              </>
-            )}
-
-            {!simpleMode ? (
-              <div style={{ marginTop: 14 }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Quick roles shown in Room</div>
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  {roleProfiles.map((role) => {
-                    const checked = quickRoleIds.includes(role.id);
-                    return (
-                      <label key={role.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 13, color: "#e5e7eb", border: "1px solid #1f2937", borderRadius: 10, padding: "6px 10px", background: "rgba(255,255,255,0.02)" }}>
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(e) => {
-                            const next = e.target.checked
-                              ? [...quickRoleIds, role.id]
-                              : quickRoleIds.filter((id) => id !== role.id);
-                            updateQuickRoles(next);
-                          }}
-                        />
-                        <span>{role.label}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : (
-              <div style={{ marginTop: 14, color: "#9ca3af", fontSize: 12 }}>
-                Quick roles are fixed in Simple mode and hidden here.
-              </div>
-            )}
+            <div style={{ marginTop: 14, color: "#9ca3af", fontSize: 12 }}>
+              Notes:
+              <ul style={{ marginTop: 6, paddingLeft: 18 }}>
+                <li>Host-only actions like mute/remove, mute-all, and mute-lock are never granted by these templates.</li>
+                <li>
+                  If any legacy roles or moderator presets exist, they are treated as Participant in-room so older data can't
+                  reintroduce extra roles.
+                </li>
+              </ul>
+            </div>
           </div>
         )}
 
@@ -1771,6 +1566,79 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                       </span>
                     </div>
                     <p style={S.planDescription}>No matching plan found for your account. Please contact support.</p>
+                  </div>
+                </div>
+              )}
+
+              {/* Terms of Service status + checkbox + explicit submit for checkout */}
+              {!hasAcceptedCurrentTosForUi && (
+                <div style={{ marginTop: 16, padding: "10px 12px", borderRadius: 10, border: "1px solid #1f2937", background: "rgba(15,23,42,0.8)", display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ fontSize: 13, color: "#e5e7eb" }}>
+                    <strong>Legal</strong>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#9ca3af" }}>
+                    {user?.tosVersion && user?.tosAcceptedAt ? (
+                      <>
+                        Last accepted Terms of Service: v{user.tosVersion} on {formatDate(user.tosAcceptedAt)}
+                      </>
+                    ) : (
+                      <>You have not yet accepted the latest Terms of Service.</>
+                    )}
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#e5e7eb" }}>
+                    <input
+                      type="checkbox"
+                      checked={checkoutTosAccepted}
+                      onChange={(e) => {
+                        setCheckoutTosAccepted(e.target.checked);
+                        setCheckoutTosError(null);
+                      }}
+                    />
+                    <span>
+                      I agree to the <a href="/terms" target="_blank" rel="noopener noreferrer" style={{ color: "#60a5fa", textDecoration: "underline" }}>Terms of Service</a>
+                    </span>
+                  </label>
+                  <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 2 }}>
+                    <button
+                      type="button"
+                      onClick={submitTosAcceptance}
+                      disabled={!checkoutTosAccepted || checkoutTosSubmitting}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 999,
+                        border: "1px solid rgba(96,165,250,0.3)",
+                        background: !checkoutTosAccepted || checkoutTosSubmitting ? "rgba(31,41,55,0.8)" : "rgba(37,99,235,0.9)",
+                        color: "#e5e7eb",
+                        fontSize: 12,
+                        fontWeight: 600,
+                        cursor: !checkoutTosAccepted || checkoutTosSubmitting ? "not-allowed" : "pointer",
+                      }}
+                    >
+                      {checkoutTosSubmitting ? "Submitting..." : "Submit acceptance"}
+                    </button>
+                  </div>
+                  {checkoutTosError && (
+                    <div style={{ fontSize: 12, color: "#f97316" }}>{checkoutTosError}</div>
+                  )}
+                </div>
+              )}
+
+              {!platformTranscodeEnabled && (
+                <div
+                  style={{
+                    marginTop: 12,
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(248,113,113,0.45)",
+                    background: "rgba(30,64,175,0.45)",
+                    color: "#fee2e2",
+                    fontSize: 13,
+                    fontWeight: 600,
+                  }}
+                >
+                  <div style={{ marginBottom: 4 }}>Transcoding: Temporarily Disabled (Beta)</div>
+                  <div style={{ fontSize: 12, color: "#fecaca", fontWeight: 400 }}>
+                    Recordings are still available, but export/transcode features are paused while we stabilize the pipeline.
                   </div>
                 </div>
               )}
@@ -1938,15 +1806,13 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                       <ul style={S.featureList}>
                         <FeatureRow label="Monthly minutes" value={plan.limits.monthlyMinutesIncluded} />
                         <FeatureRow label="Max guests" value={plan.limits.maxGuests} />
-                        <FeatureRow label="RTMP destinations" value={plan.limits.rtmpDestinationsMax} />
-                        <FeatureRow label="Recording" value={plan.features.recording} />
+                        <FeatureRow label="Stream destinations" value={plan.limits.rtmpDestinationsMax} />
+                        {entitlements.recording && (
+                          <FeatureRow label="Recording" value={plan.features.recording} />
+                        )}
                         <FeatureRow label="Multistream" value={(plan as any).features?.multistream ?? (plan as any).multistreamEnabled} />
-                        <FeatureRow
-                          label="Advanced Permissions Mode"
-                          value={!!plan.features.advancedPermissions}
-                          pill
-                          subBullets={plan.features.advancedPermissions && planId !== "starter" ? [] : undefined}
-                        />
+                        {platformHlsEnabled ? <FeatureRow label="HLS Broadcast Page" value={(plan as any).features?.canHls} /> : null}
+                        {/* Advanced Permissions is now removed from plan marketing UI; all accounts use simple Participant/Co-host defaults. */}
                         {plan.editing?.access && (
                           <>
                             <FeatureRow label="Projects" value={plan.editing.maxProjects} />
@@ -2062,7 +1928,10 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 </p>
                 
                 <div style={S.lockedGrid}>
-                  {!currentPlan.features.recording && (
+                  {(
+                    !entitlements.recording &&
+                    !currentPlan.features.recording
+                  ) && (
                     <LockedFeature
                       icon="🎥"
                       title="Recording"
@@ -2070,7 +1939,10 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                       requiredPlan="Starter"
                     />
                   )}
-                  {!currentPlan.features.multistream && (
+                  {(
+                    !entitlements.rtmpMultistream &&
+                    !currentPlan.features.multistream
+                  ) && (
                     <LockedFeature
                       icon="📡"
                       title="Multistream"
@@ -2078,14 +1950,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                       requiredPlan="Starter"
                     />
                   )}
-                  {!currentPlan.editing?.access && (
-                    <LockedFeature
-                      icon="🎬"
-                      title="Editing Suite"
-                      description="Edit your recordings with our built-in editor"
-                      requiredPlan="Starter"
-                    />
-                  )}
+                  {/* Editing Suite is not yet available; hide from locked features for now. */}
                   {currentPlan.limits.maxGuests < 10 && (
                     <LockedFeature
                       icon="👥"
@@ -2303,7 +2168,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
               )}
               {renderEntitlementPill(
                 "Multistream",
-                entitlements.rtmpMultistream ? "RTMP enabled" : "Single platform",
+                entitlements.rtmpMultistream ? "Enabled" : "Single destination",
                 entitlements.rtmpMultistream
               )}
               {renderEntitlementPill(
@@ -2312,8 +2177,8 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 entitlements.maxGuests !== 0
               )}
               {renderEntitlementPill(
-                "Destinations",
-                formatLimitLabel(entitlements.maxDestinations, "destination"),
+                "Stream Destinations",
+                formatLimitLabel(entitlements.maxDestinations, "stream destination"),
                 entitlements.maxDestinations !== 0
               )}
               {renderEntitlementPill(
@@ -2369,11 +2234,12 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 unit="min"
               />
               <UsageBar
-                label="RTMP Destinations"
+                label="Stream Destinations"
                 used={usage.rtmpDestinations.used}
                 limit={
-                  usage.rtmpDestinations.limit ||
-                  currentPlan.limits?.rtmpDestinationsMax ||
+                  entitlements.maxDestinations ??
+                  usage.rtmpDestinations.limit ??
+                  currentPlan.limits?.rtmpDestinationsMax ??
                   0
                 }
                 unit=""

@@ -40,3 +40,17 @@
 .read-the-docs {
   color: #888;
 }
+
+/* ======================================
+   Role select dropdown (Room dashboard)
+   ====================================== */
+
+.sl-role-select {
+  color: #000 !important;
+  background: #fff !important;
+}
+
+.sl-role-select option {
+  color: #000 !important;
+  background: #fff !important;
+}

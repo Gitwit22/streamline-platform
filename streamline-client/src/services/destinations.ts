@@ -1,3 +1,5 @@
+import { apiFetch } from "../lib/api";
+
 export type DestinationStatus = "connected" | "needs_attention" | "disconnected";
 export type DestinationStatusReason = "missing_key" | "invalid_format" | "egress_auth" | "egress_failed" | "unknown";
 
@@ -18,83 +20,56 @@ export interface DestinationItem {
   updatedAt?: number;
 }
 
-const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
-
-async function parseJsonSafe(res: Response) {
-  const ct = res.headers.get("content-type") || "";
-  if (ct.includes("application/json")) return res.json();
-  const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    return { ok: false, error: "non_json_response", raw: text };
-  }
-}
-
 export async function fetchDestinations(params?: { platform?: string; includeDisabled?: boolean }) {
-  const url = new URL(`${API_BASE}/api/destinations`);
-  if (params?.platform) url.searchParams.set("platform", params.platform);
-  if (params?.includeDisabled === true) url.searchParams.set("includeDisabled", "true");
-  const res = await fetch(url.toString(), { credentials: "include" });
-  const data = await parseJsonSafe(res);
-  if (!res.ok) throw new Error(String((data && data.error) || res.status));
+  const qs = new URLSearchParams();
+  if (params?.platform) qs.set("platform", params.platform);
+  if (params?.includeDisabled === true) qs.set("includeDisabled", "true");
+  const path = `/api/destinations${qs.toString() ? `?${qs.toString()}` : ""}`;
+  const res = await apiFetch(path);
+  const data = await res.json();
   return data as { ok: boolean; items: DestinationItem[]; usedCount?: number; limit?: number };
 }
 
 export async function createDestination(body: { platform: string; name?: string; rtmpUrlBase: string; enabled?: boolean; streamKeyPlain?: string; mode?: "manual" | "connected"; persistent?: boolean; oauthRef?: string | null }) {
-  const res = await fetch(`${API_BASE}/api/destinations`, {
+  const res = await apiFetch("/api/destinations", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
     body: JSON.stringify(body),
   });
-  const data = await parseJsonSafe(res);
-  if (!res.ok) throw new Error(String((data && data.error) || res.status));
+  const data = await res.json();
   return data as { ok: boolean; destination: DestinationItem; validation?: { status: DestinationStatus; statusReason?: DestinationStatusReason | null }; usedCount?: number; limit?: number };
 }
 
 export async function updateDestination(id: string, body: { platform?: string; name?: string; rtmpUrlBase?: string; enabled?: boolean; streamKeyPlain?: string; streamKeyEnc?: any; mode?: "manual" | "connected"; persistent?: boolean; oauthRef?: string | null }) {
-  const res = await fetch(`${API_BASE}/api/destinations/${encodeURIComponent(id)}`, {
+  const res = await apiFetch(`/api/destinations/${encodeURIComponent(id)}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
     body: JSON.stringify(body || {}),
   });
-  const data = await parseJsonSafe(res);
-  if (!res.ok) throw new Error(String((data && data.error) || res.status));
+  const data = await res.json();
   return data as { ok: boolean; destination: DestinationItem; usedCount?: number; limit?: number };
 }
 
 export async function deleteDestination(id: string) {
-  const res = await fetch(`${API_BASE}/api/destinations/${encodeURIComponent(id)}`, {
+  const res = await apiFetch(`/api/destinations/${encodeURIComponent(id)}`, {
     method: "DELETE",
-    credentials: "include",
   });
-  const data = await parseJsonSafe(res);
-  if (!res.ok) throw new Error(String((data && data.error) || res.status));
+  const data = await res.json();
   return data as { ok: boolean };
 }
 
 export async function validateDestinationPreCreate(body: { platform: string; rtmpUrlBase: string; streamKeyPlain?: string }) {
-  const res = await fetch(`${API_BASE}/api/destinations/validate`, {
+  const res = await apiFetch("/api/destinations/validate", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
     body: JSON.stringify(body),
   });
-  const data = await parseJsonSafe(res);
-  if (!res.ok) throw new Error(String((data && data.error) || res.status));
+  const data = await res.json();
   return data as { ok: boolean; status: DestinationStatus; statusReason?: DestinationStatusReason | null };
 }
 
 export async function preflight(body: { destinationIds?: string[]; video?: any; audio?: any; networkProbeMs?: number }) {
-  const res = await fetch(`${API_BASE}/api/live/preflight`, {
+  const res = await apiFetch("/api/live/preflight", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
     body: JSON.stringify(body || {}),
   });
-  const data = await parseJsonSafe(res);
-  if (!res.ok) throw new Error(String((data && data.error) || res.status));
+  const data = await res.json();
   return data as { ok: boolean; allowed: boolean; destinations: Array<{ id: string; platform: string; status: DestinationStatus; statusReason?: DestinationStatusReason | null }> };
 }

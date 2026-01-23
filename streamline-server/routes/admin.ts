@@ -75,6 +75,7 @@ router.get("/env-sanity", async (req, res) => {
         planId,
         planLegacy: user.plan ?? null,
         adminOverride: Boolean(user.adminOverride),
+        adminOverrideHls: Boolean((user as any).adminOverrideHls),
         admin: user.admin ?? null,
         isAdminUserField: Boolean(user.admin?.isAdmin ?? user.isAdmin),
       },
@@ -115,8 +116,6 @@ router.get("/plans", async (req, res) => {
       id: d.id,
       ...(d.data() as any),
     }));
-
-    console.log("🎯 4. Mapped all plans:", JSON.stringify(plans));
     return res.json({ plans });
   } catch (err: any) {
     console.error("🎯 ERROR in plans route:", err);
@@ -536,7 +535,8 @@ router.post("/plans/migrate-schema", async (req, res) => {
         "recording",
         "rtmp",
         "multistream",
-        "advancedPermissions",
+        // "advancedPermissions" is no longer admin-editable; keep any stored
+        // value as-is and treat advanced permissions as removed from plans.
         "rtmpMultistream",
         "overagesAllowed",
       ];
@@ -857,10 +857,33 @@ router.get("/features", async (req, res) => {
   try {
     const snapshot = await firestore.collection("featureFlags").get();
 
-    const features = snapshot.docs.map((doc) => ({
-      name: doc.id,
-      ...doc.data(),
-    }));
+    // Ensure important flags are visible in the Admin UI even before they have
+    // been explicitly created in Firestore.
+    const seededDefaults: Array<{ name: string; enabled: boolean }> = [
+      { name: "hlsSettingsTab", enabled: true },
+    ];
+
+    const byName = new Map<string, any>();
+    snapshot.docs.forEach((doc) => {
+      byName.set(doc.id, doc.data());
+    });
+
+    const features: any[] = snapshot.docs
+      .map((doc) => ({
+        name: doc.id,
+        ...doc.data(),
+      }))
+      // Advanced permissions is now a legacy flag and should not
+      // be exposed as a toggle in the Admin UI.
+      .filter((f) => f.name !== "advancedPermissions");
+
+    for (const seed of seededDefaults) {
+      if (!byName.has(seed.name)) {
+        features.push({ name: seed.name, enabled: seed.enabled, seeded: true });
+      }
+    }
+
+    features.sort((a, b) => String(a?.name || "").localeCompare(String(b?.name || "")));
 
     res.json({ features });
   } catch (error: any) {

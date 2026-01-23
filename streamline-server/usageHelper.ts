@@ -49,9 +49,9 @@ export async function addUsageForUser(
     const now = new Date();
     const durationHours = durationMinutes / 60;
 
-    // Get the user's current usage and plan
+    // Get the user's current usage and plan (prefer canonical planId, fall back to legacy plan)
     const usage = (userData.usage || {}) as any;
-    const planId = userData.plan || "free";
+    const planId = (userData.planId || userData.plan || "free") as string;
 
     // Get plan limits
     const planSnap = await firestore.collection("plans").doc(planId).get();
@@ -123,7 +123,7 @@ export async function getUserUsage(userId: string) {
 
     const userData = userSnap.data() as any;
     const usage = (userData.usage || {}) as any;
-    const planId = userData.plan || "free";
+    const planId = (userData.planId || userData.plan || "free") as string;
 
     // Get plan limits
     const planSnap = await firestore.collection("plans").doc(planId).get();
@@ -171,7 +171,7 @@ export async function checkStorageLimit(userId: string, fileSizeBytes: number): 
     }
 
     const userData = userSnap.data() as any;
-    const planId = userData.plan || "free";
+    const planId = (userData.planId || userData.plan || "free") as string;
 
     // Get plan limits
     const planSnap = await firestore.collection("plans").doc(planId).get();

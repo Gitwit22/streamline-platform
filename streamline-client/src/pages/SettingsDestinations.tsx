@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { fetchDestinations, createDestination, validateDestinationPreCreate, preflight, updateDestination, deleteDestination, type DestinationItem } from "../services/destinations";
+import { getMeCached } from "../lib/meCache";
 
 function StatusBadge({ status, reason }: { status: string; reason?: string | null }) {
   const color = status === "connected" ? "#16a34a" : status === "disconnected" ? "#6b7280" : "#f59e0b";
@@ -61,9 +62,7 @@ export default function SettingsDestinations() {
     load();
     const loadAccount = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/account/me`, { credentials: "include" });
-        if (!res.ok) return;
-        const data = await res.json();
+        const data = await getMeCached();
         if (data?.connectedPlatforms) {
           setConnectedPlatforms({
             youtube: !!data.connectedPlatforms.youtube,
@@ -167,7 +166,7 @@ export default function SettingsDestinations() {
 
   async function onClearKey(id: string) {
     setError(null);
-    const confirmClear = window.confirm("Clear the stored stream key for this destination?");
+    const confirmClear = window.confirm("Clear the stored stream key for this stream destination?");
     if (!confirmClear) return;
     try {
       const res = await updateDestination(id, { streamKeyPlain: "" });
@@ -194,14 +193,14 @@ export default function SettingsDestinations() {
       {/* Header */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
         <div>
-          <h1 style={{ fontSize: 24, fontWeight: 600, margin: 0 }}>Streaming / Stream Keys</h1>
+          <h1 style={{ fontSize: 24, fontWeight: 600, margin: 0 }}>Stream Destinations</h1>
           <p style={{ marginTop: 4, fontSize: 13, color: "#6b7280", maxWidth: 520 }}>
-            Configure where StreamLine sends your live stream. Add YouTube, Facebook, Twitch, or custom RTMP
-            destinations and save your stream keys once here for one-click Go Live in the room.
+            Configure where StreamLine sends your live stream. Add YouTube, Facebook, Twitch, or custom destinations
+            (RTMP) and save your stream keys once here for one-click Go Live in the room.
           </p>
         </div>
         <div style={{ textAlign: "right", fontSize: 12, color: "#6b7280" }}>
-          <div style={{ fontWeight: 600, marginBottom: 4 }}>RTMP Destinations</div>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>Stream Destinations</div>
           <div>
             Used <span style={{ fontWeight: 600 }}>{typeof usedCount !== "undefined" ? usedCount : "—"}</span>
             {" / "}
@@ -224,7 +223,7 @@ export default function SettingsDestinations() {
             color: "#f9fafb",
           }}
         >
-          <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Add streaming destination</h3>
+          <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>Add Stream Destination</h3>
           <p style={{ fontSize: 12, color: "#e5e7eb", marginBottom: 12 }}>
             Paste your stream key from your platform. Keys are stored encrypted and will be used automatically when
             you go live.
@@ -240,8 +239,15 @@ export default function SettingsDestinations() {
             <StatusBadge status={validation.status} reason={validation.statusReason || undefined} />
           </div>
         )}
-        <form onSubmit={onCreate}>
+        <form onSubmit={onCreate} autoComplete="off">
           <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 8 }}>
+            {/* Autofill decoy to absorb email/username autofill */}
+            <input
+              type="text"
+              name="username"
+              autoComplete="username"
+              style={{ display: "none" }}
+            />
             <select
               value={platform}
               onChange={e => setPlatform(e.target.value)}
@@ -272,6 +278,8 @@ export default function SettingsDestinations() {
             />
             <input
               type="password"
+              name="streamKey"
+              id="stream-destination-stream-key"
               value={streamKey}
               onChange={e => setStreamKey(e.target.value)}
               placeholder="Enter stream key (optional, stored encrypted)"
@@ -282,7 +290,7 @@ export default function SettingsDestinations() {
                 color: "#f9fafb",
                 background: "rgba(15, 23, 42, 0.7)",
               }}
-              autoComplete="off"
+              autoComplete="new-password"
             />
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
               <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#e5e7eb" }}>
@@ -381,7 +389,7 @@ export default function SettingsDestinations() {
           }}
         >
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Existing destinations</h3>
+            <h3 style={{ fontSize: 14, fontWeight: 600, margin: 0 }}>Saved Stream Destinations</h3>
             <button
               onClick={onPreflight}
               style={{
@@ -401,8 +409,8 @@ export default function SettingsDestinations() {
             <div style={{ padding: 12, fontSize: 13 }}>Loading…</div>
           ) : items.length === 0 ? (
             <div style={{ padding: 12, fontSize: 13, color: "#e5e7eb" }}>
-              No destinations yet. Add YouTube, Facebook, Twitch, or custom RTMP targets on the left to reuse them
-              from the room.
+              No stream destinations yet. Add YouTube, Facebook, Twitch, or a custom destination (RTMP) above to
+              reuse it from the room.
             </div>
           ) : (
             <div style={{ width: "100%" }}>
@@ -484,7 +492,7 @@ export default function SettingsDestinations() {
                             ? "Facebook default"
                             : item.platform === "twitch"
                             ? "Twitch default"
-                            : "Custom RTMP endpoint"
+                            : "Custom endpoint (RTMP)"
                         )}
                       </td>
                       <td style={{ padding: "6px 6px" }}>
@@ -494,6 +502,8 @@ export default function SettingsDestinations() {
                         {editingId === item.id ? (
                           <input
                             type="password"
+                            name="streamKey"
+                            id={`stream-destination-stream-key-${item.id}`}
                             value={editForm.streamKeyPlain}
                             onChange={e => setEditForm(f => ({ ...f, streamKeyPlain: e.target.value }))}
                             placeholder={item.hasKey ? "Enter new key (stored encrypted, never shown)" : "Enter new key"}
@@ -507,7 +517,7 @@ export default function SettingsDestinations() {
                               minWidth: 100,
                               maxWidth: 140,
                             }}
-                            autoComplete="off"
+                            autoComplete="new-password"
                           />
                         ) : (
                           // Do not show any part of the stored key; only indicate presence

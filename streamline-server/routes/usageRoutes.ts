@@ -55,12 +55,14 @@ async function handleUsageSummary(req: any, res: any) {
     if (usageSnap.exists) {
       usageMonthly = usageSnap.data() as any;
     } else {
+      const legacyYtdMinutes = Math.max(0, Math.round(Number(legacyUsage.ytdHours || 0) * 60));
       usageMonthly = {
         uid,
         monthKey,
         usage: {
           participantMinutes: legacyParticipantMinutes,
           transcodeMinutes: 0,
+          hlsMinutes: 0,
           minutes: {
             live: {
               currentPeriod: legacyParticipantMinutes,
@@ -73,11 +75,12 @@ async function handleUsageSummary(req: any, res: any) {
           },
         },
         ytd: {
-          participantMinutes: Math.max(0, Math.round(Number(legacyUsage.ytdHours || 0) * 60)),
+          participantMinutes: legacyYtdMinutes,
           transcodeMinutes: 0,
+          hlsMinutes: 0,
           minutes: {
             live: {
-              lifetime: Math.max(0, Math.round(Number(legacyUsage.ytdHours || 0) * 60)),
+              lifetime: legacyYtdMinutes,
             },
             recording: {
               lifetime: 0,
@@ -104,10 +107,16 @@ async function handleUsageSummary(req: any, res: any) {
     const participantUsed = toNumber(usage.participantMinutes);
     const transcodeUsed = toNumber(usage.transcodeMinutes);
 
-    const liveCurrent = toNumber(usageMinutes.live?.currentPeriod ?? participantUsed);
-    const liveLifetime = toNumber(
+    const hlsCurrent = toNumber(usage.hlsMinutes);
+    const hlsLifetime = toNumber(ytd.hlsMinutes);
+
+    const liveCurrentBase = toNumber(usageMinutes.live?.currentPeriod ?? participantUsed);
+    const liveLifetimeBase = toNumber(
       usageMinutes.live?.lifetime ?? ytdMinutes.live?.lifetime ?? ytd.participantMinutes
     );
+
+    const liveCurrent = liveCurrentBase + hlsCurrent;
+    const liveLifetime = liveLifetimeBase + hlsLifetime;
     const recordingCurrent = toNumber(usageMinutes.recording?.currentPeriod);
     const recordingLifetime = toNumber(usageMinutes.recording?.lifetime ?? ytdMinutes.recording?.lifetime);
 
@@ -146,6 +155,10 @@ async function handleUsageSummary(req: any, res: any) {
           recording: {
             currentPeriod: recordingCurrent,
             lifetime: recordingLifetime,
+          },
+          hls: {
+            currentPeriod: hlsCurrent,
+            lifetime: hlsLifetime,
           },
         },
       },
@@ -189,17 +202,25 @@ async function handleUsageSummary(req: any, res: any) {
               currentPeriod: recordingCurrent,
               lifetime: recordingLifetime,
             },
+            hls: {
+              currentPeriod: hlsCurrent,
+              lifetime: hlsLifetime,
+            },
           },
         },
         ytd: {
           participantMinutes: Number(ytd.participantMinutes || 0),
           transcodeMinutes: Number(ytd.transcodeMinutes || 0),
+          hlsMinutes: Number(ytd.hlsMinutes || 0),
           minutes: {
             live: {
               lifetime: toNumber(ytdMinutes.live?.lifetime ?? liveLifetime),
             },
             recording: {
               lifetime: toNumber(ytdMinutes.recording?.lifetime ?? recordingLifetime),
+            },
+            hls: {
+              lifetime: hlsLifetime,
             },
           },
         },
@@ -236,13 +257,26 @@ router.get("/entitlements", requireAuth, async (req, res) => {
   const entitlements = await getEffectiveEntitlements(uid);
   const plan = entitlements.plan;
 
+   // Global recording feature flag: when disabled, recording should be treated
+   // as unavailable even if the plan normally includes it. Default to enabled
+   // if the flag doc is missing so plans behave as defined out of the box.
+   let recordingEnabledFlag = true;
+   try {
+     const snap = await firestore.collection("featureFlags").doc("recording").get();
+     const data = snap.exists ? (snap.data() as any) || {} : {};
+     recordingEnabledFlag = data.enabled === undefined ? true : !!data.enabled;
+   } catch {
+     recordingEnabledFlag = true;
+   }
+
   const payload = {
     planId: entitlements.planId,
     planName: plan.name || entitlements.planId,
-    recording: !!entitlements.features.recording,
+    recording: !!entitlements.features.recording && recordingEnabledFlag,
     rtmpMultistream: !!entitlements.features.multistream,
     dualRecording: !!(plan.raw?.features?.dualRecording || plan.raw?.features?.dual_recording),
     watermark: !!(plan.raw?.features?.watermarkRecordings || plan.raw?.features?.watermark),
+    canHls: !!((entitlements.features as any).canHls || plan.raw?.features?.canHls || plan.raw?.features?.hls || plan.raw?.features?.hlsBroadcast),
     maxDestinations: resolveMaxDestinations(plan.raw?.limits || entitlements.limits),
     maxGuests: Number(entitlements.limits.maxGuests || 0),
     participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),

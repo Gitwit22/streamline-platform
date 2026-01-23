@@ -158,7 +158,7 @@ const Welcome = () => {
             padding: '0 16px'
           }}
         >
-          {/* Card 1 */}
+          {/* Card 1 - Multi-Platform */}
           <div 
             style={{
               background: 'rgba(255, 255, 255, 0.05)',
@@ -185,11 +185,11 @@ const Welcome = () => {
               Multi-Platform
             </div>
             <div style={{ fontSize: '12px', color: '#6b7280' }}>
-              Stream to all platforms at once
+              Stream to all platforms at once.
             </div>
           </div>
 
-          {/* Card 2 */}
+          {/* Card 2 - Recording */}
           <div 
             style={{
               background: 'rgba(255, 255, 255, 0.05)',
@@ -211,16 +211,16 @@ const Welcome = () => {
               e.currentTarget.style.transform = 'translateY(0)';
             }}
           >
-            <div style={{ fontSize: '32px', marginBottom: '12px' }}>⚡</div>
+            <div style={{ fontSize: '32px', marginBottom: '12px' }}>🔴</div>
             <div style={{ fontSize: '14px', fontWeight: 600, color: '#ffffff', marginBottom: '4px' }}>
-              Ultra Low Latency
+              Recording
             </div>
             <div style={{ fontSize: '12px', color: '#6b7280' }}>
-              Real-time interaction
+              Record your stream for playback, downloads, or editing later.
             </div>
           </div>
 
-          {/* Card 3 */}
+          {/* Card 3 - HLS */}
           <div 
             style={{
               background: 'rgba(255, 255, 255, 0.05)',
@@ -242,12 +242,12 @@ const Welcome = () => {
               e.currentTarget.style.transform = 'translateY(0)';
             }}
           >
-            <div style={{ fontSize: '32px', marginBottom: '12px' }}>✂️</div>
+            <div style={{ fontSize: '32px', marginBottom: '12px' }}>🌐</div>
             <div style={{ fontSize: '14px', fontWeight: 600, color: '#ffffff', marginBottom: '4px' }}>
-              Built-in Editor
+              HLS
             </div>
             <div style={{ fontSize: '12px', color: '#6b7280' }}>
-              Edit and share instantly
+              Stream to a shareable link that works on websites and across devices.
             </div>
           </div>
         </div>
@@ -361,34 +361,6 @@ const Welcome = () => {
 
       </div>
 
-      {/* DEV BYPASS - BOTTOM RIGHT */}
-      <button
-        onClick={() => nav("/join")}
-        style={{
-          position: 'absolute',
-          bottom: '24px',
-          right: '24px',
-          color: 'rgba(248, 113, 113, 0.5)',
-          fontSize: '12px',
-          background: 'rgba(0, 0, 0, 0.2)',
-          backdropFilter: 'blur(10px)',
-          padding: '6px 12px',
-          borderRadius: '8px',
-          border: '1px solid rgba(220, 38, 38, 0.2)',
-          cursor: 'pointer',
-          transition: 'all 0.3s ease'
-        }}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.color = 'rgba(248, 113, 113, 1)';
-          e.currentTarget.style.borderColor = 'rgba(220, 38, 38, 0.4)';
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.color = 'rgba(248, 113, 113, 0.5)';
-          e.currentTarget.style.borderColor = 'rgba(220, 38, 38, 0.2)';
-        }}
-      >
-        dev bypass →
-      </button>
       {/* FOOTER LINKS - BOTTOM LEFT */}
       <div 
         style={{
@@ -409,14 +381,16 @@ const Welcome = () => {
         >
           Privacy
         </Link>
-        <Link 
-          to="/terms" 
+        <a
+          href="/terms"
+          target="_blank"
+          rel="noopener noreferrer"
           style={{ color: '#4b5563', textDecoration: 'none', transition: 'color 0.3s ease' }}
           onMouseEnter={(e) => e.currentTarget.style.color = '#ef4444'}
           onMouseLeave={(e) => e.currentTarget.style.color = '#4b5563'}
         >
           Terms
-        </Link>
+        </a>
         <Link 
           to="/support" 
           style={{ color: '#4b5563', textDecoration: 'none', transition: 'color 0.3s ease' }}

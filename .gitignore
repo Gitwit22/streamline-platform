@@ -1,6 +1,8 @@
 node_modules/
 dist/
 dist-node/
+**/dist/
+**/dist-node/
 .env
 .env.local
 *.log
@@ -15,3 +17,6 @@ coverage/
 build/
 .next/
 out/
+
+# Secrets / credentials (do not commit)
+**/firebaseServiceAccount*.json

@@ -1,11 +1,19 @@
 import { Router } from "express";
 import { firestore } from "../firebaseAdmin";
+import admin from "firebase-admin";
 import { requireAuth } from "../middleware/requireAuth";
 import { clampPresetForPlan, getPresetById, getUserPlanId, MEDIA_PRESETS, MediaPresetId } from "../lib/mediaPresets";
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import crypto from "crypto";
+import { CURRENT_TOS_VERSION } from "../lib/tos";
+import {
+  DEFAULT_ROLE_PROFILES,
+  DEFAULT_ROLE_PROFILES_BY_ID,
+  type RolePermissionMap,
+} from "../lib/permissions/defaultRoleProfiles";
+import { getPlatformTranscodeEnabled } from "../lib/platformFlags";
 
 const router = Router();
 
@@ -21,28 +29,127 @@ const DEFAULT_MEDIA_PREFS = {
 
 const DEFAULT_COHOST_PROFILE = {
   label: "Co-Host",
-  canStream: false,
-  canRecord: false,
-  canDestinations: false,
+  canStream: true,
+  canRecord: true,
+  canDestinations: true,
   canModerate: false,
-  canLayout: false,
-  canScreenShare: false,
-  canInvite: false,
+  canLayout: true,
+  canScreenShare: true,
+  canInvite: true,
   canAnalytics: false,
   expiresHours: 24,
   maxUses: 1,
 };
 
-type PermissionSet = {
-  canStream: boolean;
-  canRecord: boolean;
-  canDestinations: boolean;
-  canModerate: boolean;
-  canLayout: boolean;
+type RolePresetId = "participant" | "cohost" | "moderator";
+type RolePresetDoc = {
+  role: RolePresetId;
+  canPublishAudio: boolean;
+  canPublishVideo: boolean;
   canScreenShare: boolean;
-  canInvite: boolean;
-  canAnalytics: boolean;
+  tileVisible: boolean;
+  canMuteGuests: boolean;
+  canInviteLinks: boolean;
+  canManageDestinations: boolean;
+  canStartStopStream: boolean;
+  canStartStopRecording: boolean;
+  // Optional future scopes. Moderator must never have these enabled.
+  canViewAnalytics?: boolean;
+  canChangeLayoutScene?: boolean;
+  updatedAt?: number;
 };
+
+const DEFAULT_ROLE_PRESETS: Record<RolePresetId, RolePresetDoc> = {
+  participant: {
+    role: "participant",
+    canPublishAudio: true,
+    canPublishVideo: true,
+    canScreenShare: false,
+    tileVisible: true,
+    // Host-only moderation: participants never gain mute/remove powers from templates.
+    canMuteGuests: false,
+    canInviteLinks: false,
+    canManageDestinations: false,
+    canStartStopStream: false,
+    canStartStopRecording: false,
+  },
+  moderator: {
+    role: "moderator",
+    canPublishAudio: true,
+    canPublishVideo: true,
+    canScreenShare: false,
+    tileVisible: true,
+    // Legacy moderator profile kept for backwards-compat reads only.
+    // Moderation powers are enforced host-only elsewhere.
+    canMuteGuests: false,
+    canInviteLinks: true,
+    canManageDestinations: false,
+    canStartStopStream: false,
+    canStartStopRecording: false,
+    canViewAnalytics: false,
+    canChangeLayoutScene: false,
+  },
+  cohost: {
+    role: "cohost",
+    canPublishAudio: true,
+    canPublishVideo: true,
+    canScreenShare: true,
+    tileVisible: true,
+    // Host-only moderation: co-hosts never gain mute/remove powers from templates.
+    canMuteGuests: false,
+    canInviteLinks: true,
+    canManageDestinations: true,
+    canStartStopStream: true,
+    canStartStopRecording: true,
+  },
+};
+
+function parseRolePresetId(raw: any): RolePresetId | null {
+  const v = String(raw || "").toLowerCase();
+  if (v === "participant" || v === "cohost" || v === "moderator") return v;
+  return null;
+}
+
+function pickBoolean(v: any): boolean | undefined {
+  if (typeof v === "boolean") return v;
+  return undefined;
+}
+
+async function readRolePreset(uid: string, presetId: RolePresetId): Promise<RolePresetDoc> {
+  const base = DEFAULT_ROLE_PRESETS[presetId];
+  try {
+    const snap = await firestore.collection("users").doc(uid).collection("rolePresets").doc(presetId).get();
+    const data = snap.exists ? (snap.data() as any) : {};
+    const merged: RolePresetDoc = {
+      ...base,
+      role: presetId,
+      canPublishAudio: pickBoolean(data.canPublishAudio) ?? base.canPublishAudio,
+      canPublishVideo: pickBoolean(data.canPublishVideo) ?? base.canPublishVideo,
+      canScreenShare: pickBoolean(data.canScreenShare) ?? base.canScreenShare,
+      tileVisible: pickBoolean(data.tileVisible) ?? base.tileVisible,
+      canMuteGuests: pickBoolean(data.canMuteGuests) ?? base.canMuteGuests,
+      canInviteLinks: pickBoolean(data.canInviteLinks) ?? base.canInviteLinks,
+      canManageDestinations: pickBoolean(data.canManageDestinations) ?? base.canManageDestinations,
+      canStartStopStream: pickBoolean(data.canStartStopStream) ?? base.canStartStopStream,
+      canStartStopRecording: pickBoolean(data.canStartStopRecording) ?? base.canStartStopRecording,
+      canViewAnalytics: pickBoolean(data.canViewAnalytics) ?? base.canViewAnalytics,
+      canChangeLayoutScene: pickBoolean(data.canChangeLayoutScene) ?? base.canChangeLayoutScene,
+      updatedAt: typeof data.updatedAt === "number" ? data.updatedAt : undefined,
+    };
+
+    // Hard guarantees: moderator must never have these enabled.
+    if (presetId === "moderator") {
+      merged.canViewAnalytics = false;
+      merged.canChangeLayoutScene = false;
+    }
+
+    return merged;
+  } catch {
+    return base;
+  }
+}
+
+type PermissionSet = RolePermissionMap;
 
 type RoleProfile = {
   id: string;
@@ -53,107 +160,29 @@ type RoleProfile = {
   slug?: string;
 };
 
-const DEFAULT_ROLE_TEMPLATES: RoleProfile[] = [
-  {
-    id: "viewer",
-    slug: "viewer",
-    label: "Viewer",
-    system: true,
-    lockedName: true,
-    permissions: {
-      canStream: false,
-      canRecord: false,
-      canDestinations: false,
-      canModerate: false,
-      canLayout: false,
-      canScreenShare: false,
-      canInvite: false,
-      canAnalytics: false,
-    },
-  },
-  {
-    id: "participant",
-    slug: "participant",
-    label: "Participant",
-    system: true,
-    lockedName: true,
-    permissions: {
-      canStream: false,
-      canRecord: false,
-      canDestinations: false,
-      canModerate: false,
-      canLayout: false,
-      canScreenShare: false,
-      canInvite: false,
-      canAnalytics: false,
-    },
-  },
-  {
-    id: "cohost",
-    slug: "cohost",
-    label: "Co-host",
-    system: true,
-    lockedName: true,
-    permissions: {
-      canStream: false,
-      canRecord: false,
-      canDestinations: false,
-      canModerate: false,
-      canLayout: true,
-      canScreenShare: true,
-      canInvite: false,
-      canAnalytics: false,
-    },
-  },
-  {
-    id: "moderator",
-    slug: "moderator",
-    label: "Moderator",
-    system: true,
-    lockedName: true,
-    permissions: {
-      canStream: false,
-      canRecord: false,
-      canDestinations: false,
-      canModerate: true,
-      canLayout: true,
-      canScreenShare: false,
-      canInvite: false,
-      canAnalytics: false,
-    },
-  },
-];
+const DEFAULT_ROLE_TEMPLATES: RoleProfile[] = DEFAULT_ROLE_PROFILES.map((profile) => ({
+  id: profile.id,
+  slug: profile.id,
+  label: profile.name,
+  system: profile.isSystemDefault,
+  lockedName: !!profile.lockedName,
+  permissions: profile.permissions,
+}));
 
-export const SIMPLE_ROLE_DEFAULTS: Record<"participant" | "moderator" | "cohost", PermissionSet> = {
+const DEFAULT_QUICK_ROLE_IDS: string[] = ["participant", "cohost"];
+
+export const SIMPLE_ROLE_DEFAULTS: Record<"participant" | "moderator" | "cohost" | "host", PermissionSet> = {
   participant: {
-    canStream: false,
-    canRecord: false,
-    canDestinations: false,
-    canModerate: false,
-    canLayout: false,
-    canScreenShare: false,
-    canInvite: false,
-    canAnalytics: false,
+    ...DEFAULT_ROLE_PROFILES_BY_ID.participant.permissions,
   },
   moderator: {
-    canStream: false,
-    canRecord: false,
-    canDestinations: false,
-    canModerate: true,
-    canLayout: true,
-    canScreenShare: false,
-    canInvite: false,
-    canAnalytics: false,
+    ...DEFAULT_ROLE_PROFILES_BY_ID.moderator.permissions,
   },
   cohost: {
-    canStream: false,
-    canRecord: false,
-    canDestinations: false,
-    canModerate: false,
-    canLayout: true,
-    canScreenShare: true,
-    canInvite: false,
-    canAnalytics: false,
+    ...DEFAULT_ROLE_PROFILES_BY_ID.cohost.permissions,
+  },
+  host: {
+    ...DEFAULT_ROLE_PROFILES_BY_ID.host.permissions,
   },
 };
 
@@ -175,20 +204,31 @@ async function getNormalizedMediaPrefs(uid: string) {
   return { mediaPrefs: normalizeMediaPrefs((data as any).mediaPrefs, planId), planId };
 }
 
-async function getPlanFeatures(planId: string) {
-  const snap = await firestore.collection("plans").doc(planId).get();
+// Advanced permissions have been fully removed in favor of a single,
+// simple permissions mode. Keep a minimal helper that always reports
+// advanced permissions as disabled so existing callers continue to
+// receive a stable payload shape.
+
+async function getHlsUiFlag() {
+  // Global HLS UI/tab flag, driven from the featureFlags collection.
+  // When missing, we default to enabled so HLS UI is visible by default.
+  const snap = await firestore.collection("featureFlags").doc("hlsSettingsTab").get();
   const data = snap.exists ? (snap.data() as any) || {} : {};
-  const features = data.features || {};
+  const enabled = data.enabled === undefined ? true : !!data.enabled;
   return {
-    advancedPermissions: !!features.advancedPermissions,
+    enabled,
+    reason: typeof data.reason === "string" ? data.reason : undefined,
   };
 }
 
-async function getForceSimpleMode() {
-  const snap = await firestore.collection("featureFlags").doc("forceSimpleMode").get();
+// Global recording UI/feature flag.
+// When missing, we default to enabled so recording behaves according to the plan.
+async function getRecordingUiFlag() {
+  const snap = await firestore.collection("featureFlags").doc("recording").get();
   const data = snap.exists ? (snap.data() as any) || {} : {};
+  const enabled = data.enabled === undefined ? true : !!data.enabled;
   return {
-    enabled: !!data.enabled,
+    enabled,
     reason: typeof data.reason === "string" ? data.reason : undefined,
   };
 }
@@ -197,18 +237,13 @@ async function getAdvancedPermissionsEnabled(uid: string) {
   const userSnap = await firestore.collection("users").doc(uid).get();
   const userData = userSnap.exists ? userSnap.data() || {} : {};
   const planId = await getUserPlanId(uid);
-  const planFeatures = await getPlanFeatures(planId);
-  const force = await getForceSimpleMode();
-  const override = userData.advancedPermissionsOverride === true;
-  const enabled = !force.enabled && (planFeatures.advancedPermissions || override);
-  const lockReason = force.enabled ? "global_lock" : enabled ? undefined : "plan";
   return {
-    enabled,
-    planFlag: planFeatures.advancedPermissions,
-    override,
-    globalLock: force.enabled,
-    lockReason,
-    globalReason: force.reason,
+    enabled: false,
+    planFlag: false,
+    override: false,
+    globalLock: false,
+    lockReason: "plan" as const,
+    globalReason: undefined,
     planId,
     userData,
   };
@@ -240,7 +275,7 @@ function normalizeCohostProfile(raw: any) {
 }
 
 function normalizePermissions(raw: any): PermissionSet {
-  return {
+  const perms: PermissionSet = {
     canStream: !!raw?.canStream,
     canRecord: !!raw?.canRecord,
     canDestinations: !!raw?.canDestinations,
@@ -249,7 +284,23 @@ function normalizePermissions(raw: any): PermissionSet {
     canScreenShare: !!raw?.canScreenShare,
     canInvite: !!raw?.canInvite,
     canAnalytics: !!raw?.canAnalytics,
+    canMuteGuests: !!raw?.canMuteGuests,
+    canRemoveGuests: !!raw?.canRemoveGuests,
   };
+
+  return clampNeverPermissions(perms);
+}
+
+/**
+ * Central hook for hard "never" rules on role permissions.
+ *
+ * Today this is a no-op beyond boolean normalization, but any
+ * permission keys that must never be enabled (regardless of
+ * stored data) should be enforced here so that all roleProfiles
+ * writes and reads are consistently clamped.
+ */
+function clampNeverPermissions(perms: PermissionSet): PermissionSet {
+  return perms;
 }
 
 function normalizeRoleProfiles(rawRoles: any): RoleProfile[] {
@@ -300,8 +351,10 @@ async function loadRolesForUser(uid: string) {
   const data = snap.exists ? snap.data() || {} : {};
   const roleProfiles = normalizeRoleProfiles(data.roleProfiles);
   const quickRoleIdsRaw: string[] = Array.isArray((data as any).quickRoleIds) ? (data as any).quickRoleIds : [];
-  const quickRoleIds = quickRoleIdsRaw.filter((id) => roleProfiles.find((r) => r.id === id));
-  const ensuredQuick = quickRoleIds.length ? quickRoleIds : DEFAULT_ROLE_TEMPLATES.map((r) => r.id);
+  const quickRoleIds = quickRoleIdsRaw
+    .map((id) => String(id))
+    .filter((id) => id !== "moderator" && roleProfiles.find((r) => r.id === id));
+  const ensuredQuick = quickRoleIds.length ? quickRoleIds : DEFAULT_QUICK_ROLE_IDS;
   return { roleProfiles, quickRoleIds: ensuredQuick };
 }
 
@@ -321,19 +374,93 @@ async function loadEffectiveRoles(uid: string, advancedEnabled: boolean) {
         ...DEFAULT_ROLE_TEMPLATES.find((r) => r.id === "cohost")!,
         permissions: { ...SIMPLE_ROLE_DEFAULTS.cohost },
       },
-      {
-        ...DEFAULT_ROLE_TEMPLATES.find((r) => r.id === "moderator")!,
-        permissions: { ...SIMPLE_ROLE_DEFAULTS.moderator },
-      },
     ];
-    const quickRoleIds = DEFAULT_ROLE_TEMPLATES.map((r) => r.id);
+    const quickRoleIds: string[] = ["participant", "cohost"];
     return { roleProfiles: simpleRoles, quickRoleIds, simpleMode };
   }
   const { roleProfiles, quickRoleIds } = await loadRolesForUser(uid);
-  return { roleProfiles, quickRoleIds, simpleMode };
+  const filteredQuick = quickRoleIds.filter((id) => id !== "moderator");
+  return { roleProfiles, quickRoleIds: filteredQuick, simpleMode };
 }
 
 router.use(requireAuth);
+
+// ---------------------------------------------------------------------------
+// Minimal account init endpoint for new-style accounts collection.
+// This is intentionally simple: it only creates accounts/{uid} once with
+// conservative streaming defaults and ToS metadata. Older flows that rely on
+// users/{uid} remain unchanged.
+// ---------------------------------------------------------------------------
+
+// NOTE: Client baseline lives in streamline-client/src/lib/streamDefaults.ts
+// under DEFAULT_STREAM_DEFAULTS. If you change one, update the other to match.
+const BASE_STREAM_DEFAULTS = Object.freeze({
+  video: { resolution: "720p", fps: 30, bitrateKbps: 2500 },
+  audio: { sampleRate: 48000, channels: 2 },
+  platform: { youtubePrivacy: "public" as const },
+  features: {
+    recordingDefault: false,
+    hlsDefault: false,
+    transcodeDefault: false,
+  },
+} as const);
+
+router.post("/init", async (req, res) => {
+  try {
+    const user = (req as any).user || {};
+    const uid: string | undefined = user.uid;
+
+    if (!uid) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const accountsRef = firestore.collection("accounts").doc(uid);
+    const existing = await accountsRef.get();
+
+    if (existing.exists) {
+      return res.json({ ok: true, alreadyInitialized: true });
+    }
+
+    const accountDoc: any = {
+      uid,
+      plan: "free",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      createdAtMs: Date.now(),
+      streamDefaults: BASE_STREAM_DEFAULTS,
+    };
+
+    // Optionally mirror basic identity + ToS fields from the primary
+    // users/{uid} document when available. If the user doc is missing,
+    // we still create the minimal accounts/{uid} shell.
+    try {
+      const userSnap = await firestore.collection("users").doc(uid).get();
+      const userData = userSnap.exists ? (userSnap.data() as any) || {} : {};
+
+      if (typeof userData.email === "string" && userData.email) {
+        accountDoc.email = userData.email;
+      }
+      if (typeof userData.displayName === "string" && userData.displayName) {
+        accountDoc.displayName = userData.displayName;
+      }
+
+      if (typeof userData.tosVersion === "string") {
+        accountDoc.tosVersion = userData.tosVersion;
+      }
+      if (typeof userData.tosAcceptedAt === "number") {
+        accountDoc.tosAcceptedAt = userData.tosAcceptedAt;
+      }
+    } catch (mirrorErr) {
+      console.warn("[account/init] failed to mirror user fields", mirrorErr);
+    }
+
+    await accountsRef.set(accountDoc, { merge: false });
+
+    return res.json({ ok: true, initialized: true });
+  } catch (err: any) {
+    console.error("POST /api/account/init failed", err?.message || err);
+    return res.status(500).json({ error: "account_init_failed" });
+  }
+});
 
 router.get("/me", async (req, res) => {
   try {
@@ -347,6 +474,7 @@ router.get("/me", async (req, res) => {
     const { mediaPrefs } = await getNormalizedMediaPrefs(uid);
     const adv = await getAdvancedPermissionsEnabled(uid);
     const entitlements = await getEffectiveEntitlements(uid);
+    const hlsUi = await getHlsUiFlag();
 
     const monthKey = getCurrentMonthKey();
     const usageDocId = `${uid}_${monthKey}`;
@@ -362,20 +490,29 @@ router.get("/me", async (req, res) => {
       return Number.isFinite(num) ? num : 0;
     };
 
-    const liveCurrent = toNumber(usageMinutes.live?.currentPeriod ?? usage.participantMinutes);
-    const liveLifetime = toNumber(
+    const hlsCurrent = toNumber(usage.hlsMinutes);
+    const hlsLifetime = toNumber(ytd.hlsMinutes);
+
+    const liveCurrentBase = toNumber(usageMinutes.live?.currentPeriod ?? usage.participantMinutes);
+    const liveLifetimeBase = toNumber(
       usageMinutes.live?.lifetime ?? ytdMinutes.live?.lifetime ?? ytd.participantMinutes
     );
+
+    const liveCurrent = liveCurrentBase + hlsCurrent;
+    const liveLifetime = liveLifetimeBase + hlsLifetime;
     const recordingCurrent = toNumber(usageMinutes.recording?.currentPeriod);
     const recordingLifetime = toNumber(
       usageMinutes.recording?.lifetime ?? ytdMinutes.recording?.lifetime
     );
 
-    const effectivePermissionsMode = adv.enabled && mediaPrefs.permissionsMode === "advanced" ? "advanced" : "simple";
-    const permissionsModeLockReason = adv.globalLock ? "global_lock" : (adv.enabled ? undefined : "plan");
+    const effectivePermissionsMode = "simple" as const;
+    const permissionsModeLockReason = "plan" as const;
 
     // Canonical effective entitlements payload (features + limits) for client gating
     let effectiveEntitlements: any = null;
+    // Global feature/UI flags that can further constrain plan-based entitlements.
+    const recordingUi = await getRecordingUiFlag();
+
     try {
       const plan = entitlements.plan;
       const limits = entitlements.limits;
@@ -392,26 +529,63 @@ router.get("/me", async (req, res) => {
           features.multistream
       );
 
+      const canHls = Boolean(
+        (features as any).hls ??
+          (features as any).hlsEnabled ??
+          (features as any).canHls ??
+          rawFeatures.canHls ??
+          rawFeatures.hls ??
+          rawFeatures.hlsBroadcast
+      );
+
+      const hlsCustomizationEnabled = (() => {
+        const explicit = (features as any).hlsCustomizationEnabled;
+        if (typeof explicit === "boolean") return explicit;
+        const legacy = rawFeatures.canCustomizeHlsPage;
+        if (typeof legacy === "boolean") return legacy;
+        return canHls;
+      })();
+
+      // Canonical RTMP destinations cap: derive once from the
+      // normalized plan limits and expose both the canonical
+      // rtmpDestinationsMax and a maxDestinations alias so
+      // older callers can continue to function.
+      const rtmpDestinationsMax = resolveMaxDestinations(limits);
+
       effectiveEntitlements = {
         planId: entitlements.planId,
         planName: plan.name || entitlements.planId,
         features: {
-          recording: !!features.recording,
+          // Recording is available only when the plan includes it AND the
+          // global recording feature flag is enabled.
+          recording: !!features.recording && recordingUi.enabled,
           rtmpMultistream: rtmpMultistreamEnabled,
           dualRecording: !!(rawFeatures.dualRecording ?? rawFeatures.dual_recording),
           watermark: !!(rawFeatures.watermarkRecordings ?? rawFeatures.watermark),
+          canHls,
+          // Canonical + compatibility fields for HLS
+          hls: canHls,
+          hlsEnabled: canHls,
+          hlsCustomizationEnabled,
+          canCustomizeHlsPage: hlsCustomizationEnabled,
         },
         limits: {
-          maxDestinations: resolveMaxDestinations(limits),
+          // Canonical numeric usage/feature caps
+          rtmpDestinationsMax,
+          // Backwards-compatible alias for older clients
+          maxDestinations: rtmpDestinationsMax,
           maxGuests: Number(limits.maxGuests || 0),
           participantMinutes: Number(limits.monthlyMinutes || limits.monthlyMinutesIncluded || 0),
           transcodeMinutes: Number(limits.transcodeMinutes || 0),
           maxRecordingMinutesPerClip: Number(limits.maxRecordingMinutesPerClip || 0),
         },
+        caps: entitlements.caps || {},
       };
     } catch (e) {
       console.error("[account/me] failed to compute effectiveEntitlements", e);
     }
+
+    const platformTranscodeEnabled = getPlatformTranscodeEnabled();
 
     return res.json({
       id: uid,
@@ -419,14 +593,14 @@ router.get("/me", async (req, res) => {
       displayName: data.displayName || null,
       permissionsMode: mediaPrefs.permissionsMode,
       advancedPermissions: {
-        enabled: adv.enabled,
-        plan: adv.planFlag,
-        override: adv.override,
-        global: adv.globalLock,
-        lockReason: adv.lockReason,
-        globalReason: adv.globalReason,
+        enabled: false,
+        plan: false,
+        override: false,
+        global: false,
+        lockReason: "plan" as const,
+        globalReason: undefined,
       },
-      advancedPermissionsLockedReason: adv.lockReason || null,
+      advancedPermissionsLockedReason: "plan",
       effectivePermissionsMode,
       permissionsModeLockReason: permissionsModeLockReason || null,
       mediaPrefs,
@@ -434,6 +608,15 @@ router.get("/me", async (req, res) => {
         youtube: !!data.youtubeConnected,
         facebook: !!data.facebookConnected,
         twitch: !!data.twitchConnected,
+      },
+      tosVersion: typeof (data as any).tosVersion === "string" ? (data as any).tosVersion : null,
+      tosAcceptedAt: typeof (data as any).tosAcceptedAt === "number" ? (data as any).tosAcceptedAt : null,
+      currentTosVersion: CURRENT_TOS_VERSION,
+      platformFlags: {
+        hlsEnabled: hlsUi.enabled,
+        hlsSettingsTab: hlsUi.enabled,
+        transcodeEnabled: platformTranscodeEnabled,
+        recordingEnabled: recordingUi.enabled,
       },
       planId: effectiveEntitlements?.planId ?? entitlements.planId,
       effectiveEntitlements,
@@ -446,6 +629,10 @@ router.get("/me", async (req, res) => {
           recording: {
             currentPeriod: recordingCurrent,
             lifetime: recordingLifetime,
+          },
+          hls: {
+            currentPeriod: hlsCurrent,
+            lifetime: hlsLifetime,
           },
         },
       },
@@ -507,6 +694,42 @@ router.patch("/media-prefs", async (req, res) => {
   }
 });
 
+// Explicit Terms of Service acceptance endpoint for Billing settings.
+// Allows users to acknowledge the CURRENT_TOS_VERSION without changing plans.
+router.post("/accept-tos", async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+    const userRef = firestore.collection("users").doc(uid);
+    const existing = await userRef.get();
+
+    // Do not create "ghost" user documents that only contain TOS fields.
+    // If a user doc does not already exist, require a real signup/onboarding
+    // flow to create it instead of implicitly creating it here.
+    if (!existing.exists) {
+      return res.status(404).json({ error: "user_not_found" });
+    }
+
+    const now = Date.now();
+
+    await userRef.set(
+      {
+        tosVersion: CURRENT_TOS_VERSION,
+        tosAcceptedAt: now,
+        tosAcceptedIp: req.ip || undefined,
+        tosUserAgent: req.get("user-agent") || undefined,
+      },
+      { merge: true }
+    );
+
+    return res.json({ success: true, tosVersion: CURRENT_TOS_VERSION, tosAcceptedAt: now });
+  } catch (err: any) {
+    console.error("[account/accept-tos] error", err);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
 router.get("/cohost-profile", async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
@@ -532,6 +755,92 @@ router.get("/cohost-profile", async (req, res) => {
   } catch (err: any) {
     console.error("[account/cohost-profile] error", err);
     return res.status(500).json({ error: "failed_to_load_cohost_profile" });
+  }
+});
+
+// Role presets used for in-room controls (applied to rooms/{roomId}/controls/{identity}).
+router.get("/role-presets", requireAuth, async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+    // Role defaults are now locked to two templates: participant and cohost.
+    // Any legacy moderator data is ignored for new writes and UI, but can
+    // still be read/migrated server-side if needed.
+    const [participant, cohost] = await Promise.all([
+      readRolePreset(uid, "participant"),
+      readRolePreset(uid, "cohost"),
+    ]);
+
+    return res.json({
+      presets: {
+        participant,
+        cohost,
+      },
+      defaults: {
+        participant: DEFAULT_ROLE_PRESETS.participant,
+        cohost: DEFAULT_ROLE_PRESETS.cohost,
+      },
+    });
+  } catch (err: any) {
+    console.error("[account/role-presets] error", err);
+    return res.status(500).json({ error: "failed_to_load_role_presets" });
+  }
+});
+
+router.patch("/role-presets/:presetId", requireAuth, async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+    const presetId = parseRolePresetId(req.params.presetId);
+    if (!presetId) return res.status(400).json({ error: "invalid_presetId" });
+
+    // Moderator templates are legacy-only and no longer user-editable.
+    if (presetId === "moderator") {
+      return res.status(400).json({ error: "preset_disabled" });
+    }
+
+    const body = (req.body || {}) as any;
+    const patch: Partial<RolePresetDoc> = {
+      canPublishAudio: pickBoolean(body.canPublishAudio),
+      canPublishVideo: pickBoolean(body.canPublishVideo),
+      canScreenShare: pickBoolean(body.canScreenShare),
+      tileVisible: pickBoolean(body.tileVisible),
+      canMuteGuests: pickBoolean(body.canMuteGuests),
+      canInviteLinks: pickBoolean(body.canInviteLinks),
+      canManageDestinations: pickBoolean(body.canManageDestinations),
+      canStartStopStream: pickBoolean(body.canStartStopStream),
+      canStartStopRecording: pickBoolean(body.canStartStopRecording),
+      canViewAnalytics: pickBoolean(body.canViewAnalytics),
+      canChangeLayoutScene: pickBoolean(body.canChangeLayoutScene),
+    };
+
+    const cleaned: any = {};
+    (Object.keys(patch) as Array<keyof RolePresetDoc>).forEach((k) => {
+      const val = (patch as any)[k];
+      if (typeof val === "boolean") cleaned[k] = val;
+    });
+
+    if (Object.keys(cleaned).length === 0) {
+      return res.status(400).json({ error: "no_valid_fields" });
+    }
+
+    // Host-only moderation: templates never grant guest mute/remove powers.
+    if ("canMuteGuests" in cleaned) delete cleaned.canMuteGuests;
+
+    await firestore
+      .collection("users")
+      .doc(uid)
+      .collection("rolePresets")
+      .doc(presetId)
+      .set({ ...cleaned, role: presetId, updatedAt: Date.now() }, { merge: true });
+
+    const preset = await readRolePreset(uid, presetId);
+    return res.json({ ok: true, preset });
+  } catch (err: any) {
+    console.error("[account/role-presets patch] error", err);
+    return res.status(500).json({ error: "failed_to_update_role_preset" });
   }
 });
 
@@ -565,133 +874,32 @@ router.patch("/cohost-profile", async (req, res) => {
   }
 });
 
-router.get("/roles", async (req, res) => {
-  try {
-    const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
+// Advanced custom roles have been fully replaced by two fixed role
+// templates (participant and cohost). Expose a clear, non-successful
+// response for any legacy callers so they cannot silently reintroduce
+// complexity.
 
-    const adv = await getAdvancedPermissionsEnabled(uid);
-    const { roleProfiles, quickRoleIds, simpleMode } = await loadEffectiveRoles(uid, adv.enabled);
-    if (!simpleMode) {
-      await firestore.collection("users").doc(uid).set({ roleProfiles, quickRoleIds }, { merge: true });
-    }
-
-    return res.json({ roles: roleProfiles, quickRoleIds, locked: simpleMode, lockReason: adv.globalLock ? "global_lock" : undefined });
-  } catch (err: any) {
-    console.error("[account/roles] error", err);
-    return res.status(500).json({ error: "failed_to_load_roles" });
-  }
+router.get("/roles", async (_req, res) => {
+  return res.status(410).json({
+    error: "roles_disabled",
+    message: "Custom roles have been removed; use role-presets instead.",
+  });
 });
 
-router.post("/roles", async (req, res) => {
-  try {
-    const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
-
-    const adv = await getAdvancedPermissionsEnabled(uid);
-    const { simpleMode, roleProfiles, quickRoleIds } = await loadEffectiveRoles(uid, adv.enabled);
-    if (simpleMode) {
-      const payload: any = { roles: roleProfiles, quickRoleIds };
-      return res.status(400).json(adv.globalLock ? { error: "advanced_disabled", reason: "global_lock", ...payload } : { error: "simple_mode_locked", ...payload });
-    }
-
-    const labelRaw = String((req.body?.label ?? "")).trim();
-    if (!labelRaw) return res.status(400).json({ error: "label_required" });
-    const permissions = normalizePermissions(req.body?.permissions || {});
-    const id = crypto.randomBytes(6).toString("hex");
-
-    roleProfiles.push({ id, label: labelRaw.slice(0, 64), system: false, lockedName: false, permissions });
-    await firestore.collection("users").doc(uid).set({ roleProfiles, quickRoleIds }, { merge: true });
-
-    return res.json({ roles: roleProfiles, quickRoleIds });
-  } catch (err: any) {
-    console.error("[account/roles create] error", err);
-    return res.status(500).json({ error: "failed_to_create_role" });
-  }
+router.post("/roles", async (_req, res) => {
+  return res.status(410).json({ error: "roles_disabled" });
 });
 
-router.patch("/roles/:id", async (req, res) => {
-  try {
-    const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
-    const roleId = String(req.params.id);
-
-    const adv = await getAdvancedPermissionsEnabled(uid);
-    const { roleProfiles, quickRoleIds, simpleMode } = await loadEffectiveRoles(uid, adv.enabled);
-    if (simpleMode) {
-      const payload: any = { roles: roleProfiles, quickRoleIds };
-      return res.status(400).json(adv.globalLock ? { error: "advanced_disabled", reason: "global_lock", ...payload } : { error: "simple_mode_locked", ...payload });
-    }
-    const idx = roleProfiles.findIndex((r) => r.id === roleId);
-    if (idx === -1) return res.status(404).json({ error: "role_not_found" });
-
-    const current = roleProfiles[idx];
-    const nextPermissions = normalizePermissions(req.body?.permissions || {});
-    const nextLabel = String(req.body?.label ?? current.label).trim().slice(0, 64) || current.label;
-
-    const updated: RoleProfile = {
-      ...current,
-      permissions: nextPermissions,
-      label: current.lockedName ? current.label : nextLabel,
-    };
-
-    roleProfiles[idx] = updated;
-    await firestore.collection("users").doc(uid).set({ roleProfiles, quickRoleIds }, { merge: true });
-
-    return res.json({ roles: roleProfiles, quickRoleIds });
-  } catch (err: any) {
-    console.error("[account/roles update] error", err);
-    return res.status(500).json({ error: "failed_to_update_role" });
-  }
+router.patch("/roles/:id", async (_req, res) => {
+  return res.status(410).json({ error: "roles_disabled" });
 });
 
-router.delete("/roles/:id", async (req, res) => {
-  try {
-    const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
-    const roleId = String(req.params.id);
-
-    const adv = await getAdvancedPermissionsEnabled(uid);
-    const { roleProfiles, quickRoleIds, simpleMode } = await loadEffectiveRoles(uid, adv.enabled);
-    if (simpleMode) {
-      const payload: any = { roles: roleProfiles, quickRoleIds };
-      return res.status(400).json(adv.globalLock ? { error: "advanced_disabled", reason: "global_lock", ...payload } : { error: "simple_mode_locked", ...payload });
-    }
-    const role = roleProfiles.find((r) => r.id === roleId);
-    if (!role) return res.status(404).json({ error: "role_not_found" });
-    if (role.system) return res.status(400).json({ error: "cannot_delete_system_role" });
-
-    const nextRoles = roleProfiles.filter((r) => r.id !== roleId);
-    const nextQuick = quickRoleIds.filter((id) => id !== roleId);
-    await firestore.collection("users").doc(uid).set({ roleProfiles: nextRoles, quickRoleIds: nextQuick }, { merge: true });
-
-    return res.json({ roles: nextRoles, quickRoleIds: nextQuick });
-  } catch (err: any) {
-    console.error("[account/roles delete] error", err);
-    return res.status(500).json({ error: "failed_to_delete_role" });
-  }
+router.delete("/roles/:id", async (_req, res) => {
+  return res.status(410).json({ error: "roles_disabled" });
 });
 
-router.put("/roles/quick", async (req, res) => {
-  try {
-    const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
-    const adv = await getAdvancedPermissionsEnabled(uid);
-    const { roleProfiles, simpleMode, quickRoleIds: effectiveQuick } = await loadEffectiveRoles(uid, adv.enabled);
-    if (simpleMode) {
-      const payload: any = { roles: roleProfiles, quickRoleIds: effectiveQuick };
-      return res.status(400).json(adv.globalLock ? { error: "advanced_disabled", reason: "global_lock", ...payload } : { error: "simple_mode_locked", ...payload });
-    }
-    const requested: string[] = Array.isArray(req.body?.roleIds) ? req.body.roleIds.map((r: any) => String(r)) : [];
-    const filtered = requested.filter((id) => roleProfiles.find((r) => r.id === id));
-    const quickRoleIds = filtered.length ? filtered : DEFAULT_ROLE_TEMPLATES.map((r) => r.id);
-
-    await firestore.collection("users").doc(uid).set({ roleProfiles, quickRoleIds }, { merge: true });
-    return res.json({ roles: roleProfiles, quickRoleIds });
-  } catch (err: any) {
-    console.error("[account/roles quick] error", err);
-    return res.status(500).json({ error: "failed_to_update_quick_roles" });
-  }
+router.put("/roles/quick", async (_req, res) => {
+  return res.status(410).json({ error: "roles_disabled" });
 });
 
 export default router;
