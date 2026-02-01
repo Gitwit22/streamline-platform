@@ -1,6 +1,6 @@
 import PricingExplainerPage from "./pages/PricingExplainerPage";
 import { useEffect, useState } from "react";
-import { Routes, Route, Navigate, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 import AdminUsage from './pages/AdminUsage';
 import AdminDashboard from './pages/AdminDashboard';
 
@@ -26,6 +26,7 @@ import Support from "./pages/Support";
 import BillingCanceled from "./pages/BillingCanceled";
 import BillingSuccess from "./pages/BillingSuccess";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import PostStreamSummary from "./pages/PostStreamSummary";
 
 import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
@@ -172,7 +173,7 @@ function App() {
       <Route path="/stream-summary/:recordingId" element={<LegacyStreamSummaryRedirect />} />
       <Route
         path="/editing/post-stream"
-        element={<LegacyPostStreamRedirect />}
+        element={<PostStreamSummary />}
       />
       
       {/* Thank You / Post-Stream */}
@@ -220,14 +221,6 @@ function App() {
     </>
   );
 }
-
-function LegacyPostStreamRedirect() {
-  const [sp] = useSearchParams();
-  const recordingId = (sp.get('recordingId') || '').trim();
-  const target = recordingId ? `/room-exit/${encodeURIComponent(recordingId)}` : '/room-exit/unknown';
-  return <Navigate to={target} replace state={{ exitRole: 'host' }} />;
-}
-
 function LegacyStreamSummaryRedirect() {
   const { recordingId } = useParams<{ recordingId: string }>();
   const target = recordingId ? `/room-exit/${encodeURIComponent(recordingId)}` : '/room-exit/unknown';

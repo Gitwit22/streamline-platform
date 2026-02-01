@@ -23,6 +23,40 @@ async function getLiveKitSdk() {
   return _lkMod;
 }
 
+function toNumber(value: any): number {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function coerceDate(value: any): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
+  if (typeof value?.toDate === "function") {
+    try {
+      const d = value.toDate();
+      return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof value === "number") {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  if (typeof value === "string") {
+    const d = new Date(value);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+
+function computeBilledMinutes(start: Date | null, end: Date): number {
+  if (!start) return 0;
+  const durationMs = Math.max(0, end.getTime() - start.getTime());
+  if (!durationMs) return 0;
+  return Math.max(1, Math.ceil(durationMs / 60_000));
+}
+
 async function getPlanLimit(uid: string, field: string): Promise<number | undefined> {
   const userSnap = await firestore.collection("users").doc(uid).get();
   const planId = String((userSnap.data() || {}).planId || "free");
@@ -345,6 +379,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         // Save to Firestore only after success
         await ref.set({
           uid,
+          roomId,
           roomName,
           youtubeStreamKey: youtubeStreamKey || null,
           facebookStreamKey: facebookStreamKey || null,
@@ -359,6 +394,30 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
           warmupMs,
           warmupPlatforms: platforms,
         }, { merge: true });
+
+        // Persist a durable egress session record so we can attribute usage on
+        // egress_ended webhooks even if the activeStreams doc is deleted.
+        try {
+          await firestore
+            .collection("egressSessions")
+            .doc(String(response.egressId))
+            .set(
+              {
+                egressId: String(response.egressId),
+                uid,
+                roomId,
+                roomName,
+                kind: "multistream",
+                destinationCount: urls.length,
+                startedAt: new Date(startedAt),
+                createdAt: new Date(),
+                updatedAt: new Date(),
+              },
+              { merge: true }
+            );
+        } catch (e) {
+          console.warn("[multistream:start] failed to write egressSessions", (e as any)?.message || e);
+        }
 
         console.log("[multistream:warmup] egress started", {
           uid,
@@ -488,8 +547,91 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
     const livekitApiSecret = process.env.LIVEKIT_API_SECRET;
     const egressClient = new EgressClient(livekitUrl, livekitApiKey, livekitApiSecret);
 
+    const now = new Date();
+
+    // Best-effort: attribute broadcast (transcode/egress) minutes even if
+    // LiveKit webhooks are not configured or are delayed.
+    const countUsage = async () => {
+      try {
+        const sessionRef = firestore.collection("egressSessions").doc(String(egressId));
+        await firestore.runTransaction(async (tx) => {
+          const s = await tx.get(sessionRef);
+          if (!s.exists) return;
+          const session = s.data() as any;
+          if (session?.countedAt) return;
+
+          const startedAt = coerceDate(session?.startedAt);
+          const billedMinutes = computeBilledMinutes(startedAt, now);
+          if (billedMinutes <= 0) return;
+
+          const monthKey = getCurrentMonthKey();
+          const usageRef = firestore.collection("usageMonthly").doc(`${uid}_${monthKey}`);
+          const usageSnap = await tx.get(usageRef);
+          const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
+          const usage = existing.usage || {};
+          const ytd = existing.ytd || {};
+          const minutes = usage.minutes || {};
+          const ytdMinutes = ytd.minutes || {};
+
+          const prevCurrent = toNumber(minutes.transcode?.currentPeriod ?? usage.transcodeMinutes);
+          const prevLifetime = toNumber(
+            minutes.transcode?.lifetime ?? ytdMinutes.transcode?.lifetime ?? ytd.transcodeMinutes
+          );
+
+          const nextCurrent = prevCurrent + billedMinutes;
+          const nextLifetime = prevLifetime + billedMinutes;
+
+          tx.set(
+            usageRef,
+            {
+              uid,
+              monthKey,
+              usage: {
+                ...usage,
+                transcodeMinutes: toNumber(usage.transcodeMinutes) + billedMinutes,
+                minutes: {
+                  ...minutes,
+                  transcode: {
+                    currentPeriod: nextCurrent,
+                    lifetime: nextLifetime,
+                  },
+                },
+              },
+              ytd: {
+                ...ytd,
+                transcodeMinutes: toNumber(ytd.transcodeMinutes) + billedMinutes,
+                minutes: {
+                  ...ytdMinutes,
+                  transcode: {
+                    lifetime: nextLifetime,
+                  },
+                },
+              },
+              createdAt: existing.createdAt || now,
+              updatedAt: now,
+            },
+            { merge: true }
+          );
+
+          tx.set(
+            sessionRef,
+            {
+              endedAt: now,
+              billedMinutes,
+              countedAt: now,
+              updatedAt: now,
+            },
+            { merge: true }
+          );
+        });
+      } catch (e: any) {
+        console.warn("[multistream:stop] failed to count usage", e?.message || e);
+      }
+    };
+
     try {
       await egressClient.stopEgress(egressId);
+      await countUsage();
       await foundRef.delete();
       return res.json({ success: true, status: "stopped" });
     } catch (err: any) {
@@ -498,6 +640,7 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
       const isNotRunning = code === 412 || /412/.test(message) || /not running/i.test(message);
       if (isNotRunning) {
         console.warn("stopEgress returned precondition/unknown state; treating as already stopped", { egressId, message });
+        await countUsage();
         await foundRef.delete();
         return res.json({ success: true, status: "stopped", reason: "not_running" });
       }
