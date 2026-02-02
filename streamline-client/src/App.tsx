@@ -166,6 +166,8 @@ function App() {
       <Route path="/live" element={<Live />} />
       {/* New stable viewer URL: /live/:savedEmbedId */}
       <Route path="/live/:savedEmbedId" element={<Live />} />
+      {/* Instagram-only viewer URL (fullscreen, minimal UI): /ig/:savedEmbedId */}
+      <Route path="/ig/:savedEmbedId" element={<Live />} />
       <Route path="/settings/destinations" element={<SettingsDestinations />} />
       <Route path="/room-exit/:recordingId" element={<RoomExitPage />} />
 

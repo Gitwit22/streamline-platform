@@ -81,6 +81,9 @@ type SessionRtmpDestination = {
   rtmpUrl: string;
   streamKey: string;
   label?: string;
+  // Optional per-destination layout hints (kept minimal in UI; defaults applied automatically)
+  layoutPreset?: "instagram_reels_9x16";
+  videoFit?: "cover" | "contain";
 };
 
 interface Props {
@@ -799,6 +802,8 @@ export default function StreamSetupModalV2({
           rtmpUrl,
           streamKey,
           label: "Instagram",
+          layoutPreset: "instagram_reels_9x16",
+          videoFit: "cover",
         });
 
         if (!hasMain && !state.manualFields.length) {
@@ -1165,7 +1170,7 @@ export default function StreamSetupModalV2({
                     {!main && (
                       <div style={{ fontSize: '0.75rem', color: 'rgba(226,232,240,0.7)' }}>
                         {platform === 'instagram'
-                          ? 'Instagram Live is session-only. Enter RTMP URL + Stream Key from Instagram Live Producer each time you go live.'
+                          ? 'Instagram Live is session-only. Enter RTMP URL + Stream Key from Instagram Live Producer each time you go live. (Auto: 9:16 Reels preset)'
                           : 'No saved destination yet. Add one in Settings → Stream Destinations to reuse across sessions.'}
                       </div>
                     )}

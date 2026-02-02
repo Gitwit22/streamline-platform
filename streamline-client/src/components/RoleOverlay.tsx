@@ -7,7 +7,7 @@ import { encodeReconnectMediaMessage, reconnectMedia } from "../lib/mediaRecover
 // Normalize API base to avoid trailing slashes that cause "//api/..." URLs
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 
-type Role = "host" | "participant";
+type Role = "host" | "participant" | "moderator";
 type RolePresetId = "participant" | "cohost";
 
 export default function RoleOverlay({
@@ -119,7 +119,7 @@ export default function RoleOverlay({
           flexDirection: 'column',
           gap: '0.75rem'
         }}>
-          {role === "host" && (
+          {(role === "host" || role === "moderator") && (
             <HostPanel
               roomName={roomName}
               roomId={roomId}

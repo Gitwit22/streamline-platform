@@ -3,7 +3,7 @@ import { useEffect, useState, useRef } from "react";
 import { logAuthDebugContext } from "../lib/logAuthDebug";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { apiStartRecording, apiStopRecording, apiFetch, apiFetchAuth, getAuthToken, clearAuthStorage } from "../lib/api";
-import { LiveKitRoom, VideoConference, useRoomContext } from "@livekit/components-react";
+import { LiveKitRoom, VideoConference, useLocalParticipant, useRoomContext } from "@livekit/components-react";
 import "@livekit/components-styles";
 import { RoomEvent, Track } from "livekit-client";
 import {
@@ -195,7 +195,8 @@ function ThankYouScreen({ showHomeButton = false, onHome }: { showHomeButton?: b
 
 function PermissionsDebugOverlay({ dashboardRole }: { dashboardRole: "host" | "participant" }) {
   const { localParticipant } = useLocalParticipant();
-  const localPermissions: any = useLocalParticipantPermissions();
+  const localPermissions: any =
+    (localParticipant as any)?.permissions || (localParticipant as any)?.participant?.permissions;
   const rawRolePresetId = ((localParticipant as any)?.identityMetadata as any)?.rolePresetId;
   const normalizedRolePresetId = normalizeUiRolePresetId(rawRolePresetId);
 
