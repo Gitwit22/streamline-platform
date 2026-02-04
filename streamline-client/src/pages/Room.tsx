@@ -1,29 +1,54 @@
 import { getFeatureErrorMessage } from "../lib/featureErrors";
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { logAuthDebugContext } from "../lib/logAuthDebug";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { apiStartRecording, apiStopRecording, apiFetch, apiFetchAuth, getAuthToken, clearAuthStorage } from "../lib/api";
-import { LiveKitRoom, VideoConference, useLocalParticipant, useRoomContext } from "@livekit/components-react";
-import "@livekit/components-styles";
-import { RoomEvent, Track } from "livekit-client";
+import { API_BASE } from "../lib/apiBase";
+import { APP_BASE } from "../lib/appBase";
+import {
+  LiveKitRoom,
+  useRoomContext,
+  useLocalParticipant,
+} from "@livekit/components-react";
+import { RoomEvent } from "livekit-client";
+import {
+  apiStartRecording,
+  apiStopRecording,
+  apiFetch,
+  apiFetchAuth,
+  getAuthToken,
+  apiGetCurrentUser,
+  apiGetPlans,
+  apiGetRoomToken,
+  apiGetRoomInviteToken,
+  apiGetUserPrefs,
+  apiGetUserFeatureAccess,
+  apiPatchUserPrefs,
+  apiGetDestinations,
+  apiCreateDestination,
+  apiUpdateDestination,
+  apiDeleteDestination,
+  apiConnectDestination,
+  apiDisconnectDestination,
+  apiRefreshDestination,
+  apiResetDestination,
+  apiGetRoomControls,
+  apiGetRoomPermissions,
+  apiSetRoomControls,
+} from "../lib/api";
+import RoleOverlay from "../components/RoleOverlay";
+import StreamSetupModalV2 from "../components/StreamSetupModal";
+import { ErrorBoundary } from "../components/ErrorBoundary";
+import { RoleChangeToast } from "../components/RoleChangeToast";
+import SafeVideoConference from "../components/SafeVideoConference";
+import { useEffectiveEntitlements } from "../hooks/useEffectiveEntitlements";
+import { useFeatureAccess } from "../hooks/useFeatureAccess";
 import {
   RECONNECT_MEDIA_MESSAGE_TYPE,
   reconnectMedia,
   tryParseLiveKitDataMessage,
 } from "../lib/mediaRecovery";
-import { fetchDestinations, preflight, type DestinationItem } from "../services/destinations";
-import StreamSetupModalV2 from "../components/StreamSetupModal";
-import { ErrorBoundary } from "../components/ErrorBoundary";
-import RoleOverlay from "../components/RoleOverlay";
-import { RoleChangeToast } from "../components/RoleChangeToast";
-import { API_BASE } from "../lib/apiBase";
-import { APP_BASE } from "../lib/appBase";
-import { normalizeUiRolePresetId } from "../lib/roles";
-import { computeEffectiveFeatureAccess } from "../lib/effectiveFeatureAccess";
-import { usePlatformFlags } from "../hooks/usePlatformFlags";
-import { useEffectiveEntitlements } from "../hooks/useEffectiveEntitlements";
-import { useFeatureAccess } from "../hooks/useFeatureAccess";
 import { setPlatformFlagsValue } from "../lib/platformFlagsStore";
+import { fetchDestinations, preflight, type DestinationItem } from "../services/destinations";
 
 const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
 
@@ -758,7 +783,7 @@ function LiveKitShell({
               </div>
             }
           >
-            <VideoConference />
+            <SafeVideoConference />
           </ErrorBoundary>
         </div>
         {watermarkEnabled && (
@@ -797,7 +822,6 @@ function LiveKitShell({
 function RoomPage() {
   const location = useLocation();
   const nav = useNavigate();
-  const { flags: platformFlags } = usePlatformFlags();
   const { roomName: routeRoomNameParam } = useParams();
   const routeRoomId = routeRoomNameParam ? decodeURIComponent(routeRoomNameParam) : null;
   const [searchParams] = useSearchParams();
@@ -850,6 +874,9 @@ function RoomPage() {
   );
   const [roomTokenMode, setRoomTokenMode] = useState<"unknown" | "auth" | "guest">("unknown");
   const roomTokenMintInFlightRef = useRef(false);
+  const [roomGateStatus, setRoomGateStatus] = useState<"unknown" | "idle" | "live" | "blocked">("unknown");
+  const roomGatePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hostToolsHydratedKeyRef = useRef<string | null>(null);
   const [controlsPanelOpen, setControlsPanelOpen] = useState(false);
   const [effectiveControls, setEffectiveControls] = useState<EffectiveControls>(() => ({
     canPublishAudio: true,
@@ -1036,7 +1063,6 @@ function RoomPage() {
   const [selectedPresetId, setSelectedPresetId] = useState<string>("standard_720p30");
   const [effectivePresetId, setEffectivePresetId] = useState<string | null>(null);
   const [presetClamped, setPresetClamped] = useState(false);
-  const [defaultLayoutPref, setDefaultLayoutPref] = useState<"speaker" | "grid">("speaker");
   const [defaultRecordingModePref, setDefaultRecordingModePref] = useState<"cloud" | "dual">("cloud");
   const [firestoreRoomId, setFirestoreRoomId] = useState<string | null>(null);
   const [roomAccessToken, setRoomAccessToken] = useState<string | null>(null);
@@ -1044,6 +1070,18 @@ function RoomPage() {
   const [, setAuthStatus] = useState<"unknown" | "authed" | "guest">("unknown");
     const [effectivePermissionsMode, setEffectivePermissionsMode] = useState<"simple" | "advanced">("simple");
   const roomId = firestoreRoomId ?? routeRoomId ?? null;
+
+  useEffect(() => {
+    // New room => allow fresh host tools hydration
+    hostToolsHydratedKeyRef.current = null;
+  }, [roomId]);
+
+  useEffect(() => {
+    // If all host tools are closed, allow a future open to hydrate again.
+    if (!showStreamSetup && !dashboardOpen) {
+      hostToolsHydratedKeyRef.current = null;
+    }
+  }, [showStreamSetup, dashboardOpen]);
   const [roomName, setRoomName] = useState<string>(() => {
     const fromState = (location.state as any)?.livekitRoomName;
     if (typeof fromState === "string" && fromState.trim()) return fromState.trim();
@@ -1051,6 +1089,21 @@ function RoomPage() {
     return cached || "";
   });
   const effectiveRoomName = roomName;
+
+  const rtmpCap = planRtmpDestinationsMax ?? 0;
+  const roomEffectiveEntitlementsForAccess = useMemo(
+    () => ({
+      features: {
+        hls: planHlsEnabled,
+        hlsCustomizationEnabled: planHlsCustomizationEnabled,
+      },
+      limits: {
+        rtmpDestinationsMax: rtmpCap,
+      },
+    }),
+    [planHlsEnabled, planHlsCustomizationEnabled, rtmpCap],
+  );
+  const { access: featureAccess } = useFeatureAccess(roomEffectiveEntitlementsForAccess);
 
   useEffect(() => {
     // When navigating between rooms in a single SPA session, always
@@ -1267,6 +1320,7 @@ function RoomPage() {
           const resolvedRoomId = String(data.roomId || "").trim();
           const resolvedRoomName = String(data.roomName || "").trim();
           const resolvedRole = String(data.role || "").trim();
+          const tokenType = String((data as any).tokenType || "").trim();
 
           if (resolvedRoomId) setFirestoreRoomId(resolvedRoomId);
           if (resolvedRoomName) setRoomName(resolvedRoomName);
@@ -1280,10 +1334,21 @@ function RoomPage() {
             }
           }
 
-          // Treat the incoming token as a roomAccessToken for downstream
-          // APIs (HLS, status, etc.). /api/roomToken will return a refreshed
-          // token which will overwrite this state when available.
-          setRoomAccessToken(t);
+          // Distinguish between legacy invite JWTs and roomAccessTokens.
+          // Invite tokens must be forwarded to /api/rooms/:roomId/token as x-invite-token.
+          if (tokenType === "invite") {
+            setInviteToken(t);
+            try {
+              localStorage.setItem("sl_invite_token", t);
+            } catch {
+              // ignore
+            }
+          } else {
+            // Treat the incoming token as a roomAccessToken for downstream
+            // APIs (HLS, status, etc.). /api/rooms/:roomId/token will return a refreshed
+            // token which will overwrite this state when available.
+            setRoomAccessToken(t);
+          }
           return;
         }
 
@@ -1467,7 +1532,9 @@ function RoomPage() {
   useEffect(() => {
     if (!hostCheckReady) return;
     if (!displayName) return;
-    if (!roomId && !effectiveRoomName) return;
+    if (!roomId) return;
+    // Guests should only request RTC tokens once the room is live.
+    if (!isHost && roomGateStatus !== "live") return;
     // If we already have a valid token+serverUrl for this mount, avoid
     // refetching room tokens on every minor state change. This prevents
     // duplicate /api/roomToken calls that can cause spurious 401s and
@@ -1476,95 +1543,51 @@ function RoomPage() {
     if (roomTokenMintInFlightRef.current) return;
     // Role used to mint the LiveKit token + roomAccessToken.
     // IMPORTANT: Hosts must request role="host" so /api/hls/start isn't rejected as insufficient_role.
-    const requestedRole = isHost ? "host" : userRole === "moderator" ? "participant" : userRole;
-    const roleNeedsAuth = requestedRole === "cohost" || requestedRole === "host";
+    const requestedRole = isHost ? "host" : "participant";
     const role = requestedRole;
-    const isGuest = role === "guest";
 
     const fetchToken = async () => {
       try {
         roomTokenMintInFlightRef.current = true;
         console.log(`[Room] Fetching room token (role=${role || "host"})...`);
         const bearerToken = getAuthToken();
-        const buildRoomTokenRequest = (mode: "auth" | "guest") => {
-          const endpoint = mode === "guest" ? `${API_BASE}/api/roomToken/guest` : `${API_BASE}/api/roomToken`;
+        // Force invite mode when a token is present in the URL and we are not authed.
+        // This matches the legacy participant join flow: /room/<roomId>?t=<inviteToken>
+        // Also fall back to any locally-stored invite token for backward compatibility.
+        const inviteTokenFromUrl = new URLSearchParams(window.location.search).get("t");
+        const inviteTokenForJoin = (inviteTokenFromUrl || inviteToken || null)?.trim?.() || null;
+        const buildRoomTokenRequest = () => {
+          const canonicalRoomId = roomId || "";
+          const endpoint = `${API_BASE}/api/rooms/${encodeURIComponent(canonicalRoomId)}/token`;
           const payload: any = { identity: displayName };
 
-          // If we have a canonical roomId, send only that.
-          // Otherwise, fall back to roomName so the server can resolve.
-          if (roomId) {
-            payload.roomId = roomId;
-          } else {
-            payload.roomName = effectiveRoomName;
-          }
-
-          // Hosts should never rely on invite tokens for room access.
-          // Using a stale invite for a different room can cause
-          // invite_room_mismatch 403 errors when minting host tokens.
-          if (inviteToken && !isHost) {
-            payload.inviteToken = inviteToken;
-          }
+          // New API uses the URL roomId; keep displayName in the body so
+          // participant name is set in LiveKit.
 
           // Tell the backend what role we want this token minted as.
           // The backend will clamp/lock it as needed.
           // If we failed auth for a privileged role, always request a low-trust role
           // for the guest fallback so the UI can honestly operate in viewer/guest mode.
-          payload.role = mode === "guest" && roleNeedsAuth ? "participant" : role;
+          payload.role = role;
 
-          if (mode === "guest") {
-            payload.displayName = displayName;
-            payload.guestId = getOrCreateUid();
-          } else {
-            payload.uid = getOrCreateUid();
-            payload.displayName = displayName;
-            // Invites are currently guest/participant-only (no elevated roles).
+          payload.uid = getOrCreateUid();
+          payload.displayName = displayName;
+          // Invites are currently guest/participant-only (no elevated roles).
+          if (!bearerToken && inviteTokenForJoin) {
+            payload.inviteToken = inviteTokenForJoin;
           }
 
           return { endpoint, payload };
         };
 
-        const tryFetch = async (mode: "auth" | "guest", opts?: { omitInvite?: boolean }) => {
-          const { endpoint, payload } = buildRoomTokenRequest(mode);
-          if (opts?.omitInvite) {
-            delete (payload as any).inviteToken;
-          }
-          // apiFetch always sends cookies; for /api/roomToken we also attach Bearer
-          // explicitly when available so incognito/cookie-blocked sessions can host.
-          const headers: Record<string, string> = {};
-          if (mode === "auth" && bearerToken) {
-            headers.Authorization = `Bearer ${bearerToken}`;
-          }
-          const res = await apiFetch(endpoint, {
-            method: "POST",
-            body: JSON.stringify(payload),
-            headers,
-          }, { allowNonOk: true });
-          return { res, mode };
-        };
+        const { endpoint, payload } = buildRoomTokenRequest();
 
-        // Primary: if role is not guest, try auth token first.
-        // If denied due to auth, we only fall back to guest for low-trust roles.
-        let attempt = await tryFetch(isGuest ? "guest" : "auth");
-        if (!attempt.res.ok && !isGuest && (attempt.res.status === 401 || attempt.res.status === 403)) {
-          // For privileged roles: degrade gracefully to a guest token and surface re-auth banner.
-          if (roleNeedsAuth) {
-            setNeedsReauth(true);
-            setAuthStatus("guest");
-            setReauthBannerText("Host tools unavailable — sign in again in a normal window.");
-            setIsHost(false);
-            setUserRole("participant");
-          }
-          console.warn("[Room] auth roomToken denied; falling back to guest token", attempt.res.status);
-          attempt = await tryFetch("guest");
-        }
+        const mode: "auth" | "invite" = bearerToken ? "auth" : payload.inviteToken ? "invite" : "auth";
+        const tokenRes = bearerToken
+          ? await apiFetchAuth(endpoint, { method: "POST", body: JSON.stringify(payload) }, { allowNonOk: true })
+          : await apiFetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) }, { allowNonOk: true });
 
-        // If a guest token request fails with 403 (e.g. stale or mismatched invite),
-        // retry once without the invite token so a valid participant link doesn't leave
-        // the user stuck without video.
-        if (isGuest && !attempt.res.ok && attempt.res.status === 403) {
-          console.warn("[Room] guest roomToken denied; retrying without invite token", attempt.res.status);
-          attempt = await tryFetch("guest", { omitInvite: true });
-        }
+        const attempt = { res: tokenRes, mode };
 
         const res = attempt.res;
         console.log("[Room] roomToken status:", res.status, "mode:", attempt.mode);
@@ -1599,6 +1622,26 @@ function RoomPage() {
 
         if (!res.ok) {
           console.error("[Room] roomToken HTTP error", res.status, rawText);
+          if (res.status === 401) {
+            setNeedsReauth(true);
+            setAuthStatus("guest");
+            setReauthBannerText(inviteToken ? "Invite invalid or expired." : "Login or invite required to join this room.");
+            // Only force login redirect when we truly have no invite to attempt guest join.
+            if (!inviteToken) {
+              try {
+                const next = `${location.pathname}${location.search}`;
+                nav(`/login?next=${encodeURIComponent(next)}`, { replace: true });
+              } catch {
+                // ignore
+              }
+            }
+          } else if (res.status === 403) {
+            setNeedsReauth(true);
+            setAuthStatus("guest");
+            setReauthBannerText("Not allowed to join this room.");
+          } else if (res.status === 409) {
+            setRoomGateStatus("idle");
+          }
           return;
         }
         if (!data) {
@@ -1685,7 +1728,7 @@ function RoomPage() {
     };
 
     fetchToken();
-  }, [displayName, roomId, effectiveRoomName, inviteToken, userRole, isHost, hostCheckReady, token, serverUrl]);
+  }, [displayName, roomId, effectiveRoomName, inviteToken, userRole, isHost, hostCheckReady, token, serverUrl, roomGateStatus]);
 
   
 
@@ -1695,6 +1738,67 @@ function RoomPage() {
     }
   }, [isViewer, showStreamSetup]);
 
+  // Guest flow: poll idle/live and auto-join when live.
+  // Hosts can join anytime (they flip the room live on join).
+  useEffect(() => {
+    if (!roomId) return;
+
+    // Host can proceed immediately.
+    if (isHost) {
+      setRoomGateStatus("live");
+      return;
+    }
+
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const res = await apiFetch(
+          `/api/rooms/${encodeURIComponent(roomId)}/status`,
+          {
+            headers: inviteToken ? { "x-invite-token": inviteToken } : undefined,
+          },
+          { allowNonOk: true }
+        );
+        if (cancelled) return;
+
+        if (res.status === 401 || res.status === 403) {
+          setRoomGateStatus("blocked");
+          setNeedsReauth(true);
+          setReauthBannerText("Invite required (or sign in) to access this room.");
+          return;
+        }
+
+        if (!res.ok) {
+          setRoomGateStatus("blocked");
+          return;
+        }
+
+        const data = await res.json().catch(() => null);
+        const status = data?.status === "live" ? "live" : "idle";
+        setRoomGateStatus(status);
+
+        if (status === "idle") {
+          roomGatePollRef.current = setTimeout(poll, 4000);
+        }
+      } catch {
+        if (!cancelled) {
+          roomGatePollRef.current = setTimeout(poll, 5000);
+        }
+      }
+    };
+
+    poll();
+
+    return () => {
+      cancelled = true;
+      if (roomGatePollRef.current) {
+        clearTimeout(roomGatePollRef.current);
+        roomGatePollRef.current = null;
+      }
+    };
+  }, [roomId, isHost]);
+
   // Load effective entitlements + media presets only when the user explicitly opens host tools.
   // (Nuclear option 2: avoid background /me calls after connect.)
   useEffect(() => {
@@ -1703,6 +1807,10 @@ function RoomPage() {
     if (!showStreamSetup && !(dashboardOpen && canManageStream)) return;
     if (needsReauth) return;
     if (!canManageStream) return;
+
+    const toolsKey = `${roomId || ""}:${showStreamSetup ? "setup" : "dashboard"}`;
+    if (hostToolsHydratedKeyRef.current === toolsKey) return;
+    hostToolsHydratedKeyRef.current = toolsKey;
 
     let cancelled = false;
 
@@ -1736,9 +1844,6 @@ function RoomPage() {
           setAuthStatus("authed");
           const me = await meRes.json();
           const prefs = me?.mediaPrefs || {};
-          if (prefs.defaultLayout === "grid" || prefs.defaultLayout === "speaker") {
-            setDefaultLayoutPref(prefs.defaultLayout);
-          }
           if (prefs.defaultRecordingMode === "cloud" || prefs.defaultRecordingMode === "dual") {
             setDefaultRecordingModePref(prefs.defaultRecordingMode);
           }
@@ -2043,7 +2148,7 @@ function RoomPage() {
     layout = "grid",
     mode = "cloud",
     presetId,
-  }: { layout?: "speaker" | "grid"; mode?: "cloud" | "dual"; presetId?: string }) => {
+  }: { mode: "cloud" | "dual"; presetId?: string }) => {
     if (isViewer) {
       console.warn("startRecording blocked for viewer role");
       return;
@@ -2074,7 +2179,7 @@ function RoomPage() {
       console.warn("Dual recording requested but not allowed; falling back to cloud mode.");
     }
 
-    console.log("🎬 startRecording called. roomId:", roomId, "layout:", layout, "mode:", requestedMode);
+    console.log("🎬 startRecording called. roomId:", roomId, "mode:", requestedMode);
 
     autoStopTriggeredRef.current = false;
 
@@ -2095,7 +2200,7 @@ function RoomPage() {
       setRecordingCountdown("You're recording");
       try {
         console.log("📡 Calling apiStartRecording...");
-        const response = await apiStartRecording(roomId, layout, requestedMode, presetId || selectedPresetId, roomAccessToken || undefined);
+        const response = await apiStartRecording(roomId, requestedMode, presetId || selectedPresetId, roomAccessToken || undefined);
         console.log("📡 Got response:", response);
         const recId = response?.data?.recordingId ?? response?.recordingId;
         console.log("🎬 Extracted recordingId:", recId);
@@ -2709,23 +2814,6 @@ function RoomPage() {
   }
 
   const guestCapLabel = typeof maxGuestsAllowed === "number" && maxGuestsAllowed > 0 ? `${maxGuestsAllowed}` : "—";
-  const rtmpCap = planRtmpDestinationsMax ?? 0;
-  const featureAccess = computeEffectiveFeatureAccess({
-    effectiveEntitlements: {
-      features: {
-        hls: planHlsEnabled,
-        hlsCustomizationEnabled: planHlsCustomizationEnabled,
-      },
-      limits: {
-        rtmpDestinationsMax: rtmpCap,
-      },
-    },
-    platformFlags: {
-      hlsEnabled: platformHlsEnabled,
-      transcodeEnabled: platformFlags?.transcodeEnabled,
-      recordingEnabled: platformRecordingEnabled,
-    },
-  });
 
   const entitlementSummary = `Rec:${planRecordingEnabled ? "on" : "off"} • Dual:${dualRecordingAllowed ? "on" : "off"} • RTMP:${rtmpCap === 0 ? "off" : rtmpCap === 1 ? "1" : `up to ${rtmpCap}`} • HLS:${planHlsEnabled ? "on" : "off"} • HLS Setup:${planHlsCustomizationEnabled ? "on" : "off"} • Guests:${guestCapLabel}`;
   const recordingEnabled =
@@ -2754,6 +2842,14 @@ function RoomPage() {
       {isViewer && (
         <div className="w-full bg-amber-500 text-black text-sm font-semibold px-4 py-2 flex items-center gap-2">
           👀 View-only mode — publishing controls are disabled.
+        </div>
+      )}
+      {!isHost && roomGateStatus === "idle" && !token && (
+        <div className="w-full bg-slate-900 text-white text-sm font-semibold px-4 py-2 flex items-center justify-between gap-3">
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span>Not started yet — waiting for the host to start.</span>
+          </div>
+          <div style={{ fontSize: 12, opacity: 0.85 }}>This page will auto-join when live.</div>
         </div>
       )}
       {!isViewer && needsReauth && (
@@ -3195,14 +3291,13 @@ function RoomPage() {
         }
       >
         <StreamSetupModalV2
-          open={showStreamSetup && canManageStream}
+          open={showStreamSetup}
           onClose={() => setShowStreamSetup(false)}
           roomName={roomName ?? ""}
           roomId={roomId || ""}
           roomAccessToken={roomAccessToken || undefined}
           
           selectedPresetId={selectedPresetId}
-          defaultLayout={defaultLayoutPref}
           defaultRecordingMode={defaultRecordingModePref}
           streamStatus={streamStatus}
           onStartStream={handleStartMultistream}

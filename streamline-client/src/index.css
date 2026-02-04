@@ -12,13 +12,6 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 
-  /* Hide LiveKit default media permission prompt */
-.lk-enable-camera,
-.lk-enable-microphone,
-.lk-button.lk-primary {
-  display: none !important;
-}
-git add .
   /* LiveKit color palette overrides (dark theme) */
   --lk-bg: #000000;
   --lk-bg-secondary: #111111;
@@ -26,6 +19,13 @@ git add .
 
   --lk-fg: #ffffff;
   --lk-fg-secondary: #cccccc;
+}
+
+/* Hide LiveKit default media permission prompt */
+.lk-enable-camera,
+.lk-enable-microphone,
+.lk-button.lk-primary {
+  display: none !important;
 }
 
 .join-instructions {
@@ -42,7 +42,7 @@ body,
 #root {
   margin: 0;
   padding: 0;
-  min-height: 100%;
+  height: 100%;
 }
 
 body {

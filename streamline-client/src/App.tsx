@@ -10,6 +10,7 @@ import { SignupPage } from "./pages/SignupPage";
 import Join from "./pages/Join";
 import Room from "./pages/Room";
 import InviteLanding from "./pages/InviteLanding";
+import InviteRedeem from "./pages/InviteRedeem";
 import Live from "./pages/Live";
 import SettingsDestinations from "./pages/SettingsDestinations";
 import RoomExitPage from "./pages/RoomExitPage";
@@ -147,6 +148,8 @@ function App() {
 
       {/* Invite landing */}
       <Route path="/i/:inviteToken" element={<InviteLanding />} />
+      {/* New guest invite flow (Firestore-backed) */}
+      <Route path="/invite/:inviteId" element={<InviteRedeem />} />
       {/* Policy & Support */}
       <Route path="/privacy" element={<Privacy />} />
       <Route path="/terms" element={<Terms />} />
@@ -171,7 +174,7 @@ function App() {
       <Route path="/settings/destinations" element={<SettingsDestinations />} />
       <Route path="/room-exit/:recordingId" element={<RoomExitPage />} />
 
-      {/* Stream Summary */}
+      {/* Legacy: /stream-summary -> canonical /room-exit */}
       <Route path="/stream-summary/:recordingId" element={<LegacyStreamSummaryRedirect />} />
       <Route
         path="/editing/post-stream"

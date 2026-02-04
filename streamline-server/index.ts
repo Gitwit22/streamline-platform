@@ -15,11 +15,14 @@ import plansRoutes from "./routes/plans";
 import roomTokenRoute from "./routes/roomToken";
 import roomsCreateRoutes from "./routes/roomsCreate";
 import invitesRoutes from "./routes/invites";
+import roomInvitesRoutes from "./routes/roomInvites";
+import roomGuestAccessRoutes from "./routes/roomGuestAccess";
 import multistreamRoutes from "./routes/multistream";
 import roomsResolveRoutes from "./routes/roomsResolve";
 import roomsHlsConfigRoutes from "./routes/roomsHlsConfig";
 import roomsActiveEmbedRoutes from "./routes/roomsActiveEmbed";
 import roomControlsRoutes from "./routes/roomControls";
+import roomsLayoutRoutes from "./routes/roomsLayout";
 import destinationsRoutes from "./routes/destinations";
 import liveRoutes from "./routes/live";
 import statsRoutes from "./routes/stats";
@@ -98,6 +101,9 @@ app.use(cors({
     // Explicitly allow both typical header casings to satisfy browser preflight checks.
     "x-room-access-token",
     "X-Room-Access-Token",
+    // Legacy invite JWT (join links) used for guest RTC join/status without auth.
+    "x-invite-token",
+    "X-Invite-Token",
   ],
   exposedHeaders: ["x-sl-auth-fallback", "x-sl-auth-header-invalid"],
   optionsSuccessStatus: 204,
@@ -161,11 +167,16 @@ app.use("/api/usage", usageRoutes); // gives /api/usage/summary
 // API ROUTES - Order matters! More specific routes first
 // =============================================================================
 
-// Token route used by the frontend
-app.use("/api/roomToken", roomTokenRoute);
+// RTC token minting: use /api/rooms/:roomId/token (mounted via roomGuestAccessRoutes)
 
 // Room creation (host flow)
 app.use("/api/rooms", roomsCreateRoutes);
+
+// Room invite creation (authenticated)
+app.use("/api/rooms", roomInvitesRoutes);
+
+// Guest invite redeem + room status/token (mixed auth)
+app.use("/api", roomGuestAccessRoutes);
 
 // Invite resolve/accept flow
 app.use("/api/invites", invitesRoutes);
@@ -176,6 +187,8 @@ app.use("/api/multistream", multistreamRoutes);
 app.use("/api/rooms", roomsResolveRoutes);
 // Realtime in-room controls (host/cohost writes; all participants read via roomAccessToken)
 app.use("/api/rooms", roomControlsRoutes);
+// Persistent room layout config (controls viewer layout; recordings inherit)
+app.use("/api/rooms", roomsLayoutRoutes);
 // Room-level persistent HLS config (NOT runtime HLS state)
 app.use("/api/rooms", roomsHlsConfigRoutes);
 // Room-level selection of which Saved Embed to use for HLS control
@@ -197,6 +210,21 @@ app.use("/api/plans", plansRoutes);
 app.use("/api/stats", statsRoutes);
 // Lightweight telemetry events
 app.use("/api/telemetry", telemetryRoutes);
+
+// Protected config health (helps diagnose env drift across Render services)
+app.get("/api/health/config", requireAuth, (req, res) => {
+  const asBool = (v: any) => (v ? true : false);
+  return res.json({
+    ok: true,
+    env: String(process.env.NODE_ENV || "development"),
+    tokenGrants: "v3-no-sources",
+    hasLivekitUrl: asBool(process.env.LIVEKIT_URL),
+    hasLivekitApiKey: asBool(process.env.LIVEKIT_API_KEY),
+    hasLivekitApiSecret: asBool(process.env.LIVEKIT_API_SECRET),
+    hasJwtSecret: asBool(process.env.JWT_SECRET),
+    hasRoomAccessTokenSecret: asBool(process.env.ROOM_ACCESS_TOKEN_SECRET),
+  });
+});
 
 
 // Storage test route
@@ -461,11 +489,21 @@ app.post("/api/roomModeration/mute-lock", requireAuth, requireRoomAccessToken as
 
         const currentPerms: any = (p as any).permission || {};
         const currentSources: any[] = currentPerms.canPublishSources || [];
+        const sourcesAreStrings = currentSources.some((s) => typeof s === "string");
+
+        const normalizeSource = (s: any) => (typeof s === "string" ? s.toLowerCase() : s);
+        const isMic = (s: any) => {
+          const n = normalizeSource(s);
+          return n === TrackSource.MICROPHONE || n === "microphone";
+        };
+        const isScreenShareAudio = (s: any) => {
+          const n = normalizeSource(s);
+          return n === TrackSource.SCREEN_SHARE_AUDIO || n === "screen_share_audio";
+        };
 
         if (muteLock) {
           // Remove audio-related publish sources (mic + screen share audio)
-          const blocked = new Set([TrackSource.MICROPHONE, TrackSource.SCREEN_SHARE_AUDIO]);
-          const nextSources = currentSources.filter((s) => !blocked.has(s));
+          const nextSources = currentSources.filter((s) => !(isMic(s) || isScreenShareAudio(s)));
 
           await roomService.updateParticipant(livekitRoomName, p.identity, {
             permission: {
@@ -475,7 +513,9 @@ app.post("/api/roomModeration/mute-lock", requireAuth, requireRoomAccessToken as
           });
         } else {
           // Restore audio publish ability while preserving any existing sources
-          const toEnsure = [TrackSource.MICROPHONE, TrackSource.SCREEN_SHARE_AUDIO];
+          const mic = sourcesAreStrings ? "microphone" : TrackSource.MICROPHONE;
+          const ssa = sourcesAreStrings ? "screen_share_audio" : TrackSource.SCREEN_SHARE_AUDIO;
+          const toEnsure = [mic, ssa];
           const merged = Array.from(new Set([...currentSources, ...toEnsure]));
 
           await roomService.updateParticipant(livekitRoomName, p.identity, {
@@ -845,34 +885,8 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/api/usage/summary", async (req, res) => {
-  try {
-    const uid = req.query.uid as string;
-    if (!uid) return res.status(400).json({ error: "uid required" });
-
-    const userRef = db.collection("users").doc(uid);
-    const userSnap = await userRef.get();
-
-    if (!userSnap.exists) {
-      return res.status(404).json({ error: "user not found" });
-    }
-
-    const userData = userSnap.data() || {};
-    const usage = (userData.usage || {}) as any;
-
-    return res.json({
-      hoursStreamedToday: usage.hoursStreamedToday || 0,
-      hoursStreamedThisMonth: usage.hoursStreamedThisMonth || 0,
-      ytdHours: usage.ytdHours || 0,
-      guestCountToday: usage.guestCountToday || 0,
-      periodStart: usage.periodStart ? usage.periodStart.toDate() : null,
-      resetDate: usage.resetDate ? usage.resetDate.toDate() : null,
-    });
-  } catch (err) {
-    console.error("usage summary error", err);
-    return res.status(500).json({ error: "internal server error" });
-  }
-});
+// NOTE: /api/usage/summary is implemented in routes/usageRoutes.ts
+// and is requireAuth-protected with a stable payload.
 
 app.post("/api/usage/streamEnded", async (req, res) => {
   try {
@@ -1098,4 +1112,13 @@ app.use((req, res) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Server listening on http://localhost:${PORT}`);
+  console.log("[config-health]", {
+    env: String(process.env.NODE_ENV || "development"),
+    tokenGrants: "v3-no-sources",
+    hasLivekitUrl: !!process.env.LIVEKIT_URL,
+    hasLivekitApiKey: !!process.env.LIVEKIT_API_KEY,
+    hasLivekitApiSecret: !!process.env.LIVEKIT_API_SECRET,
+    hasJwtSecret: !!process.env.JWT_SECRET,
+    hasRoomAccessTokenSecret: !!process.env.ROOM_ACCESS_TOKEN_SECRET,
+  });
 });

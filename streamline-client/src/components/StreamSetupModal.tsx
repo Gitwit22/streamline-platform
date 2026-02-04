@@ -93,7 +93,6 @@ interface Props {
   roomId: string;
   roomAccessToken?: string;
   selectedPresetId?: string;
-  defaultLayout?: "speaker" | "grid";
   defaultRecordingMode?: "cloud" | "dual";
   
   // Stream state
@@ -112,7 +111,7 @@ interface Props {
   
   // Recording state (independent from stream)
   recordingStatus: "idle" | "recording" | "stopping" | "stopped" | "error";
-  onStartRecording: (params: { layout: "speaker" | "grid"; mode: "cloud" | "dual"; presetId?: string }) => Promise<void>;
+  onStartRecording: (params: { mode: "cloud" | "dual"; presetId?: string }) => Promise<void>;
   onStopRecording: () => Promise<void>;
   recordingEnabled?: boolean;
   recordingElapsedSeconds?: number;
@@ -149,7 +148,6 @@ export default function StreamSetupModalV2({
   roomId,
   roomAccessToken,
   selectedPresetId,
-  defaultLayout = "speaker",
   defaultRecordingMode = "cloud",
   streamStatus,
   onStartStream,
@@ -204,7 +202,6 @@ export default function StreamSetupModalV2({
 
   const platformOrder: PlatformKey[] = ["youtube", "facebook", "twitch", "instagram", "custom"];
 
-  const [layout, setLayout] = useState<"speaker" | "grid">(defaultLayout);
   const [recordingMode, setRecordingMode] = useState<"cloud" | "dual">(defaultRecordingMode);
 
   // Canonical: HLS is always keyed by Firestore roomId.
@@ -230,11 +227,6 @@ export default function StreamSetupModalV2({
     const token = typeof window !== "undefined" ? window.localStorage.getItem("authToken") : null;
     return token ? { Authorization: `Bearer ${token}` } : {};
   }, []);
-
-  // Keep local layout/mode in sync with defaults from account prefs
-  useEffect(() => {
-    setLayout(defaultLayout);
-  }, [defaultLayout]);
 
   useEffect(() => {
     setRecordingMode(defaultRecordingMode);
@@ -608,15 +600,7 @@ export default function StreamSetupModalV2({
 
   if (!open) return null;
 
-  if (!entitlementsReady) {
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-        <div className="rounded-lg bg-slate-900 px-4 py-3 text-sm text-slate-100 shadow-lg">
-          Loading stream features...
-        </div>
-      </div>
-    );
-  }
+  const isEntitlementsLoading = !entitlementsReady;
 
   const streamIsLive = streamStatus === "live";
   const streamIsBusy = streamStatus === "starting" || streamStatus === "stopping";
@@ -921,7 +905,7 @@ export default function StreamSetupModalV2({
   };
 
   const handleStartRecording = async () => {
-    await onStartRecording({ layout, mode: recordingMode, presetId: selectedPresetId });
+    await onStartRecording({ mode: recordingMode, presetId: selectedPresetId });
   };
 
   return (
@@ -1464,31 +1448,6 @@ export default function StreamSetupModalV2({
                   </div>
                 )}
               </div>
-
-              {/* Layout Selector */}
-              <label style={{ fontSize: '0.875rem', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <span style={{ fontWeight: 600 }}>Layout:</span>
-                <select
-                  value={layout}
-                  onChange={e => setLayout(e.target.value as "speaker" | "grid")}
-                  disabled={recordingIsActive}
-                  style={{
-                    padding: '0.4rem 0.7rem',
-                    borderRadius: '0.3rem',
-                    border: '1px solid #ef4444',
-                    background: '#18181b',
-                    color: '#fff',
-                    fontWeight: 600,
-                    fontSize: '0.85rem',
-                    outline: 'none',
-                    cursor: recordingIsActive ? 'not-allowed' : 'pointer',
-                    opacity: recordingIsActive ? 0.5 : 1
-                  }}
-                >
-                  <option value="speaker">Speaker</option>
-                  <option value="grid">Grid</option>
-                </select>
-              </label>
 
               {/* Status */}
               {recordingStatus === "error" && (

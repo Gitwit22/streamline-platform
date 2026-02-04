@@ -206,14 +206,13 @@ export async function getToken(
 
 export async function apiStartRecording(
   roomId: string,
-  layout: "speaker" | "grid",
   mode: "cloud" | "dual" = "cloud",
   presetId?: string,
   roomAccessToken?: string | null
 ) {
   const res = await apiFetchAuth("/api/recordings/start", {
     method: "POST",
-    body: JSON.stringify({ roomId, layout, mode, presetId }),
+    body: JSON.stringify({ roomId, mode, presetId }),
     headers: roomAccessToken
       ? {
           "x-room-access-token": roomAccessToken,
@@ -234,6 +233,46 @@ export async function apiStopRecording(recordingId: string, roomAccessToken?: st
       : undefined,
   });
   return res.json() as Promise<{ ok: true }>;
+}
+
+export type RoomLayoutMode = "speaker" | "grid" | "carousel" | "pip";
+
+export type RoomLayout = {
+  mode: RoomLayoutMode;
+  maxTiles?: number;
+  followSpeaker?: boolean;
+  pinnedIdentity?: string | null;
+};
+
+export async function apiGetRoomLayout(roomId: string, roomAccessToken: string) {
+  const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/layout`, {
+    method: "GET",
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+  return res.json() as Promise<{
+    ok: true;
+    roomId: string;
+    roomLayout: RoomLayout | null;
+    effectiveLayoutMode: "speaker" | "grid";
+    effectiveLayoutSource: "roomLayout" | "legacyRecordingLayout" | "request" | "default";
+  }>;
+}
+
+export async function apiUpdateRoomLayout(
+  roomId: string,
+  roomAccessToken: string,
+  roomLayout: Pick<RoomLayout, "mode"> & Partial<RoomLayout>
+) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/layout`, {
+    method: "PATCH",
+    body: JSON.stringify({ roomLayout }),
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; roomLayout: RoomLayout }>;
 }
 
 export function clearAuthStorage() {

@@ -205,7 +205,7 @@ export const generateLiveKitToken = (
 ```
 
 #### 6.2 Update Room Token Endpoint (80 lines)
-**Modify**: `server/routes/roomToken.ts`
+**Modify**: `streamline-server/routes/roomGuestAccess.ts` (current source of truth: `POST /api/rooms/:roomId/token`)
 
 ```typescript
 router.post('/', async (req, res) => {
@@ -498,7 +498,7 @@ describe('User Creates and Uses Invite', () => {
 ### Test Coverage Targets
 
 - **Middleware**: 100% (auth.ts, validatePermissions.ts)
-- **Routes**: 95% (invites.ts, roomToken.ts)
+- **Routes**: 95% (invites.ts, roomGuestAccess.ts)
 - **Components**: 90% (PermissionPickerModal, Dashboard, etc.)
 - **Hooks**: 90% (usePermissions, usePermissionGuards)
 - **Overall**: 90%+

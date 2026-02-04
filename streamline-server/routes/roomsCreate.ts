@@ -4,6 +4,7 @@ import { firestore as db } from "../firebaseAdmin";
 import { ensureRoomDoc } from "../services/rooms";
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { normalizeRoomLayout, type RoomLayout } from "../lib/roomLayout";
 
 const router = Router();
 
@@ -19,6 +20,14 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
   if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
   const roomType = (req.body?.roomType || "rtc") as "rtc" | "hls";
+
+  // Optional room access policy (secure defaults are applied in ensureRoomDoc).
+  const visibilityRaw = String(req.body?.visibility || "").trim().toLowerCase();
+  const visibility = (visibilityRaw === "public" || visibilityRaw === "unlisted" || visibilityRaw === "private")
+    ? (visibilityRaw as "public" | "unlisted" | "private")
+    : undefined;
+  const requiresAuth = typeof req.body?.requiresAuth === "boolean" ? req.body.requiresAuth : undefined;
+  const requiresPayment = typeof req.body?.requiresPayment === "boolean" ? req.body.requiresPayment : undefined;
   const rawNameInput = String(req.body?.livekitRoomName || req.body?.roomName || "");
   const rawName = sanitizeDisplayName(rawNameInput).trim();
 
@@ -33,6 +42,21 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
 
   const livekitRoomName = rawName || roomId;
 
+  // Seed roomLayout from account defaults (users/{uid}.mediaPrefs.defaultRoomLayout)
+  // so new rooms inherit the user's preferred layout without requiring per-room setup.
+  let initialRoomLayout: RoomLayout | undefined = undefined;
+  try {
+    const userSnap = await db.collection("users").doc(uid).get();
+    const userData = userSnap.exists ? (userSnap.data() as any) || {} : {};
+    const mediaPrefs = (userData as any)?.mediaPrefs || {};
+    initialRoomLayout =
+      normalizeRoomLayout(mediaPrefs.defaultRoomLayout) ||
+      normalizeRoomLayout({ mode: mediaPrefs.defaultLayout }) ||
+      undefined;
+  } catch (err) {
+    console.warn("/api/rooms/create failed to read mediaPrefs for initialRoomLayout", err);
+  }
+
   try {
     const { data } = await ensureRoomDoc({
       roomId,
@@ -40,7 +64,11 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
       livekitRoomName,
       roomType,
       initialStatus: "idle",
+      initialRoomLayout,
       savedEmbedId: savedEmbedId || undefined,
+      visibility,
+      requiresAuth,
+      requiresPayment,
     });
 
     return res.status(201).json({

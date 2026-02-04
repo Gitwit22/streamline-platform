@@ -49,6 +49,11 @@ function normalizeRoomId(raw: unknown): string | null {
 
 const router = Router();
 
+// NOTE: New invite model (Firestore roomInvites + HttpOnly sl_guest cookie)
+// is implemented in routes/roomGuestAccess.ts at:
+//   POST /api/invites/:inviteId/redeem
+// Keeping this router for legacy JWT invite tokens.
+
 /**
  * POST /api/invites/create
  * Body: { roomId, role }

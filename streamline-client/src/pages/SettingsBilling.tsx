@@ -7,7 +7,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import "./SettingsBilling.css";
 import { S } from "./SettingsBilling.styles";
 import SettingsDestinations from "./SettingsDestinations";
-import { ApiUnauthorizedError, apiFetch, apiFetchAuth, clearAuthStorage } from "../lib/api";
+import { ApiUnauthorizedError, apiFetch, apiFetchAuth, clearAuthStorage, type RoomLayout, type RoomLayoutMode } from "../lib/api";
 import { useAuthMe, isAuthUserInTestMode } from "../hooks/useAuthMe";
 import { formatLimitLabel } from "../lib/entitlements";
 import SettingsHlsSetup from "./settings/SettingsHlsSetup";
@@ -164,6 +164,7 @@ const DEFAULT_USAGE = {
 const DEFAULT_MEDIA_PREFS = {
   defaultPresetId: "standard_720p30",
   defaultLayout: "speaker" as "speaker" | "grid",
+  defaultRoomLayout: { mode: "speaker" as RoomLayoutMode } as RoomLayout,
   defaultRecordingMode: "cloud" as "cloud" | "dual",
   destinationsDefaultMode: "last_used" as "last_used" | "pick_each_time",
   warnOnHighQuality: true,
@@ -1099,12 +1100,24 @@ export default function SettingsBilling() {
     setMediaPrefsMessage(null);
     setMediaPrefsError(null);
     try {
+      const roomMode = (mediaPrefs as any)?.defaultRoomLayout?.mode;
+      const derivedDefaultLayout: "speaker" | "grid" =
+        roomMode === "grid" || roomMode === "carousel" ? "grid" : "speaker";
+
+      const payload = {
+        ...mediaPrefs,
+        // Single mental model: destinations reuse last-used automatically.
+        destinationsDefaultMode: "last_used" as const,
+        // Keep legacy composite layout in sync for older callers.
+        defaultLayout: derivedDefaultLayout,
+      };
+
       const res = await apiFetchAuth(
         `${API_BASE}/api/account/media-prefs`,
         {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(mediaPrefs),
+          body: JSON.stringify(payload),
         },
         { allowNonOk: true }
       );
@@ -2656,19 +2669,23 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
         {activeTab === "defaults" && (
           <div style={{ ...S.card, opacity: isBlocked ? 0.6 : 1 }}>
             <div style={S.cardHeader}>
-              <h2 style={S.cardTitle}>🎛️ Streaming & Recording Defaults</h2>
+              <h2 style={S.cardTitle}>Media Defaults</h2>
               <span style={{ padding: "4px 10px", borderRadius: 999, border: "1px solid rgba(255,255,255,0.15)", color: "#cbd5e1", fontSize: 12 }}>
                 Plan: {entitlements.planName || currentPlan?.name || "Free"}
               </span>
             </div>
 
             <p style={{ color: "#94a3b8", marginTop: 4, marginBottom: 14, fontSize: 13 }}>
-              These defaults pre-fill the in-room setup for new streams and recordings. Higher presets may be clamped by your plan automatically.
+              These settings define how new streams and recordings behave by default.
             </p>
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
+              {/* SECTION A — Quality (applies to everything) */}
               <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, background: "rgba(255,255,255,0.02)" }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Media Preset</div>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Stream & Recording Quality</div>
+                <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 10 }}>
+                  How good should it look?
+                </div>
                 <select
                   value={mediaPrefs.defaultPresetId}
                   onChange={(e) => setMediaPrefs((prev) => ({ ...prev, defaultPresetId: e.target.value }))}
@@ -2680,44 +2697,145 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                   ))}
                 </select>
                 <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
-                  Applies to both streaming and recording quality; plan caps still apply.
+                  Applies to live streaming and recordings. Plan limits may apply.
+                </div>
+
+                <div style={{ marginTop: 10, borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: 10 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700 }}>
+                    <input
+                      type="checkbox"
+                      checked={mediaPrefs.warnOnHighQuality}
+                      onChange={(e) => setMediaPrefs((prev) => ({ ...prev, warnOnHighQuality: e.target.checked }))}
+                    />
+                    <span>Warn when using high-quality presets</span>
+                  </label>
+                  <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
+                    Shows a reminder before starting streams with higher resource usage.
+                  </div>
                 </div>
               </div>
 
+              {/* SECTION B — Room Layout (single source of truth) */}
               <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, background: "rgba(255,255,255,0.02)" }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Recording Layout</div>
-                <div style={{ display: "flex", gap: 10 }}>
-                  {(["speaker", "grid"] as const).map((opt) => (
-                    <label key={opt} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14 }}>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Room Layout (Default)</div>
+                <div style={{ marginTop: 2, fontSize: 12, color: "#94a3b8" }}>
+                  Controls how participants and viewers are arranged. Recordings automatically use this layout.
+                </div>
+
+                <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
+                  <label style={{ display: "grid", gap: 6, fontSize: 13, color: "#cbd5e1" }}>
+                    <span style={{ fontWeight: 600, color: "#e2e8f0" }}>Layout Mode</span>
+                    <select
+                      value={mediaPrefs.defaultRoomLayout?.mode || "speaker"}
+                      onChange={(e) => {
+                        const mode = e.target.value as RoomLayoutMode;
+                        setMediaPrefs((prev) => {
+                          const prevLayout = (prev.defaultRoomLayout || ({ mode: "speaker" } as RoomLayout)) as RoomLayout;
+                          const next: RoomLayout = {
+                            ...prevLayout,
+                            mode,
+                            // Max tiles only applies to grid/carousel.
+                            ...(mode === "grid" || mode === "carousel" ? {} : { maxTiles: undefined }),
+                          };
+                          return { ...prev, defaultRoomLayout: next };
+                        });
+                      }}
+                      style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: "#0f172a", color: "#e2e8f0" }}
+                    >
+                      {(["speaker", "grid", "carousel"] as const).map((m) => (
+                        <option key={m} value={m}>
+                          {m.charAt(0).toUpperCase() + m.slice(1)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                    <label style={{ display: "grid", gap: 6, fontSize: 13, color: "#cbd5e1" }}>
+                      <span style={{ fontWeight: 600, color: "#e2e8f0" }}>Max tiles</span>
                       <input
-                        type="radio"
-                        name="recLayout"
-                        value={opt}
-                        checked={mediaPrefs.defaultLayout === opt}
-                        onChange={() => setMediaPrefs((prev) => ({ ...prev, defaultLayout: opt }))}
+                        type="number"
+                        min={1}
+                        max={64}
+                        disabled={!(mediaPrefs.defaultRoomLayout?.mode === "grid" || mediaPrefs.defaultRoomLayout?.mode === "carousel")}
+                        value={typeof mediaPrefs.defaultRoomLayout?.maxTiles === "number" ? String(mediaPrefs.defaultRoomLayout.maxTiles) : ""}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          const next = raw === "" ? undefined : Number(raw);
+                          setMediaPrefs((prev) => ({
+                            ...prev,
+                            defaultRoomLayout: {
+                              ...(prev.defaultRoomLayout || ({ mode: "speaker" } as RoomLayout)),
+                              maxTiles: Number.isFinite(next as any) ? (next as number) : undefined,
+                            },
+                          }));
+                        }}
+                        placeholder="Auto"
+                        style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: "#0f172a", color: "#e2e8f0", opacity: (mediaPrefs.defaultRoomLayout?.mode === "grid" || mediaPrefs.defaultRoomLayout?.mode === "carousel") ? 1 : 0.55 }}
                       />
-                      <span style={{ textTransform: "capitalize" }}>{opt}</span>
                     </label>
-                  ))}
-                </div>
-                <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
-                  Used when starting recordings from the room controls.
+
+                    <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: "#cbd5e1", paddingTop: 26 }}>
+                      <input
+                        type="checkbox"
+                        checked={mediaPrefs.defaultRoomLayout?.followSpeaker === true}
+                        onChange={(e) => {
+                          setMediaPrefs((prev) => ({
+                            ...prev,
+                            defaultRoomLayout: {
+                              ...(prev.defaultRoomLayout || ({ mode: "speaker" } as RoomLayout)),
+                              followSpeaker: e.target.checked,
+                            },
+                          }));
+                        }}
+                      />
+                      <span>Follow active speaker</span>
+                    </label>
+                  </div>
+
+                  <label style={{ display: "grid", gap: 6, fontSize: 13, color: "#cbd5e1" }}>
+                    <span style={{ fontWeight: 600, color: "#e2e8f0" }}>Pinned participant (optional)</span>
+                    <input
+                      type="text"
+                      value={mediaPrefs.defaultRoomLayout?.pinnedIdentity || ""}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setMediaPrefs((prev) => ({
+                          ...prev,
+                          defaultRoomLayout: {
+                            ...(prev.defaultRoomLayout || ({ mode: "speaker" } as RoomLayout)),
+                            pinnedIdentity: v.trim() ? v : null,
+                          },
+                        }));
+                      }}
+                      placeholder="Participant identity (optional)"
+                      style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: "#0f172a", color: "#e2e8f0" }}
+                    />
+                    <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
+                      Keeps a specific participant visible by default.
+                    </div>
+                  </label>
                 </div>
               </div>
 
+              {/* SECTION C — Recording Behavior (storage & reliability) */}
               <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, background: "rgba(255,255,255,0.02)" }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Recording Mode</div>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Recording Storage</div>
                 <select
                   value={mediaPrefs.defaultRecordingMode}
                   onChange={(e) => setMediaPrefs((prev) => ({ ...prev, defaultRecordingMode: e.target.value as "cloud" | "dual" }))}
                   style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: entitlements.dualRecording ? "#0f172a" : "rgba(15,23,42,0.6)", color: "#e2e8f0" }}
                 >
-                  <option value="cloud">Standard Recording (cloud only)</option>
-                  <option value="dual" disabled={!entitlements.dualRecording}>Backup Recording (cloud + local)</option>
+                  <option value="cloud">Standard Recording (Cloud) — Recommended</option>
+                  <option value="dual" disabled={!entitlements.dualRecording}>Redundant Recording (Cloud + Backup)</option>
                 </select>
-                <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8", display: "grid", gap: 4 }}>
-                  <span style={{ color: "#22c55e" }}><strong>Standard Recording:</strong> saves one final video to the cloud. Uses less storage.</span>
-                  <span style={{ color: "#f87171" }}><strong>Backup Recording:</strong> saves the cloud video and a local backup for recovery or editing. Uses more storage.</span>
+                <div style={{ marginTop: 8, fontSize: 12, color: "#94a3b8", display: "grid", gap: 6 }}>
+                  <div>
+                    <strong style={{ color: "#e2e8f0" }}>Standard Recording (Cloud):</strong> Saves a single finalized recording to the cloud. Uses less storage and is suitable for most streams.
+                  </div>
+                  <div>
+                    <strong style={{ color: "#e2e8f0" }}>Redundant Recording (Cloud + Backup):</strong> Saves a cloud recording and an additional backup for recovery or editing. Uses more storage.
+                  </div>
                 </div>
                 {!entitlements.dualRecording && (
                   <div style={{ marginTop: 6, fontSize: 12, color: "#fbbf24" }}>
@@ -2726,41 +2844,12 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 )}
               </div>
 
+              {/* SECTION D — Defaults Behavior (implicit) */}
               <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, background: "rgba(255,255,255,0.02)" }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Destinations Default</div>
-                <div style={{ display: "flex", gap: 10 }}>
-                  {([
-                    { id: "last_used", label: "Reuse last" },
-                    { id: "pick_each_time", label: "Pick each time" },
-                  ] as const).map((opt) => (
-                    <label key={opt.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14 }}>
-                      <input
-                        type="radio"
-                        name="destMode"
-                        value={opt.id}
-                        checked={mediaPrefs.destinationsDefaultMode === opt.id}
-                        onChange={() => setMediaPrefs((prev) => ({ ...prev, destinationsDefaultMode: opt.id }))}
-                      />
-                      <span>{opt.label}</span>
-                    </label>
-                  ))}
-                </div>
-                <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
-                  Controls how the stream setup modal seeds destination selection.
-                </div>
-              </div>
-
-              <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, background: "rgba(255,255,255,0.02)" }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700 }}>
-                  <input
-                    type="checkbox"
-                    checked={mediaPrefs.warnOnHighQuality}
-                    onChange={(e) => setMediaPrefs((prev) => ({ ...prev, warnOnHighQuality: e.target.checked }))}
-                  />
-                  <span>Warn when using high-quality presets</span>
-                </label>
-                <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
-                  Shows a reminder before starting with higher-bitrate presets.
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Defaults Behavior</div>
+                <div style={{ fontSize: 12, color: "#94a3b8", display: "grid", gap: 8 }}>
+                  <div>These defaults are applied automatically when creating new rooms and streams.</div>
+                  <div>Destination selections reuse the most recent configuration unless changed during setup.</div>
                 </div>
               </div>
             </div>
@@ -2777,6 +2866,9 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
             )}
 
             <div style={{ marginTop: 14, display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap" }}>
+              <div style={{ flex: "1 1 auto", minWidth: 220, alignSelf: "center", fontSize: 12, color: "#94a3b8" }}>
+                Changes apply to newly created rooms and streams.
+              </div>
               <button
                 type="button"
                 onClick={saveMediaPrefs}
@@ -2791,7 +2883,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                   cursor: mediaPrefsSaving ? "not-allowed" : "pointer",
                 }}
               >
-                {mediaPrefsSaving ? "Saving..." : "Save defaults"}
+                {mediaPrefsSaving ? "Saving..." : "Save Defaults"}
               </button>
             </div>
           </div>

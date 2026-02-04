@@ -19,10 +19,21 @@ export type RoomAccessClaims = {
 
 function getRoomAccessSecret(): string {
   const env = String(process.env.NODE_ENV || "development").toLowerCase();
-  const raw = process.env.ROOM_ACCESS_TOKEN_SECRET || process.env.JWT_SECRET || "";
-  if ((env === "production" || env === "staging") && (!process.env.ROOM_ACCESS_TOKEN_SECRET || raw === "dev-secret")) {
-    throw new Error("ROOM_ACCESS_TOKEN_SECRET must be set (no dev-secret in production)");
+  const explicit = process.env.ROOM_ACCESS_TOKEN_SECRET;
+  const fallback = process.env.JWT_SECRET;
+  const raw = String(explicit || fallback || "").trim();
+
+  // In production/staging we require a real secret, but we allow falling back to
+  // JWT_SECRET for backwards compatibility with older deployments.
+  if (env === "production" || env === "staging") {
+    if (!raw || raw === "dev-secret") {
+      throw new Error("ROOM_ACCESS_TOKEN_SECRET (or JWT_SECRET) must be set (no dev-secret in production)");
+    }
+    if (!explicit && process.env.AUTH_DEBUG === "1") {
+      console.warn("[roomAccessToken] Using JWT_SECRET fallback for ROOM_ACCESS_TOKEN_SECRET");
+    }
   }
+
   return raw || "dev-secret";
 }
 

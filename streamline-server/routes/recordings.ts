@@ -40,6 +40,7 @@ import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { evaluateUsageGate } from "../lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
 import { deleteFiles, deletePrefix } from "../lib/storageClient";
+import { resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
 
 const router = Router();
 
@@ -69,10 +70,16 @@ async function getMyContentPlatformFlags(): Promise<MyContentPlatformFlags> {
       ? ((myContentRecordingsSnap.data() as any) || {})
       : {};
 
+    const myContentEnabled = myContentData.enabled === true;
+    // Recording pipeline is controlled by featureFlags/recording.
+    // This flag is an additional opt-out. Missing => enabled.
+    const rawMyContentRecordingsEnabled = (myContentRecordingsData as any).enabled;
+    const myContentRecordingsEnabled =
+      rawMyContentRecordingsEnabled === undefined ? true : rawMyContentRecordingsEnabled === true;
+
     cachedMyContentFlags = {
-      // Safety-first: missing => disabled.
-      myContentEnabled: myContentData.enabled === true,
-      myContentRecordingsEnabled: myContentRecordingsData.enabled === true,
+      myContentEnabled,
+      myContentRecordingsEnabled,
     };
     cachedMyContentFlagsAt = now;
     return cachedMyContentFlags;
@@ -80,7 +87,8 @@ async function getMyContentPlatformFlags(): Promise<MyContentPlatformFlags> {
     console.error("[recordings] failed to load My Content platform flags", err);
     cachedMyContentFlags = {
       myContentEnabled: false,
-      myContentRecordingsEnabled: false,
+      // Fail-open to avoid breaking recording when Firestore is transient.
+      myContentRecordingsEnabled: true,
     };
     cachedMyContentFlagsAt = now;
     return cachedMyContentFlags;
@@ -89,12 +97,12 @@ async function getMyContentPlatformFlags(): Promise<MyContentPlatformFlags> {
 
 async function assertMyContentRecordingsEnabled(res: any): Promise<boolean> {
   const flags = await getMyContentPlatformFlags();
-  if (flags.myContentEnabled && flags.myContentRecordingsEnabled) return true;
+  if (flags.myContentRecordingsEnabled) return true;
 
   res.status(403).json({
     error: LIMIT_ERRORS.FEATURE_DISABLED,
     feature: "myContentRecordingsEnabled",
-    reason: "My Content recordings are disabled platform-wide",
+    reason: "Recordings are disabled by featureFlags/myContentRecordingsEnabled",
     platformFlags: flags,
   });
   return false;
@@ -684,7 +692,6 @@ router.post(
     const {
       roomId: rawRoomId,
       roomName: rawRoomName,
-      layout: rawLayout,
       mode: rawMode,
       presetId,
       usageType: rawUsageType,
@@ -692,7 +699,6 @@ router.post(
     } = req.body as {
       roomId?: string;
       roomName?: string;
-      layout?: string;
       mode?: string; // "cloud" | "dual"
       presetId?: string;
       usageType?: string;
@@ -717,8 +723,31 @@ router.post(
       throw err;
     }
 
-    // CRITICAL: Layout must be exactly "speaker" or "grid" - anything else causes 400
-    const layout = rawLayout === "speaker" ? "speaker" : "grid";
+    // Single mental model:
+    // - Room Layout is the source of truth
+    // - Recordings inherit Room Layout
+    // If a legacy room lacks roomLayout, seed it from account defaults before starting.
+    const roomRef = firestore.collection("rooms").doc(roomId);
+    const roomSnap = await roomRef.get();
+    let roomDoc = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+
+    if (!roomDoc.roomLayout) {
+      try {
+        const userSnap = await firestore.collection("users").doc(uid).get();
+        const userData = userSnap.exists ? ((userSnap.data() as any) || {}) : {};
+        const mediaPrefs = (userData as any).mediaPrefs || {};
+        const candidate = mediaPrefs.defaultRoomLayout;
+        if (candidate && typeof candidate === "object" && typeof candidate.mode === "string") {
+          await roomRef.set({ roomLayout: candidate }, { merge: true });
+          roomDoc = { ...roomDoc, roomLayout: candidate };
+        }
+      } catch (e: any) {
+        console.warn("[recordings/start] failed to seed missing roomLayout from mediaPrefs", e?.message || e);
+      }
+    }
+
+    const resolvedLayout = resolveCompositeLayoutFromRoom({ roomDoc, requestLayout: undefined, defaultMode: "speaker" });
+    const layout = resolvedLayout.mode;
     const mode = rawMode === "dual" ? "dual" : "cloud";
 
     // Optional: emergency recordings have special retention rules.
