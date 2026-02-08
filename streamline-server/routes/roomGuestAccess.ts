@@ -189,7 +189,7 @@ router.post("/invites/:inviteId/redeem", async (req: any, res) => {
       maxAge: 2 * 60 * 60 * 1000,
     });
 
-    return res.json({ roomId: result.roomId });
+    return res.json({ roomId: result.roomId, guestSessionToken: sessionJwt });
   } catch (err: any) {
     console.error("/api/invites/:inviteId/redeem error", err?.message || err);
     return res.status(500).json({ error: "internal_error" });
@@ -206,8 +206,20 @@ router.get("/rooms/:roomId/status", async (req: any, res) => {
     const roomId = String(req.params.roomId || "").trim();
     if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
+    const snap = await firestore.collection("rooms").doc(roomId).get();
+    if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
+
+    const room = (snap.data() as any) || {};
+    const status = room.status === "live" ? "live" : "idle";
+    const allowGuestsPolicy = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
+
     const user = tryGetAuthUser(req);
     let guest = tryGetGuestSession(req);
+
+    // Optional per-room guest policy: only enforced when explicitly set.
+    if (!user && allowGuestsPolicy === false) {
+      return res.status(401).json({ error: "login_required" });
+    }
 
     if (!user && !guest) {
       const legacyGuest = tryGetLegacyInviteGuest(req, roomId);
@@ -229,12 +241,6 @@ router.get("/rooms/:roomId/status", async (req: any, res) => {
     if (!user && (!guest || guest.roomId !== roomId)) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
-
-    const snap = await firestore.collection("rooms").doc(roomId).get();
-    if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
-
-    const room = (snap.data() as any) || {};
-    const status = room.status === "live" ? "live" : "idle";
 
     return res.json({ roomId, status });
   } catch (err) {
@@ -294,6 +300,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     const requiresAuth = typeof room.requiresAuth === "boolean" ? !!room.requiresAuth : true;
     const requiresPayment = typeof room.requiresPayment === "boolean" ? !!room.requiresPayment : false;
     const roomType = typeof room.roomType === "string" ? String(room.roomType).trim() : "";
+    const allowGuestsPolicy = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
 
     // Policy: room type must be rtc when explicitly set
     if (roomType && roomType !== "rtc") {
@@ -303,6 +310,11 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // Policy: auth requirement
     // Allow guests to join via a verified guest session (sl_guest cookie) or legacy invite token.
     if (requiresAuth && !user && !guest) {
+      return res.status(401).json({ error: "login_required" });
+    }
+
+    // Optional per-room guest policy: only enforced when explicitly set.
+    if (!user && allowGuestsPolicy === false) {
       return res.status(401).json({ error: "login_required" });
     }
 

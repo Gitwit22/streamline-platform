@@ -353,8 +353,10 @@ function isExpired(readyAt?: Timestamp | Date | null, retentionMinutes?: number)
 }
 
 function mapRecordingDoc(id: string, data: any) {
-  const status = data.status || "unknown";
-  const downloadReady = !!(data.downloadReady || status === "ready" || status === "stopped");
+  const status = String(data.status || "unknown").toLowerCase();
+  // downloadReady should mean the file is actually ready to download.
+  // Do NOT treat "stopped" as ready; download-link is strict on status === "ready".
+  const downloadReady = data.downloadReady === true || status === "ready";
   return {
     id,
     status,
@@ -365,6 +367,12 @@ function mapRecordingDoc(id: string, data: any) {
     duration: data.duration || 0,
     fileSize: data.fileSize || null,
   };
+}
+
+function normalizeStorageKey(key: unknown): string | null {
+  const raw = String(key ?? "").trim();
+  if (!raw) return null;
+  return raw.startsWith("/") ? raw.slice(1) : raw;
 }
 
 function getAuthUserId(req: any): string | null {
@@ -1645,16 +1653,21 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
             : [];
 
           // Prefer explicit r2Keys; otherwise fall back to recording doc's objectKey.
-          let objectKey: string | null = keys[0] || null;
+          let objectKey: string | null = normalizeStorageKey(keys[0]) || null;
 
           if (!objectKey && recordingId) {
             const recSnap = await firestore.collection("recordings").doc(recordingId).get();
             const rec = recSnap.exists ? (recSnap.data() || {}) : {};
-            objectKey = (rec.objectKey as string | undefined) || (rec.downloadPath as string | undefined) || null;
+            objectKey =
+              normalizeStorageKey(rec.objectKey as string | undefined) ||
+              normalizeStorageKey(rec.downloadPath as string | undefined) ||
+              null;
           }
 
           if (objectKey) {
-            const size = await r2HeadObjectSize(objectKey);
+            // Handle historical drift where a leading slash may have been stored.
+            const normalizedKey = normalizeStorageKey(objectKey) || objectKey;
+            const size = await r2HeadObjectSize(normalizedKey);
             if (size > 0) {
               // Emergency link should be usable up to the emergency expiry window.
               // Never hand out a URL that outlives the window (cap at 1 hour).
@@ -1671,7 +1684,7 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
               }
 
               const signedTtlSeconds = Math.max(1, Math.min(60 * 60, expiresInSeconds));
-              const signedUrl = await getSignedDownloadUrl(objectKey, signedTtlSeconds);
+              const signedUrl = await getSignedDownloadUrl(normalizedKey, signedTtlSeconds);
 
               return res.status(200).json({
                 success: true,
@@ -1741,7 +1754,8 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
         (fallbackData.objectKey as string | undefined) ||
         (fallbackData.downloadPath as string | undefined);
 
-      if (!fallbackKey) {
+      const normalizedFallbackKey = normalizeStorageKey(fallbackKey);
+      if (!normalizedFallbackKey) {
         return res.status(200).json({
           success: false,
           noRecording: true,
@@ -1749,7 +1763,7 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
         });
       }
 
-      const size = await r2HeadObjectSize(fallbackKey);
+      const size = await r2HeadObjectSize(normalizedFallbackKey);
       if (size <= 0) {
         return res.status(200).json({
           success: false,
@@ -1758,7 +1772,7 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
         });
       }
 
-      const signedUrl = await getSignedDownloadUrl(fallbackKey, 15 * 60);
+      const signedUrl = await getSignedDownloadUrl(normalizedFallbackKey, 15 * 60);
 
       const nowTs = Timestamp.now();
       await firestore
@@ -1769,8 +1783,8 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
             lastDownloadRequestedAt: nowTs,
             status: "ready",
             downloadReady: true,
-            objectKey: fallbackKey,
-            downloadPath: fallbackKey,
+            objectKey: normalizedFallbackKey,
+            downloadPath: normalizedFallbackKey,
             fileSize: size,
             readyAt: fallbackData.readyAt || nowTs,
             updatedAt: nowTs,
@@ -1798,7 +1812,9 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
       (readyData.objectKey as string | undefined) ||
       (readyData.downloadPath as string | undefined);
 
-    if (!objectKey) {
+    const normalizedObjectKey = normalizeStorageKey(objectKey);
+
+    if (!normalizedObjectKey) {
       return res.json({
         success: false,
         noRecording: true,
@@ -1807,7 +1823,7 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
     }
 
     // Generate signed URL (15-minute TTL per spec)
-    const signedUrl = await getSignedDownloadUrl(objectKey, 15 * 60);
+    const signedUrl = await getSignedDownloadUrl(normalizedObjectKey, 15 * 60);
 
     const nowTs = Timestamp.now();
     await firestore
@@ -1816,8 +1832,8 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
       .set(
         {
           lastDownloadRequestedAt: nowTs,
-          objectKey,
-          downloadPath: objectKey,
+          objectKey: normalizedObjectKey,
+          downloadPath: normalizedObjectKey,
           status: "ready",
           downloadReady: true,
           updatedAt: nowTs,
@@ -1860,7 +1876,7 @@ router.get("/:id/storage-check", requireAuth, requireMyContentRecordingsEnabled 
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    const objectKey = data.objectKey || data.downloadPath;
+    const objectKey = normalizeStorageKey(data.objectKey || data.downloadPath);
     if (!objectKey) {
       return res.json({ success: false, message: "No object key on recording" });
     }
@@ -1958,7 +1974,7 @@ router.get("/:id/download-link", requireAuth, requireMyContentRecordingsEnabled 
       });
     }
 
-    const objectKey = data.objectKey || data.downloadPath;
+    const objectKey = normalizeStorageKey(data.objectKey || data.downloadPath);
     if (!objectKey) {
       return res.status(500).json({
         success: false,

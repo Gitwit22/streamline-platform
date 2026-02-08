@@ -473,7 +473,7 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
       else requestedRole = "participant";
     }
 
-    const normalizedRequested = String(requestedRole || "participant").toLowerCase();
+    let normalizedRequested = String(requestedRole || "participant").toLowerCase();
     const elevatedRequested = normalizedRequested === "cohost" || normalizedRequested === "moderator";
 
     // If an elevated role is requested but the caller is not authenticated,
@@ -537,6 +537,22 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
         requiresPayment: typeof roomData?.requiresPayment === "boolean" ? !!roomData.requiresPayment : false,
         roomType: typeof roomData?.roomType === "string" ? roomData.roomType : null,
       };
+
+      // Role enforcement:
+      // - Existing rooms: only the room owner may be treated as the host.
+      // - Owner joins: always mint a host-scoped roomAccessToken so host tools
+      //   (mute/remove/etc) work even if the client omitted role=host.
+      // - Non-owner joins: never allow self-assigned host role.
+      if (roomPolicy.ownerId) {
+        const isOwner = !!uid && uid === roomPolicy.ownerId;
+        if (isOwner) {
+          requestedRole = "host";
+          normalizedRequested = "host";
+        } else if (normalizedRequested === "host") {
+          requestedRole = "participant";
+          normalizedRequested = "participant";
+        }
+      }
 
       // Room policy enforcement (server-side, before token issuance)
       if (roomPolicy.requiresAuth && !uid) {

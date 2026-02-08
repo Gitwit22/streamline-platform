@@ -116,32 +116,59 @@ export default function RoomExitPage() {
   };
 
   useEffect(() => {
-    const fetchData = async () => {
-      if (recordingId && recordingId !== "unknown") {
-        try {
-          const rec = await editingApi.getRecording(recordingId);
-          setRecording(rec);
-        } catch (error) {
-          console.error("Failed to fetch recording:", error);
-          setRecording(null);
-        }
-      } else {
+    let cancelled = false;
+    let interval: ReturnType<typeof setInterval> | null = null;
+
+    const fetchRecording = async () => {
+      if (!recordingId || recordingId === "unknown") {
         setRecording(null);
+        return;
       }
-      
-      // Calculate session duration from sessionStart stored in localStorage
-      const sessionStartStr = localStorage.getItem('sl_sessionStart');
+
+      try {
+        const rec = await editingApi.getRecording(recordingId);
+        if (!cancelled) setRecording(rec);
+
+        const status = String((rec as any)?.status ?? "").toLowerCase();
+        const downloadReady = (rec as any)?.downloadReady === true || status === "ready";
+
+        if (downloadReady && interval) {
+          clearInterval(interval);
+          interval = null;
+        }
+      } catch (error) {
+        console.error("Failed to fetch recording:", error);
+        if (!cancelled) setRecording(null);
+      }
+    };
+
+    // Calculate session duration from sessionStart stored in localStorage
+    try {
+      const sessionStartStr = localStorage.getItem("sl_sessionStart");
       if (sessionStartStr) {
         const sessionStart = parseInt(sessionStartStr, 10);
         const sessionEnd = Date.now();
-        const duration = Math.floor((sessionEnd - sessionStart) / 1000); // Convert to seconds
+        const duration = Math.floor((sessionEnd - sessionStart) / 1000);
         setSessionDuration(duration);
       }
-      
-      setLoading(false);
-    };
+    } catch {
+      // ignore
+    }
 
-    fetchData();
+    (async () => {
+      await fetchRecording();
+      if (!cancelled) setLoading(false);
+
+      // If not ready yet, keep polling so the exit page updates automatically.
+      interval = setInterval(() => {
+        void fetchRecording();
+      }, 3000);
+    })();
+
+    return () => {
+      cancelled = true;
+      if (interval) clearInterval(interval);
+    };
   }, [recordingId]);
 
   if (loading) {

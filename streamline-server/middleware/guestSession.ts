@@ -20,11 +20,29 @@ export function signGuestSession(
   return jwt.sign(claims, getGuestSessionSecret(), { expiresIn });
 }
 
+function extractGuestSessionToken(req: Request): string | null {
+  const hdr = (req.headers as any) || {};
+  const fromHeader = hdr["x-guest-session"] ?? hdr["x-guest-session-token"];
+  if (typeof fromHeader === "string" && fromHeader.trim()) return fromHeader.trim();
+
+  const fromBody = (req as any)?.body?.guestSessionToken;
+  if (typeof fromBody === "string" && fromBody.trim()) return fromBody.trim();
+
+  const fromQuery = (req as any)?.query?.guestSessionToken;
+  if (typeof fromQuery === "string" && fromQuery.trim()) return fromQuery.trim();
+
+  return null;
+}
+
 export function tryGetGuestSession(req: Request): GuestSessionClaims | null {
   const cookieToken = (req as any).cookies?.sl_guest;
-  if (!cookieToken || typeof cookieToken !== "string") return null;
+  const token =
+    typeof cookieToken === "string" && cookieToken.trim()
+      ? cookieToken.trim()
+      : extractGuestSessionToken(req);
+  if (!token) return null;
   try {
-    const decoded = jwt.verify(cookieToken, getGuestSessionSecret()) as any;
+    const decoded = jwt.verify(token, getGuestSessionSecret()) as any;
     const inviteId = typeof decoded?.inviteId === "string" ? decoded.inviteId : "";
     const roomId = typeof decoded?.roomId === "string" ? decoded.roomId : "";
     const role = decoded?.role === "viewer" || decoded?.role === "participant" ? (decoded.role as any) : null;

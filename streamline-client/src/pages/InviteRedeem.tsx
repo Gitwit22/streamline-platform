@@ -36,6 +36,15 @@ export default function InviteRedeem() {
           return;
         }
 
+        const guestSessionToken = typeof (data as any)?.guestSessionToken === "string" ? (data as any).guestSessionToken : "";
+        if (guestSessionToken && guestSessionToken.trim()) {
+          try {
+            sessionStorage.setItem(`sl_guest_session:${roomId}`, guestSessionToken.trim());
+          } catch {
+            // ignore
+          }
+        }
+
         nav(`/room/${encodeURIComponent(roomId)}`, { replace: true });
       } catch (err: any) {
         setError(err?.message || "Failed to redeem invite.");

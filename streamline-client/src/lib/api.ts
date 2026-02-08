@@ -275,6 +275,39 @@ export async function apiUpdateRoomLayout(
   return res.json() as Promise<{ ok: true; roomId: string; roomLayout: RoomLayout }>;
 }
 
+export type RoomPolicy = {
+  visibility: "public" | "unlisted" | "private";
+  requiresAuth: boolean;
+  requiresPayment: boolean;
+  allowGuests: boolean | null;
+};
+
+export async function apiGetRoomPolicy(roomId: string, roomAccessToken: string) {
+  const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/policy`, {
+    method: "GET",
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+
+  return res.json() as Promise<{ ok: true; roomId: string } & RoomPolicy>;
+}
+
+export async function apiUpdateRoomPolicy(
+  roomId: string,
+  roomAccessToken: string,
+  patch: Pick<Required<RoomPolicy>, "allowGuests">
+) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/policy`, {
+    method: "PATCH",
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+    body: JSON.stringify(patch),
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; allowGuests: boolean }>;
+}
+
 export function clearAuthStorage() {
   if (typeof window === "undefined") return;
   try {
