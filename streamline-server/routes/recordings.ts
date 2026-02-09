@@ -41,6 +41,7 @@ import { evaluateUsageGate } from "../lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
 import { deleteFiles, deletePrefix } from "../lib/storageClient";
 import { resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
+import { deleteRecordingStorage } from "../lib/recordingDeletion";
 
 const router = Router();
 
@@ -383,10 +384,16 @@ function getAuthUserId(req: any): string | null {
  * Generate recording path for R2
  * CRITICAL: No leading slash - use "recordings/..." not "/recordings/..."
  */
-function generateRecordingPath(userId: string, roomKey: string, timestamp: number): string {
+function generateRecordingPrefix(userId: string, roomKey: string, recordingId: string): string {
   const safeRoom = roomKey.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const safeRecordingId = String(recordingId || "").trim() || "unknown";
   // Ensure no leading slash - R2/S3 keys should not start with /
-  return `recordings/${userId}/${safeRoom}/${timestamp}.mp4`;
+  return `recordings/${userId}/${safeRoom}/${safeRecordingId}/`;
+}
+
+function generateRecordingPath(userId: string, roomKey: string, recordingId: string): { objectKey: string; prefix: string } {
+  const prefix = generateRecordingPrefix(userId, roomKey, recordingId);
+  return { prefix, objectKey: `${prefix}recording.mp4` };
 }
 
 /**
@@ -613,6 +620,24 @@ async function stopRecordingInternal(options: {
 
   console.log(`[recordings/stopInternal] Recording ${recordingId} now processing`);
 
+  // Best-effort: keep the room's latest recording status in sync.
+  try {
+    const roomId = typeof (data as any).roomId === "string" ? String((data as any).roomId).trim() : "";
+    if (roomId) {
+      const roomRef = firestore.collection("rooms").doc(roomId);
+      await roomRef.set(
+        {
+          latestRecordingId: recordingId,
+          latestRecordingStatus: "processing",
+          latestRecordingUpdatedAt: now,
+        },
+        { merge: true }
+      );
+    }
+  } catch (e: any) {
+    console.warn("[recordings/stopInternal] failed to update room latestRecording status", e?.message || e);
+  }
+
   // Release active recording lock for this (user, room)
   try {
     const roomId = typeof (data as any).roomId === "string" ? (data as any).roomId : null;
@@ -649,6 +674,26 @@ async function stopRecordingInternal(options: {
             fileSize: size,
             updatedAt: new Date(),
           });
+
+          try {
+            const roomId = typeof (data as any).roomId === "string" ? String((data as any).roomId).trim() : "";
+            if (roomId) {
+              await firestore
+                .collection("rooms")
+                .doc(roomId)
+                .set(
+                  {
+                    latestRecordingId: recordingId,
+                    latestRecordingStatus: "ready",
+                    latestRecordingUpdatedAt: new Date(),
+                  },
+                  { merge: true }
+                );
+            }
+          } catch (e: any) {
+            console.warn("[recordings/stopInternal] failed to update room latestRecording to ready", e?.message || e);
+          }
+
           console.log(
             `[recordings/stopInternal] ✅ File confirmed via head-check: ${objectKey} (${size} bytes)`
           );
@@ -866,11 +911,10 @@ router.post(
       return res.status(500).json({ error: "R2 storage not configured" });
     }
 
-    // Generate recording path and ID
+    // Generate recording ID and storage paths
     const now = new Date();
-    const timestamp = now.getTime();
-    const objectKey = generateRecordingPath(uid, roomId, timestamp);
     const recordingId = firestore.collection("recordings").doc().id;
+    const { objectKey, prefix: r2Prefix } = generateRecordingPath(uid, roomId, recordingId);
     const recordingRef = firestore.collection("recordings").doc(recordingId);
 
     const isEmergency = recordingClass === "emergency";
@@ -914,6 +958,9 @@ router.post(
       downloadReady: false,
       objectKey,
       downloadPath: null,
+      r2Keys: [objectKey],
+      r2Prefix,
+      r2Prefixes: [r2Prefix],
       fileSize: null,
       egressId: null,
       errorMessage: null,
@@ -986,6 +1033,7 @@ router.post(
             deleteAfterMs: emergencyExpiresAtMs,
             status: "active",
             r2Keys: [objectKey],
+            r2Prefix,
           },
           { merge: false }
         );
@@ -997,6 +1045,20 @@ router.post(
     }
 
     console.log(`[recordings/start] Created doc ${recordingId} status=starting`);
+
+    // Best-effort: publish latest recording pointer on the room doc.
+    try {
+      await roomRef.set(
+        {
+          latestRecordingId: recordingId,
+          latestRecordingStatus: "starting",
+          latestRecordingUpdatedAt: now,
+        },
+        { merge: true }
+      );
+    } catch (e: any) {
+      console.warn("[recordings/start] failed to set room latestRecording pointer", e?.message || e);
+    }
 
     // Best-effort: if this replaced an older emergency recording, delete its assets asynchronously.
     if (isEmergency && previousEmergency?.recordingId && previousEmergency.recordingId !== recordingId) {
@@ -1914,6 +1976,92 @@ router.get("/:id", requireAuth, requireMyContentRecordingsEnabled as any, async 
   } catch (err: any) {
     console.error("[recordings/:id] Error:", err);
     return res.status(500).json({ error: "Failed to fetch recording" });
+  }
+});
+
+// =============================================================================
+// DELETE /:id - Delete a recording (bucket + Firestore)
+// Default behavior is SOFT delete (status="deleted"); pass ?hard=1 to delete the doc.
+// =============================================================================
+
+router.delete("/:id", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
+  try {
+    const uid = getAuthUserId(req);
+    const recordingId = req.params.id;
+
+    const snap = await firestore.collection("recordings").doc(recordingId).get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Recording not found" });
+    }
+
+    const data = snap.data() || {};
+    if (data.userId && data.userId !== uid) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    const storage = await deleteRecordingStorage(data);
+
+    // Best-effort: if the room pointer points to this recording, clear it.
+    try {
+      const roomId = typeof data.roomId === "string" ? String(data.roomId).trim() : "";
+      if (roomId) {
+        const roomRef = firestore.collection("rooms").doc(roomId);
+        const roomSnap = await roomRef.get();
+        const roomData = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+        const latestId = String(roomData.latestRecordingId || "").trim();
+        if (latestId === recordingId) {
+          await roomRef.set(
+            {
+              latestRecordingId: null,
+              latestRecordingStatus: null,
+              latestRecordingUpdatedAt: new Date(),
+            },
+            { merge: true }
+          );
+        }
+      }
+    } catch {}
+
+    // Best-effort: keep emergency pointer from referencing a deleted recording.
+    try {
+      const recordingClass = String(data.recordingClass || "").toLowerCase();
+      if (recordingClass === "emergency") {
+        const currentRef = firestore.collection("users").doc(uid).collection("emergencyRecording").doc("current");
+        const curSnap = await currentRef.get();
+        const cur = curSnap.exists ? ((curSnap.data() as any) || {}) : {};
+        if (String(cur.recordingId || "") === recordingId) {
+          await currentRef.set(
+            {
+              status: "deleted",
+              deletedAt: new Date(),
+              updatedAt: new Date(),
+            },
+            { merge: true }
+          );
+        }
+      }
+    } catch {}
+
+    const hard = req.query.hard === "1" || req.query.hard === "true";
+    if (hard) {
+      await firestore.collection("recordings").doc(recordingId).delete();
+    } else {
+      await firestore.collection("recordings").doc(recordingId).set(
+        {
+          status: "deleted",
+          deleteReason: "user_deleted",
+          deletedAt: new Date(),
+          updatedAt: new Date(),
+          downloadReady: false,
+        },
+        { merge: true }
+      );
+    }
+
+    return res.json({ success: true, recordingId, hard, storage });
+  } catch (err: any) {
+    console.error("[recordings/:id delete] Error:", err);
+    return res.status(500).json({ error: "Failed to delete recording" });
   }
 });
 

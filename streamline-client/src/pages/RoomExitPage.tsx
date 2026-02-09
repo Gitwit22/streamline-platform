@@ -59,7 +59,7 @@ export default function RoomExitPage() {
     try {
       const res = await apiFetchAuth(`/api/recordings/${recordingId}/download-link`, {}, { allowNonOk: true });
       if (res.status === 410) {
-        alert("This recording link expired. Use Settings → Usage → Emergency Download.");
+        alert("This recording link expired. Use Settings → Usage → Latest video to generate a fresh 1-hour link.");
         setDownloading(false);
         return;
       }
@@ -111,7 +111,7 @@ export default function RoomExitPage() {
         { allowNonOk: true }
       );
     } catch {}
-    setConfirmMessage("Use Settings → Usage → Emergency Download (Latest Recording) if you're having trouble.");
+    setConfirmMessage("Use Settings → Usage → Latest video if you're having trouble.");
     setShowConfirmModal(false);
   };
 
@@ -523,7 +523,7 @@ export default function RoomExitPage() {
               </div>
               {!downloading && (
                 <div style={{ fontSize: '11px', color: '#fca5a5' }}>
-                  This emergency download link expires in 1 hour. After that, the recording is automatically deleted.
+                  Download links expire in 1 hour. Generate a fresh link in Settings → Usage → Latest video.
                 </div>
               )}
             </button>
@@ -533,7 +533,7 @@ export default function RoomExitPage() {
                 <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 20 }}>
                   <div style={{ background: '#111', border: '1px solid #333', borderRadius: 12, padding: 20, width: 320 }}>
                     <h4 style={{ margin: 0, marginBottom: 10, color: '#fff' }}>Did your download start?</h4>
-                    <p style={{ margin: 0, marginBottom: 16, color: '#d1d5db', fontSize: 14 }}>If not, try Emergency Download in Settings → Usage.</p>
+                    <p style={{ margin: 0, marginBottom: 16, color: '#d1d5db', fontSize: 14 }}>If not, try Settings → Usage → Latest video.</p>
                     <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
                       <button onClick={handleConfirmNo} style={{ padding: '8px 12px', borderRadius: 8, border: '1px solid #444', background: '#1f2937', color: '#fff', cursor: 'pointer' }}>No</button>
                       <button onClick={handleConfirmYes} style={{ padding: '8px 12px', borderRadius: 8, border: 'none', background: 'linear-gradient(135deg,#dc2626,#ef4444)', color: '#fff', cursor: 'pointer' }}>Yes</button>

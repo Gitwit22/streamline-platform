@@ -18,6 +18,7 @@ import Stripe from "stripe";
 import { firestore as db } from "../firebaseAdmin";
 import { stripe } from "../lib/stripe";
 import { getCurrentMonthKey } from "../lib/usageTracker";
+import { FieldValue } from "firebase-admin/firestore";
 import {
   S3Client,
   HeadObjectCommand,
@@ -410,6 +411,20 @@ function extractObjectKey(egressInfo: any): string | null {
   ];
   const hit = candidates.find((x) => typeof x === "string" && x.length > 0);
   return hit ?? null;
+}
+
+function normalizeStorageKey(key: unknown): string | null {
+  const raw = String(key ?? "").trim();
+  if (!raw) return null;
+  return raw.startsWith("/") ? raw.slice(1) : raw;
+}
+
+function keyToPrefix(key: string): string | null {
+  const normalized = normalizeStorageKey(key);
+  const k = normalized || String(key || "").trim();
+  const idx = k.lastIndexOf("/");
+  if (idx <= 0) return null;
+  return `${k.slice(0, idx + 1)}`;
 }
 
 // =============================================================================
@@ -1001,17 +1016,27 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     const rawToken = crypto.randomBytes(32).toString("hex");
     const hashedToken = crypto.createHash("sha256").update(rawToken).digest("hex");
 
+    const normalizedObjectKey = normalizeStorageKey(objectKey) || objectKey;
+    const derivedPrefix = keyToPrefix(normalizedObjectKey);
+
     const updates: Record<string, any> = {
       status: finalStatus,
       downloadReady,
-      objectKey,  // Update with actual egress path if different
-      downloadPath: objectKey,
+      objectKey: normalizedObjectKey,  // Update with actual egress path if different
+      downloadPath: normalizedObjectKey,
       fileSize,
       livekitStatus: egressStatus,
       oneTimeToken: hashedToken,
       updatedAt: now,
       endedAt: now,
     };
+
+    // Always retain storage targets for later deletion (idempotent).
+    updates.r2Keys = FieldValue.arrayUnion(normalizedObjectKey);
+    if (derivedPrefix) {
+      updates.r2Prefix = derivedPrefix;
+      updates.r2Prefixes = FieldValue.arrayUnion(derivedPrefix);
+    }
 
     if (finalStatus === "ready") {
       updates.readyAt = now;
@@ -1021,6 +1046,29 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     }
 
     await recordingRef.update(updates);
+
+    // Best-effort: keep room latest recording pointer in sync.
+    try {
+      const roomId = typeof recordingData.roomId === "string" ? String(recordingData.roomId).trim() : "";
+      if (roomId) {
+        const roomRef = db.collection("rooms").doc(roomId);
+        const roomSnap = await roomRef.get();
+        const roomData = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+        const currentLatest = String(roomData.latestRecordingId || "").trim();
+        if (!currentLatest || currentLatest === recordingId) {
+          await roomRef.set(
+            {
+              latestRecordingId: recordingId,
+              latestRecordingStatus: finalStatus,
+              latestRecordingUpdatedAt: now,
+            },
+            { merge: true }
+          );
+        }
+      }
+    } catch (e: any) {
+      console.warn("[livekit-webhook] failed to update room latestRecording status", e?.message || e);
+    }
 
     // Ensure recording minutes are counted even if /recordings/stop wasn't called.
     if (recordingData.usageCounted !== true) {

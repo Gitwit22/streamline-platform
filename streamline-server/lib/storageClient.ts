@@ -31,6 +31,31 @@ const s3Client = new S3Client({
   forcePathStyle: true,
 });
 
+export function isR2Configured(): boolean {
+  return !!(R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET && R2_ENDPOINT);
+}
+
+/**
+ * HEAD check on R2 to verify object exists and get size.
+ * Returns 0 when not found or when R2 is not configured.
+ */
+export async function headObjectSize(remotePath: string): Promise<number> {
+  const key = String(remotePath || "").trim().replace(/^\//, "");
+  if (!key) return 0;
+  if (!R2_BUCKET || !isR2Configured()) return 0;
+
+  try {
+    const resp = await s3Client.send(new HeadObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+    return typeof resp.ContentLength === "number" ? resp.ContentLength : 0;
+  } catch (err: any) {
+    if (err?.name === "NotFound" || err?.$metadata?.httpStatusCode === 404) {
+      return 0;
+    }
+    console.warn(`[r2] headObjectSize error for ${key}:`, err?.message || err);
+    return 0;
+  }
+}
+
 /**
  * Generate R2 public URL for a given storage path
  */

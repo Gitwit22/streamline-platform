@@ -5,8 +5,8 @@ import { requireAuth } from "../middleware/requireAuth";
 import { firestore as db } from "../firebaseAdmin";
 import { getUserAccount } from "../lib/userAccount";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
-import { CURRENT_TOS_VERSION } from "../lib/tos";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { buildNewUserDoc } from "../lib/newUserDefaults";
 
 console.log("✅ auth router loaded");
 
@@ -215,21 +215,15 @@ router.post("/signup", async (req, res) => {
 
     const now = Date.now();
 
-    const userData = {
+    const userData = buildNewUserDoc({
       email: emailNorm,
-      displayName: displayName ? String(displayName) : "",
       passwordHash,
-      planId: "free",
-      billingTruth: normalizeBillingTruthFromUser({ planId: "free" }, now),
-      billingActive: false,
-      billingStatus: "none",
-      createdAt: now,
-      timeZone: timeZone ? String(timeZone) : "America/Chicago",
-      tosVersion: CURRENT_TOS_VERSION,
-      tosAcceptedAt: now,
+      displayName,
+      timeZone,
+      nowMs: now,
       tosAcceptedIp: req.ip || undefined,
       tosUserAgent: req.get("user-agent") || undefined,
-    };
+    });
 
     await userRef.set(userData);
 

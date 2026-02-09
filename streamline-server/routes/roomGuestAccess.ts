@@ -330,7 +330,11 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
 
     // Policy: visibility
     const isOwner = !!user && !!ownerId && user.uid === ownerId;
-    if (visibility === "private" && !isOwner) {
+    // Private rooms are owner-only UNLESS the caller presents a valid invite token.
+    // This supports "invite someone on stage" while keeping strict access by default.
+    const inviteForRoom = tryGetLegacyInviteGuest(req, roomId);
+    const hasInviteAccess = !!inviteForRoom;
+    if (visibility === "private" && !isOwner && !hasInviteAccess) {
       return res.status(403).json({ error: "not_allowed" });
     }
 
@@ -390,21 +394,53 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
 
     const token = await at.toJwt();
 
+    const effectiveRoleKey: "viewer" | "participant" | "host" = lkRole;
+    const basePerms =
+      effectiveRoleKey === "host"
+        ? {
+            canStream: true,
+            canRecord: true,
+            canDestinations: true,
+            canModerate: true,
+            canLayout: true,
+            canScreenShare: true,
+            canInvite: true,
+            canAnalytics: true,
+            canMuteGuests: true,
+            canRemoveGuests: true,
+          }
+        : effectiveRoleKey === "participant"
+          ? {
+              canStream: false,
+              canRecord: false,
+              canDestinations: false,
+              canModerate: false,
+              canLayout: false,
+              canScreenShare: false,
+              canInvite: false,
+              canAnalytics: false,
+              canMuteGuests: false,
+              canRemoveGuests: false,
+            }
+          : {
+              canStream: false,
+              canRecord: false,
+              canDestinations: false,
+              canModerate: false,
+              canLayout: false,
+              canScreenShare: false,
+              canInvite: false,
+              canAnalytics: false,
+              canMuteGuests: false,
+              canRemoveGuests: false,
+            };
+
     const roomAccessPayload = {
       roomId,
       roomName: String(room.roomName || room.name || livekitRoomName || roomId),
       livekitRoomName,
-      role: lkRole === "viewer" ? "viewer" : "participant",
-      permissions: {
-        canStream: lkRole !== "viewer",
-        canRecord: lkRole !== "viewer",
-        canDestinations: lkRole !== "viewer",
-        canModerate: lkRole === "host",
-        canLayout: lkRole !== "viewer",
-        canScreenShare: lkRole !== "viewer",
-        canInvite: lkRole === "host",
-        canAnalytics: false,
-      },
+      role: effectiveRoleKey,
+      permissions: basePerms,
       identity,
     } as const;
 
@@ -428,7 +464,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       participantIdentity: identity,
       isViewer: lkRole === "viewer",
       role: lkRole,
-      effectiveRoleKey: lkRole === "viewer" ? "viewer" : "participant",
+      effectiveRoleKey,
     });
   } catch (err: any) {
     console.error("/api/rooms/:roomId/token error", err?.message || err);

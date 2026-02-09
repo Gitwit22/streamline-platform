@@ -58,17 +58,15 @@ function applyIncrementingSuffix(baseName: string, lastRoom: string | null): str
 
 function formatDefaultRoomName(displayName: string) {
   const now = new Date();
-  const dateFmt = new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-  }).format(now);
-  const timeFmt = new Intl.DateTimeFormat("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(now);
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const min = String(now.getMinutes()).padStart(2, "0");
+  const stamp = `${yyyy}${mm}${dd}-${hh}${min}`;
 
-  if (displayName) return `${displayName} – Live Session`;
-  return `StreamLine Live – ${dateFmt}, ${timeFmt}`;
+  const prefix = displayName ? `${displayName} – Live` : "StreamLine Live";
+  return `${prefix} – ${stamp}`;
 }
 
 export default function Join() {

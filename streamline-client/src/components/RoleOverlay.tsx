@@ -10,6 +10,34 @@ const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 type Role = "host" | "participant" | "moderator";
 type RolePresetId = "participant" | "cohost";
 
+function extractRolePresetId(rawParticipant: any): RolePresetId | null {
+  // Preferred: explicit parsed identity metadata (some parts of the app attach this).
+  const identityMeta = rawParticipant?.identityMetadata;
+  if (identityMeta && typeof identityMeta === "object") {
+    const v = (identityMeta as any)?.rolePresetId;
+    if (v === "cohost" || v === "participant") return v;
+  }
+
+  // LiveKit's `metadata` is typically a JSON string. Some wrappers may already
+  // parse it into an object, so support both.
+  const meta = rawParticipant?.metadata;
+  if (meta && typeof meta === "object") {
+    const v = (meta as any)?.rolePresetId;
+    if (v === "cohost" || v === "participant") return v;
+  }
+  if (typeof meta === "string" && meta.trim()) {
+    try {
+      const parsed = JSON.parse(meta);
+      const v = parsed?.rolePresetId;
+      if (v === "cohost" || v === "participant") return v;
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
+
 export default function RoleOverlay({
   open,
   onClose,
@@ -658,7 +686,7 @@ function HostPanel({
 function ParticipantPanel({ roomName }: { roomName: string }) {
   const { localParticipant } = useLocalParticipant();
   const roleLabel = (() => {
-    const raw = (localParticipant as any)?.identityMetadata?.rolePresetId;
+    const raw = extractRolePresetId(localParticipant as any);
     const name = normalizeUiRolePresetId(raw);
     if (name === "cohost") return "You are a Co-host";
     if (name === "participant") return "You are a Participant";
@@ -741,7 +769,7 @@ function ParticipantList({
       {participants.map((p) => (
         (() => {
           const stableRole = roleByIdentity && roleByIdentity[p.identity];
-          const metaRoleRaw = (p as any)?.metadata?.rolePresetId;
+          const metaRoleRaw = extractRolePresetId(p as any);
           const metaRole = metaRoleRaw ? normalizeUiRolePresetId(metaRoleRaw) : undefined;
           const currentRole: RolePresetId = (stableRole || metaRole || "participant") as RolePresetId;
 
