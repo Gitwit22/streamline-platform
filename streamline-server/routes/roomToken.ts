@@ -476,6 +476,8 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
     let normalizedRequested = String(requestedRole || "participant").toLowerCase();
     const elevatedRequested = normalizedRequested === "cohost" || normalizedRequested === "moderator";
 
+    const callerIsAdmin = !!uid && (await isAdmin(uid));
+
     // If an elevated role is requested but the caller is not authenticated,
     // reject even if an invite token is present.
     if (elevatedRequested && !uid) {
@@ -486,8 +488,7 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
     // authorizes it. If an authenticated user requests moderator without any
     // invite, require admin and otherwise downgrade.
     if (uid && !invite && normalizedRequested === "moderator") {
-      const ok = await isAdmin(uid);
-      if (!ok) requestedRole = "participant";
+      if (!callerIsAdmin) requestedRole = "participant";
     }
 
     const apiKey = process.env.LIVEKIT_API_KEY;
@@ -548,6 +549,10 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
         if (isOwner) {
           requestedRole = "host";
           normalizedRequested = "host";
+        } else if (callerIsAdmin) {
+          // Internal admin override: allow host-level tooling in any room.
+          requestedRole = "host";
+          normalizedRequested = "host";
         } else if (normalizedRequested === "host") {
           requestedRole = "participant";
           normalizedRequested = "participant";
@@ -558,11 +563,13 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
       if (roomPolicy.requiresAuth && !uid) {
         return res.status(401).json({ error: "Login required" });
       }
-      if (roomPolicy.visibility === "private" && roomPolicy.ownerId && uid !== roomPolicy.ownerId) {
-        return res.status(403).json({ error: "Not allowed" });
-      }
-      if (roomPolicy.requiresPayment && roomPolicy.ownerId && uid !== roomPolicy.ownerId) {
-        return res.status(402).json({ error: "payment_required" });
+      if (!callerIsAdmin) {
+        if (roomPolicy.visibility === "private" && roomPolicy.ownerId && uid !== roomPolicy.ownerId) {
+          return res.status(403).json({ error: "Not allowed" });
+        }
+        if (roomPolicy.requiresPayment && roomPolicy.ownerId && uid !== roomPolicy.ownerId) {
+          return res.status(402).json({ error: "payment_required" });
+        }
       }
       if (roomPolicy.roomType && roomPolicy.roomType !== "rtc") {
         return res.status(400).json({ error: "room_not_rtc" });
@@ -766,6 +773,7 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
       role: effectiveRoleKey,
       permissions,
       identity: tokenIdentity,
+      adminOverride: callerIsAdmin && !!roomPolicy.ownerId && !!uid && uid !== roomPolicy.ownerId,
     } as const;
 
     const roomAccessToken = jwt.sign(roomAccessPayload, getRoomAccessSecret(), {
@@ -803,6 +811,7 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
       roomId,
       roomName,
       roomAccessToken,
+      adminOverride: callerIsAdmin && !!roomPolicy.ownerId && !!uid && uid !== roomPolicy.ownerId,
       effectiveEntitlements: effectiveEntitlementsPayload,
       platformFlags,
     });

@@ -671,13 +671,21 @@ export default function StreamSetupModalV2({
   const instagramState = platformState.instagram;
   const instagramHasManual = instagramState.manualFields.some((f) => (f.value && f.value.trim()) || (f.base && f.base.trim()));
   const instagramSelected = instagramState.selected || instagramHasManual;
-  const anyPlatformSelection = selectedPlatforms.length > 0 || customHasManual;
-  const missingKeySelected = selectedPlatforms.some((p) => {
+  const anyPlatformSelection = selectedPlatforms.length > 0 || customHasManual || instagramSelected;
+  const instagramMissingKeySelected = (() => {
+    if (!instagramSelected) return false;
+    const firstManual = instagramState.manualFields.find((f) => (f.value && f.value.trim()) || (f.base && f.base.trim()));
+    const rtmpUrl = (firstManual?.base || "").trim();
+    const streamKey = (firstManual?.value || "").trim();
+    return !(rtmpUrl && streamKey);
+  })();
+  const missingKeySelected =
+    selectedPlatforms.some((p) => {
     const main = mainByPlatform[p];
     const mainUsable = !!(main && main.hasKey && main.mode !== "connected");
     const manual = platformState[p].manualFields.find((f) => f.value.trim());
     return !(mainUsable || manual);
-  });
+  }) || instagramMissingKeySelected;
   const startDisabled =
     streamIsBusy ||
     streamDisallowed ||

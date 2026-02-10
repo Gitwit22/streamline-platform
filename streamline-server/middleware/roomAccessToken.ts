@@ -15,6 +15,9 @@ export type RoomAccessClaims = {
   // LiveKit identity for the caller inside the room. Used to
   // bind room-level permissions to per-participant controls docs.
   identity: string;
+  // True when the caller was elevated to host due to internal-admin override.
+  // Useful for client UX decisions (e.g., avoid ending the room when an admin leaves).
+  adminOverride?: boolean;
 };
 
 function getRoomAccessSecret(): string {

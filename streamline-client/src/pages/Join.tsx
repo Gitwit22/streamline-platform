@@ -11,6 +11,7 @@ import { useEffectiveEntitlements } from "../hooks/useEffectiveEntitlements";
 type SavedEmbedSummary = {
   embedId: string;
   label: string;
+  roomId: string;
   activeRoomId?: string | null;
 };
 
@@ -316,9 +317,10 @@ export default function Join() {
           .map((e: any) => ({
             embedId: String(e?.embedId || "").trim(),
             label: String(e?.label || "").trim(),
+            roomId: String(e?.roomId || "").trim(),
             activeRoomId: typeof e?.activeRoomId === "string" ? e.activeRoomId : null,
           }))
-          .filter((e) => !!e.embedId);
+          .filter((e) => !!e.embedId && !!e.roomId);
         setSavedEmbeds(next);
       } catch (e: any) {
         if (!cancelled) {
@@ -439,6 +441,36 @@ export default function Join() {
     // Host flow: create a Firestore room first, then navigate to /room/:roomId
     if (!isParticipant) {
       try {
+        // Saved Room flow (HLS): reuse the existing canonical roomId so
+        // HLS config + viewer page stay stable across sessions.
+        if (isUsingSaved) {
+          const selected = savedEmbeds.find((e) => e.embedId === selectedSavedEmbedId);
+          const savedRoomId = String(selected?.roomId || "").trim();
+          if (!savedRoomId) {
+            alert("Select a Saved Room or switch to Create New Room.");
+            return;
+          }
+
+          // Ensure this room is treated as host-created on this device so
+          // the Room page can mint host tokens even when the room is idle.
+          try {
+            const createdRooms = JSON.parse(localStorage.getItem("sl_created_rooms") || "[]");
+            if (!createdRooms.includes(savedRoomId)) {
+              createdRooms.push(savedRoomId);
+              localStorage.setItem("sl_created_rooms", JSON.stringify(createdRooms));
+            }
+          } catch {
+            // ignore
+          }
+
+          localStorage.setItem("sl_last_room", selected?.label || roomLabel || savedRoomId);
+          localStorage.setItem("sl_last_room_ts", String(Date.now()));
+          localStorage.setItem("sl_current_role", "host");
+
+          nav(`/room/${encodeURIComponent(savedRoomId)}`);
+          return;
+        }
+
         if (!roomLabel) {
           alert("Please enter a room name.");
           return;
@@ -450,7 +482,7 @@ export default function Join() {
           body: JSON.stringify({
             livekitRoomName: roomLabel,
             roomType: "rtc",
-            savedEmbedId: isUsingSaved ? selectedSavedEmbedId : undefined,
+            savedEmbedId: undefined,
           }),
         }, { allowNonOk: true });
 

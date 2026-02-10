@@ -2236,7 +2236,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
               <div style={S.cardHeader}>
                 <h2 style={S.cardTitle}>Your Plan</h2>
                 <div style={S.cardHeaderRight}>
-                  {!isTestMode && userPlanId !== "free" && status !== "none" && (
+                  {!isTestMode && hasStripeCustomer && (
                     <button
                       type="button"
                       onClick={openPortal}
