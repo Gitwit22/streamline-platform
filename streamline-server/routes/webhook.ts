@@ -447,9 +447,16 @@ router.post(
         mustGetEnv("STRIPE_WEBHOOK_SECRET")
       );
     } catch (err: any) {
-      console.error("[stripe] Webhook signature error:", err?.message);
+      console.error("[stripe-webhook] Signature verification failed:", err?.message);
       return res.status(400).send(`Webhook Error: ${err?.message || "Bad signature"}`);
     }
+
+    // Log received event before processing
+    console.log("[stripe-webhook] Received:", {
+      eventType: event.type,
+      eventId: event.id,
+      timestamp: new Date().toISOString(),
+    });
 
     try {
       switch (event.type) {
@@ -496,6 +503,16 @@ router.post(
             currentPlan === canonicalPlan
               ? history
               : [...history, { at: now, fromPlan: currentPlan, toPlan: canonicalPlan, source: "stripe_webhook" }].slice(-10);
+
+          console.log("[stripe-webhook] Processing subscription update:", {
+            uid,
+            eventType: event.type,
+            subscriptionId: subscription.id,
+            fromPlan: currentPlan,
+            toPlan: canonicalPlan,
+            status: subscription.status,
+            isActive,
+          });
 
           await getUserRef(uid).set(
             {
@@ -643,6 +660,12 @@ router.post(
               ? history
               : [...history, { at: now, fromPlan: currentPlan, toPlan: "free", source: "stripe_webhook" }].slice(-10);
 
+          console.log("[stripe-webhook] Payment failed - downgrading to free:", {
+            userId,
+            subscriptionId: subId,
+            fromPlan: currentPlan,
+          });
+
           await db.collection("users").doc(userId).set(
             {
               planId: "free",
@@ -657,6 +680,98 @@ router.post(
             },
             { merge: true }
           );
+          break;
+        }
+
+        case "customer.subscription.trial_will_end": {
+          const sub: any = event.data.object;
+          const uid = sub?.metadata?.userId;
+          if (!uid) break;
+
+          console.log("[stripe-webhook] Trial ending soon:", { 
+            uid, 
+            subscriptionId: sub.id,
+            trialEnd: sub.trial_end 
+          });
+          break;
+        }
+
+        case "subscription_schedule.completed": {
+          // Fired when a scheduled plan change executes
+          const schedule: any = event.data.object;
+          const subscription = schedule.subscription;
+          
+          if (typeof subscription !== "string") break;
+
+          const sub = await stripe.subscriptions.retrieve(subscription);
+          const uid = sub?.metadata?.userId;
+          if (!uid) break;
+
+          const canonicalPlan = canonicalPlanFromSubscription(sub);
+          const userSnap = await getUserRef(uid).get();
+          const user = userSnap.exists ? userSnap.data() : {};
+          const currentPlan = user?.planId || "free";
+          const now = Date.now();
+          const history = sanitizeHistory((user as any)?.planChangeHistory);
+
+          console.log("[stripe-webhook] Schedule completed:", {
+            uid,
+            scheduleId: schedule.id,
+            subscriptionId: subscription,
+            fromPlan: currentPlan,
+            toPlan: canonicalPlan,
+          });
+
+          const nextHistory =
+            currentPlan === canonicalPlan
+              ? history
+              : [...history, { at: now, fromPlan: currentPlan, toPlan: canonicalPlan, source: "schedule_completed" }].slice(-10);
+
+          await getUserRef(uid).set(
+            {
+              planId: canonicalPlan,
+              pendingPlan: null,
+              scheduledPlanChange: null,  // Clear scheduled change
+              planChangeHistory: nextHistory,
+              updatedAt: now,
+            },
+            { merge: true }
+          );
+          break;
+        }
+
+        case "subscription_schedule.released": {
+          // Fired when a schedule is released (canceled)
+          const schedule: any = event.data.object;
+          const subscription = schedule.subscription;
+          
+          if (typeof subscription !== "string") break;
+
+          const sub = await stripe.subscriptions.retrieve(subscription);
+          const uid = sub?.metadata?.userId;
+          if (!uid) break;
+
+          console.log("[stripe-webhook] Schedule released (canceled):", {
+            uid,
+            scheduleId: schedule.id,
+            subscriptionId: subscription,
+          });
+
+          const userSnap = await getUserRef(uid).get();
+          const user = userSnap.exists ? userSnap.data() : {};
+          const scheduledChange = (user as any)?.scheduledPlanChange;
+
+          // Only clear if this is the matching schedule
+          if (scheduledChange?.scheduleId === schedule.id) {
+            await getUserRef(uid).set(
+              {
+                pendingPlan: null,
+                scheduledPlanChange: null,
+                updatedAt: Date.now(),
+              },
+              { merge: true }
+            );
+          }
           break;
         }
 

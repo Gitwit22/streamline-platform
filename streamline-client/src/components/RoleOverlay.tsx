@@ -160,7 +160,9 @@ export default function RoleOverlay({
               overlaysEnabled={overlaysEnabled}
             />
           )}
-          {role === "participant" && <ParticipantPanel roomName={roomName} />}
+          {role === "participant" && (
+            <ParticipantPanel roomName={roomName} roomId={roomId} roomAccessToken={roomAccessToken} />
+          )}
         </div>
       </div>
     </div>
@@ -205,6 +207,20 @@ function HostPanel({
   const [videoInputs, setVideoInputs] = React.useState<Array<{ deviceId: string; label: string }>>([]);
   const [selectedAudioDeviceId, setSelectedAudioDeviceId] = React.useState<string>("");
   const [selectedVideoDeviceId, setSelectedVideoDeviceId] = React.useState<string>("");
+
+  const localDisplayName = React.useMemo(() => {
+    const lkName = (localParticipant as any)?.name as string | undefined;
+    const n = typeof lkName === "string" ? lkName.trim() : "";
+    if (n) return n;
+    try {
+      const cached = localStorage.getItem("sl_displayName");
+      const c = typeof cached === "string" ? cached.trim() : "";
+      if (c) return c;
+    } catch {
+      // ignore
+    }
+    return "";
+  }, [localParticipant]);
 
   const loadDevices = React.useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) return;
@@ -479,6 +495,13 @@ function HostPanel({
         )}
       </Section>
 
+        <ChatPanel
+          roomId={roomId}
+          roomAccessToken={roomAccessToken}
+          displayName={localDisplayName}
+          allowEndSession={true}
+        />
+
       {roleToast && (
         <div
           style={{
@@ -683,8 +706,29 @@ function HostPanel({
   );
 }
 
-function ParticipantPanel({ roomName }: { roomName: string }) {
+function ParticipantPanel({
+  roomName,
+  roomId,
+  roomAccessToken,
+}: {
+  roomName: string;
+  roomId: string;
+  roomAccessToken: string;
+}) {
   const { localParticipant } = useLocalParticipant();
+  const localDisplayName = React.useMemo(() => {
+    const lkName = (localParticipant as any)?.name;
+    const n = typeof lkName === "string" ? lkName.trim() : "";
+    if (n) return n;
+    try {
+      const cached = localStorage.getItem("sl_displayName");
+      const c = typeof cached === "string" ? cached.trim() : "";
+      if (c) return c;
+    } catch {
+      // ignore
+    }
+    return "";
+  }, [localParticipant]);
   const roleLabel = (() => {
     const raw = extractRolePresetId(localParticipant as any);
     const name = normalizeUiRolePresetId(raw);
@@ -705,6 +749,14 @@ function ParticipantPanel({ roomName }: { roomName: string }) {
           </p>
         )}
       </Section>
+
+      <ChatPanel
+        roomId={roomId}
+        roomAccessToken={roomAccessToken}
+        displayName={localDisplayName}
+        allowEndSession={false}
+      />
+
       <Section title="Tips">
         <ul style={{ listStyle: 'disc', paddingLeft: '1.25rem', fontSize: '0.875rem', opacity: 0.8, color: 'rgba(255, 255, 255, 0.8)', lineHeight: 1.6 }}>
           <li>Use headphones to avoid echo.</li>
@@ -713,6 +765,358 @@ function ParticipantPanel({ roomName }: { roomName: string }) {
         </ul>
       </Section>
     </>
+  );
+}
+
+function ChatPanel({
+  roomId,
+  roomAccessToken,
+  displayName,
+  allowEndSession,
+}: {
+  roomId: string;
+  roomAccessToken: string;
+  displayName?: string;
+  allowEndSession: boolean;
+}) {
+  const [sessionId, setSessionId] = React.useState<string | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [messages, setMessages] = React.useState<
+    Array<{ id: string; text: string; createdAtMs: number | null; sender?: { name?: string | null; role?: string | null } }>
+  >([]);
+  const [draft, setDraft] = React.useState("");
+  const bottomRef = React.useRef<HTMLDivElement | null>(null);
+  const eventSourceRef = React.useRef<EventSource | null>(null);
+  const seenIdsRef = React.useRef<Set<string>>(new Set());
+
+  const loadSessionAndHistory = React.useCallback(async () => {
+    if (!roomId || !roomAccessToken) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const sessionRes = await apiFetchAuth(
+        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/session`,
+        {
+          method: "GET",
+          headers: {
+            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
+          },
+        },
+        { allowNonOk: true }
+      );
+      const sessionText = await sessionRes.text();
+      const sessionData = sessionText ? JSON.parse(sessionText) : {};
+      if (!sessionRes.ok) {
+        setError(sessionData?.error || "Failed to load chat session");
+        setSessionId(null);
+        setMessages([]);
+        return;
+      }
+      const sid = typeof sessionData?.sessionId === "string" ? sessionData.sessionId : null;
+      setSessionId(sid);
+
+      if (!sid) {
+        setMessages([]);
+        return;
+      }
+
+      const msgRes = await apiFetchAuth(
+        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/messages?sessionId=${encodeURIComponent(sid)}&limit=200`,
+        {
+          method: "GET",
+          headers: {
+            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
+          },
+        },
+        { allowNonOk: true }
+      );
+      const msgText = await msgRes.text();
+      const msgData = msgText ? JSON.parse(msgText) : {};
+      if (!msgRes.ok) {
+        setError(msgData?.error || "Failed to load chat messages");
+        setMessages([]);
+        return;
+      }
+
+      const rows = Array.isArray(msgData?.messages) ? msgData.messages : [];
+      const next = rows
+        .map((m: any) => ({
+          id: String(m?.id || ""),
+          text: typeof m?.text === "string" ? m.text : "",
+          createdAtMs: typeof m?.createdAtMs === "number" ? m.createdAtMs : null,
+          sender: m?.sender || undefined,
+        }))
+        .filter((m: any) => !!m.id);
+      setMessages(next);
+      const seen = new Set<string>();
+      next.forEach((m) => seen.add(m.id));
+      seenIdsRef.current = seen;
+    } catch (e: any) {
+      setError(e?.message || "Failed to load chat");
+      setSessionId(null);
+      setMessages([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [roomId, roomAccessToken]);
+
+  const connectStream = React.useCallback(
+    (sid: string) => {
+      try {
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
+        }
+
+        // EventSource can't send headers, so we pass the room access token via query param `t`.
+        const url = `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/stream?sessionId=${encodeURIComponent(sid)}&t=${encodeURIComponent(roomAccessToken)}`;
+        const es = new EventSource(url);
+        eventSourceRef.current = es;
+
+        es.addEventListener("message", (ev: any) => {
+          try {
+            const payload = JSON.parse(ev?.data || "{}");
+            const id = typeof payload?.id === "string" ? payload.id : "";
+            if (!id) return;
+            if (seenIdsRef.current.has(id)) return;
+            seenIdsRef.current.add(id);
+
+            const nextMsg = {
+              id,
+              text: typeof payload?.text === "string" ? payload.text : "",
+              createdAtMs: typeof payload?.createdAtMs === "number" ? payload.createdAtMs : null,
+              sender: payload?.sender || undefined,
+            };
+
+            setMessages((prev) => prev.concat([nextMsg]));
+          } catch {
+            // ignore
+          }
+        });
+      } catch {
+        // ignore
+      }
+    },
+    [roomId, roomAccessToken]
+  );
+
+  const sendMessage = React.useCallback(async () => {
+    const text = draft.trim();
+    if (!text) return;
+    setDraft("");
+    setError(null);
+    try {
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/messages`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
+          },
+          body: JSON.stringify({ text, displayName: displayName || undefined }),
+        },
+        { allowNonOk: true }
+      );
+      const raw = await res.text();
+      const data = raw ? JSON.parse(raw) : {};
+      if (!res.ok) {
+        setError(data?.error || "Failed to send message");
+        return;
+      }
+      const sid = typeof data?.sessionId === "string" ? data.sessionId : null;
+      if (sid && sid !== sessionId) {
+        setSessionId(sid);
+      }
+    } catch (e: any) {
+      setError(e?.message || "Failed to send message");
+    }
+  }, [draft, roomId, roomAccessToken, displayName, sessionId]);
+
+  const endSession = React.useCallback(async () => {
+    if (!allowEndSession) return;
+    setError(null);
+    try {
+      await apiFetchAuth(
+        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/session/end`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
+          },
+          body: JSON.stringify({}),
+        },
+        { allowNonOk: true }
+      );
+
+      setSessionId(null);
+      setMessages([]);
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+    } catch (e: any) {
+      setError(e?.message || "Failed to end session");
+    }
+  }, [allowEndSession, roomId, roomAccessToken]);
+
+  React.useEffect(() => {
+    void loadSessionAndHistory();
+    return () => {
+      try {
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
+        }
+      } catch {
+        // ignore
+      }
+    };
+  }, [loadSessionAndHistory]);
+
+  React.useEffect(() => {
+    if (!sessionId) return;
+    connectStream(sessionId);
+    return () => {
+      try {
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
+        }
+      } catch {
+        // ignore
+      }
+    };
+  }, [sessionId, connectStream]);
+
+  React.useEffect(() => {
+    try {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    } catch {
+      // ignore
+    }
+  }, [messages.length]);
+
+  return (
+    <Section title="Chat">
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.75)" }}>
+            {loading ? "Loading…" : sessionId ? "Session chat" : "Chat not started"}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => void loadSessionAndHistory()}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.14)",
+                background: "rgba(255,255,255,0.06)",
+                color: "rgba(255,255,255,0.9)",
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              Refresh
+            </button>
+            {allowEndSession && (
+              <button
+                type="button"
+                onClick={() => void endSession()}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(220,38,38,0.35)",
+                  background: "rgba(220,38,38,0.12)",
+                  color: "rgba(248,113,113,0.95)",
+                  fontSize: 12,
+                  fontWeight: 800,
+                  cursor: "pointer",
+                }}
+              >
+                End session
+              </button>
+            )}
+          </div>
+        </div>
+
+        {error && <div style={{ fontSize: 12, color: "rgba(248,113,113,0.95)" }}>{String(error)}</div>}
+
+        <div
+          style={{
+            border: "1px solid rgba(255,255,255,0.10)",
+            background: "rgba(15,23,42,0.35)",
+            borderRadius: 12,
+            padding: 10,
+            maxHeight: 180,
+            overflowY: "auto",
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          {messages.length === 0 ? (
+            <div style={{ fontSize: 12, opacity: 0.7 }}>No messages yet.</div>
+          ) : (
+            messages.map((m) => (
+              <div key={m.id} style={{ fontSize: 12, lineHeight: 1.35 }}>
+                <span style={{ color: "rgba(255,255,255,0.75)", fontWeight: 700 }}>
+                  {(m.sender?.name || m.sender?.role || "Someone") + ": "}
+                </span>
+                <span style={{ color: "rgba(255,255,255,0.92)" }}>{m.text}</span>
+              </div>
+            ))
+          )}
+          <div ref={bottomRef} />
+        </div>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void sendMessage();
+              }
+            }}
+            placeholder={sessionId ? "Type a message…" : "Chat will start when you send"}
+            style={{
+              flex: 1,
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid rgba(255,255,255,0.14)",
+              background: "rgba(255,255,255,0.06)",
+              color: "rgba(255,255,255,0.9)",
+              outline: "none",
+              fontSize: 13,
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => void sendMessage()}
+            disabled={!draft.trim()}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid rgba(59,130,246,0.20)",
+              background: !draft.trim() ? "rgba(59,130,246,0.08)" : "rgba(59,130,246,0.18)",
+              color: "rgba(255,255,255,0.95)",
+              fontSize: 13,
+              fontWeight: 900,
+              cursor: !draft.trim() ? "not-allowed" : "pointer",
+              opacity: !draft.trim() ? 0.6 : 1,
+            }}
+          >
+            Send
+          </button>
+        </div>
+      </div>
+    </Section>
   );
 }
 

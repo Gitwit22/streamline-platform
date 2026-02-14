@@ -188,41 +188,22 @@ export default function Join() {
       // Preferred: inviteToken resolves room+role server-side
       if (inviteTokenParam) {
         try {
-          const res = await fetch(`${API_BASE}/api/invites/resolve`, {
+          // Canonicalize legacy JWT invite links into the Firestore-backed invite flow.
+          // This reduces query-param token brittleness and ensures a server-issued guest session.
+          const res = await fetch(`${API_BASE}/api/invites/legacy/resolve`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ inviteToken: inviteTokenParam }),
           });
 
           if (!res.ok) return;
-          const data = await res.json().catch(() => null);
+          const data = await res.json().catch(() => null as any);
           if (!data || cancelled) return;
 
-          const decodedRoomId = String(data.roomId || "");
-          const decodedRoom = String(data.roomName || "");
-          // Use the resolved role from the server
-          const resolvedRole = String(data.role || "guest");
-          if (decodedRoomId) setInviteRoomId(decodedRoomId);
-          if (decodedRoom) setRoomName(decodedRoom);
+          const inviteId = String(data?.inviteId || "").trim();
+          if (!inviteId) return;
 
-          try {
-            localStorage.setItem("sl_invite_token", inviteTokenParam);
-            localStorage.setItem("sl_current_role", resolvedRole);
-          } catch {
-            // ignore
-          }
-
-          // Let the host know that someone has opened the invite link
-          // and is viewing the join page.
-          try {
-            await fetch(`${API_BASE}/api/invites/track-landing`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ inviteToken: inviteTokenParam, stage: "join_page" }),
-            });
-          } catch {
-            // best-effort only
-          }
+          nav(`/invite/${encodeURIComponent(inviteId)}`, { replace: true });
           return;
         } catch {
           return;

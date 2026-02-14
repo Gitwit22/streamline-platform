@@ -1408,16 +1408,29 @@ function RoomPage() {
             }
           }
 
-          // Distinguish between legacy invite JWTs and roomAccessTokens.
-          // Invite tokens must be forwarded to /api/rooms/:roomId/token as x-invite-token.
+          // If this is an invite token, route it through the canonical invite flow
+          // (/invite/:inviteId -> redeem -> sl_guest cookie) instead of persisting query tokens.
           if (tokenType === "invite") {
-            setInviteToken(t);
             try {
-              localStorage.setItem("sl_invite_token", t);
+              const legacyRes = await fetch(`${API_BASE}/api/invites/legacy/resolve`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ inviteToken: t }),
+              });
+              if (legacyRes.ok) {
+                const legacy = await legacyRes.json().catch(() => null as any);
+                const inviteId = String(legacy?.inviteId || "").trim();
+                if (inviteId) {
+                  window.location.replace(`/invite/${encodeURIComponent(inviteId)}`);
+                  return;
+                }
+              }
             } catch {
-              // ignore
+              // fall through to legacy behavior
             }
-          } else {
+          }
+
+          if (tokenType !== "invite") {
             // Treat the incoming token as a roomAccessToken for downstream
             // APIs (HLS, status, etc.). /api/rooms/:roomId/token will return a refreshed
             // token which will overwrite this state when available.
@@ -1426,9 +1439,27 @@ function RoomPage() {
           return;
         }
 
-        // If resolve fails (legacy tokens, pure invites, etc.), fall back to
-        // the previous behavior of treating `t` as an invite token only.
+        // If resolve fails, treat it as a legacy invite and route through /invite/:inviteId.
         console.warn("[Room] /api/rooms/resolve failed for token route", res.status);
+        try {
+          const legacyRes = await fetch(`${API_BASE}/api/invites/legacy/resolve`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ inviteToken: t }),
+          });
+          if (legacyRes.ok) {
+            const legacy = await legacyRes.json().catch(() => null as any);
+            const inviteId = String(legacy?.inviteId || "").trim();
+            if (inviteId) {
+              window.location.replace(`/invite/${encodeURIComponent(inviteId)}`);
+              return;
+            }
+          }
+        } catch {
+          // ignore
+        }
+
+        // Final fallback: preserve legacy behavior if resolve endpoint is unreachable.
         setInviteToken(t);
         try {
           localStorage.setItem("sl_invite_token", t);
@@ -1438,6 +1469,25 @@ function RoomPage() {
       } catch (err) {
         if (cancelled) return;
         console.warn("[Room] /api/rooms/resolve error; treating t as invite", err);
+        try {
+          const legacyRes = await fetch(`${API_BASE}/api/invites/legacy/resolve`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ inviteToken: t }),
+          });
+          if (legacyRes.ok) {
+            const legacy = await legacyRes.json().catch(() => null as any);
+            const inviteId = String(legacy?.inviteId || "").trim();
+            if (inviteId) {
+              window.location.replace(`/invite/${encodeURIComponent(inviteId)}`);
+              return;
+            }
+          }
+        } catch {
+          // ignore
+        }
+
+        // Final fallback: preserve legacy behavior.
         setInviteToken(t);
         try {
           localStorage.setItem("sl_invite_token", t);
@@ -1628,9 +1678,9 @@ function RoomPage() {
         // Force invite mode when a token is present in the URL and we are not authed.
         // This matches the legacy participant join flow: /room/<roomId>?t=<inviteToken>
         // Also fall back to any locally-stored invite token for backward compatibility.
-        const inviteTokenFromUrl = new URLSearchParams(window.location.search).get("t");
-        const inviteTokenForJoin = (inviteTokenFromUrl || inviteToken || null)?.trim?.() || null;
         const guestSessionToken = getGuestSessionToken(roomId);
+        const inviteTokenFromUrl = new URLSearchParams(window.location.search).get("t");
+        const inviteTokenForJoin = (!guestSessionToken ? (inviteTokenFromUrl || inviteToken || null) : null)?.trim?.() || null;
         const buildRoomTokenRequest = () => {
           const canonicalRoomId = roomId || "";
           const endpoint = `${API_BASE}/api/rooms/${encodeURIComponent(canonicalRoomId)}/token`;
@@ -1890,7 +1940,7 @@ function RoomPage() {
           `/api/rooms/${encodeURIComponent(roomId)}/status`,
           {
             headers: {
-              ...(inviteToken ? { "x-invite-token": inviteToken } : {}),
+              ...(!guestSessionToken && inviteToken ? { "x-invite-token": inviteToken } : {}),
               ...(guestSessionToken ? { "x-guest-session": guestSessionToken } : {}),
             },
           },

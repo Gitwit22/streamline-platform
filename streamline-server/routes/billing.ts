@@ -943,6 +943,68 @@ router.post("/clear-pending", requireAuth, async (req, res) => {
   }
 });
 
+// Cancel a scheduled plan change (downgrade or upgrade pending)
+router.post("/cancel-plan-change", requireAuth, async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ success: false, error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    const userRef = getUserRef(uid);
+    const snap = await userRef.get();
+    if (!snap.exists) return res.status(404).json({ success: false, error: "User not found" });
+
+    const user = snap.data() as any;
+    const scheduledPlanChange = user?.scheduledPlanChange || null;
+    const pendingPlan = user?.pendingPlan || null;
+
+    // If no plan change is pending, nothing to cancel
+    if (!pendingPlan && !scheduledPlanChange) {
+      return res.json({ success: true, message: "No pending plan change to cancel" });
+    }
+
+    // If there's a Stripe subscription schedule, release it
+    if (scheduledPlanChange?.scheduleId) {
+      try {
+        const scheduleId = scheduledPlanChange.scheduleId;
+        console.log(`[cancel-plan-change] Releasing subscription schedule ${scheduleId} for user ${uid}`);
+        
+        // Release the subscription schedule (removes the scheduled changes)
+        await stripe.subscriptionSchedules.release(scheduleId);
+        console.log(`[cancel-plan-change] Successfully released schedule ${scheduleId}`);
+      } catch (stripeErr: any) {
+        // If schedule doesn't exist or already released, that's fine - continue
+        if (stripeErr?.code === "resource_missing") {
+          console.log(`[cancel-plan-change] Schedule already released or missing for user ${uid}`);
+        } else {
+          console.error(`[cancel-plan-change] Stripe error releasing schedule:`, stripeErr?.message || stripeErr);
+          // Don't fail the request - still clear the local state
+        }
+      }
+    }
+
+    // Clear both pendingPlan and scheduledPlanChange from user doc
+    await userRef.set(
+      {
+        pendingPlan: null,
+        scheduledPlanChange: null,
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    );
+
+    console.log(`[cancel-plan-change] Cleared pending plan change for user ${uid}`);
+    return res.json({ 
+      success: true, 
+      message: "Plan change canceled successfully",
+      clearedPendingPlan: !!pendingPlan,
+      clearedSchedule: !!scheduledPlanChange
+    });
+  } catch (err: any) {
+    console.error("POST /api/billing/cancel-plan-change failed:", err?.message || err);
+    return res.status(500).json({ success: false, error: err?.message || "Server error" });
+  }
+});
+
 // Self-healing reconcile: if webhooks lag/miss, fetch Stripe subscription state and
 // update planId + clear pendingPlan when the subscription is active/trialing.
 router.post("/refresh", requireAuth, async (req, res) => {

@@ -1,4 +1,6 @@
 import { Router } from "express";
+import admin from "firebase-admin";
+import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { firestore } from "../firebaseAdmin";
 import { requireAuth, tryGetAuthUser, verifyInviteToken } from "../middleware/requireAuth";
@@ -48,6 +50,177 @@ function normalizeRoomId(raw: unknown): string | null {
 }
 
 const router = Router();
+
+// Simple, best-effort in-memory IP rate limiter for legacy invite resolve.
+// This prevents obvious abuse without requiring extra infrastructure.
+const legacyResolveWindowMs = 60_000;
+const legacyResolveMax = 30;
+const legacyResolveHits = new Map<string, { count: number; resetAt: number }>();
+const legacyResolveTokenMax = 120;
+const legacyResolveTokenHits = new Map<string, { count: number; resetAt: number }>();
+
+function hitLegacyResolveRateLimit(ip: string): boolean {
+  const now = Date.now();
+  const key = ip || "unknown";
+  const existing = legacyResolveHits.get(key);
+  if (!existing || now >= existing.resetAt) {
+    legacyResolveHits.set(key, { count: 1, resetAt: now + legacyResolveWindowMs });
+    return false;
+  }
+  existing.count += 1;
+  return existing.count > legacyResolveMax;
+}
+
+function hitLegacyResolveTokenRateLimit(tokenKey: string): boolean {
+  const now = Date.now();
+  const key = tokenKey || "unknown";
+  const existing = legacyResolveTokenHits.get(key);
+  if (!existing || now >= existing.resetAt) {
+    legacyResolveTokenHits.set(key, { count: 1, resetAt: now + legacyResolveWindowMs });
+    return false;
+  }
+  existing.count += 1;
+  return existing.count > legacyResolveTokenMax;
+}
+
+function hashInviteToken(token: string): string {
+  // Stable, URL-safe id component.
+  return crypto.createHash("sha256").update(token).digest("base64url");
+}
+
+function hashLegacyFingerprint(parts: Record<string, any>): string {
+  // Hash stable, verified fields (NOT the raw JWT string) so semantically-identical
+  // legacy tokens do not create multiple Firestore invites.
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify(parts))
+    .digest("base64url");
+}
+
+/**
+ * POST /api/invites/legacy/resolve
+ * Body: { inviteToken }
+ * Auth: none
+ * Returns: { inviteId, roomId, url, role }
+ *
+ * Purpose: route legacy JWT invite tokens through the canonical Firestore invite flow
+ * (/invite/:inviteId -> redeem -> sl_guest cookie -> wait-for-live).
+ *
+ * Policy: legacy tokens resolve to viewer-only invites.
+ * Cohost invites require auth and are rejected here.
+ */
+router.post("/legacy/resolve", async (req, res) => {
+  try {
+    const inviteToken = String((req.body as any)?.inviteToken || "").trim();
+    if (!inviteToken) return res.status(400).json({ error: "inviteToken_required" });
+
+    const ip = String((req as any).ip || "");
+    if (hitLegacyResolveRateLimit(ip)) {
+      return res.status(429).json({ error: "rate_limited" });
+    }
+
+    let claims: any;
+    try {
+      claims = verifyInviteToken(inviteToken) as any;
+    } catch {
+      return res.status(401).json({ error: "invalid_invite" });
+    }
+
+    const requestedRole = normalizeRole(claims?.role || "guest") || "guest";
+    if (requiresAuthForRole(requestedRole)) {
+      // Cohost-style invites must go through signed-in flow.
+      return res.status(401).json({ error: "login_required" });
+    }
+
+    const roomId = normalizeRoomId(claims?.roomId);
+    const roomName = normalizeRoomName(claims?.roomName || claims?.room);
+    if (!roomId && !roomName) return res.status(400).json({ error: "invite_room_missing" });
+
+    const resolved = await resolveRoomIdentity({ roomId, roomName });
+    if (!resolved) return res.status(400).json({ error: "invite_room_missing" });
+
+    // Keep a token hash for debugging/forensics and abuse limiting.
+    const tokenHash = hashInviteToken(inviteToken);
+    if (hitLegacyResolveTokenRateLimit(tokenHash.slice(0, 40))) {
+      return res.status(429).json({ error: "rate_limited" });
+    }
+
+    // Canonical legacy invites are viewer-only.
+    // Generate a deterministic ID from stable claims, not the raw token string.
+    const creator = typeof claims?.createdByUid === "string" ? String(claims.createdByUid) : "legacy";
+
+    // Additional stability ingredient:
+    // - Prefer jti when present
+    // - Else bucket by iat day to avoid per-request/per-second explosion
+    const jti = typeof claims?.jti === "string" && String(claims.jti).trim() ? String(claims.jti).trim() : null;
+    const iatSec = typeof claims?.iat === "number" && Number.isFinite(claims.iat) ? Number(claims.iat) : null;
+    const iatDay = !jti && iatSec ? Math.floor(iatSec / 86400) : null;
+
+    const fingerprint = hashLegacyFingerprint({
+      v: 1,
+      roomId: resolved.roomId,
+      role: "viewer",
+      createdByUid: creator,
+      ...(jti ? { jti } : {}),
+      ...(iatDay !== null ? { iatDay } : {}),
+    });
+    const inviteId = `legacy_${fingerprint.slice(0, 32)}`;
+
+    // Try to align expiresAt with the JWT exp when available.
+    const expSec = Number(claims?.exp || 0);
+    const expiresAt = Number.isFinite(expSec) && expSec > 0
+      ? admin.firestore.Timestamp.fromMillis(expSec * 1000)
+      : null;
+
+    const ref = firestore.collection("roomInvites").doc(inviteId);
+
+    await firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (snap.exists) {
+        // Do not allow later resolves to extend invite lifetime.
+        // If we can infer an earlier expiry from the JWT, only shorten.
+        if (expiresAt) {
+          const existing = (snap.data() as any) || {};
+          const existingExpires = (existing.expiresAt as any)?.toMillis?.() ?? null;
+          const nextExpires = expiresAt.toMillis();
+          if (!existingExpires || (Number.isFinite(existingExpires) && nextExpires < Number(existingExpires))) {
+            tx.update(ref, { expiresAt });
+          }
+        }
+        return;
+      }
+      tx.set(
+        ref,
+        {
+          roomId: resolved.roomId,
+          mode: "guest",
+          role: "viewer",
+          expiresAt,
+          maxUses: null,
+          useCount: 0,
+          revokedAt: null,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+          createdByUid: creator,
+          legacy: {
+            tokenHash: tokenHash.slice(0, 40),
+            source: "jwt",
+          },
+        } as any,
+        { merge: false }
+      );
+    });
+
+    return res.json({
+      inviteId,
+      roomId: resolved.roomId,
+      url: `/invite/${encodeURIComponent(inviteId)}`,
+      role: "viewer",
+    });
+  } catch (err: any) {
+    console.error("/api/invites/legacy/resolve error", err?.message || err);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
 
 // NOTE: New invite model (Firestore roomInvites + HttpOnly sl_guest cookie)
 // is implemented in routes/roomGuestAccess.ts at:

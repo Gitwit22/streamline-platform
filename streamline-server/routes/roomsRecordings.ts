@@ -2,6 +2,8 @@ import { Router } from "express";
 import { firestore } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { getSignedDownloadUrl, headObjectSize, isR2Configured } from "../lib/storageClient";
+import { resolveRoomIdentity } from "../lib/roomIdentity";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 
 const router = Router();
 
@@ -77,6 +79,31 @@ async function findLatestRecordingForRoom(params: {
     }
   }
 
+  // 1.5) Index-free fallback: consult activeRecordings lock for (uid, room).
+  // This avoids Firestore composite index requirements and works even when the room pointer is missing.
+  try {
+    const activeKey = `${uid}_${roomId}`;
+    const activeSnap = await firestore.collection("activeRecordings").doc(activeKey).get();
+    if (activeSnap.exists) {
+      const active = (activeSnap.data() as any) || {};
+      const activeRecordingId = String(active.recordingId || "").trim();
+      if (activeRecordingId) {
+        const byLock = await getRecordingById(activeRecordingId);
+        if (byLock) {
+          const data = byLock.data || {};
+          const ownerUid = String(data.userId || "").trim();
+          const recRoomId = String(data.roomId || "").trim();
+          const state = statusToState(data.status);
+          if (ownerUid === uid && recRoomId === roomId && state !== "none") {
+            return byLock;
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
   // 2) Deterministic fallback: newest by startedAt (or createdAt).
   // Note: this may require a composite index in Firestore; if it fails, we fall back safely.
   try {
@@ -112,13 +139,27 @@ router.get("/:roomId/latest-recording", requireAuth, async (req, res) => {
 
   try {
     const uid = getAuthUserId(req);
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    const roomId = normalizeRoomId(req.params.roomId);
-    if (!roomId) return res.status(400).json({ error: "missing_room_id" });
+    const roomKey = normalizeRoomId(req.params.roomId);
+    if (!roomKey) return res.status(400).json({ error: "missing_room_id" });
 
-    const roomSnap = await firestore.collection("rooms").doc(roomId).get();
-    const roomData = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+    // Allow UI to pass either the Firestore room doc id OR a human-friendly room name.
+    let roomId = roomKey;
+    let roomSnap = await firestore.collection("rooms").doc(roomId).get();
+    if (!roomSnap.exists) {
+      const resolved = await resolveRoomIdentity({ roomName: roomKey });
+      if (resolved?.roomId) {
+        roomId = resolved.roomId;
+        roomSnap = await firestore.collection("rooms").doc(roomId).get();
+      }
+    }
+
+    if (!roomSnap.exists) {
+      return res.status(200).json({ ok: true, roomId: roomKey, state: "none" satisfies LatestRecordingState, error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
+    }
+
+    const roomData = (roomSnap.data() as any) || {};
 
     const roomLatestRecordingId = String(roomData.latestRecordingId || "").trim() || null;
     const recDoc = await findLatestRecordingForRoom({ uid, roomId, roomLatestRecordingId });
@@ -246,14 +287,29 @@ router.post("/:roomId/recordings/reconcile", requireAuth, async (req, res) => {
 
   try {
     const uid = getAuthUserId(req);
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    const roomId = normalizeRoomId(req.params.roomId);
-    if (!roomId) return res.status(400).json({ error: "missing_room_id" });
+    const roomKey = normalizeRoomId(req.params.roomId);
+    if (!roomKey) return res.status(400).json({ error: "missing_room_id" });
 
-    const roomRef = firestore.collection("rooms").doc(roomId);
-    const roomSnap = await roomRef.get();
-    const roomData = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+    // Allow reconcile to work when the UI supplies room name.
+    let roomId = roomKey;
+    let roomRef = firestore.collection("rooms").doc(roomId);
+    let roomSnap = await roomRef.get();
+    if (!roomSnap.exists) {
+      const resolved = await resolveRoomIdentity({ roomName: roomKey });
+      if (resolved?.roomId) {
+        roomId = resolved.roomId;
+        roomRef = firestore.collection("rooms").doc(roomId);
+        roomSnap = await roomRef.get();
+      }
+    }
+
+    if (!roomSnap.exists) {
+      return res.status(200).json({ ok: true, roomId: roomKey, reconciled: false, state: "none" as LatestRecordingState, error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
+    }
+
+    const roomData = (roomSnap.data() as any) || {};
 
     const roomLatestRecordingId = String(roomData.latestRecordingId || "").trim() || null;
     const recDoc = await findLatestRecordingForRoom({ uid, roomId, roomLatestRecordingId });

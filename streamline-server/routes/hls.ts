@@ -1,5 +1,6 @@
 import { Router } from "express";
 import admin from "firebase-admin";
+import { FieldValue } from "firebase-admin/firestore";
 import { getRoom, setHlsError, setHlsIdle, setHlsLive, setHlsStarting } from "../services/rooms";
 import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "../middleware/roomAccessToken";
 import { requireAuth } from "../middleware/requireAuth";
@@ -24,35 +25,40 @@ async function incrementHlsUsageMinutes(uid: string, minutes: number) {
   const monthKey = getCurrentMonthKey();
   const usageDocId = `${uid}_${monthKey}`;
   const usageRef = firestore.collection("usageMonthly").doc(usageDocId);
-  const usageSnap = await usageRef.get();
-  const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
 
-  const prevUsage = existing.usage || {};
-  const prevYtd = existing.ytd || {};
+  // Use transaction for atomic increment (safe for concurrent requests)
+  await firestore.runTransaction(async (tx) => {
+    const usageSnap = await tx.get(usageRef);
+    const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
 
-  const nextUsage = {
-    ...prevUsage,
-    hlsMinutes: Number(prevUsage.hlsMinutes || 0) + safeMinutes,
-    transcodeMinutes: Number(prevUsage.transcodeMinutes || 0) + safeMinutes,
-  };
+    const prevUsage = existing.usage || {};
+    const prevYtd = existing.ytd || {};
 
-  const nextYtd = {
-    ...prevYtd,
-    hlsMinutes: Number(prevYtd.hlsMinutes || 0) + safeMinutes,
-    transcodeMinutes: Number(prevYtd.transcodeMinutes || 0) + safeMinutes,
-  };
+    const nextUsage = {
+      ...prevUsage,
+      hlsMinutes: Number(prevUsage.hlsMinutes || 0) + safeMinutes,
+      transcodeMinutes: Number(prevUsage.transcodeMinutes || 0) + safeMinutes,
+    };
 
-  await usageRef.set(
-    {
-      uid,
-      monthKey,
-      usage: nextUsage,
-      ytd: nextYtd,
-      createdAt: existing.createdAt || new Date(),
-      updatedAt: new Date(),
-    },
-    { merge: true }
-  );
+    const nextYtd = {
+      ...prevYtd,
+      hlsMinutes: Number(prevYtd.hlsMinutes || 0) + safeMinutes,
+      transcodeMinutes: Number(prevYtd.transcodeMinutes || 0) + safeMinutes,
+    };
+
+    tx.set(
+      usageRef,
+      {
+        uid,
+        monthKey,
+        usage: nextUsage,
+        ytd: nextYtd,
+        createdAt: existing.createdAt || FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+  });
 }
 
 function getHlsPublicBaseUrl(): string {
@@ -125,7 +131,7 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
     }
     const featureAccess = await canAccessFeature((req as any).account || uid, "hls");
     if (!featureAccess.allowed) {
-      if (featureAccess.code === "feature_disabled") {
+      if (featureAccess.code === LIMIT_ERRORS.FEATURE_DISABLED) {
         return res.status(403).json({
           error: featureAccess.code,
           reason: featureAccess.reason || "HLS is temporarily disabled",
@@ -310,7 +316,7 @@ router.get("/status/:roomId", requireAuth as any, requireRoomAccessToken as any,
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     const featureAccess = await canAccessFeature((req as any).account || uid, "hls");
     if (!featureAccess.allowed) {
-      if (featureAccess.code === "feature_disabled") {
+      if (featureAccess.code === LIMIT_ERRORS.FEATURE_DISABLED) {
         return res.status(403).json({
           error: featureAccess.code,
           reason: featureAccess.reason || "HLS is temporarily disabled",
@@ -426,7 +432,7 @@ router.post("/stop/:roomId", requireAuth as any, requireRoomAccessToken as any, 
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     const featureAccess = await canAccessFeature((req as any).account || uid, "hls");
     if (!featureAccess.allowed) {
-      if (featureAccess.code === "feature_disabled") {
+      if (featureAccess.code === LIMIT_ERRORS.FEATURE_DISABLED) {
         return res.status(403).json({
           error: featureAccess.code,
           reason: featureAccess.reason || "HLS is temporarily disabled",

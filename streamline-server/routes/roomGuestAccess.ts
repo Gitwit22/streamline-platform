@@ -284,7 +284,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     const allowGuestJoin = String(process.env.ALLOW_GUEST_RTC_JOIN || "").trim() === "1";
 
     const snap = await firestore.collection("rooms").doc(roomId).get();
-    if (!snap.exists) return res.status(404).json({ error: "room_not_found" });
+    if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
     const room = (snap.data() as any) || {};
     const ownerId = typeof room.ownerId === "string" ? room.ownerId.trim() : "";

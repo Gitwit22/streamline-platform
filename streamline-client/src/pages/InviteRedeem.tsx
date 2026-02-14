@@ -63,6 +63,11 @@ export default function InviteRedeem() {
         <div style={{ fontSize: 13, opacity: 0.9 }}>
           {error ? error : "Validating your invite and preparing the room."}
         </div>
+        {!error && (
+          <div style={{ marginTop: 10, fontSize: 12, color: "rgba(255,255,255,0.75)", lineHeight: 1.35 }}>
+            This invite grants <strong>viewer</strong> (view-only) access.
+          </div>
+        )}
         {error && (
           <div style={{ marginTop: 14 }}>
             <button
