@@ -128,9 +128,6 @@ export default function Support() {
           >
             Terms of Service
           </button>
-          <button onClick={() => nav("/settings/billing")} style={styles.quickLink}>
-            Manage Billing
-          </button>
         </div>
 
         {/* Footer */}

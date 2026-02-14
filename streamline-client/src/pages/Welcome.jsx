@@ -148,7 +148,7 @@ const Welcome = () => {
           </p>
         </div>
 
-        {/* FEATURE CARDS - MUST BE 3 COLUMNS ON DESKTOP */}
+        {/* FEATURE CARDS - NOW 4 COLUMNS ON DESKTOP */}
         <div 
           style={{
             display: 'grid',
@@ -248,6 +248,37 @@ const Welcome = () => {
             </div>
             <div style={{ fontSize: '12px', color: '#6b7280' }}>
               Stream to a shareable link that works on websites and across devices.
+            </div>
+          </div>
+
+          {/* Card 4 - Easy Navigation */}
+          <div 
+            style={{
+              background: 'rgba(255, 255, 255, 0.05)',
+              backdropFilter: 'blur(15px)',
+              border: '1px solid rgba(255, 255, 255, 0.1)',
+              borderRadius: '16px',
+              padding: '24px',
+              transition: 'all 0.3s ease',
+              cursor: 'pointer'
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.1)';
+              e.currentTarget.style.borderColor = 'rgba(220, 38, 38, 0.3)';
+              e.currentTarget.style.transform = 'translateY(-4px)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
+              e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+              e.currentTarget.style.transform = 'translateY(0)';
+            }}
+          >
+            <div style={{ fontSize: '32px', marginBottom: '12px' }}>🧭</div>
+            <div style={{ fontSize: '14px', fontWeight: 600, color: '#ffffff', marginBottom: '4px' }}>
+              Easy Navigation
+            </div>
+            <div style={{ fontSize: '12px', color: '#6b7280' }}>
+              Quickly find your way with a clean, intuitive interface.
             </div>
           </div>
         </div>

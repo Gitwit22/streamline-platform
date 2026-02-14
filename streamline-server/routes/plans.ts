@@ -3,11 +3,53 @@ import { PLANS } from "../usagePlans";
 import { PLAN_IDS, PlanId, isPlanId } from "../types/plan";
 import { firestore } from "../firebaseAdmin";
 import { normalizePlan } from "../lib/normalizePlan";
+import { getPlatformTranscodeEnabled } from "../lib/platformFlags";
 
 const router = Router();
 
 router.get("/", async (_req, res) => {
   try {
+    const [
+      hlsUiSnap,
+      recordingUiSnap,
+      contentLibrarySnap,
+      projectsSnap,
+      editorSnap,
+      myContentSnap,
+      myContentRecordingsSnap,
+    ] = await Promise.all([
+      firestore.collection("featureFlags").doc("hlsSettingsTab").get(),
+      firestore.collection("featureFlags").doc("recording").get(),
+      firestore.collection("featureFlags").doc("contentLibraryEnabled").get(),
+      firestore.collection("featureFlags").doc("projectsEnabled").get(),
+      firestore.collection("featureFlags").doc("editorEnabled").get(),
+      firestore.collection("featureFlags").doc("myContentEnabled").get(),
+      firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
+    ]);
+
+    const hlsUiData = hlsUiSnap.exists ? ((hlsUiSnap.data() as any) || {}) : {};
+    const recordingUiData = recordingUiSnap.exists ? ((recordingUiSnap.data() as any) || {}) : {};
+    const contentLibraryData = contentLibrarySnap.exists ? ((contentLibrarySnap.data() as any) || {}) : {};
+    const projectsData = projectsSnap.exists ? ((projectsSnap.data() as any) || {}) : {};
+    const editorData = editorSnap.exists ? ((editorSnap.data() as any) || {}) : {};
+    const myContentData = myContentSnap.exists ? ((myContentSnap.data() as any) || {}) : {};
+    const myContentRecordingsData = myContentRecordingsSnap.exists
+      ? ((myContentRecordingsSnap.data() as any) || {})
+      : {};
+
+    const hlsEnabled = hlsUiData.enabled === undefined ? true : !!hlsUiData.enabled;
+    const recordingEnabled = recordingUiData.enabled === undefined ? true : !!recordingUiData.enabled;
+    const transcodeEnabled = getPlatformTranscodeEnabled();
+
+    // New segmented flags default to DISABLED when missing.
+    const contentLibraryEnabled = contentLibraryData.enabled === true;
+    const projectsEnabled = projectsData.enabled === true;
+    const editorEnabled = editorData.enabled === true;
+
+    // My Content umbrella + sub-feature flags default to DISABLED when missing.
+    const myContentEnabled = myContentData.enabled === true;
+    const myContentRecordingsEnabled = myContentRecordingsData.enabled === true;
+
     const snap = await firestore.collection("plans").get();
     const mapped = snap.docs.map((d) => {
       const data = (d.data() as any) || {};
@@ -45,6 +87,7 @@ router.get("/", async (_req, res) => {
         billable: id === "free" ? true : (priceNumber > 0 && hasStripePrice),
         limits: {
           monthlyMinutesIncluded: plan.limits.monthlyMinutes,
+          transcodeMinutes: plan.limits.transcodeMinutes ?? data.limits?.transcodeMinutes ?? data.transcodeMinutes ?? data.minutes ?? 0,
           maxGuests: plan.limits.maxGuests,
           rtmpDestinationsMax: plan.limits.rtmpDestinationsMax,
           maxSessionMinutes: plan.limits.maxSessionMinutes,
@@ -53,11 +96,27 @@ router.get("/", async (_req, res) => {
         },
         features: {
           recording: !!plan.features.recording,
+          dualRecording: !!(data.features?.dualRecording ?? data.dualRecordingEnabled),
           rtmp: !!plan.features.rtmp,
           multistream: !!plan.features.multistream,
           // Advanced permissions have been removed; all accounts use
           // the simple Participant/Co-host model.
           advancedPermissions: false,
+
+          // Pro-only capability: allow actions past included minutes.
+          // Billing is not handled here; this flag only indicates that
+          // server-side overage totals may be recorded.
+          allowsOverages: !!plan.features.allowsOverages,
+
+          // HLS flags are used by pricing/marketing UI and should reflect
+          // admin-edited plan settings.
+          canHls: !!plan.features.canHls,
+          hls: !!plan.features.hls,
+          hlsEnabled: !!plan.features.hlsEnabled,
+          hlsCustomizationEnabled: !!plan.features.hlsCustomizationEnabled,
+        },
+        caps: {
+          hlsMaxMinutesPerSession: plan.caps?.hlsMaxMinutesPerSession ?? null,
         },
         editing: {
           access: !!data.editing?.access,
@@ -83,14 +142,55 @@ router.get("/", async (_req, res) => {
     });
 
     // If no plan docs, fall back to ids
-    if (!mapped.length) return res.json({ plans: PLANS });
+    if (!mapped.length) {
+      return res.json({
+        plans: PLANS,
+        platformFlags: {
+          hlsEnabled,
+          hlsSettingsTab: hlsEnabled,
+          recordingEnabled,
+          transcodeEnabled,
+          contentLibraryEnabled,
+          projectsEnabled,
+          editorEnabled,
+          myContentEnabled,
+          myContentRecordingsEnabled,
+        },
+      });
+    }
 
     // If filter removed everything, fall back to mapped to avoid empty payloads
     const plansToReturn = publicPlans.length ? publicPlans : mapped;
-    return res.json({ plans: plansToReturn });
+    return res.json({
+      plans: plansToReturn,
+      platformFlags: {
+        hlsEnabled,
+        hlsSettingsTab: hlsEnabled,
+        recordingEnabled,
+        transcodeEnabled,
+        contentLibraryEnabled,
+        projectsEnabled,
+        editorEnabled,
+        myContentEnabled,
+        myContentRecordingsEnabled,
+      },
+    });
   } catch (err: any) {
     console.error("/api/plans failed, returning fallback IDs:", err?.message || err);
-    return res.json({ plans: PLANS });
+    return res.json({
+      plans: PLANS,
+      platformFlags: {
+        hlsEnabled: true,
+        hlsSettingsTab: true,
+        recordingEnabled: true,
+        transcodeEnabled: getPlatformTranscodeEnabled(),
+        contentLibraryEnabled: false,
+        projectsEnabled: false,
+        editorEnabled: false,
+        myContentEnabled: false,
+        myContentRecordingsEnabled: false,
+      },
+    });
   }
 });
 

@@ -1,4 +1,4 @@
-import { apiFetch } from "../lib/api";
+import { apiFetchAuth } from "../lib/api";
 
 export type DestinationStatus = "connected" | "needs_attention" | "disconnected";
 export type DestinationStatusReason = "missing_key" | "invalid_format" | "egress_auth" | "egress_failed" | "unknown";
@@ -25,13 +25,13 @@ export async function fetchDestinations(params?: { platform?: string; includeDis
   if (params?.platform) qs.set("platform", params.platform);
   if (params?.includeDisabled === true) qs.set("includeDisabled", "true");
   const path = `/api/destinations${qs.toString() ? `?${qs.toString()}` : ""}`;
-  const res = await apiFetch(path);
+  const res = await apiFetchAuth(path);
   const data = await res.json();
   return data as { ok: boolean; items: DestinationItem[]; usedCount?: number; limit?: number };
 }
 
 export async function createDestination(body: { platform: string; name?: string; rtmpUrlBase: string; enabled?: boolean; streamKeyPlain?: string; mode?: "manual" | "connected"; persistent?: boolean; oauthRef?: string | null }) {
-  const res = await apiFetch("/api/destinations", {
+  const res = await apiFetchAuth("/api/destinations", {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -40,7 +40,7 @@ export async function createDestination(body: { platform: string; name?: string;
 }
 
 export async function updateDestination(id: string, body: { platform?: string; name?: string; rtmpUrlBase?: string; enabled?: boolean; streamKeyPlain?: string; streamKeyEnc?: any; mode?: "manual" | "connected"; persistent?: boolean; oauthRef?: string | null }) {
-  const res = await apiFetch(`/api/destinations/${encodeURIComponent(id)}`, {
+  const res = await apiFetchAuth(`/api/destinations/${encodeURIComponent(id)}`, {
     method: "PUT",
     body: JSON.stringify(body || {}),
   });
@@ -49,7 +49,7 @@ export async function updateDestination(id: string, body: { platform?: string; n
 }
 
 export async function deleteDestination(id: string) {
-  const res = await apiFetch(`/api/destinations/${encodeURIComponent(id)}`, {
+  const res = await apiFetchAuth(`/api/destinations/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
   const data = await res.json();
@@ -57,7 +57,7 @@ export async function deleteDestination(id: string) {
 }
 
 export async function validateDestinationPreCreate(body: { platform: string; rtmpUrlBase: string; streamKeyPlain?: string }) {
-  const res = await apiFetch("/api/destinations/validate", {
+  const res = await apiFetchAuth("/api/destinations/validate", {
     method: "POST",
     body: JSON.stringify(body),
   });
@@ -66,7 +66,7 @@ export async function validateDestinationPreCreate(body: { platform: string; rtm
 }
 
 export async function preflight(body: { destinationIds?: string[]; video?: any; audio?: any; networkProbeMs?: number }) {
-  const res = await apiFetch("/api/live/preflight", {
+  const res = await apiFetchAuth("/api/live/preflight", {
     method: "POST",
     body: JSON.stringify(body || {}),
   });

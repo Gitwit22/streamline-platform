@@ -5,6 +5,7 @@
 
 // Use Vite proxy by default (routes /api/* to localhost:5137)
 import { API_BASE } from "./apiBase";
+import { apiFetchAuth, ApiUnauthorizedError } from "./api";
 
 // ============================================================================
 // TYPES
@@ -85,12 +86,26 @@ export type ExportJob = {
 // AUTH HELPERS
 // ============================================================================
 
-function getAuthHeaders(): HeadersInit {
-  const token = localStorage.getItem('sl_token') || localStorage.getItem('auth_token');
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  };
+function isUnauthorizedError(err: unknown): boolean {
+  return (
+    err instanceof ApiUnauthorizedError ||
+    (!!err && typeof err === "object" && (err as any).name === "ApiUnauthorizedError")
+  );
+}
+
+function emitUnauthorizedEventOnce(detail?: string) {
+  if (typeof window === "undefined") return;
+  const w = window as any;
+  const now = Date.now();
+  if (typeof w.__sl_last_unauthorized_event_ts === "number" && now - w.__sl_last_unauthorized_event_ts < 2000) {
+    return;
+  }
+  w.__sl_last_unauthorized_event_ts = now;
+  try {
+    window.dispatchEvent(new CustomEvent("sl:unauthorized", { detail: { reason: detail || "unauthorized" } }));
+  } catch {
+    // ignore
+  }
 }
 
 async function handleResponse<T>(response: Response): Promise<T> {
@@ -117,14 +132,13 @@ async function handleResponse<T>(response: Response): Promise<T> {
 export const assetsApi = {
   async getAll(): Promise<Asset[]> {
     try {
-      const response = await fetch(`${API_BASE}/editing/assets`, {
-        headers: getAuthHeaders(),
-      });
+      const response = await apiFetchAuth(`${API_BASE}/editing/assets`, {}, { allowNonOk: true });
       if (!response.ok) {
         return [];
       }
       return handleResponse<Asset[]>(response);
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.error('Assets API error:', error);
       return [];
     }
@@ -132,14 +146,13 @@ export const assetsApi = {
 
   async getById(id: string): Promise<Asset | null> {
     try {
-      const response = await fetch(`${API_BASE}/editing/assets/${id}`, {
-        headers: getAuthHeaders(),
-      });
+      const response = await apiFetchAuth(`${API_BASE}/editing/assets/${id}`, {}, { allowNonOk: true });
       if (!response.ok) {
         return null;
       }
       return handleResponse<Asset>(response);
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.error('Asset API error:', error);
       return null;
     }
@@ -151,6 +164,20 @@ export const assetsApi = {
 
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+
+      const token = (() => {
+        try {
+          return localStorage.getItem("authToken");
+        } catch {
+          return null;
+        }
+      })();
+
+      if (!token) {
+        emitUnauthorizedEventOnce("missing_or_invalid_token");
+        reject(new ApiUnauthorizedError());
+        return;
+      }
 
       xhr.upload.addEventListener('progress', (e) => {
         if (e.lengthComputable && onProgress) {
@@ -174,10 +201,7 @@ export const assetsApi = {
 
       xhr.open('POST', `${API_BASE}/editing/assets/upload`);
 
-      const token = localStorage.getItem('sl_token') || localStorage.getItem('auth_token');
-      if (token) {
-        xhr.setRequestHeader('Authorization', `Bearer ${token}`);
-      }
+      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
 
       xhr.send(formData);
     });
@@ -185,14 +209,14 @@ export const assetsApi = {
 
   async delete(id: string): Promise<void> {
     try {
-      const response = await fetch(`${API_BASE}/editing/assets/${id}`, {
+      const response = await apiFetchAuth(`${API_BASE}/editing/assets/${id}`, {
         method: 'DELETE',
-        headers: getAuthHeaders(),
-      });
+      }, { allowNonOk: true });
       if (!response.ok) {
         throw new Error('Failed to delete asset');
       }
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.error('Delete asset failed:', error);
       throw error;
     }
@@ -206,14 +230,13 @@ export const assetsApi = {
 export const recordingsApi = {
   async getAll(): Promise<Recording[]> {
     try {
-      const response = await fetch(`${API_BASE}/editing/list`, {
-        headers: getAuthHeaders(),
-      });
+      const response = await apiFetchAuth(`${API_BASE}/editing/list`, {}, { allowNonOk: true });
       if (!response.ok) {
         return [];
       }
       return handleResponse<Recording[]>(response);
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.error('Recordings API error:', error);
       return [];
     }
@@ -226,14 +249,13 @@ export const recordingsApi = {
 
   async getById(id: string): Promise<Recording | null> {
     try {
-      const response = await fetch(`${API_BASE}/editing/recordings/${id}`, {
-        headers: getAuthHeaders(),
-      });
+      const response = await apiFetchAuth(`${API_BASE}/editing/recordings/${id}`, {}, { allowNonOk: true });
       if (!response.ok) {
         return null;
       }
       return handleResponse<Recording>(response);
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.error('Recording API error:', error);
       return null;
     }
@@ -241,16 +263,13 @@ export const recordingsApi = {
 
   async convertToAsset(recordingId: string): Promise<Asset> {
     try {
-      const response = await fetch(`${API_BASE}/editing/assets/from-recording`, {
+      const response = await apiFetchAuth(`${API_BASE}/editing/assets/from-recording`, {
         method: 'POST',
-        headers: getAuthHeaders(),
         body: JSON.stringify({ recordingId }),
-      });
-      if (response.status === 401) {
-        throw new Error('Unauthorized');
-      }
+      }, { allowNonOk: true });
       return handleResponse<Asset>(response);
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.warn('Convert recording failed:', error);
       throw error;
     }
@@ -258,14 +277,12 @@ export const recordingsApi = {
 
   async delete(id: string): Promise<void> {
     try {
-      const response = await fetch(`${API_BASE}/editing/assets/${id}`, {
-        method: 'DELETE',
-        headers: getAuthHeaders(),
-      });
+      const response = await apiFetchAuth(`${API_BASE}/editing/assets/${id}`, { method: 'DELETE' }, { allowNonOk: true });
       if (!response.ok) {
         throw new Error('Failed to delete recording');
       }
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.error('Delete recording failed:', error);
       throw error;
     }
@@ -279,14 +296,13 @@ export const recordingsApi = {
 export const projectsApi = {
   async getAll(): Promise<Project[]> {
     try {
-      const response = await fetch(`${API_BASE}/editing/projects`, {
-        headers: getAuthHeaders(),
-      });
+      const response = await apiFetchAuth(`${API_BASE}/editing/projects`, {}, { allowNonOk: true });
       if (!response.ok) {
         return [];
       }
       return handleResponse<Project[]>(response);
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.error('Projects API error:', error);
       return [];
     }
@@ -294,14 +310,13 @@ export const projectsApi = {
 
   async getById(id: string): Promise<Project | null> {
     try {
-      const response = await fetch(`${API_BASE}/editing/projects/${id}`, {
-        headers: getAuthHeaders(),
-      });
+      const response = await apiFetchAuth(`${API_BASE}/editing/projects/${id}`, {}, { allowNonOk: true });
       if (!response.ok) {
         return null;
       }
       return handleResponse<Project>(response);
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.error('Project API error:', error);
       return null;
     }
@@ -309,16 +324,16 @@ export const projectsApi = {
 
   async create(data: { name: string; assetId: string }): Promise<Project> {
     try {
-      const response = await fetch(`${API_BASE}/editing/projects`, {
+      const response = await apiFetchAuth(`${API_BASE}/editing/projects`, {
         method: 'POST',
-        headers: getAuthHeaders(),
         body: JSON.stringify(data),
-      });
+      }, { allowNonOk: true });
       if (!response.ok) {
         throw new Error(`Failed to create project: HTTP ${response.status}`);
       }
       return handleResponse<Project>(response);
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.error('Create project failed:', error);
       throw error;
     }
@@ -326,16 +341,13 @@ export const projectsApi = {
 
   async update(id: string, data: Partial<Project>): Promise<Project> {
     try {
-      const response = await fetch(`${API_BASE}/editing/projects/${id}`, {
+      const response = await apiFetchAuth(`${API_BASE}/editing/projects/${id}`, {
         method: 'PATCH',
-        headers: getAuthHeaders(),
         body: JSON.stringify(data),
-      });
-      if (response.status === 401) {
-        throw new Error('Unauthorized');
-      }
+      }, { allowNonOk: true });
       return handleResponse<Project>(response);
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.warn('Update project failed:', error);
       throw error;
     }
@@ -343,16 +355,16 @@ export const projectsApi = {
 
   async saveTimeline(id: string, clips: TimelineClip[]): Promise<{ saved: boolean }> {
     try {
-      const response = await fetch(`${API_BASE}/editing/projects/${id}/timeline`, {
+      const response = await apiFetchAuth(`${API_BASE}/editing/projects/${id}/timeline`, {
         method: 'PUT',
-        headers: getAuthHeaders(),
         body: JSON.stringify({ clips }),
-      });
+      }, { allowNonOk: true });
       if (!response.ok) {
         throw new Error('Failed to save timeline');
       }
       return handleResponse<{ saved: boolean }>(response);
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.error('Save timeline failed:', error);
       throw error;
     }
@@ -360,14 +372,12 @@ export const projectsApi = {
 
   async delete(id: string): Promise<void> {
     try {
-      const response = await fetch(`${API_BASE}/editing/projects/${id}`, {
-        method: 'DELETE',
-        headers: getAuthHeaders(),
-      });
+      const response = await apiFetchAuth(`${API_BASE}/editing/projects/${id}`, { method: 'DELETE' }, { allowNonOk: true });
       if (!response.ok) {
         throw new Error('Failed to delete project');
       }
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.error('Delete project failed:', error);
       throw error;
     }
@@ -381,16 +391,16 @@ export const projectsApi = {
 export const exportApi = {
   async start(projectId: string, settings: ExportSettings): Promise<ExportJob> {
     try {
-      const response = await fetch(`${API_BASE}/editing/export`, {
+      const response = await apiFetchAuth(`${API_BASE}/editing/export`, {
         method: 'POST',
-        headers: getAuthHeaders(),
         body: JSON.stringify({ projectId, settings }),
-      });
+      }, { allowNonOk: true });
       if (!response.ok) {
         throw new Error('Failed to start export');
       }
       return handleResponse<ExportJob>(response);
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.error('Start export failed:', error);
       throw error;
     }
@@ -398,14 +408,10 @@ export const exportApi = {
 
   async getStatus(exportId: string): Promise<ExportJob> {
     try {
-      const response = await fetch(`${API_BASE}/editing/exports/${exportId}`, {
-        headers: getAuthHeaders(),
-      });
-      if (response.status === 401) {
-        throw new Error('Unauthorized');
-      }
+      const response = await apiFetchAuth(`${API_BASE}/editing/exports/${exportId}`, {}, { allowNonOk: true });
       return handleResponse<ExportJob>(response);
     } catch (error) {
+      if (isUnauthorizedError(error)) throw error;
       console.warn('Get export status failed:', error);
       throw error;
     }

@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { API_BASE } from "../lib/apiBase";
+import { apiFetchAuth } from "../lib/api";
+import { clearMeCache } from "../lib/meCache";
 
 export default function BillingCanceled() {
   const nav = useNavigate();
@@ -9,8 +10,10 @@ export default function BillingCanceled() {
     let cancelled = false;
     (async () => {
       try {
-        await fetch(`${API_BASE}/api/billing/clear-pending`, { method: "POST", credentials: "include" });
+        await apiFetchAuth("/api/billing/clear-pending", { method: "POST" }, { allowNonOk: true });
       } catch {}
+      // Ensure any cached /api/account/me payload is discarded.
+      clearMeCache();
       if (!cancelled) nav("/settings/billing", { replace: true });
     })();
     return () => { cancelled = true; };

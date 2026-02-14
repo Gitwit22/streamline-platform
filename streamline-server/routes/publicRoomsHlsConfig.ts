@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { getRoom, DEFAULT_ROOM_HLS_CONFIG, type RoomHlsConfig } from "../services/rooms";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 
 const router = Router();
 
@@ -31,8 +32,8 @@ router.get("/:roomId/hls-config", async (req: any, res) => {
       hlsConfig,
     });
   } catch (e: any) {
-    if (e?.message === "room_not_found") {
-      return res.status(404).json({ error: "room_not_found" });
+    if (e?.message === PERMISSION_ERRORS.ROOM_NOT_FOUND) {
+      return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
     }
     console.error("GET /api/public/rooms/:roomId/hls-config error", e);
     return res.status(500).json({ error: "server_error" });

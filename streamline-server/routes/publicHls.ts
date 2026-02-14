@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { getRoom } from "../services/rooms";
 import { getLiveKitSdk } from "../lib/livekit";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 
 const router = Router();
 
@@ -67,8 +68,8 @@ router.get("/:roomId", async (req: any, res) => {
       viewerCount: viewerCount ?? undefined,
     });
   } catch (e: any) {
-    if (e?.message === "room_not_found") {
-      return res.status(404).json({ error: "room_not_found" });
+    if (e?.message === PERMISSION_ERRORS.ROOM_NOT_FOUND) {
+      return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
     }
     console.error("Public HLS status error", e);
     return res.status(500).json({ error: "Failed to fetch HLS status" });

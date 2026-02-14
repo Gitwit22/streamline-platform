@@ -17,6 +17,7 @@ import {
   Link2
 } from "lucide-react";
 import { editingApi } from "../lib/editingApi";
+import { apiFetchAuth } from "../lib/api";
 import { useEditingFeatures } from "./useEditingFeatures";
 
 // ============================================================================
@@ -233,7 +234,7 @@ export default function EditorPage() {
       console.log('🔍 Fetching recording:', recordingId);
       
       // Fetch recording details
-      const response = await fetch(`/api/editing/recordings/${recordingId}`);
+      const response = await apiFetchAuth(`/api/editing/recordings/${recordingId}`, {}, { allowNonOk: true });
       if (!response.ok) {
         throw new Error('Recording not found');
       }

@@ -4,6 +4,7 @@ import { getUserAccount, UserAccount } from "../lib/userAccount";
 
 type AccessResult = {
   allowed: boolean;
+  code?: string;
   reason?: string;
 };
 
@@ -16,6 +17,7 @@ const BAD_BILLING_STATUSES = new Set([
 ]);
 
 import { PLAN_IDS, PlanId, isPlanId } from "../types/plan";
+import { LIMIT_ERRORS } from "../lib/limitErrors";
 
 // List of paid plans (update as needed, or drive from plan config)
 const PAID_PLANS: PlanId[] = [
@@ -87,6 +89,19 @@ export async function canAccessFeature(
   const uid = account.uid;
   const user = account.rawUser || {};
   const planId = user?.planId || account.planId || "free";
+
+  // 0) Platform-wide feature gates (default enabled when missing)
+  // These should hard-disable the feature for everyone (including admins) when off.
+  if (featureKey === "recording" || featureKey === "hls") {
+    const platformEnabled = await getPlatformFeatureEnabled(featureKey);
+    if (!platformEnabled) {
+      return {
+        allowed: false,
+        code: LIMIT_ERRORS.FEATURE_DISABLED,
+        reason: "Feature disabled platform-wide",
+      };
+    }
+  }
   if (process.env.DEBUG_FEATURE_ACCESS === "1") {
     console.log(
       `[featureAccess] uid=${uid} feature=${featureKey} planId=${planId} adminOverride=${!!user?.adminOverride}`
@@ -128,6 +143,7 @@ export async function canAccessFeature(
     if (billingBlockReason) {
       return {
         allowed: false,
+        code: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
         reason: `Billing issue: ${billingBlockReason}`,
       };
     }
@@ -136,7 +152,7 @@ export async function canAccessFeature(
   // 3) Load plan
   const planSnap = await db.collection("plans").doc(planId).get();
   if (!planSnap.exists) {
-    return { allowed: false, reason: "Plan not found" };
+    return { allowed: false, code: LIMIT_ERRORS.FEATURE_NOT_ENTITLED, reason: "Plan not found" };
   }
 
   const plan = planSnap.data() as any;
@@ -195,9 +211,61 @@ export async function canAccessFeature(
   if (!enabled) {
     return {
       allowed: false,
+      code: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
       reason: "Feature not available on your plan",
     };
   }
 
   return { allowed: true };
+}
+
+// Small in-memory cache for platform feature flags to avoid hammering Firestore.
+// TTL is short so admin toggles propagate quickly.
+let cachedRecordingEnabled: boolean | null = null;
+let cachedRecordingEnabledAt = 0;
+let cachedHlsEnabled: boolean | null = null;
+let cachedHlsEnabledAt = 0;
+const PLATFORM_FEATURE_TTL_MS = 30 * 1000;
+
+async function getPlatformFeatureEnabled(featureKey: "recording" | "hls"): Promise<boolean> {
+  const now = Date.now();
+
+  if (featureKey === "recording") {
+    if (cachedRecordingEnabled !== null && now - cachedRecordingEnabledAt < PLATFORM_FEATURE_TTL_MS) {
+      return cachedRecordingEnabled;
+    }
+    try {
+      const snap = await db.collection("featureFlags").doc("recording").get();
+      const data = snap.exists ? snap.data() || {} : {};
+      const enabled = (data as any).enabled;
+      cachedRecordingEnabled = enabled === undefined ? true : !!enabled;
+      cachedRecordingEnabledAt = now;
+      return cachedRecordingEnabled;
+    } catch {
+      cachedRecordingEnabled = true;
+      cachedRecordingEnabledAt = now;
+      return cachedRecordingEnabled;
+    }
+  }
+
+  // HLS: doc is historically named hlsSettingsTab, but we treat it as the canonical platform HLS toggle.
+  if (cachedHlsEnabled !== null && now - cachedHlsEnabledAt < PLATFORM_FEATURE_TTL_MS) {
+    return cachedHlsEnabled;
+  }
+  try {
+    const snap = await db.collection("featureFlags").doc("hlsSettingsTab").get();
+    const data = snap.exists ? snap.data() || {} : {};
+    const hlsEnabled = (data as any).hlsEnabled;
+    const enabled = (data as any).enabled;
+    // Default enabled when missing.
+    if (typeof hlsEnabled === "boolean") cachedHlsEnabled = hlsEnabled;
+    else if (typeof enabled === "boolean") cachedHlsEnabled = enabled;
+    else cachedHlsEnabled = true;
+    cachedHlsEnabledAt = now;
+    return cachedHlsEnabled;
+  } catch {
+    cachedHlsEnabled = true;
+    cachedHlsEnabledAt = now;
+    return cachedHlsEnabled;
+  }
 }

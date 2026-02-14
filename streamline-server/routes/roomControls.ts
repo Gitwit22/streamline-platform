@@ -6,6 +6,7 @@ import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "..
 import { getLiveKitSdk } from "../lib/livekit";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
 import { roleToParticipantPermission } from "../lib/livekitPermissions";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 
 const router = Router();
 
@@ -227,15 +228,15 @@ router.patch("/:roomId/controls", requireAuth as any, requireRoomAccessToken as 
   if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
   const access = (req as any).roomAccess as RoomAccessClaims | undefined;
-  if (!access || !access.roomId) return res.status(401).json({ error: "room_token_required" });
-  if (access.roomId !== roomId) return res.status(403).json({ error: "room_mismatch" });
+  if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+  if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
 
   if (!isHostOrCohost(access.role)) {
-    return res.status(403).json({ error: "insufficient_role" });
+    return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
   }
 
   const uid = (req as any).user?.uid as string | undefined;
-  if (!uid) return res.status(401).json({ error: "Unauthorized" });
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
   const body = (req.body || {}) as any;
   const patch: RoomControls = {
@@ -287,15 +288,15 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
   if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
   const access = (req as any).roomAccess as RoomAccessClaims | undefined;
-  if (!access || !access.roomId) return res.status(401).json({ error: "room_token_required" });
-  if (access.roomId !== roomId) return res.status(403).json({ error: "room_mismatch" });
+  if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+  if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
 
   if (!isHostOrCohost(access.role)) {
-    return res.status(403).json({ error: "insufficient_role" });
+    return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
   }
 
   const uid = (req as any).user?.uid as string | undefined;
-  if (!uid) return res.status(401).json({ error: "Unauthorized" });
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
   const rawIdentity = String(req.params.identity || "").trim();
   if (!rawIdentity) return res.status(400).json({ error: "identity_required" });
@@ -456,16 +457,16 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
   if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
   const access = (req as any).roomAccess as RoomAccessClaims | undefined;
-  if (!access || !access.roomId) return res.status(401).json({ error: "room_token_required" });
-  if (access.roomId !== roomId) return res.status(403).json({ error: "room_mismatch" });
+  if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+  if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
 
   // Host-only moderation: only a host can change participant roles/permissions.
   if (String(access.role || "").toLowerCase() !== "host") {
-    return res.status(403).json({ error: "insufficient_role" });
+    return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
   }
 
   const uid = (req as any).user?.uid as string | undefined;
-  if (!uid) return res.status(401).json({ error: "Unauthorized" });
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
   const rawIdentity = String(req.params.identity || "").trim();
   if (!rawIdentity) return res.status(400).json({ error: "identity_required" });
@@ -565,9 +566,13 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
         livekitApplied = true;
         livekitReason = null;
 
-        const lostScreenShare =
-          Array.isArray((permission as any).canPublishSources) &&
-          !(permission as any).canPublishSources.includes(TrackSource.SCREEN_SHARE);
+        const sources: any[] = Array.isArray((permission as any).canPublishSources)
+          ? (permission as any).canPublishSources
+          : [];
+        const hasScreenShare = sources.some(
+          (s) => s === TrackSource.SCREEN_SHARE || String(s).toLowerCase() === "screen_share",
+        );
+        const lostScreenShare = sources.length > 0 && !hasScreenShare;
 
         if (lostScreenShare) {
           try {
@@ -664,15 +669,15 @@ router.post("/:roomId/controls/:identity/apply-preset", requireAuth as any, requ
   if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
   const access = (req as any).roomAccess as RoomAccessClaims | undefined;
-  if (!access || !access.roomId) return res.status(401).json({ error: "room_token_required" });
-  if (access.roomId !== roomId) return res.status(403).json({ error: "room_mismatch" });
+  if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+  if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
 
   if (!isHostOrCohost(access.role)) {
-    return res.status(403).json({ error: "insufficient_role" });
+    return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
   }
 
   const uid = (req as any).user?.uid as string | undefined;
-  if (!uid) return res.status(401).json({ error: "Unauthorized" });
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
   const parsedPresetId = parsePresetId((req.body as any)?.presetId);
   if (!parsedPresetId) return res.status(400).json({ error: "presetId_required" });
@@ -706,8 +711,8 @@ router.get("/:roomId/controls/stream", requireRoomAccessToken as any, async (req
   if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
   const access = (req as any).roomAccess as RoomAccessClaims | undefined;
-  if (!access || !access.roomId) return res.status(401).json({ error: "room_token_required" });
-  if (access.roomId !== roomId) return res.status(403).json({ error: "room_mismatch" });
+  if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+  if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
 
   res.status(200);
   res.setHeader("Content-Type", "text/event-stream");

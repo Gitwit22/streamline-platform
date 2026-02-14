@@ -1,5 +1,6 @@
 import { firestore as db } from "../firebaseAdmin";
 import { PlanId, isPlanId } from "../types/plan";
+import { normalizeBillingTruthFromUser } from "./billingTruth";
 
 export interface UserAccount {
   uid: string;
@@ -80,7 +81,9 @@ export async function getUserAccount(uid: string): Promise<UserAccount> {
       updatedAt: now,
     };
 
-    await userRef.set(baseDoc, { merge: true });
+    const billingTruth = normalizeBillingTruthFromUser(baseDoc, now);
+
+    await userRef.set({ ...baseDoc, billingTruth }, { merge: true });
 
     const platformBillingEnabled = await getPlatformBillingEnabled();
     const effectiveBillingEnabled = platformBillingEnabled && baseDoc.billingEnabled;
@@ -103,6 +106,10 @@ export async function getUserAccount(uid: string): Promise<UserAccount> {
   }
 
   const data = snap.data() || {};
+
+  // Backfill planId if missing so admin/UIs are consistent for legacy users.
+  // Avoid overwriting unknown/experimental plan ids.
+  const planIdMissing = typeof data.planId !== "string" || !String(data.planId).trim();
 
   // Plan normalization: default to free and coerce to a known PlanId when possible.
   let planId: PlanId = "free";
@@ -136,6 +143,10 @@ export async function getUserAccount(uid: string): Promise<UserAccount> {
   const patch: any = {};
   if (!data.createdAt) patch.createdAt = now;
   patch.updatedAt = now;
+  if (planIdMissing) patch.planId = "free";
+  if (!(data as any).billingTruth) {
+    patch.billingTruth = normalizeBillingTruthFromUser({ ...data, planId: planIdMissing ? "free" : data.planId }, now);
+  }
   if (Object.keys(patch).length > 0) {
     await userRef.set(patch, { merge: true });
   }

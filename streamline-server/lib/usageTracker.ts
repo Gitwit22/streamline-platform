@@ -10,6 +10,7 @@ import type {
   CanStartStreamParams,
 } from "./usageTypes";
 import { resolveMaxDestinations } from "./planLimits";
+import { LIMIT_ERRORS } from "./limitErrors";
 
 /**
  * Get current month key in YYYY-MM format
@@ -41,7 +42,7 @@ export function canStartStream(params: CanStartStreamParams): GateResult {
   if (wantsRTMP && maxDestinations <= 0) {
     return {
       allowed: false,
-      reason: "Your plan does not include Stream Destinations (RTMP)",
+      reason: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
       requiresUpgrade: true,
     };
   }
@@ -50,7 +51,7 @@ export function canStartStream(params: CanStartStreamParams): GateResult {
   if (maxDestinations > 0 && selectedDestinationsCount > maxDestinations) {
     return {
       allowed: false,
-      reason: `Your plan allows ${maxDestinations} stream destination(s), but you selected ${selectedDestinationsCount}`,
+      reason: LIMIT_ERRORS.LIMIT_EXCEEDED,
       requiresUpgrade: true,
     };
   }
@@ -59,7 +60,7 @@ export function canStartStream(params: CanStartStreamParams): GateResult {
   if (wantsRecording && !plan.features.recording) {
     return {
       allowed: false,
-      reason: "Your plan does not include recording",
+      reason: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
       requiresUpgrade: true,
     };
   }
@@ -75,13 +76,13 @@ export function canStartStream(params: CanStartStreamParams): GateResult {
     } else if (plan.features.overagesAllowed && !userOverages.overagesEnabled) {
       return {
         allowed: false,
-        reason: `You've used ${currentUsage.participantMinutes}/${participantLimit} participant minutes. Enable overages to continue.`,
+        reason: LIMIT_ERRORS.USAGE_EXHAUSTED,
         requiresOveragesEnabled: true,
       };
     } else {
       return {
         allowed: false,
-        reason: `You've used ${currentUsage.participantMinutes}/${participantLimit} participant minutes. Upgrade your plan to continue.`,
+        reason: LIMIT_ERRORS.USAGE_EXHAUSTED,
         requiresUpgrade: true,
       };
     }
@@ -96,13 +97,13 @@ export function canStartStream(params: CanStartStreamParams): GateResult {
     } else if (plan.features.overagesAllowed && !userOverages.overagesEnabled) {
       return {
         allowed: false,
-        reason: `You've used ${currentUsage.transcodeMinutes}/${transcodeLimit} transcode minutes. Enable overages to continue.`,
+        reason: LIMIT_ERRORS.USAGE_EXHAUSTED,
         requiresOveragesEnabled: true,
       };
     } else {
       return {
         allowed: false,
-        reason: `You've used ${currentUsage.transcodeMinutes}/${transcodeLimit} transcode minutes. Upgrade your plan to continue.`,
+        reason: LIMIT_ERRORS.USAGE_EXHAUSTED,
         requiresUpgrade: true,
       };
     }

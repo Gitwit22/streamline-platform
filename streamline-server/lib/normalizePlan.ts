@@ -7,7 +7,9 @@ export type CanonicalPlan = {
   limits: {
     monthlyMinutes: number; // canonical minutes bucket used by usage
     monthlyMinutesIncluded: number; // alias for plan listing
-    transcodeMinutes: number;
+    // When undefined, the plan does NOT include broadcast/transcode minutes.
+    // When 0, it may mean "unlimited" for internal plans.
+    transcodeMinutes?: number;
     maxGuests: number;
     rtmpDestinationsMax: number;
     maxSessionMinutes: number;
@@ -20,6 +22,9 @@ export type CanonicalPlan = {
     rtmp: boolean;
     multistream: boolean;
     advancedPermissions: boolean;
+    // When true, the account is allowed to continue past included monthly
+    // minutes (server will log overage totals; billing is handled elsewhere).
+    allowsOverages: boolean;
     // hlsEnabled is the canonical runtime flag (can generate/play HLS)
     hlsEnabled: boolean;
     // hlsCustomizationEnabled controls whether the user can edit the HLS broadcast page
@@ -44,6 +49,14 @@ function toNumber(value: any, fallback = 0): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function firstFiniteNumber(candidates: any[], fallback = 0): number {
+  for (const value of candidates) {
+    const n = Number(value);
+    if (Number.isFinite(n)) return n;
+  }
+  return fallback;
+}
+
 // Helper to coerce booleans
 function toBool(value: any): boolean {
   return value === true || value === "true" || value === 1;
@@ -65,6 +78,8 @@ export function normalizePlan(id: string, doc: any | undefined | null): Canonica
   const caps = (data.caps || {}) as any;
   const idLower = String(id).toLowerCase();
 
+  const rtmpEnabled = toBool(features.rtmp ?? data.rtmpEnabled);
+
   const rawMonthlyMinutes =
     limits.monthlyMinutesIncluded ??
     limits.participantMinutes ??
@@ -76,7 +91,10 @@ export function normalizePlan(id: string, doc: any | undefined | null): Canonica
 
   const monthlyMinutes = toNumber(rawMonthlyMinutes, 0);
 
-  const priceMonthly = toNumber(data.priceMonthly ?? data.price, 0);
+  // Price input can come from either legacy `price` or canonical `priceMonthly`.
+  // Important: if `priceMonthly` exists but is non-numeric (e.g. "$25"),
+  // we must fall back to `price` instead of zeroing out.
+  const priceMonthly = firstFiniteNumber([data.priceMonthly, data.price], 0);
 
   const rawVisibility: any =
     data.visibility ?? (data.hidden === true ? "hidden" : undefined);
@@ -113,10 +131,16 @@ export function normalizePlan(id: string, doc: any | undefined | null): Canonica
     0
   );
 
-  const transcodeMinutes = toNumber(
-    limits.transcodeMinutes ?? data.transcodeMinutes,
-    0
-  );
+  // IMPORTANT: preserve absence vs explicit value.
+  // - If the plan doc does not define transcodeMinutes at all, treat as "not included" (undefined).
+  // - If the plan doc defines transcodeMinutes (including 0), keep it.
+  const hasTranscodeMinutesField =
+    (limits && Object.prototype.hasOwnProperty.call(limits, "transcodeMinutes")) ||
+    Object.prototype.hasOwnProperty.call(data, "transcodeMinutes");
+
+  const transcodeMinutes = hasTranscodeMinutesField
+    ? toNumber(limits.transcodeMinutes ?? data.transcodeMinutes, 0)
+    : undefined;
 
   // Canonical multistream feature flag. Honor both the modern
   // `features.multistream` key and the legacy/admin
@@ -145,10 +169,19 @@ export function normalizePlan(id: string, doc: any | undefined | null): Canonica
     }
   }
 
+  // RTMP destinations are only meaningful when RTMP itself is enabled.
+  // This avoids “phantom” destination counts (e.g., Basic showing 1)
+  // when a leftover numeric cap exists but RTMP is turned off.
+  if (!rtmpEnabled) {
+    rtmpDestinationsMax = 0;
+  }
+
   const maxHoursPerMonth = (() => {
     const explicit = limits.maxHoursPerMonth ?? data.maxHoursPerMonth;
     if (explicit !== undefined && explicit !== null) return toNumber(explicit, 0);
-    if (monthlyMinutes > 0) return Math.floor(monthlyMinutes / 60);
+    // Use ceil so hour-based caps never undercut minute-based caps.
+    // Example: 2000 minutes => 33h 20m, so we need 34 hours to cover all minutes.
+    if (monthlyMinutes > 0) return Math.ceil(monthlyMinutes / 60);
     return 0;
   })();
 
@@ -169,6 +202,18 @@ export function normalizePlan(id: string, doc: any | undefined | null): Canonica
 
   const rawFeatures = features as any;
   const rawData: any = data;
+
+  // Overage capability flag (NOT billing): Pro allows overages by default.
+  // This is separate from legacy per-user toggles.
+  const allowsOverages = (() => {
+    const explicit =
+      rawFeatures.allowsOverages ??
+      rawFeatures.overagesAllowed ??
+      rawData.allowsOverages ??
+      rawData.overagesAllowed;
+    if (explicit !== undefined) return toBool(explicit);
+    return idLower === "pro";
+  })();
 
   // Derive canonical HLS feature flag with sensible defaults:
   // - Respect any explicit HLS flags on the plan document first.
@@ -247,14 +292,15 @@ export function normalizePlan(id: string, doc: any | undefined | null): Canonica
     },
     features: {
       recording: toBool(features.recording ?? data.recordingEnabled),
-      rtmp: toBool(features.rtmp ?? data.rtmpEnabled),
+      rtmp: rtmpEnabled,
       // Multistream is enabled when either the explicit feature flag
       // is set or the numeric destination cap allows more than one
       // RTMP destination.
-      multistream: multistreamFeature || rtmpDestinationsMax > 1,
+      multistream: rtmpEnabled && (multistreamFeature || rtmpDestinationsMax > 1),
       // Advanced permissions have been removed; plans no longer toggle
       // permissions mode. Always operate in simple mode.
       advancedPermissions: false,
+      allowsOverages,
       hlsEnabled: canHls,
       hlsCustomizationEnabled,
       canHls,

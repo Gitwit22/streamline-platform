@@ -2,7 +2,7 @@ import React, { useState, useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { API_BASE } from "../services/apiBase";
-import { apiFetch } from "../lib/api";
+import { apiFetchAuth } from "../lib/api";
 
 // Email validation function
 function validateEmail(email: string): boolean {
@@ -79,8 +79,6 @@ export const SignupPage = () => {
         tosAccepted: true,
       };
 
-      console.log("📤 Sending signup request:", { email, displayName });
-
       const res = await fetch(`${API_BASE}/api/auth/signup`, {
         method: "POST",
         headers: {
@@ -97,23 +95,26 @@ export const SignupPage = () => {
         return;
       }
 
-      console.log("✅ Signup successful:", data);
+      if (!data?.token) {
+        setError("Signup failed: missing token from server");
+        setLoading(false);
+        return;
+      }
 
       // Store user data and token in localStorage
       localStorage.setItem("sl_user", JSON.stringify(data.user));
-      localStorage.setItem("sl_token", data.token);
+      localStorage.setItem("authToken", data.token);
       localStorage.setItem("sl_userId", data.user.id || data.user.uid);
       localStorage.setItem("sl_displayName", data.user.displayName);
 
       // Fallback: Set JWT as a non-httpOnly cookie for backend auth (for local dev)
       if (typeof document !== "undefined" && data.token) {
         document.cookie = `token=${data.token}; path=/; max-age=${60 * 60 * 24 * 7}`;
-        console.log("[Signup] Cookies after signup:", document.cookie);
       }
 
       // Initialize canonical account document with plan + stream defaults.
       try {
-        await apiFetch("/api/account/init", { method: "POST" });
+        await apiFetchAuth("/api/account/init", { method: "POST" });
       } catch (initErr) {
         console.warn("[Signup] account init failed", initErr);
       }

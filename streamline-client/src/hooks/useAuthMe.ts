@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { apiFetch, clearAuthStorage } from "../lib/api";
+import { apiFetchAuth, clearAuthStorage } from "../lib/api";
 
 export interface AuthUser {
   id?: string;
@@ -37,7 +37,7 @@ async function fetchAuthMeFresh(): Promise<AuthUser | null> {
   inFlight = (async () => {
     try {
       // Use the canonical auth endpoint which exposes plan + billing + admin flags
-      const res = await apiFetch("/api/auth/me");
+      const res = await apiFetchAuth("/api/auth/me");
       const data = (await res.json()) as AuthUser;
       cachedUser = data;
       return data;

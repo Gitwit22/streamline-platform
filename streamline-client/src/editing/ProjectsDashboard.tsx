@@ -1,11 +1,17 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { editingApi, type Project as EditProject, type Asset } from "../lib/editingApi";
+import { useEffectiveEntitlements } from "../hooks/useEffectiveEntitlements";
+import { useFeatureAccess } from "../hooks/useFeatureAccess";
 
 type Project = EditProject;
 
 export default function ProjectsDashboard() {
   const nav = useNavigate();
+  const { effectiveEntitlements } = useEffectiveEntitlements();
+  const { access } = useFeatureAccess(effectiveEntitlements);
+  const canEditor = access.editor.allowed;
+
   const [projects, setProjects] = useState<Project[]>([]);
   const [assets, setAssets] = useState<Asset[]>([]);
   const [loading, setLoading] = useState(true);
@@ -42,7 +48,11 @@ export default function ProjectsDashboard() {
     setProjectName("");
     setSelectedAssetId("");
 
-    nav(`/editing/editor/${newProject.id}`);
+    if (canEditor) {
+      nav(`/editing/editor/${newProject.id}`);
+    } else {
+      alert("Project created. Editor is currently disabled.");
+    }
   };
 
   return (
@@ -210,6 +220,7 @@ export default function ProjectsDashboard() {
               <ProjectCard 
                 key={proj.id} 
                 project={proj} 
+                canEditor={canEditor}
                 onDelete={async () => {
                   try {
                     await editingApi.deleteProject(proj.id);
@@ -420,9 +431,11 @@ export default function ProjectsDashboard() {
 
 function ProjectCard({
   project,
+  canEditor,
   onDelete,
 }: {
   project: Project;
+  canEditor: boolean;
   onDelete: () => Promise<void>;
 }) {
   const nav = useNavigate();
@@ -524,33 +537,41 @@ function ProjectCard({
           gap: '0.75rem'
         }}>
           <button
-            onClick={() => nav(`/editing/editor/${project.id}`)}
+            onClick={() => {
+              if (!canEditor) return;
+              nav(`/editing/editor/${project.id}`);
+            }}
+            disabled={!canEditor}
             style={{
               flex: 1,
               padding: '0.75rem 1rem',
-              background: 'linear-gradient(135deg, #dc2626, #ef4444)',
-              color: '#ffffff',
+              background: canEditor
+                ? 'linear-gradient(135deg, #dc2626, #ef4444)'
+                : 'rgba(107, 114, 128, 0.2)',
+              color: canEditor ? '#ffffff' : '#9ca3af',
               border: 'none',
               borderRadius: '0.5rem',
               fontWeight: '600',
-              cursor: 'pointer',
+              cursor: canEditor ? 'pointer' : 'not-allowed',
               transition: 'all 0.3s ease',
               fontSize: '0.875rem'
             }}
             onMouseEnter={(e) => {
+              if (!canEditor) return;
               const target = e.target as HTMLButtonElement;
               target.style.background = 'linear-gradient(135deg, #b91c1c, #dc2626)';
               target.style.boxShadow = '0 8px 16px rgba(220, 38, 38, 0.3)';
               target.style.transform = 'translateY(-2px)';
             }}
             onMouseLeave={(e) => {
+              if (!canEditor) return;
               const target = e.target as HTMLButtonElement;
               target.style.background = 'linear-gradient(135deg, #dc2626, #ef4444)';
               target.style.boxShadow = 'none';
               target.style.transform = 'translateY(0)';
             }}
           >
-            ✏️ Open
+            {canEditor ? '✏️ Open' : '🚫 Editor disabled'}
           </button>
           <button
             onClick={() => alert("Duplicate coming soon")}

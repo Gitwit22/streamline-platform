@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { API_BASE } from "../../lib/apiBase";
 import { S } from "../SettingsBilling.styles";
+import { apiFetchAuth } from "../../lib/api";
 
 type SavedEmbed = {
   embedId: string;
@@ -48,7 +49,7 @@ function persistCreateDraft(draft: HlsCreateDraft) {
 
 function getAuthToken(): string | null {
   try {
-    return window.localStorage.getItem("sl_token") || window.localStorage.getItem("auth_token");
+    return window.localStorage.getItem("authToken");
   } catch {
     return null;
   }
@@ -96,6 +97,9 @@ export default function SettingsHlsSetup({
   canCustomize: boolean;
   onUpgrade?: () => void;
 }) {
+  const canCustomize = !!_canCustomize;
+  const onUpgrade = _onUpgrade;
+
   const [embeds, setEmbeds] = useState<SavedEmbed[]>([]);
   const [loadingList, setLoadingList] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
@@ -164,12 +168,12 @@ export default function SettingsHlsSetup({
     setLoadingList(true);
     setListError(null);
     try {
-      const res = await fetch(`${API_BASE}/api/saved-embeds`, {
+      const res = await apiFetchAuth(`${API_BASE}/api/saved-embeds`, {
         method: "GET",
         credentials: "include",
         cache: "no-store",
         headers: buildAuthHeaders(),
-      });
+      }, { allowNonOk: true });
       const payload = await res.json().catch(() => null);
       if (!res.ok) {
         const code = payload?.error || "server_error";
@@ -192,23 +196,31 @@ export default function SettingsHlsSetup({
   };
 
   useEffect(() => {
+    if (!platformEnabled) return;
+    if (!canCustomize) return;
     loadEmbeds({ keepSelection: false });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleArchive = async (embedId: string) => {
+    if (!canCustomize) {
+      setListError("Not included in your plan");
+      onUpgrade?.();
+      return;
+    }
+
     const ok = window.confirm("Archive this embed? It will be removed from the list.");
     if (!ok) return;
 
     setListMessage(null);
     setListError(null);
     try {
-      const res = await fetch(`${API_BASE}/api/saved-embeds/${encodeURIComponent(embedId)}`, {
+      const res = await apiFetchAuth(`${API_BASE}/api/saved-embeds/${encodeURIComponent(embedId)}`, {
         method: "PUT",
         credentials: "include",
         headers: buildAuthHeaders(),
         body: JSON.stringify({ archived: true }),
-      });
+      }, { allowNonOk: true });
       const payload = await res.json().catch(() => null);
       if (!res.ok) {
         throw new Error(payload?.error || "Failed to archive");
@@ -221,6 +233,12 @@ export default function SettingsHlsSetup({
   };
 
   const handleDelete = async (embed: SavedEmbed) => {
+    if (!canCustomize) {
+      setListError("Not included in your plan");
+      onUpgrade?.();
+      return;
+    }
+
     const message = embed.activeRoomId
       ? "This embed is currently active. Deleting will break the viewer link anywhere it’s posted and disconnect your active show."
       : "Deleting will break the viewer link anywhere it’s posted. You’ll need to replace the embed code on your site.";
@@ -236,12 +254,12 @@ export default function SettingsHlsSetup({
     setListMessage(null);
     setListError(null);
     try {
-      const res = await fetch(`${API_BASE}/api/saved-embeds/${encodeURIComponent(embed.embedId)}`, {
+      const res = await apiFetchAuth(`${API_BASE}/api/saved-embeds/${encodeURIComponent(embed.embedId)}`, {
         method: "PUT",
         credentials: "include",
         headers: buildAuthHeaders(),
         body: JSON.stringify({ archived: true }),
-      });
+      }, { allowNonOk: true });
       const payload = await res.json().catch(() => null);
       if (!res.ok) {
         throw new Error(payload?.error || "Failed to delete");
@@ -268,6 +286,13 @@ export default function SettingsHlsSetup({
 
   const handleEditSave = async (e: FormEvent) => {
     e.preventDefault();
+
+    if (!canCustomize) {
+      setEditError("Not included in your plan");
+      onUpgrade?.();
+      return;
+    }
+
     if (!editingEmbed) return;
 
     setEditError(null);
@@ -300,7 +325,7 @@ export default function SettingsHlsSetup({
 
     setEditSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/api/saved-embeds/${encodeURIComponent(editingEmbed.embedId)}`, {
+      const res = await apiFetchAuth(`${API_BASE}/api/saved-embeds/${encodeURIComponent(editingEmbed.embedId)}`, {
         method: "PUT",
         credentials: "include",
         headers: buildAuthHeaders(),
@@ -308,7 +333,7 @@ export default function SettingsHlsSetup({
           name,
           description: description || "",
         }),
-      });
+      }, { allowNonOk: true });
       const payload = await res.json().catch(() => null);
       if (!res.ok) {
         throw new Error(payload?.error || "Failed to update embed");
@@ -328,6 +353,13 @@ export default function SettingsHlsSetup({
 
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
+
+    if (!canCustomize) {
+      setCreateError("Not included in your plan");
+      onUpgrade?.();
+      return;
+    }
+
     setCreateError(null);
     setCreateMessage(null);
 
@@ -348,7 +380,7 @@ export default function SettingsHlsSetup({
 
     setCreating(true);
     try {
-      const res = await fetch(`${API_BASE}/api/saved-embeds`, {
+      const res = await apiFetchAuth(`${API_BASE}/api/saved-embeds`, {
         method: "POST",
         credentials: "include",
         headers: buildAuthHeaders(),
@@ -356,7 +388,7 @@ export default function SettingsHlsSetup({
           name,
           description: description || undefined,
         }),
-      });
+      }, { allowNonOk: true });
       const payload = await res.json().catch(() => null);
       if (!res.ok) {
         throw new Error(payload?.error || "Failed to create embed");
@@ -408,6 +440,22 @@ export default function SettingsHlsSetup({
             </div>
           )}
 
+          {!canCustomize && (
+            <div style={{ marginTop: 10, padding: "10px 12px", borderRadius: 12, background: "rgba(245,158,11,0.10)", border: "1px solid rgba(245,158,11,0.35)", color: "#fde68a", fontSize: 13 }}>
+              <div style={{ fontWeight: 800, marginBottom: 6 }}>Not included in your plan</div>
+              <div style={{ color: "#fcd34d" }}>Upgrade to create and manage viewer pages (Saved Embeds).</div>
+              {onUpgrade && (
+                <button
+                  type="button"
+                  onClick={onUpgrade}
+                  style={{ ...S.primaryBtn, padding: "10px 14px", fontSize: 13, marginTop: 10 }}
+                >
+                  Upgrade
+                </button>
+              )}
+            </div>
+          )}
+
           <form onSubmit={handleCreate} style={{ marginTop: 12, display: "grid", gap: 10 }}>
             <div style={{ display: "grid", gap: 6 }}>
               <label style={{ fontSize: 12, color: "#9ca3af", fontWeight: 800 }}>Name</label>
@@ -417,6 +465,7 @@ export default function SettingsHlsSetup({
                 onChange={(e) => setCreateName(e.target.value)}
                 placeholder="e.g. Weekly Live Show"
                 maxLength={60}
+                disabled={!canCustomize || creating}
                 style={{
                   width: "100%",
                   padding: "10px 12px",
@@ -436,6 +485,7 @@ export default function SettingsHlsSetup({
                 placeholder="Short description for this viewer page"
                 maxLength={200}
                 rows={2}
+                disabled={!canCustomize || creating}
                 style={{
                   width: "100%",
                   padding: "8px 12px",
@@ -456,7 +506,7 @@ export default function SettingsHlsSetup({
               <span>{60 - createName.length}</span> name characters left · <span>{200 - createDescription.length}</span> description characters left
             </div>
 
-            <button type="submit" disabled={creating || isCreateInvalid} style={{ ...S.primaryBtn, padding: "12px 16px", fontSize: 14 }}>
+            <button type="submit" disabled={!canCustomize || creating || isCreateInvalid} style={{ ...S.primaryBtn, padding: "12px 16px", fontSize: 14 }}>
               {creating ? "Creating…" : "Create Embed"}
             </button>
           </form>
@@ -517,7 +567,7 @@ export default function SettingsHlsSetup({
             type="button"
             style={{ ...S.secondaryBtn, padding: "8px 12px", fontSize: 13 }}
             onClick={() => loadEmbeds({ keepSelection: true })}
-            disabled={loadingList}
+            disabled={!platformEnabled || !canCustomize || loadingList}
           >
             {loadingList ? "Loading…" : "Refresh"}
           </button>
@@ -534,12 +584,28 @@ export default function SettingsHlsSetup({
           </div>
         )}
 
+        {!canCustomize && (
+          <div style={{ marginTop: 12, padding: "10px 12px", borderRadius: 12, background: "rgba(245,158,11,0.10)", border: "1px solid rgba(245,158,11,0.35)", color: "#fde68a", fontSize: 13 }}>
+            <div style={{ fontWeight: 800, marginBottom: 6 }}>Not included in your plan</div>
+            <div style={{ color: "#fcd34d" }}>Upgrade to create and manage Saved Embeds.</div>
+            {onUpgrade && (
+              <button
+                type="button"
+                onClick={onUpgrade}
+                style={{ ...S.primaryBtn, padding: "10px 14px", fontSize: 13, marginTop: 10 }}
+              >
+                Upgrade
+              </button>
+            )}
+          </div>
+        )}
+
         <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-          {embeds.length === 0 && (
+          {canCustomize && embeds.length === 0 && (
             <div style={{ color: "#9ca3af", fontSize: 13 }}>No saved embeds yet. Create one first.</div>
           )}
 
-          {embeds.map((embed) => {
+          {canCustomize && embeds.map((embed) => {
             const viewerUrl = absoluteViewerUrlFromPath(embed.viewerPath, embed.embedId);
             const selected = embed.embedId === selectedEmbedId;
             return (
@@ -623,6 +689,7 @@ export default function SettingsHlsSetup({
                     type="button"
                     style={{ ...S.secondaryBtn, padding: "8px 12px", fontSize: 13 }}
                     onClick={() => openEditModal(embed)}
+                    disabled={!canCustomize}
                   >
                     Edit
                   </button>
@@ -650,6 +717,11 @@ export default function SettingsHlsSetup({
                     type="button"
                     style={{ ...S.secondaryBtn, padding: "8px 12px", fontSize: 13 }}
                     onClick={() => {
+                      if (!canCustomize) {
+                        setListError("Not included in your plan");
+                        onUpgrade?.();
+                        return;
+                      }
                       const name = embed.label || "this embed";
                       const ok = window.confirm(
                         `Duplicate ${name}? This will create a new viewer link with the same name and description.`,
@@ -659,14 +731,14 @@ export default function SettingsHlsSetup({
                         setListMessage(null);
                         setListError(null);
                         try {
-                          const res = await fetch(`${API_BASE}/api/saved-embeds`, {
+                          const res = await apiFetchAuth(`${API_BASE}/api/saved-embeds`, {
                             method: "POST",
                             credentials: "include",
                             headers: buildAuthHeaders(),
                             body: JSON.stringify({
                               name: `${embed.label} (Copy)`,
                             }),
-                          });
+                          }, { allowNonOk: true });
                           const payload = await res.json().catch(() => null);
                           if (!res.ok) {
                             throw new Error(payload?.error || "Failed to duplicate embed");
@@ -678,6 +750,7 @@ export default function SettingsHlsSetup({
                         }
                       })();
                     }}
+                    disabled={!canCustomize}
                   >
                     Duplicate
                   </button>
@@ -685,6 +758,7 @@ export default function SettingsHlsSetup({
                     type="button"
                     style={{ ...S.secondaryBtn, padding: "8px 12px", fontSize: 13, borderColor: "rgba(239,68,68,0.7)", color: "#fecaca" }}
                     onClick={() => handleDelete(embed)}
+                    disabled={!canCustomize}
                   >
                     Delete
                   </button>

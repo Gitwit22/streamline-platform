@@ -25,7 +25,7 @@ Successfully integrated real backend API endpoints across the entire editing mod
 
 | File | Changes | Status |
 |------|---------|--------|
-| `EditorPage.tsx` | Replaced mockApi/mockRecordingApi with editingApi | ✅ |
+| `EditorPage.tsx` | Replaced mock clients with editingApi | ✅ |
 | `AssetLibrary.tsx` | Updated imports, types (Recording), API calls | ✅ |
 | `ProjectsDashboard.tsx` | Added assets state, Promise.all loading, real createProject | ✅ |
 | `RenderAndUploadPage.tsx` | Imported Project type from editingApi, real getProject | ✅ |

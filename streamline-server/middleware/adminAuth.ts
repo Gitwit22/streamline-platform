@@ -32,6 +32,7 @@ declare global {
  */
 export async function isAdmin(uid: string): Promise<boolean> {
   try {
+    console.log("[isAdmin] checking users/%s and admins/%s", uid, uid);
     const userDoc = await firestore.collection("users").doc(uid).get();
     const userData = userDoc.data() || {};
 
@@ -49,7 +50,7 @@ export async function isAdmin(uid: string): Promise<boolean> {
     }
     return fromLegacyAdmins;
   } catch (error) {
-    console.error("[isAdmin] error checking admin status");
+    console.error("[isAdmin] firestore error", error);
     return false;
   }
 }
@@ -108,6 +109,8 @@ export async function requireAdmin(
       res.status(401).json({ error: "Missing admin user ID or valid token" });
       return;
     }
+
+    console.log("[requireAdmin] resolved userId:", userId);
 
     const isAdminUser = await isAdmin(userId);
     if (!isAdminUser) {

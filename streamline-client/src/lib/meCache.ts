@@ -1,4 +1,5 @@
-import { apiFetch } from "./api";
+import { apiFetchAuth } from "./api";
+import { setPlatformFlagsValue } from "./platformFlagsStore";
 
 // Simple in-memory cache for /api/account/me so Settings and other pages
 // can share a single canonical user payload per session, with basic
@@ -24,9 +25,12 @@ export async function getMeCached(): Promise<any | null> {
   if (!inFlightMe) {
     inFlightMe = (async () => {
       try {
-        const res = await apiFetch("/api/account/me");
+        const res = await apiFetchAuth("/api/account/me", { cache: "no-store" });
         const data = await res.json();
         cachedMe = data;
+        if (data && typeof data === "object" && (data as any).platformFlags) {
+          setPlatformFlagsValue((data as any).platformFlags);
+        }
         return data;
       } finally {
         inFlightMe = null;

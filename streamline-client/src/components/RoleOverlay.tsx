@@ -1,12 +1,42 @@
 import React from "react";
-import { useParticipants, useLocalParticipant } from "@livekit/components-react";
+import { useParticipants, useLocalParticipant, useRoomContext } from "@livekit/components-react";
 import { normalizeUiRolePresetId } from "../lib/roles";
+import { apiFetchAuth } from "../lib/api";
+import { encodeReconnectMediaMessage, reconnectMedia } from "../lib/mediaRecovery";
 
 // Normalize API base to avoid trailing slashes that cause "//api/..." URLs
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 
-type Role = "host" | "participant";
+type Role = "host" | "participant" | "moderator";
 type RolePresetId = "participant" | "cohost";
+
+function extractRolePresetId(rawParticipant: any): RolePresetId | null {
+  // Preferred: explicit parsed identity metadata (some parts of the app attach this).
+  const identityMeta = rawParticipant?.identityMetadata;
+  if (identityMeta && typeof identityMeta === "object") {
+    const v = (identityMeta as any)?.rolePresetId;
+    if (v === "cohost" || v === "participant") return v;
+  }
+
+  // LiveKit's `metadata` is typically a JSON string. Some wrappers may already
+  // parse it into an object, so support both.
+  const meta = rawParticipant?.metadata;
+  if (meta && typeof meta === "object") {
+    const v = (meta as any)?.rolePresetId;
+    if (v === "cohost" || v === "participant") return v;
+  }
+  if (typeof meta === "string" && meta.trim()) {
+    try {
+      const parsed = JSON.parse(meta);
+      const v = parsed?.rolePresetId;
+      if (v === "cohost" || v === "participant") return v;
+    } catch {
+      // ignore
+    }
+  }
+
+  return null;
+}
 
 export default function RoleOverlay({
   open,
@@ -117,7 +147,7 @@ export default function RoleOverlay({
           flexDirection: 'column',
           gap: '0.75rem'
         }}>
-          {role === "host" && (
+          {(role === "host" || role === "moderator") && (
             <HostPanel
               roomName={roomName}
               roomId={roomId}
@@ -130,7 +160,9 @@ export default function RoleOverlay({
               overlaysEnabled={overlaysEnabled}
             />
           )}
-          {role === "participant" && <ParticipantPanel roomName={roomName} />}
+          {role === "participant" && (
+            <ParticipantPanel roomName={roomName} roomId={roomId} roomAccessToken={roomAccessToken} />
+          )}
         </div>
       </div>
     </div>
@@ -161,19 +193,100 @@ function HostPanel({
 }) {
   const parts = useParticipants();
   const { localParticipant } = useLocalParticipant();
+  const room = useRoomContext();
   const [muteLock, setMuteLock] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+  const [mediaBusy, setMediaBusy] = React.useState(false);
   const [roleToast, setRoleToast] = React.useState<string | null>(null);
   const roleToastTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const [roleByIdentity, setRoleByIdentity] = React.useState<Record<string, RolePresetId>>({});
   const [roleStatus, setRoleStatus] = React.useState<Record<string, "saving" | "saved">>({});
+
+  const [deviceModalOpen, setDeviceModalOpen] = React.useState(false);
+  const [audioInputs, setAudioInputs] = React.useState<Array<{ deviceId: string; label: string }>>([]);
+  const [videoInputs, setVideoInputs] = React.useState<Array<{ deviceId: string; label: string }>>([]);
+  const [selectedAudioDeviceId, setSelectedAudioDeviceId] = React.useState<string>("");
+  const [selectedVideoDeviceId, setSelectedVideoDeviceId] = React.useState<string>("");
+
+  const localDisplayName = React.useMemo(() => {
+    const lkName = (localParticipant as any)?.name as string | undefined;
+    const n = typeof lkName === "string" ? lkName.trim() : "";
+    if (n) return n;
+    try {
+      const cached = localStorage.getItem("sl_displayName");
+      const c = typeof cached === "string" ? cached.trim() : "";
+      if (c) return c;
+    } catch {
+      // ignore
+    }
+    return "";
+  }, [localParticipant]);
+
+  const loadDevices = React.useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) return;
+    const all = await navigator.mediaDevices.enumerateDevices();
+    const mics = all
+      .filter((d) => d.kind === "audioinput")
+      .map((d) => ({ deviceId: d.deviceId, label: d.label || "Microphone" }));
+    const cams = all
+      .filter((d) => d.kind === "videoinput")
+      .map((d) => ({ deviceId: d.deviceId, label: d.label || "Camera" }));
+    setAudioInputs(mics);
+    setVideoInputs(cams);
+    if (!selectedAudioDeviceId && mics[0]?.deviceId) setSelectedAudioDeviceId(mics[0].deviceId);
+    if (!selectedVideoDeviceId && cams[0]?.deviceId) setSelectedVideoDeviceId(cams[0].deviceId);
+  }, [selectedAudioDeviceId, selectedVideoDeviceId]);
+
+  const handleReconnectSelf = async () => {
+    if (!room) return;
+    setMediaBusy(true);
+    try {
+      await reconnectMedia(room);
+    } finally {
+      setMediaBusy(false);
+    }
+  };
+
+  const handleOpenDeviceModal = async () => {
+    try {
+      await loadDevices();
+    } catch {
+      // ignore
+    }
+    setDeviceModalOpen(true);
+  };
+
+  const handleReconnectWithDevices = async () => {
+    if (!room) return;
+    setMediaBusy(true);
+    try {
+      await reconnectMedia(room, {
+        audioDeviceId: selectedAudioDeviceId || undefined,
+        videoDeviceId: selectedVideoDeviceId || undefined,
+      });
+      setDeviceModalOpen(false);
+    } finally {
+      setMediaBusy(false);
+    }
+  };
+
+  const handleReconnectGuest = async (identity: string) => {
+    try {
+      const lp: any = room?.localParticipant || localParticipant;
+      if (!lp?.publishData) return;
+      const data = encodeReconnectMediaMessage();
+      await lp.publishData(data, { reliable: true, destinationIdentities: [identity] });
+    } catch {
+      // ignore
+    }
+  };
 
   // Load initial muteLock state for this room
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/roomSettings/${encodeURIComponent(roomName)}`);
+        const res = await apiFetchAuth(`${API_BASE}/api/roomSettings/${encodeURIComponent(roomName)}`, {}, { allowNonOk: true });
         if (!res.ok) return;
         const data = await res.json();
         if (!cancelled) setMuteLock(!!data.muteLock);
@@ -271,6 +384,49 @@ function HostPanel({
   };
   return (
     <>
+      <Section title="Audio & Video">
+        <div style={{ display: 'flex', gap: '0.5rem' }}>
+          <button
+            onClick={handleReconnectSelf}
+            disabled={mediaBusy}
+            style={{
+              flex: 1,
+              borderRadius: '0.375rem',
+              border: '1px solid rgba(220, 38, 38, 0.6)',
+              padding: '0.35rem 0.75rem',
+              fontSize: '0.75rem',
+              background: mediaBusy ? 'rgba(220, 38, 38, 0.4)' : 'linear-gradient(135deg, #dc2626, #b91c1c)',
+              color: '#ffffff',
+              cursor: mediaBusy ? 'not-allowed' : 'pointer',
+              fontWeight: 700,
+            }}
+            title="Stops and re-acquires your mic/cam (manual control)"
+          >
+            {mediaBusy ? 'Reconnecting…' : 'Reconnect media'}
+          </button>
+          <button
+            onClick={handleOpenDeviceModal}
+            disabled={mediaBusy}
+            style={{
+              borderRadius: '0.375rem',
+              border: '1px solid rgba(148, 163, 184, 0.6)',
+              padding: '0.35rem 0.75rem',
+              fontSize: '0.75rem',
+              background: 'rgba(31, 41, 55, 0.9)',
+              color: '#e5e7eb',
+              cursor: mediaBusy ? 'not-allowed' : 'pointer',
+              fontWeight: 600,
+              opacity: mediaBusy ? 0.6 : 1,
+            }}
+          >
+            Choose device
+          </button>
+        </div>
+        <p style={{ marginTop: '0.5rem', fontSize: '0.75rem', color: 'rgba(248, 250, 252, 0.7)', lineHeight: 1.45 }}>
+          Manual-only. No room overlays or banners.
+        </p>
+      </Section>
+
       <Section title="Live Participants">
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', gap: '0.5rem' }}>
           <button
@@ -320,6 +476,7 @@ function HostPanel({
           participants={parts}
           onRemove={(id) => apiRemove(roomName, id, roomAccessToken)}
           onMute={(id, muted) => apiMute(roomName, id, muted, roomAccessToken)}
+          onReconnectGuest={handleReconnectGuest}
           canModerate={!!canModerate}
           muteLock={muteLock}
           localIdentity={localParticipant?.identity || null}
@@ -337,6 +494,13 @@ function HostPanel({
           </p>
         )}
       </Section>
+
+        <ChatPanel
+          roomId={roomId}
+          roomAccessToken={roomAccessToken}
+          displayName={localDisplayName}
+          allowEndSession={true}
+        />
 
       {roleToast && (
         <div
@@ -421,14 +585,152 @@ function HostPanel({
           </div>
         </Section>
       )}
+
+      {deviceModalOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            zIndex: 10000,
+            background: 'rgba(0,0,0,0.55)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: 16,
+          }}
+          onClick={() => setDeviceModalOpen(false)}
+        >
+          <div
+            style={{
+              width: '100%',
+              maxWidth: 560,
+              borderRadius: 14,
+              background: 'rgba(17,24,39,0.96)',
+              border: '1px solid rgba(255,255,255,0.12)',
+              padding: 14,
+              color: '#fff',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: '0.9rem', fontWeight: 800, marginBottom: 10, color: '#ef4444' }}>
+              Choose device
+            </div>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              <div>
+                <div style={{ fontSize: '0.75rem', opacity: 0.8, marginBottom: 6 }}>Microphone</div>
+                <select
+                  value={selectedAudioDeviceId}
+                  onChange={(e) => setSelectedAudioDeviceId(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '10px 12px',
+                    borderRadius: 10,
+                    border: '1px solid rgba(255,255,255,0.14)',
+                    background: 'rgba(0,0,0,0.35)',
+                    color: '#fff',
+                    fontSize: 12,
+                  }}
+                >
+                  {audioInputs.length === 0 && <option value="">(No microphones found)</option>}
+                  {audioInputs.map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <div style={{ fontSize: '0.75rem', opacity: 0.8, marginBottom: 6 }}>Camera</div>
+                <select
+                  value={selectedVideoDeviceId}
+                  onChange={(e) => setSelectedVideoDeviceId(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '10px 12px',
+                    borderRadius: 10,
+                    border: '1px solid rgba(255,255,255,0.14)',
+                    background: 'rgba(0,0,0,0.35)',
+                    color: '#fff',
+                    fontSize: 12,
+                  }}
+                >
+                  {videoInputs.length === 0 && <option value="">(No cameras found)</option>}
+                  {videoInputs.map((d) => (
+                    <option key={d.deviceId} value={d.deviceId}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
+              <button
+                onClick={() => setDeviceModalOpen(false)}
+                style={{
+                  padding: '8px 10px',
+                  borderRadius: 10,
+                  border: '1px solid rgba(255,255,255,0.14)',
+                  background: 'rgba(255,255,255,0.06)',
+                  color: 'rgba(255,255,255,0.9)',
+                  fontSize: 12,
+                  fontWeight: 700,
+                  cursor: 'pointer',
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleReconnectWithDevices}
+                disabled={mediaBusy}
+                style={{
+                  padding: '8px 10px',
+                  borderRadius: 10,
+                  border: '1px solid rgba(255,255,255,0.18)',
+                  background: 'rgba(59,130,246,0.25)',
+                  color: '#fff',
+                  fontSize: 12,
+                  fontWeight: 800,
+                  cursor: mediaBusy ? 'not-allowed' : 'pointer',
+                }}
+              >
+                {mediaBusy ? 'Reconnecting…' : 'Use selected & reconnect'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }
 
-function ParticipantPanel({ roomName }: { roomName: string }) {
+function ParticipantPanel({
+  roomName,
+  roomId,
+  roomAccessToken,
+}: {
+  roomName: string;
+  roomId: string;
+  roomAccessToken: string;
+}) {
   const { localParticipant } = useLocalParticipant();
+  const localDisplayName = React.useMemo(() => {
+    const lkName = (localParticipant as any)?.name;
+    const n = typeof lkName === "string" ? lkName.trim() : "";
+    if (n) return n;
+    try {
+      const cached = localStorage.getItem("sl_displayName");
+      const c = typeof cached === "string" ? cached.trim() : "";
+      if (c) return c;
+    } catch {
+      // ignore
+    }
+    return "";
+  }, [localParticipant]);
   const roleLabel = (() => {
-    const raw = (localParticipant as any)?.identityMetadata?.rolePresetId;
+    const raw = extractRolePresetId(localParticipant as any);
     const name = normalizeUiRolePresetId(raw);
     if (name === "cohost") return "You are a Co-host";
     if (name === "participant") return "You are a Participant";
@@ -447,6 +749,14 @@ function ParticipantPanel({ roomName }: { roomName: string }) {
           </p>
         )}
       </Section>
+
+      <ChatPanel
+        roomId={roomId}
+        roomAccessToken={roomAccessToken}
+        displayName={localDisplayName}
+        allowEndSession={false}
+      />
+
       <Section title="Tips">
         <ul style={{ listStyle: 'disc', paddingLeft: '1.25rem', fontSize: '0.875rem', opacity: 0.8, color: 'rgba(255, 255, 255, 0.8)', lineHeight: 1.6 }}>
           <li>Use headphones to avoid echo.</li>
@@ -455,6 +765,369 @@ function ParticipantPanel({ roomName }: { roomName: string }) {
         </ul>
       </Section>
     </>
+  );
+}
+
+function ChatPanel({
+  roomId,
+  roomAccessToken,
+  displayName,
+  allowEndSession,
+}: {
+  roomId: string;
+  roomAccessToken: string;
+  displayName?: string;
+  allowEndSession: boolean;
+}) {
+  const [sessionId, setSessionId] = React.useState<string | null>(null);
+  const [loading, setLoading] = React.useState(false);
+  const [error, setError] = React.useState<string | null>(null);
+  const [messages, setMessages] = React.useState<
+    Array<{ id: string; text: string; createdAtMs: number | null; sender?: { name?: string | null; role?: string | null } }>
+  >([]);
+  const [draft, setDraft] = React.useState("");
+  const bottomRef = React.useRef<HTMLDivElement | null>(null);
+  const eventSourceRef = React.useRef<EventSource | null>(null);
+  const seenIdsRef = React.useRef<Set<string>>(new Set());
+
+  const loadSessionAndHistory = React.useCallback(async () => {
+    if (!roomId || !roomAccessToken) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const sessionRes = await apiFetchAuth(
+        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/session`,
+        {
+          method: "GET",
+          headers: {
+            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
+          },
+        },
+        { allowNonOk: true }
+      );
+      const sessionText = await sessionRes.text();
+      const sessionData = sessionText ? JSON.parse(sessionText) : {};
+      if (!sessionRes.ok) {
+        setError(sessionData?.error || "Failed to load chat session");
+        setSessionId(null);
+        setMessages([]);
+        return;
+      }
+      const sid = typeof sessionData?.sessionId === "string" ? sessionData.sessionId : null;
+      setSessionId(sid);
+
+      if (!sid) {
+        setMessages([]);
+        return;
+      }
+
+      const msgRes = await apiFetchAuth(
+        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/messages?sessionId=${encodeURIComponent(sid)}&limit=200`,
+        {
+          method: "GET",
+          headers: {
+            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
+          },
+        },
+        { allowNonOk: true }
+      );
+      const msgText = await msgRes.text();
+      const msgData = msgText ? JSON.parse(msgText) : {};
+      if (!msgRes.ok) {
+        setError(msgData?.error || "Failed to load chat messages");
+        setMessages([]);
+        return;
+      }
+
+      const rows = Array.isArray(msgData?.messages) ? msgData.messages : [];
+      const next = rows
+        .map((m: any) => ({
+          id: String(m?.id || ""),
+          text: typeof m?.text === "string" ? m.text : "",
+          createdAtMs: typeof m?.createdAtMs === "number" ? m.createdAtMs : null,
+          sender: m?.sender || undefined,
+        }))
+        .filter((m: any) => !!m.id);
+      setMessages(next);
+      const seen = new Set<string>();
+      next.forEach((m) => seen.add(m.id));
+      seenIdsRef.current = seen;
+    } catch (e: any) {
+      setError(e?.message || "Failed to load chat");
+      setSessionId(null);
+      setMessages([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [roomId, roomAccessToken]);
+
+  const connectStream = React.useCallback(
+    (sid: string) => {
+      try {
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
+        }
+
+        // EventSource can't send headers, so we pass the room access token via query param `t`.
+        const url = `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/stream?sessionId=${encodeURIComponent(sid)}&t=${encodeURIComponent(roomAccessToken)}`;
+        const es = new EventSource(url);
+        eventSourceRef.current = es;
+
+        es.addEventListener("message", (ev: any) => {
+          try {
+            const payload = JSON.parse(ev?.data || "{}");
+            const id = typeof payload?.id === "string" ? payload.id : "";
+            if (!id) return;
+            if (seenIdsRef.current.has(id)) return;
+            seenIdsRef.current.add(id);
+
+            const nextMsg = {
+              id,
+              text: typeof payload?.text === "string" ? payload.text : "",
+              createdAtMs: typeof payload?.createdAtMs === "number" ? payload.createdAtMs : null,
+              sender: payload?.sender || undefined,
+            };
+
+            setMessages((prev) => prev.concat([nextMsg]));
+          } catch {
+            // ignore
+          }
+        });
+      } catch {
+        // ignore
+      }
+    },
+    [roomId, roomAccessToken]
+  );
+
+  const sendMessage = React.useCallback(async () => {
+    const text = draft.trim();
+    if (!text) return;
+    setDraft("");
+    setError(null);
+    try {
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/messages`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
+          },
+          body: JSON.stringify({ text, displayName: displayName || undefined }),
+        },
+        { allowNonOk: true }
+      );
+      const raw = await res.text();
+      const data = raw ? JSON.parse(raw) : {};
+      if (!res.ok) {
+        setError(data?.error || "Failed to send message");
+        return;
+      }
+      const sid = typeof data?.sessionId === "string" ? data.sessionId : null;
+      if (sid && sid !== sessionId) {
+        setSessionId(sid);
+      }
+    } catch (e: any) {
+      setError(e?.message || "Failed to send message");
+    }
+  }, [draft, roomId, roomAccessToken, displayName, sessionId]);
+
+  const endSession = React.useCallback(async () => {
+    if (!allowEndSession) return;
+    setError(null);
+    try {
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/session/end`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
+          },
+          body: JSON.stringify({}),
+        },
+        { allowNonOk: true }
+      );
+
+      // Only clear local state if server successfully ended the session
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        const errorMsg = `Couldn't end chat session. ${res.status} ${text}`;
+        setError(errorMsg);
+        console.error("[RoleOverlay] endSession failed:", errorMsg);
+        return;
+      }
+
+      setSessionId(null);
+      setMessages([]);
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+    } catch (e: any) {
+      const errorMsg = e?.message || "Failed to end session";
+      setError(errorMsg);
+      console.error("[RoleOverlay] endSession error:", e);
+    }
+  }, [allowEndSession, roomId, roomAccessToken]);
+
+  React.useEffect(() => {
+    void loadSessionAndHistory();
+    return () => {
+      try {
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
+        }
+      } catch {
+        // ignore
+      }
+    };
+  }, [loadSessionAndHistory]);
+
+  React.useEffect(() => {
+    if (!sessionId) return;
+    connectStream(sessionId);
+    return () => {
+      try {
+        if (eventSourceRef.current) {
+          eventSourceRef.current.close();
+          eventSourceRef.current = null;
+        }
+      } catch {
+        // ignore
+      }
+    };
+  }, [sessionId, connectStream]);
+
+  React.useEffect(() => {
+    try {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    } catch {
+      // ignore
+    }
+  }, [messages.length]);
+
+  return (
+    <Section title="Chat">
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.75)" }}>
+            {loading ? "Loading…" : sessionId ? "Session chat" : "Chat not started"}
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button
+              type="button"
+              onClick={() => void loadSessionAndHistory()}
+              style={{
+                padding: "6px 10px",
+                borderRadius: 10,
+                border: "1px solid rgba(255,255,255,0.14)",
+                background: "rgba(255,255,255,0.06)",
+                color: "rgba(255,255,255,0.9)",
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: "pointer",
+              }}
+            >
+              Refresh
+            </button>
+            {allowEndSession && (
+              <button
+                type="button"
+                onClick={() => void endSession()}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 10,
+                  border: "1px solid rgba(220,38,38,0.35)",
+                  background: "rgba(220,38,38,0.12)",
+                  color: "rgba(248,113,113,0.95)",
+                  fontSize: 12,
+                  fontWeight: 800,
+                  cursor: "pointer",
+                }}
+              >
+                End session
+              </button>
+            )}
+          </div>
+        </div>
+
+        {error && <div style={{ fontSize: 12, color: "rgba(248,113,113,0.95)" }}>{String(error)}</div>}
+
+        <div
+          style={{
+            border: "1px solid rgba(255,255,255,0.10)",
+            background: "rgba(15,23,42,0.35)",
+            borderRadius: 12,
+            padding: 10,
+            maxHeight: 180,
+            overflowY: "auto",
+            display: "flex",
+            flexDirection: "column",
+            gap: 8,
+          }}
+        >
+          {messages.length === 0 ? (
+            <div style={{ fontSize: 12, opacity: 0.7 }}>No messages yet.</div>
+          ) : (
+            messages.map((m) => (
+              <div key={m.id} style={{ fontSize: 12, lineHeight: 1.35 }}>
+                <span style={{ color: "rgba(255,255,255,0.75)", fontWeight: 700 }}>
+                  {(m.sender?.name || m.sender?.role || "Someone") + ": "}
+                </span>
+                <span style={{ color: "rgba(255,255,255,0.92)" }}>{m.text}</span>
+              </div>
+            ))
+          )}
+          <div ref={bottomRef} />
+        </div>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void sendMessage();
+              }
+            }}
+            placeholder={sessionId ? "Type a message…" : "Chat will start when you send"}
+            style={{
+              flex: 1,
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid rgba(255,255,255,0.14)",
+              background: "rgba(255,255,255,0.06)",
+              color: "rgba(255,255,255,0.9)",
+              outline: "none",
+              fontSize: 13,
+            }}
+          />
+          <button
+            type="button"
+            onClick={() => void sendMessage()}
+            disabled={!draft.trim()}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: "1px solid rgba(59,130,246,0.20)",
+              background: !draft.trim() ? "rgba(59,130,246,0.08)" : "rgba(59,130,246,0.18)",
+              color: "rgba(255,255,255,0.95)",
+              fontSize: 13,
+              fontWeight: 900,
+              cursor: !draft.trim() ? "not-allowed" : "pointer",
+              opacity: !draft.trim() ? 0.6 : 1,
+            }}
+          >
+            Send
+          </button>
+        </div>
+      </div>
+    </Section>
   );
 }
 
@@ -478,6 +1151,7 @@ function ParticipantList({
   canModerate,
   onRemove,
   onMute,
+  onReconnectGuest,
   muteLock,
   localIdentity,
   canMuteGuests,
@@ -491,6 +1165,7 @@ function ParticipantList({
   canModerate?: boolean;
   onRemove?: (identity: string) => void;
   onMute?: (identity: string, muted: boolean) => void;
+  onReconnectGuest?: (identity: string) => void;
   muteLock?: boolean;
   localIdentity?: string | null;
   canMuteGuests?: boolean;
@@ -509,7 +1184,7 @@ function ParticipantList({
       {participants.map((p) => (
         (() => {
           const stableRole = roleByIdentity && roleByIdentity[p.identity];
-          const metaRoleRaw = (p as any)?.metadata?.rolePresetId;
+          const metaRoleRaw = extractRolePresetId(p as any);
           const metaRole = metaRoleRaw ? normalizeUiRolePresetId(metaRoleRaw) : undefined;
           const currentRole: RolePresetId = (stableRole || metaRole || "participant") as RolePresetId;
 
@@ -586,6 +1261,25 @@ function ParticipantList({
                   </div>
                 )}
               <div style={{ display: 'flex', gap: '0.25rem', justifyContent: 'flex-end' }}>
+                {onReconnectGuest && localIdentity && p.identity !== localIdentity && (
+                  <button
+                    style={{
+                      borderRadius: '0.25rem',
+                      border: '1px solid rgba(148, 163, 184, 0.6)',
+                      padding: '0.25rem 0.5rem',
+                      fontSize: '0.7rem',
+                      background: 'rgba(17, 24, 39, 0.6)',
+                      color: '#e5e7eb',
+                      cursor: 'pointer',
+                      transition: 'all 0.3s ease',
+                      fontWeight: '600',
+                    }}
+                    onClick={() => onReconnectGuest(p.identity)}
+                    title="Asks this guest to re-acquire their devices"
+                  >
+                    Reconnect
+                  </button>
+                )}
                 {canMuteGuests !== false && (() => {
                   const micEnabled = (p as any).isMicrophoneEnabled as boolean | undefined;
                   const isMuted = micEnabled === false;
@@ -656,15 +1350,18 @@ function ParticipantList({
 
 async function apiRemove(room: string, identity: string, roomAccessToken: string) {
   try {
-    const res = await fetch(`${API_BASE}/api/roomModeration/remove`, {
+    const res = await apiFetchAuth(
+      `${API_BASE}/api/roomModeration/remove`,
+      {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "x-room-access-token": roomAccessToken,
       },
-      credentials: "include",
       body: JSON.stringify({ room, identity }),
-    });
+      },
+      { allowNonOk: true }
+    );
 
     let data: any = null;
     try {
@@ -688,15 +1385,18 @@ async function apiRemove(room: string, identity: string, roomAccessToken: string
 
 async function apiMute(_room: string, identity: string, muted: boolean, roomAccessToken: string) {
   try {
-    const res = await fetch(`${API_BASE}/api/roomModeration/mute`, {
+    const res = await apiFetchAuth(
+      `${API_BASE}/api/roomModeration/mute`,
+      {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "x-room-access-token": roomAccessToken,
       },
-      credentials: "include",
       body: JSON.stringify({ room: _room, identity, muted }),
-    });
+      },
+      { allowNonOk: true }
+    );
 
     const data = await res.json().catch(() => null);
     if (!res.ok || (data && data.error)) {
@@ -712,15 +1412,18 @@ async function apiMute(_room: string, identity: string, muted: boolean, roomAcce
 
 async function apiMuteAll(_room: string, muted: boolean, roomAccessToken: string) {
   try {
-    const res = await fetch(`${API_BASE}/api/roomModeration/mute-all`, {
+    const res = await apiFetchAuth(
+      `${API_BASE}/api/roomModeration/mute-all`,
+      {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "x-room-access-token": roomAccessToken,
       },
-      credentials: "include",
       body: JSON.stringify({ room: _room, muted }),
-    });
+      },
+      { allowNonOk: true }
+    );
 
     const data = await res.json().catch(() => null);
     if (!res.ok || (data && data.error)) {
@@ -740,15 +1443,18 @@ async function apiSetMuteLock(
   hostIdentity: string | null,
   roomAccessToken: string,
 ): Promise<{ muteLock: boolean }> {
-  const res = await fetch(`${API_BASE}/api/roomModeration/mute-lock`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-room-access-token": roomAccessToken,
+  const res = await apiFetchAuth(
+    `${API_BASE}/api/roomModeration/mute-lock`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-room-access-token": roomAccessToken,
+      },
+      body: JSON.stringify({ room: _room, muteLock, hostIdentity }),
     },
-    credentials: "include",
-    body: JSON.stringify({ room: _room, muteLock, hostIdentity }),
-  });
+    { allowNonOk: true }
+  );
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data.error) {
@@ -764,19 +1470,17 @@ async function apiSetRole(
   identity: string,
   role: RolePresetId,
 ): Promise<{ roleId?: string } | null> {
-  const res = await fetch(
-    `${API_BASE}/api/rooms/${encodeURIComponent(
-      roomId,
-    )}/participants/${encodeURIComponent(identity)}/permissions`,
+  const res = await apiFetchAuth(
+    `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/participants/${encodeURIComponent(identity)}/permissions`,
     {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "x-room-access-token": roomAccessToken,
       },
-      credentials: "include",
       body: JSON.stringify({ roleId: role }),
     },
+    { allowNonOk: true }
   );
 
   const data = await res.json().catch(() => null);

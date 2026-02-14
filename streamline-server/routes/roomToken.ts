@@ -1,7 +1,9 @@
+import { LIMIT_ERRORS } from "../lib/limitErrors";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 
 import { Router } from "express";
 import crypto from "crypto";
-import { InviteClaims, requireAuthOrInvite, verifyInviteToken } from "../middleware/requireAuth";
+import { InviteClaims, requireAuth, requireAuthOrInvite, verifyInviteToken } from "../middleware/requireAuth";
 import { firestore } from "../firebaseAdmin";
 import admin from "firebase-admin";
 import { ensureRoomDoc } from "../services/rooms";
@@ -11,7 +13,6 @@ import { intersectPermissionsWithEntitlements } from "../lib/rolePermissions";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { roleToParticipantPermission } from "../lib/livekitPermissions";
-import { TrackSource } from "livekit-server-sdk";
 import jwt from "jsonwebtoken";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { resolveMaxDestinations } from "../lib/planLimits";
@@ -48,11 +49,55 @@ async function getRecordingUiFlag() {
   };
 }
 
+async function getSegmentedUiFlags() {
+  const [
+    contentLibrarySnap,
+    projectsSnap,
+    editorSnap,
+    myContentSnap,
+    myContentRecordingsSnap,
+  ] = await Promise.all([
+    firestore.collection("featureFlags").doc("contentLibraryEnabled").get(),
+    firestore.collection("featureFlags").doc("projectsEnabled").get(),
+    firestore.collection("featureFlags").doc("editorEnabled").get(),
+    firestore.collection("featureFlags").doc("myContentEnabled").get(),
+    firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
+  ]);
+
+  const contentLibraryData = contentLibrarySnap.exists ? ((contentLibrarySnap.data() as any) || {}) : {};
+  const projectsData = projectsSnap.exists ? ((projectsSnap.data() as any) || {}) : {};
+  const editorData = editorSnap.exists ? ((editorSnap.data() as any) || {}) : {};
+  const myContentData = myContentSnap.exists ? ((myContentSnap.data() as any) || {}) : {};
+  const myContentRecordingsData = myContentRecordingsSnap.exists
+    ? ((myContentRecordingsSnap.data() as any) || {})
+    : {};
+
+  // New segmented flags default to DISABLED when missing.
+  return {
+    contentLibraryEnabled: contentLibraryData.enabled === true,
+    projectsEnabled: projectsData.enabled === true,
+    editorEnabled: editorData.enabled === true,
+    myContentEnabled: myContentData.enabled === true,
+    myContentRecordingsEnabled: myContentRecordingsData.enabled === true,
+  };
+}
+
 function deriveServiceUrl(): string | null {
   const raw = process.env.LIVEKIT_URL || "";
   if (!raw) return null;
   // Convert wss://host to https://host for RoomServiceClient
   return raw.replace(/^wss?:\/\//i, (m) => (m.toLowerCase() === "ws://" ? "http://" : "https://"));
+}
+
+function getLiveKitServerUrlForClient(): string | null {
+  const raw = String(process.env.LIVEKIT_URL || "").trim();
+  if (!raw) return null;
+  // LiveKit client expects ws(s) URLs. Allow operators to configure https(s)
+  // and normalize it safely.
+  if (/^https?:\/\//i.test(raw)) {
+    return raw.replace(/^http:\/\//i, "ws://").replace(/^https:\/\//i, "wss://");
+  }
+  return raw;
 }
 
 type GrantRole = "viewer" | "participant" | "host" | "cohost";
@@ -88,27 +133,11 @@ function roleToGrant(role: GrantRole) {
 
   const participantPerm = roleToParticipantPermission(permissionRole);
 
-  let canPublishSources: TrackSource[] = [];
-  if (permissionRole === "viewer") {
-    canPublishSources = [];
-  } else if (permissionRole === "cohost") {
-    canPublishSources = [
-      TrackSource.MICROPHONE,
-      TrackSource.CAMERA,
-      TrackSource.SCREEN_SHARE,
-      TrackSource.SCREEN_SHARE_AUDIO,
-    ];
-  } else {
-    // participant + moderator
-    canPublishSources = [TrackSource.MICROPHONE, TrackSource.CAMERA];
-  }
-
   const base = {
     roomJoin: true,
     canSubscribe: participantPerm.canSubscribe,
     canPublish: participantPerm.canPublish,
     canPublishData: participantPerm.canPublishData,
-    canPublishSources,
   } as const;
 
   if (role === "viewer") {
@@ -203,10 +232,21 @@ async function getPlanLimit(uid: string, field: string): Promise<number | undefi
 
 function getRoomAccessSecret() {
   const env = String(process.env.NODE_ENV || "development").toLowerCase();
-  const raw = process.env.ROOM_ACCESS_TOKEN_SECRET || process.env.JWT_SECRET || "";
-  if ((env === "production" || env === "staging") && (!process.env.ROOM_ACCESS_TOKEN_SECRET || raw === "dev-secret")) {
-    throw new Error("ROOM_ACCESS_TOKEN_SECRET must be set (no dev-secret in production)");
+  const explicit = process.env.ROOM_ACCESS_TOKEN_SECRET;
+  const fallback = process.env.JWT_SECRET;
+  const raw = String(explicit || fallback || "").trim();
+
+  // In production/staging we require a real secret, but we allow falling back to
+  // JWT_SECRET for backwards compatibility with older deployments.
+  if (env === "production" || env === "staging") {
+    if (!raw || raw === "dev-secret") {
+      throw new Error("ROOM_ACCESS_TOKEN_SECRET (or JWT_SECRET) must be set (no dev-secret in production)");
+    }
+    if (!explicit && process.env.AUTH_DEBUG === "1") {
+      console.warn("[roomToken] Using JWT_SECRET fallback for ROOM_ACCESS_TOKEN_SECRET");
+    }
   }
+
   return raw || "dev-secret";
 }
 
@@ -318,7 +358,7 @@ async function validateViewerInvite(inviteToken: string, roomId: string, session
   const doc = await firestore.collection("viewerInvites").doc(inviteToken).get();
   if (!doc.exists) return { ok: false, reason: "not_found" } as const;
   const data = doc.data() as ViewerInvite;
-  if (data.roomId !== roomId) return { ok: false, reason: "room_mismatch" } as const;
+  if (data.roomId !== roomId) return { ok: false, reason: PERMISSION_ERRORS.ROOM_MISMATCH } as const;
   if (data.revokedAt) return { ok: false, reason: "revoked" } as const;
 
   // Expiry checks
@@ -368,7 +408,12 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
     const uid = (req as any).user?.uid as string | undefined;
     const invite = (req as any).invite as InviteClaims | undefined;
 
-    if (!uid && !invite) return res.status(401).json({ error: "Unauthorized" });
+    // Default: RTC token issuance requires authentication.
+    // Invite tokens may still be supplied for role/authorization context,
+    // but do not allow anonymous token minting.
+    if (!uid) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
 
     const trimmedRoomId = String(rawRoomId || "").trim();
     const trimmedRoomName = sanitizeDisplayName(String(rawRoomName || "")).trim();
@@ -408,7 +453,7 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
       roomName: trimmedRoomName || inviteRoomName || null,
     });
 
-    if (!resolvedRoom) return res.status(400).json({ error: "roomId_or_roomName_required" });
+    if (!resolvedRoom) return res.status(400).json({ error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED }); // Canonical code for missing entitlement/feature
     const roomId = resolvedRoom.roomId;
     const roomName = resolvedRoom.roomName;
 
@@ -428,8 +473,10 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
       else requestedRole = "participant";
     }
 
-    const normalizedRequested = String(requestedRole || "participant").toLowerCase();
+    let normalizedRequested = String(requestedRole || "participant").toLowerCase();
     const elevatedRequested = normalizedRequested === "cohost" || normalizedRequested === "moderator";
+
+    const callerIsAdmin = !!uid && (await isAdmin(uid));
 
     // If an elevated role is requested but the caller is not authenticated,
     // reject even if an invite token is present.
@@ -441,28 +488,93 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
     // authorizes it. If an authenticated user requests moderator without any
     // invite, require admin and otherwise downgrade.
     if (uid && !invite && normalizedRequested === "moderator") {
-      const ok = await isAdmin(uid);
-      if (!ok) requestedRole = "participant";
+      if (!callerIsAdmin) requestedRole = "participant";
     }
 
     const apiKey = process.env.LIVEKIT_API_KEY;
     const apiSecret = process.env.LIVEKIT_API_SECRET;
     if (!apiKey || !apiSecret) {
-      return res.status(500).json({ error: "LiveKit keys missing in env" });
+      const missing: string[] = [];
+      if (!apiKey) missing.push("LIVEKIT_API_KEY");
+      if (!apiSecret) missing.push("LIVEKIT_API_SECRET");
+      return res.status(500).json({ code: "misconfigured", error: "LiveKit keys missing", missing });
     }
 
     const inviteIdentity = invite?.identity || invite?.uid || invite?.sub || null;
     const tokenIdentity = uid || inviteIdentity || `invite-${roomId}`;
+    if (!tokenIdentity || !String(tokenIdentity).trim()) {
+      return res.status(500).json({ code: "internal_error", error: "invalid_identity" });
+    }
+    if (!roomName || !String(roomName).trim()) {
+      return res.status(500).json({ code: "internal_error", error: "invalid_room_name" });
+    }
 
     // Determine which account's entitlements and permission mode should apply.
     // We always scope entitlements to the room owner, never the caller.
     let entitlementsUid: string | null = null;
     let roomSnapExists: boolean | null = null;
+    let roomPolicy: { ownerId: string | null; visibility: "public" | "unlisted" | "private"; requiresAuth: boolean; requiresPayment: boolean; roomType?: string | null } = {
+      ownerId: null,
+      visibility: "unlisted",
+      requiresAuth: true,
+      requiresPayment: false,
+      roomType: null,
+    };
     try {
       const roomRef = firestore.collection("rooms").doc(roomId);
       const roomSnap = await roomRef.get();
       roomSnapExists = roomSnap.exists;
       const roomData = (roomSnap.exists ? roomSnap.data() : null) as any;
+
+      const visibilityRaw = String(roomData?.visibility || "").trim().toLowerCase();
+      const visibility = (visibilityRaw === "public" || visibilityRaw === "unlisted" || visibilityRaw === "private")
+        ? (visibilityRaw as any)
+        : "unlisted";
+
+      roomPolicy = {
+        ownerId: typeof roomData?.ownerId === "string" && roomData.ownerId.trim() ? roomData.ownerId.trim() : null,
+        visibility,
+        requiresAuth: typeof roomData?.requiresAuth === "boolean" ? !!roomData.requiresAuth : true,
+        requiresPayment: typeof roomData?.requiresPayment === "boolean" ? !!roomData.requiresPayment : false,
+        roomType: typeof roomData?.roomType === "string" ? roomData.roomType : null,
+      };
+
+      // Role enforcement:
+      // - Existing rooms: only the room owner may be treated as the host.
+      // - Owner joins: always mint a host-scoped roomAccessToken so host tools
+      //   (mute/remove/etc) work even if the client omitted role=host.
+      // - Non-owner joins: never allow self-assigned host role.
+      if (roomPolicy.ownerId) {
+        const isOwner = !!uid && uid === roomPolicy.ownerId;
+        if (isOwner) {
+          requestedRole = "host";
+          normalizedRequested = "host";
+        } else if (callerIsAdmin) {
+          // Internal admin override: allow host-level tooling in any room.
+          requestedRole = "host";
+          normalizedRequested = "host";
+        } else if (normalizedRequested === "host") {
+          requestedRole = "participant";
+          normalizedRequested = "participant";
+        }
+      }
+
+      // Room policy enforcement (server-side, before token issuance)
+      if (roomPolicy.requiresAuth && !uid) {
+        return res.status(401).json({ error: "Login required" });
+      }
+      if (!callerIsAdmin) {
+        if (roomPolicy.visibility === "private" && roomPolicy.ownerId && uid !== roomPolicy.ownerId) {
+          return res.status(403).json({ error: "Not allowed" });
+        }
+        if (roomPolicy.requiresPayment && roomPolicy.ownerId && uid !== roomPolicy.ownerId) {
+          return res.status(402).json({ error: "payment_required" });
+        }
+      }
+      if (roomPolicy.roomType && roomPolicy.roomType !== "rtc") {
+        return res.status(400).json({ error: "room_not_rtc" });
+      }
+
       if (roomData && typeof roomData.ownerId === "string" && roomData.ownerId.trim()) {
         entitlementsUid = roomData.ownerId.trim();
       } else if (uid && normalizedRequested === "host") {
@@ -506,10 +618,11 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
       }
 
       try {
-        const [entitlements, hlsUi, recordingUi] = await Promise.all([
+        const [entitlements, hlsUi, recordingUi, segmentedUiFlags] = await Promise.all([
           getEffectiveEntitlements(entitlementsUid),
           getHlsUiFlag(),
           getRecordingUiFlag(),
+          getSegmentedUiFlags(),
         ]);
 
         const plan = entitlements.plan;
@@ -578,6 +691,7 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
           hlsSettingsTab: hlsUi.enabled,
           transcodeEnabled: platformTranscodeEnabled,
           recordingEnabled: recordingUi.enabled,
+          ...segmentedUiFlags,
         };
       } catch (err) {
         console.error("[roomToken] failed to compute effectiveEntitlements", err);
@@ -628,6 +742,9 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
     // already derived from rooms.livekitRoomName || roomName || name || id.
     // Treat that as the canonical LiveKit key and carry it explicitly.
     const livekitRoomName = roomName;
+    if (!livekitRoomName || !String(livekitRoomName).trim()) {
+      return res.status(500).json({ code: "internal_error", error: "invalid_livekit_room_name" });
+    }
 
     const AccessToken = await getAccessTokenCtor();
     const at = new AccessToken(apiKey, apiSecret, { identity: tokenIdentity, name: displayName });
@@ -638,7 +755,14 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
     const lkJwt = await at.toJwt();
     console.log("✅ roomToken jwt typeof:", typeof lkJwt, "len:", lkJwt.length);
 
-    const serverUrl = process.env.LIVEKIT_URL || null;
+    const serverUrl = getLiveKitServerUrlForClient();
+    if (!serverUrl) {
+      return res.status(500).json({
+        code: "misconfigured",
+        error: "LIVEKIT_URL missing",
+        missing: ["LIVEKIT_URL"],
+      });
+    }
 
     const roomAccessPayload = {
       roomId,
@@ -649,11 +773,32 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
       role: effectiveRoleKey,
       permissions,
       identity: tokenIdentity,
+      adminOverride: callerIsAdmin && !!roomPolicy.ownerId && !!uid && uid !== roomPolicy.ownerId,
     } as const;
 
     const roomAccessToken = jwt.sign(roomAccessPayload, getRoomAccessSecret(), {
       expiresIn: "12h",
     });
+
+    // Optional audit trail for token issuance (do NOT store tokens).
+    if (process.env.AUDIT_ROOM_TOKENS === "1") {
+      firestore
+        .collection("roomTokenAudit")
+        .add({
+          route: "/api/roomToken",
+          uid,
+          roomId,
+          roomName,
+          identity: tokenIdentity,
+          grantRole,
+          effectiveRoleKey,
+          usedInvite: !!invite,
+          ip: (req as any).ip || null,
+          userAgent: (req.headers["user-agent"] as string) || null,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        })
+        .catch((err) => console.error("[roomToken] audit write failed", err));
+    }
 
     return res.status(200).json({
       token: lkJwt,
@@ -666,17 +811,22 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
       roomId,
       roomName,
       roomAccessToken,
+      adminOverride: callerIsAdmin && !!roomPolicy.ownerId && !!uid && uid !== roomPolicy.ownerId,
       effectiveEntitlements: effectiveEntitlementsPayload,
       platformFlags,
     });
   } catch (err: any) {
     console.error("roomToken error:", err);
-    return res.status(500).json({ error: "Failed to create room token" });
+    return res.status(500).json({
+      code: "internal_error",
+      error: "Failed to create room token",
+      message: process.env.AUTH_DEBUG === "1" ? String(err?.message || err) : undefined,
+    });
   }
 });
 
 // Public guest token: subscribe only (downgraded to viewer when over cap)
-router.post("/guest", async (req, res) => {
+router.post("/guest", requireAuth as any, async (req: any, res) => {
   try {
     const { roomName: rawRoomName, roomId: rawRoomId, displayName, guestId, inviteToken } = req.body as {
       roomName?: string;
@@ -685,6 +835,12 @@ router.post("/guest", async (req, res) => {
       guestId?: string;
       inviteToken?: string;
     };
+
+    // Default: RTC token issuance requires authentication.
+    const uid = req.user?.uid as string | undefined;
+    if (!uid) {
+      return res.status(401).json({ error: "Authentication required" });
+    }
 
     if ((!rawRoomName || !rawRoomName.trim()) && (!rawRoomId || !rawRoomId.trim()) && !inviteToken) {
       return res.status(400).json({ error: "roomId_or_roomName_required" });
@@ -741,11 +897,48 @@ router.post("/guest", async (req, res) => {
     const apiKey = process.env.LIVEKIT_API_KEY;
     const apiSecret = process.env.LIVEKIT_API_SECRET;
     if (!apiKey || !apiSecret) {
-      return res.status(500).json({ error: "LiveKit keys missing in env" });
+      const missing: string[] = [];
+      if (!apiKey) missing.push("LIVEKIT_API_KEY");
+      if (!apiSecret) missing.push("LIVEKIT_API_SECRET");
+      return res.status(500).json({ code: "misconfigured", error: "LiveKit keys missing", missing });
+    }
+
+    // Load room policy + owner (do not trust hostUid from the client).
+    let ownerId: string | null = null;
+    let visibility: "public" | "unlisted" | "private" = "unlisted";
+    let requiresAuth = true;
+    let requiresPayment = false;
+    let roomType: string | null = null;
+    try {
+      const roomSnap = await firestore.collection("rooms").doc(roomId).get();
+      const roomData = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+      ownerId = typeof roomData.ownerId === "string" && roomData.ownerId.trim() ? roomData.ownerId.trim() : null;
+      const visibilityRaw = String(roomData.visibility || "").trim().toLowerCase();
+      if (visibilityRaw === "public" || visibilityRaw === "unlisted" || visibilityRaw === "private") {
+        visibility = visibilityRaw as any;
+      }
+      requiresAuth = typeof roomData.requiresAuth === "boolean" ? !!roomData.requiresAuth : true;
+      requiresPayment = typeof roomData.requiresPayment === "boolean" ? !!roomData.requiresPayment : false;
+      roomType = typeof roomData.roomType === "string" ? roomData.roomType : null;
+    } catch (err) {
+      console.error("[roomToken/guest] failed to load room policy", err);
+    }
+
+    if (requiresAuth && !uid) {
+      return res.status(401).json({ error: "Login required" });
+    }
+    if (visibility === "private" && ownerId && uid !== ownerId) {
+      return res.status(403).json({ error: "Not allowed" });
+    }
+    if (requiresPayment && ownerId && uid !== ownerId) {
+      return res.status(402).json({ error: "payment_required" });
+    }
+    if (roomType && roomType !== "rtc") {
+      return res.status(400).json({ error: "room_not_rtc" });
     }
 
     // Guest cap check (plan-aware via host, fallback to env)
-    const hostUid = (inviteClaims as any)?.uid || (inviteClaims as any)?.sub || (req.body as any)?.hostUid;
+    const hostUid = ownerId || (inviteClaims as any)?.uid || (inviteClaims as any)?.sub || uid;
     const maxGuestsPlan = hostUid ? await getPlanLimit(hostUid, "maxGuests") : undefined;
     const maxGuestsEnv = Number(process.env.MAX_GUESTS_PER_ROOM || "0");
     const envCap = Number.isFinite(maxGuestsEnv) && maxGuestsEnv > 0 ? maxGuestsEnv : undefined;
@@ -762,7 +955,13 @@ router.post("/guest", async (req, res) => {
       return res.status(429).json({ error: "room_full" });
     }
 
-    const identity = (guestId && guestId.trim()) || crypto.randomUUID();
+    const identity = (guestId && guestId.trim()) || uid;
+    if (!identity || !String(identity).trim()) {
+      return res.status(500).json({ code: "internal_error", error: "invalid_identity" });
+    }
+    if (!roomName || !String(roomName).trim()) {
+      return res.status(500).json({ code: "internal_error", error: "invalid_room_name" });
+    }
     const resolved = await resolveRoleForInvite({ uid: hostUid, requestedRole: "participant" });
     if (resolved.ok === false) {
       const payload = resolved.error;
@@ -780,7 +979,14 @@ router.post("/guest", async (req, res) => {
       ...roleToGrant(resolved.result.grantRole),
     });
     const lkJwt = await at.toJwt();
-    const serverUrl = process.env.LIVEKIT_URL || null;
+    const serverUrl = getLiveKitServerUrlForClient();
+    if (!serverUrl) {
+      return res.status(500).json({
+        code: "misconfigured",
+        error: "LIVEKIT_URL missing",
+        missing: ["LIVEKIT_URL"],
+      });
+    }
     if (process.env.AUTH_DEBUG === "1") {
       console.log("[invite-debug] mint guest room token", {
         roomName,
@@ -805,6 +1011,26 @@ router.post("/guest", async (req, res) => {
       expiresIn: "12h",
     });
 
+    // Optional audit trail for token issuance (do NOT store tokens).
+    if (process.env.AUDIT_ROOM_TOKENS === "1") {
+      firestore
+        .collection("roomTokenAudit")
+        .add({
+          route: "/api/roomToken/guest",
+          uid,
+          roomId,
+          roomName,
+          identity,
+          grantRole: resolved.result.grantRole,
+          effectiveRoleKey: resolved.result.effectiveRoleKey,
+          usedInvite: !!inviteClaims,
+          ip: (req as any).ip || null,
+          userAgent: (req.headers["user-agent"] as string) || null,
+          createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        })
+        .catch((err) => console.error("[roomToken/guest] audit write failed", err));
+    }
+
     return res.status(200).json({
       token: lkJwt,
       serverUrl,
@@ -820,7 +1046,11 @@ router.post("/guest", async (req, res) => {
     });
   } catch (err: any) {
     console.error("roomToken guest error:", err);
-    return res.status(500).json({ error: "Failed to create guest token" });
+    return res.status(500).json({
+      code: "internal_error",
+      error: "Failed to create guest token",
+      message: process.env.AUTH_DEBUG === "1" ? String(err?.message || err) : undefined,
+    });
   }
 });
 

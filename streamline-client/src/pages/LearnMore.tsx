@@ -1,6 +1,7 @@
 // src/pages/LearnMore.tsx
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { usePlatformFlags } from "../hooks/usePlatformFlags";
 
 /**
  * STREAMLINE LEARN MORE PAGE
@@ -29,6 +30,8 @@ type Audience = {
 
 export default function LearnMore() {
   const nav = useNavigate();
+  const { flags: platformFlags } = usePlatformFlags();
+  const platformTranscodeEnabled = platformFlags?.transcodeEnabled === true;
   const [scrollProgress, setScrollProgress] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -108,12 +111,16 @@ export default function LearnMore() {
   ];
 
   const futureFeatures: FutureFeature[] = [
-    {
-      icon: "✂️",
-      title: "AI Editing Suite",
-      description: "Automatic highlights, captions, timeline editing, social exports",
-      status: "Planned",
-    },
+    ...(platformTranscodeEnabled
+      ? ([
+          {
+            icon: "✂️",
+            title: "AI Editing Suite",
+            description: "Automatic highlights, captions, timeline editing, social exports",
+            status: "Planned",
+          },
+        ] as FutureFeature[])
+      : []),
     {
       icon: "📡",
       title: "Prerecorded Mode",

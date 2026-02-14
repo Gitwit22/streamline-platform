@@ -77,7 +77,7 @@ All API calls from the frontend use relative paths (`/api/*`), which the Vite pr
 - `POST /api/auth/login` - Login
 
 ### Rooms
-- `POST /api/roomToken` - Get token for joining a room
+- `POST /api/rooms/{roomId}/token` - Get token for joining a room (RTC)
 - `POST /api/rooms/{roomName}/start-multistream` - Start streaming to YouTube/FB/Twitch
 - `POST /api/rooms/{roomName}/stop-multistream` - Stop streaming
 
@@ -93,6 +93,7 @@ All API calls from the frontend use relative paths (`/api/*`), which the Vite pr
 
 ### Usage
 - `GET /api/usage/summary` - Get usage stats
+- Response header: `x-sl-usage-summary-version: v1`
 - `POST /api/usage/streamEnded` - Log stream end
 
 ## Troubleshooting

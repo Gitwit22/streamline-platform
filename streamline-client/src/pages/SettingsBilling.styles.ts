@@ -157,10 +157,26 @@ export const S: Record<string, CSSProperties> = {
     alignItems: "center",
     marginBottom: 20,
   },
+  cardHeaderRight: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+  },
   cardTitle: {
     margin: 0,
     fontSize: 20,
     fontWeight: 600,
+  },
+  manageBillingHeaderBtn: {
+    padding: "8px 12px",
+    borderRadius: 999,
+    border: "1px solid rgba(255,255,255,0.18)",
+    background: "rgba(255,255,255,0.06)",
+    color: "#e5e7eb",
+    fontSize: 13,
+    fontWeight: 700,
+    cursor: "pointer",
+    whiteSpace: "nowrap",
   },
   processingBadge: {
     fontSize: 13,

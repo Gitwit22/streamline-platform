@@ -4,18 +4,23 @@ import { PLAN_IDS, PlanId, isPlanId } from "../lib/planIds";
 import { API_BASE } from "../lib/apiBase";
 import { logAuthDebugContext } from "../lib/logAuthDebug";
 import { useNavigate, useSearchParams,} from "react-router-dom";
-import { apiFetch, clearAuthStorage } from "../lib/api";
+import { apiFetch, apiFetchAuth, clearAuthStorage } from "../lib/api";
+import { useFeatureAccess } from "../hooks/useFeatureAccess";
+import { useEffectiveEntitlements } from "../hooks/useEffectiveEntitlements";
 
 type SavedEmbedSummary = {
   embedId: string;
   label: string;
+  roomId: string;
   activeRoomId?: string | null;
 };
 
 
 type UsageData = {
-  streamingMinutes: number;
-  maxStreamingMinutes: number;
+  inRoomMinutes: number;
+  maxInRoomMinutes: number;
+  broadcastMinutes: number;
+  maxBroadcastMinutes: number;
   storageUsed: number;
   maxStorage: number;
   planId: PlanId;
@@ -54,17 +59,15 @@ function applyIncrementingSuffix(baseName: string, lastRoom: string | null): str
 
 function formatDefaultRoomName(displayName: string) {
   const now = new Date();
-  const dateFmt = new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-  }).format(now);
-  const timeFmt = new Intl.DateTimeFormat("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(now);
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const min = String(now.getMinutes()).padStart(2, "0");
+  const stamp = `${yyyy}${mm}${dd}-${hh}${min}`;
 
-  if (displayName) return `${displayName} – Live Session`;
-  return `StreamLine Live – ${dateFmt}, ${timeFmt}`;
+  const prefix = displayName ? `${displayName} – Live` : "StreamLine Live";
+  return `${prefix} – ${stamp}`;
 }
 
 export default function Join() {
@@ -72,6 +75,19 @@ export default function Join() {
   useEffect(() => { logAuthDebugContext("Arrive Join Page"); }, []);
   const nav = useNavigate();
   const [searchParams] = useSearchParams();
+  const { effectiveEntitlements } = useEffectiveEntitlements();
+  const { access } = useFeatureAccess(effectiveEntitlements);
+  const canContentLibrary = !!access?.contentLibrary?.allowed;
+  const canProjects = !!access?.projects?.allowed;
+  const canMyContent = !!access?.myContent?.allowed;
+  const canMyContentRecordings = !!access?.myContentRecordings?.allowed;
+
+  const myContentTarget = canProjects
+    ? "/projects"
+    : (canContentLibrary || canMyContentRecordings)
+      ? "/content"
+      : null;
+  const showMyContentButton = !!myContentTarget && canMyContent;
 
   const [displayName, setDisplayName] = useState(() => {
     // Prefer profile displayName if available, then fall back to cached value
@@ -90,7 +106,6 @@ export default function Join() {
   const [didEditDisplayName, setDidEditDisplayName] = useState(false);
   const [roomName, setRoomName] = useState("");
   const [inviteRoomId, setInviteRoomId] = useState<string | null>(null);
-  const [showEditingModal, setShowEditingModal] = useState(false);
   const [showLegacyJoinToast, setShowLegacyJoinToast] = useState(false);
   const [hideLegacyJoinToast, setHideLegacyJoinToast] = useState(() => {
     try {
@@ -173,41 +188,22 @@ export default function Join() {
       // Preferred: inviteToken resolves room+role server-side
       if (inviteTokenParam) {
         try {
-          const res = await fetch(`${API_BASE}/api/invites/resolve`, {
+          // Canonicalize legacy JWT invite links into the Firestore-backed invite flow.
+          // This reduces query-param token brittleness and ensures a server-issued guest session.
+          const res = await fetch(`${API_BASE}/api/invites/legacy/resolve`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ inviteToken: inviteTokenParam }),
           });
 
           if (!res.ok) return;
-          const data = await res.json().catch(() => null);
+          const data = await res.json().catch(() => null as any);
           if (!data || cancelled) return;
 
-          const decodedRoomId = String(data.roomId || "");
-          const decodedRoom = String(data.roomName || "");
-          // Use the resolved role from the server
-          const resolvedRole = String(data.role || "guest");
-          if (decodedRoomId) setInviteRoomId(decodedRoomId);
-          if (decodedRoom) setRoomName(decodedRoom);
+          const inviteId = String(data?.inviteId || "").trim();
+          if (!inviteId) return;
 
-          try {
-            localStorage.setItem("sl_invite_token", inviteTokenParam);
-            localStorage.setItem("sl_current_role", resolvedRole);
-          } catch {
-            // ignore
-          }
-
-          // Let the host know that someone has opened the invite link
-          // and is viewing the join page.
-          try {
-            await fetch(`${API_BASE}/api/invites/track-landing`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ inviteToken: inviteTokenParam, stage: "join_page" }),
-            });
-          } catch {
-            // best-effort only
-          }
+          nav(`/invite/${encodeURIComponent(inviteId)}`, { replace: true });
           return;
         } catch {
           return;
@@ -239,7 +235,7 @@ export default function Join() {
 
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/account/me`, { credentials: "include" });
+        const res = await apiFetchAuth(`${API_BASE}/api/account/me`, {}, { allowNonOk: true });
         if (!res.ok) {
           if (!cancelled) setPlatformHlsEnabled(true);
           return;
@@ -288,11 +284,10 @@ export default function Join() {
       setSavedEmbedsLoading(true);
       setSavedEmbedsError(null);
       try {
-        const res = await fetch(`${API_BASE}/api/saved-embeds`, {
+        const res = await apiFetchAuth(`${API_BASE}/api/saved-embeds`, {
           method: "GET",
-          credentials: "include",
           cache: "no-store",
-        });
+        }, { allowNonOk: true });
         const payload = await res.json().catch(() => null);
         if (!res.ok) {
           throw new Error(payload?.error || "Failed to load Saved Rooms");
@@ -303,9 +298,10 @@ export default function Join() {
           .map((e: any) => ({
             embedId: String(e?.embedId || "").trim(),
             label: String(e?.label || "").trim(),
+            roomId: String(e?.roomId || "").trim(),
             activeRoomId: typeof e?.activeRoomId === "string" ? e.activeRoomId : null,
           }))
-          .filter((e) => !!e.embedId);
+          .filter((e) => !!e.embedId && !!e.roomId);
         setSavedEmbeds(next);
       } catch (e: any) {
         if (!cancelled) {
@@ -339,7 +335,7 @@ export default function Join() {
     setUsageLoading(true);
     setUsageError(null);
 
-    fetch(`${API_BASE}/api/usage/me`, { credentials: "include" })
+    apiFetchAuth(`${API_BASE}/api/usage/me`, {}, { allowNonOk: true })
   .then(async (res) => {
     if (!res.ok) {
       const text = await res.text();
@@ -350,6 +346,7 @@ export default function Join() {
   .then((data) => {
     if (!didCancel) {
       const um = data?.usageMonthly || {};
+      const minutes = data?.usage?.minutes || um?.usage?.minutes || {};
       // Canonicalize plan id
       let planIdRaw = data?.plan?.id ?? data?.user?.planId ?? "free";
       let canonicalPlanId: PlanId = "free";
@@ -359,8 +356,19 @@ export default function Join() {
         canonicalPlanId = planIdRaw;
       }
       setUsageData({
-        streamingMinutes: um?.participantMinutes ?? um?.usage?.participantMinutes ?? Math.max(0, Math.round((data?.user?.usage?.hoursStreamedThisMonth || 0) * 60)),
-        maxStreamingMinutes: data?.plan?.limits?.participantMinutes ?? 0,
+        inRoomMinutes:
+          minutes?.inRoom?.currentPeriod ??
+          um?.participantMinutes ??
+          um?.usage?.participantMinutes ??
+          Math.max(0, Math.round((data?.user?.usage?.hoursStreamedThisMonth || 0) * 60)),
+        maxInRoomMinutes: data?.plan?.limits?.participantMinutes ?? 0,
+        broadcastMinutes:
+          minutes?.broadcast?.currentPeriod ??
+          minutes?.transcode?.currentPeriod ??
+          um?.transcodeMinutes ??
+          um?.usage?.transcodeMinutes ??
+          0,
+        maxBroadcastMinutes: data?.plan?.limits?.transcodeMinutes ?? 0,
         storageUsed: um?.storageGB ?? um?.usage?.storageGB ?? 0,
         maxStorage: data?.plan?.limits?.storageGB ?? 0,
         planId: canonicalPlanId,
@@ -414,32 +422,54 @@ export default function Join() {
     // Host flow: create a Firestore room first, then navigate to /room/:roomId
     if (!isParticipant) {
       try {
+        // Saved Room flow (HLS): reuse the existing canonical roomId so
+        // HLS config + viewer page stay stable across sessions.
+        if (isUsingSaved) {
+          const selected = savedEmbeds.find((e) => e.embedId === selectedSavedEmbedId);
+          const savedRoomId = String(selected?.roomId || "").trim();
+          if (!savedRoomId) {
+            alert("Select a Saved Room or switch to Create New Room.");
+            return;
+          }
+
+          // Ensure this room is treated as host-created on this device so
+          // the Room page can mint host tokens even when the room is idle.
+          try {
+            const createdRooms = JSON.parse(localStorage.getItem("sl_created_rooms") || "[]");
+            if (!createdRooms.includes(savedRoomId)) {
+              createdRooms.push(savedRoomId);
+              localStorage.setItem("sl_created_rooms", JSON.stringify(createdRooms));
+            }
+          } catch {
+            // ignore
+          }
+
+          localStorage.setItem("sl_last_room", selected?.label || roomLabel || savedRoomId);
+          localStorage.setItem("sl_last_room_ts", String(Date.now()));
+          localStorage.setItem("sl_current_role", "host");
+
+          nav(`/room/${encodeURIComponent(savedRoomId)}`);
+          return;
+        }
+
         if (!roomLabel) {
           alert("Please enter a room name.");
           return;
         }
 
-        const res = await fetch(`${API_BASE}/api/rooms/create`, {
+        const res = await apiFetchAuth(`${API_BASE}/api/rooms/create`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          credentials: "include",
           body: JSON.stringify({
             livekitRoomName: roomLabel,
             roomType: "rtc",
-            savedEmbedId: isUsingSaved ? selectedSavedEmbedId : undefined,
+            savedEmbedId: undefined,
           }),
-        });
+        }, { allowNonOk: true });
 
         if (!res.ok) {
           const text = await res.text().catch(() => "");
           console.error("Failed to create room", res.status, text);
-
-          // If auth is missing/expired, send host to login with a return URL
-          if (res.status === 401 || res.status === 403) {
-            const next = `${window.location.pathname}${window.location.search}`;
-            nav(`/login?next=${encodeURIComponent(next)}`, { replace: true });
-            return;
-          }
 
           alert("Failed to create room. Please try again.");
           return;
@@ -511,8 +541,13 @@ export default function Join() {
   }
 
   const streamingPercent =
-    usageData && usageData.maxStreamingMinutes > 0
-      ? (usageData.streamingMinutes / usageData.maxStreamingMinutes) * 100
+    usageData && usageData.maxInRoomMinutes > 0
+      ? (usageData.inRoomMinutes / usageData.maxInRoomMinutes) * 100
+      : 0;
+
+  const broadcastPercent =
+    usageData && usageData.maxBroadcastMinutes > 0
+      ? (usageData.broadcastMinutes / usageData.maxBroadcastMinutes) * 100
       : 0;
 
   const storagePercent =
@@ -601,7 +636,7 @@ export default function Join() {
                 flexWrap: "wrap",
               }}
             >
-              {/* Streaming Minutes */}
+              {/* In-room minutes */}
               <div>
                 <div
                   style={{
@@ -612,7 +647,7 @@ export default function Join() {
                     marginBottom: "4px",
                   }}
                 >
-                  Streaming Minutes
+                  Streaming minutes
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                   <div style={{ fontSize: "18px", fontWeight: 700 }}>
@@ -620,7 +655,7 @@ export default function Join() {
                       ? "..."
                       : usageError
                       ? "—"
-                      : usageData?.streamingMinutes ?? "—"}
+                      : usageData?.inRoomMinutes ?? "—"}
                   </div>
                   <div style={{ fontSize: "13px", color: "#9ca3af" }}>
                     /{" "}
@@ -628,7 +663,7 @@ export default function Join() {
                       ? "..."
                       : usageError
                       ? "—"
-                      : usageData?.maxStreamingMinutes ?? "—"}
+                      : usageData?.maxInRoomMinutes ?? "—"}
                   </div>
                 </div>
                 <div
@@ -651,6 +686,62 @@ export default function Join() {
                   />
                 </div>
               </div>
+
+              {/* Broadcast minutes (only when plan includes broadcast/transcode) */}
+              {usageData && usageData.maxBroadcastMinutes > 0 && (
+                <div>
+                  <div
+                    style={{
+                      fontSize: "11px",
+                      color: "#6b7280",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.05em",
+                      marginBottom: "4px",
+                    }}
+                  >
+                    Broadcast minutes
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <div style={{ fontSize: "18px", fontWeight: 700 }}>
+                      {usageLoading
+                        ? "..."
+                        : usageError
+                        ? "—"
+                        : usageData?.broadcastMinutes ?? "—"}
+                    </div>
+                    <div style={{ fontSize: "13px", color: "#9ca3af" }}>
+                      /{" "}
+                      {usageLoading
+                        ? "..."
+                        : usageError
+                        ? "—"
+                        : usageData?.maxBroadcastMinutes ?? "—"}
+                    </div>
+                  </div>
+                  <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
+                    Broadcasting uses broadcast minutes.
+                  </div>
+                  <div
+                    style={{
+                      width: "120px",
+                      height: "4px",
+                      background: "rgba(255, 255, 255, 0.1)",
+                      borderRadius: "2px",
+                      marginTop: "4px",
+                      overflow: "hidden",
+                    }}
+                  >
+                    <div
+                      style={{
+                        height: "100%",
+                        width: `${broadcastPercent}%`,
+                        background: "linear-gradient(to right, #a855f7, #8b5cf6)",
+                        borderRadius: "2px",
+                      }}
+                    />
+                  </div>
+                </div>
+              )}
 
               {/* Storage Used */}
               <div>
@@ -754,81 +845,82 @@ export default function Join() {
             </div>
 
             {/* Right side actions */}
-<div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-  {/* Settings & Billing button, always visible to logged-in users */}
-  <button
-    onClick={() => nav("/settings/billing")}
-    style={{
-      fontSize: "13px",
-      padding: "8px 16px",
-      background: "rgba(255,255,255,0.05)",
-      border: "1px solid rgba(255,255,255,0.2)",
-      color: "#fff",
-      borderRadius: "8px",
-      fontWeight: 600,
-      cursor: "pointer",
-      whiteSpace: "nowrap",
-      transition: "all 0.3s ease",
-    }}
-    onMouseEnter={e => {
-      e.currentTarget.style.background = 'rgba(255,255,255,0.1)';
-      e.currentTarget.style.borderColor = 'rgba(34,197,94,0.6)';
-    }}
-    onMouseLeave={e => {
-      e.currentTarget.style.background = 'rgba(255,255,255,0.05)';
-      e.currentTarget.style.borderColor = 'rgba(255,255,255,0.2)';
-    }}
-  >
-    ⚙️ Settings & Billing
-  </button>
+            <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+              {/* Settings & Billing button, always visible to logged-in users */}
+              <button
+                onClick={() => nav("/settings/billing")}
+                style={{
+                  fontSize: "13px",
+                  padding: "8px 16px",
+                  background: "rgba(255,255,255,0.05)",
+                  border: "1px solid rgba(255,255,255,0.2)",
+                  color: "#fff",
+                  borderRadius: "8px",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                  whiteSpace: "nowrap",
+                  transition: "all 0.3s ease",
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.background = "rgba(255,255,255,0.1)";
+                  e.currentTarget.style.borderColor = "rgba(34,197,94,0.6)";
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.background = "rgba(255,255,255,0.05)";
+                  e.currentTarget.style.borderColor = "rgba(255,255,255,0.2)";
+                }}
+              >
+                ⚙️ Settings & Billing
+              </button>
 
-  {/* Admin Dashboard button (admin, internal, or test-mode) */}
-  {showAdminUi && (
-    <button
-      onClick={() => nav("/admin/dashboard")}
-      style={{
-        fontSize: "13px",
-        padding: "8px 16px",
-        background: "rgba(220, 38, 38, 0.15)",
-        border: "1px solid rgba(220, 38, 38, 0.5)",
-        borderRadius: "8px",
-        color: "#ef4444",
-        cursor: "pointer",
-        fontWeight: 600,
-        whiteSpace: "nowrap",
-      }}
-    >
-      🛠 Admin Dashboard
-    </button>
-  )}
+              {showMyContentButton && (
+                <button
+                  onClick={() => nav(myContentTarget)}
+                  title="Open your content"
+                  style={{
+                    fontSize: "13px",
+                    padding: "8px 16px",
+                    background: "rgba(220, 38, 38, 0.1)",
+                    border: "1px solid rgba(220, 38, 38, 0.4)",
+                    borderRadius: "8px",
+                    color: "#ef4444",
+                    cursor: "pointer",
+                    whiteSpace: "nowrap",
+                    transition: "all 0.3s ease",
+                    fontWeight: 500,
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.background = "rgba(220, 38, 38, 0.2)";
+                    e.currentTarget.style.borderColor = "rgba(220, 38, 38, 0.8)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = "rgba(220, 38, 38, 0.1)";
+                    e.currentTarget.style.borderColor = "rgba(220, 38, 38, 0.4)";
+                  }}
+                >
+                  🎬 My Content
+                </button>
+              )}
 
-  {/* My Content button */}
-  <button
-    onClick={() => setShowEditingModal(true)}
-    style={{
-      fontSize: "13px",
-      padding: "8px 16px",
-      background: "rgba(220, 38, 38, 0.1)",
-      border: "1px solid rgba(220, 38, 38, 0.4)",
-      borderRadius: "8px",
-      color: "#ef4444",
-      cursor: "pointer",
-      whiteSpace: "nowrap",
-      transition: "all 0.3s ease",
-      fontWeight: 500,
-    }}
-    onMouseEnter={(e) => {
-      e.currentTarget.style.background = "rgba(220, 38, 38, 0.2)";
-      e.currentTarget.style.borderColor = "rgba(220, 38, 38, 0.8)";
-    }}
-    onMouseLeave={(e) => {
-      e.currentTarget.style.background = "rgba(220, 38, 38, 0.1)";
-      e.currentTarget.style.borderColor = "rgba(220, 38, 38, 0.4)";
-    }}
-  >
-    🎬 My Content
-  </button>
-</div>
+              {isAdmin && (
+                <button
+                  onClick={() => nav("/admin/dashboard")}
+                  style={{
+                    fontSize: "13px",
+                    padding: "8px 16px",
+                    background: "rgba(220, 38, 38, 0.15)",
+                    border: "1px solid rgba(220, 38, 38, 0.5)",
+                    borderRadius: "8px",
+                    color: "#ef4444",
+                    cursor: "pointer",
+                    fontWeight: 600,
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  🛠 Admin Dashboard
+                </button>
+              )}
+            </div>
 
               
       </div>
@@ -1320,93 +1412,6 @@ export default function Join() {
           >
             ×
           </button>
-        </div>
-      )}
-
-      {/* Editing Suite Coming Soon Modal */}
-      {showEditingModal && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            background: "rgba(0, 0, 0, 0.8)",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            zIndex: 1000,
-            backdropFilter: "blur(8px)",
-          }}
-          onClick={() => setShowEditingModal(false)}
-        >
-          <div
-            style={{
-              background:
-                "linear-gradient(135deg, rgba(20, 20, 30, 0.95), rgba(30, 30, 40, 0.95))",
-              border: "1px solid rgba(220, 38, 38, 0.3)",
-              borderRadius: "16px",
-              padding: "2rem",
-              maxWidth: "400px",
-              width: "90%",
-              textAlign: "center",
-              backdropFilter: "blur(16px)",
-              boxShadow:
-                "0 25px 50px rgba(0, 0, 0, 0.5), 0 0 0 1px rgba(255, 255, 255, 0.1) inset",
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ fontSize: "3rem", marginBottom: "1rem" }}>🎬</div>
-            <h2
-              style={{
-                fontSize: "1.5rem",
-                fontWeight: "bold",
-                marginBottom: "1rem",
-                background: "linear-gradient(135deg, #ffffff, #f0f0f0)",
-                backgroundClip: "text",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-              }}
-            >
-              Editing Suite
-            </h2>
-            <p
-              style={{
-                color: "rgba(255, 255, 255, 0.8)",
-                marginBottom: "1.5rem",
-                lineHeight: "1.6",
-              }}
-            >
-              Our powerful video editing suite is coming soon! For now, you can
-              stream and download your recordings.
-            </p>
-            <button
-              onClick={() => setShowEditingModal(false)}
-              style={{
-                padding: "0.75rem 1.5rem",
-                background: "linear-gradient(135deg, #dc2626, #ef4444)",
-                border: "none",
-                borderRadius: "8px",
-                color: "#ffffff",
-                fontWeight: "600",
-                cursor: "pointer",
-                transition: "all 0.3s ease",
-              }}
-              onMouseEnter={(e) => {
-                e.currentTarget.style.background =
-                  "linear-gradient(135deg, #b91c1c, #dc2626)";
-                e.currentTarget.style.transform = "translateY(-2px)";
-              }}
-              onMouseLeave={(e) => {
-                e.currentTarget.style.background =
-                  "linear-gradient(135deg, #dc2626, #ef4444)";
-                e.currentTarget.style.transform = "translateY(0)";
-              }}
-            >
-              Got it!
-            </button>
-          </div>
         </div>
       )}
 

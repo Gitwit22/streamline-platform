@@ -24,6 +24,8 @@ import { requireAuth } from "../middleware/requireAuth";
 import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "../middleware/roomAccessToken";
 import { canAccessFeature } from "./featureAccess";
 import { clampRecordingPreset, getUserPlanId, toEncodingOptions } from "../lib/mediaPresets";
+import { LIMIT_ERRORS } from "../lib/limitErrors";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { Timestamp } from "firebase-admin/firestore";
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import type { DocumentSnapshot } from "firebase-admin/firestore";
@@ -35,8 +37,104 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
+import { evaluateUsageGate } from "../lib/usageOverages";
+import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
+import { deleteFiles, deletePrefix } from "../lib/storageClient";
+import { resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
+import { deleteRecordingStorage } from "../lib/recordingDeletion";
 
 const router = Router();
+
+type MyContentPlatformFlags = {
+  myContentEnabled: boolean;
+  myContentRecordingsEnabled: boolean;
+};
+
+let cachedMyContentFlags: MyContentPlatformFlags | null = null;
+let cachedMyContentFlagsAt = 0;
+const MY_CONTENT_FLAGS_TTL_MS = 30 * 1000;
+
+async function getMyContentPlatformFlags(): Promise<MyContentPlatformFlags> {
+  const now = Date.now();
+  if (cachedMyContentFlags && now - cachedMyContentFlagsAt < MY_CONTENT_FLAGS_TTL_MS) {
+    return cachedMyContentFlags;
+  }
+
+  try {
+    const [myContentSnap, myContentRecordingsSnap] = await Promise.all([
+      firestore.collection("featureFlags").doc("myContentEnabled").get(),
+      firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
+    ]);
+
+    const myContentData = myContentSnap.exists ? ((myContentSnap.data() as any) || {}) : {};
+    const myContentRecordingsData = myContentRecordingsSnap.exists
+      ? ((myContentRecordingsSnap.data() as any) || {})
+      : {};
+
+    const myContentEnabled = myContentData.enabled === true;
+    // Recording pipeline is controlled by featureFlags/recording.
+    // This flag is an additional opt-out. Missing => enabled.
+    const rawMyContentRecordingsEnabled = (myContentRecordingsData as any).enabled;
+    const myContentRecordingsEnabled =
+      rawMyContentRecordingsEnabled === undefined ? true : rawMyContentRecordingsEnabled === true;
+
+    cachedMyContentFlags = {
+      myContentEnabled,
+      myContentRecordingsEnabled,
+    };
+    cachedMyContentFlagsAt = now;
+    return cachedMyContentFlags;
+  } catch (err) {
+    console.error("[recordings] failed to load My Content platform flags", err);
+    cachedMyContentFlags = {
+      myContentEnabled: false,
+      // Fail-open to avoid breaking recording when Firestore is transient.
+      myContentRecordingsEnabled: true,
+    };
+    cachedMyContentFlagsAt = now;
+    return cachedMyContentFlags;
+  }
+}
+
+async function assertMyContentRecordingsEnabled(res: any): Promise<boolean> {
+  const flags = await getMyContentPlatformFlags();
+  if (flags.myContentRecordingsEnabled) return true;
+
+  res.status(403).json({
+    error: LIMIT_ERRORS.FEATURE_DISABLED,
+    feature: "myContentRecordingsEnabled",
+    reason: "Recordings are disabled by featureFlags/myContentRecordingsEnabled",
+    platformFlags: flags,
+  });
+  return false;
+}
+
+async function requireMyContentRecordingsEnabled(req: any, res: any, next: any) {
+  if (!(await assertMyContentRecordingsEnabled(res))) return;
+  return next();
+}
+
+// Emergency recordings are intentionally short-lived: 1-hour retention window.
+const EMERGENCY_RETENTION_MS = 1 * 60 * 60 * 1000; // 1 hour
+
+type EmergencyCurrentDoc = {
+  recordingId?: string;
+  createdAt?: any;
+  expiresAt?: any;
+  emergencyAvailableUntilMs?: number;
+  deleteAfterMs?: number;
+  status?: string;
+  r2Keys?: string[];
+  r2Prefix?: string;
+  deletedAt?: any;
+};
+
+function toDate(value: any): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value?.toDate === "function") return value.toDate();
+  return null;
+}
 
 // =============================================================================
 // ENVIRONMENT & CONFIG
@@ -256,8 +354,10 @@ function isExpired(readyAt?: Timestamp | Date | null, retentionMinutes?: number)
 }
 
 function mapRecordingDoc(id: string, data: any) {
-  const status = data.status || "unknown";
-  const downloadReady = !!(data.downloadReady || status === "ready" || status === "stopped");
+  const status = String(data.status || "unknown").toLowerCase();
+  // downloadReady should mean the file is actually ready to download.
+  // Do NOT treat "stopped" as ready; download-link is strict on status === "ready".
+  const downloadReady = data.downloadReady === true || status === "ready";
   return {
     id,
     status,
@@ -270,6 +370,12 @@ function mapRecordingDoc(id: string, data: any) {
   };
 }
 
+function normalizeStorageKey(key: unknown): string | null {
+  const raw = String(key ?? "").trim();
+  if (!raw) return null;
+  return raw.startsWith("/") ? raw.slice(1) : raw;
+}
+
 function getAuthUserId(req: any): string | null {
   return req.user?.uid || req.user?.id || null;
 }
@@ -278,10 +384,16 @@ function getAuthUserId(req: any): string | null {
  * Generate recording path for R2
  * CRITICAL: No leading slash - use "recordings/..." not "/recordings/..."
  */
-function generateRecordingPath(userId: string, roomKey: string, timestamp: number): string {
+function generateRecordingPrefix(userId: string, roomKey: string, recordingId: string): string {
   const safeRoom = roomKey.replace(/[^a-zA-Z0-9_-]/g, "_");
+  const safeRecordingId = String(recordingId || "").trim() || "unknown";
   // Ensure no leading slash - R2/S3 keys should not start with /
-  return `recordings/${userId}/${safeRoom}/${timestamp}.mp4`;
+  return `recordings/${userId}/${safeRoom}/${safeRecordingId}/`;
+}
+
+function generateRecordingPath(userId: string, roomKey: string, recordingId: string): { objectKey: string; prefix: string } {
+  const prefix = generateRecordingPrefix(userId, roomKey, recordingId);
+  return { prefix, objectKey: `${prefix}recording.mp4` };
 }
 
 /**
@@ -346,7 +458,8 @@ async function stopRecordingInternal(options: {
   }
 
   if (enforceOwnership && ownerUid && ownerUid !== uid) {
-    throw new Error("forbidden");
+    // Use canonical error code for forbidden/ownership
+    throw new Error(LIMIT_ERRORS.FEATURE_NOT_ENTITLED);
   }
 
   const now = new Date();
@@ -507,6 +620,24 @@ async function stopRecordingInternal(options: {
 
   console.log(`[recordings/stopInternal] Recording ${recordingId} now processing`);
 
+  // Best-effort: keep the room's latest recording status in sync.
+  try {
+    const roomId = typeof (data as any).roomId === "string" ? String((data as any).roomId).trim() : "";
+    if (roomId) {
+      const roomRef = firestore.collection("rooms").doc(roomId);
+      await roomRef.set(
+        {
+          latestRecordingId: recordingId,
+          latestRecordingStatus: "processing",
+          latestRecordingUpdatedAt: now,
+        },
+        { merge: true }
+      );
+    }
+  } catch (e: any) {
+    console.warn("[recordings/stopInternal] failed to update room latestRecording status", e?.message || e);
+  }
+
   // Release active recording lock for this (user, room)
   try {
     const roomId = typeof (data as any).roomId === "string" ? (data as any).roomId : null;
@@ -543,6 +674,26 @@ async function stopRecordingInternal(options: {
             fileSize: size,
             updatedAt: new Date(),
           });
+
+          try {
+            const roomId = typeof (data as any).roomId === "string" ? String((data as any).roomId).trim() : "";
+            if (roomId) {
+              await firestore
+                .collection("rooms")
+                .doc(roomId)
+                .set(
+                  {
+                    latestRecordingId: recordingId,
+                    latestRecordingStatus: "ready",
+                    latestRecordingUpdatedAt: new Date(),
+                  },
+                  { merge: true }
+                );
+            }
+          } catch (e: any) {
+            console.warn("[recordings/stopInternal] failed to update room latestRecording to ready", e?.message || e);
+          }
+
           console.log(
             `[recordings/stopInternal] ✅ File confirmed via head-check: ${objectKey} (${size} bytes)`
           );
@@ -565,14 +716,19 @@ async function stopRecordingInternal(options: {
 // POST /start - Start Recording
 // =============================================================================
 
-router.post("/start", requireAuth, requireRoomAccessToken as any, async (req, res) => {
+router.post(
+  "/start",
+  requireAuth,
+  requireMyContentRecordingsEnabled as any,
+  requireRoomAccessToken as any,
+  async (req, res) => {
   const startTime = Date.now();
   console.log("[recordings/start] Request received");
 
   try {
     const uid = getAuthUserId(req);
     if (!uid) {
-      return res.status(401).json({ error: "Unauthorized" });
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
     // Feature access gate
@@ -580,25 +736,33 @@ router.post("/start", requireAuth, requireRoomAccessToken as any, async (req, re
     if (!featureAccess.allowed) {
       return res.status(403).json({
         success: false,
-        error: featureAccess.reason || "Recording requires upgrade",
+        error: featureAccess.code || LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
+        reason: featureAccess.reason || "Recording requires upgrade",
       });
     }
 
     // Validate request
-    const { roomId: rawRoomId, roomName: rawRoomName, layout: rawLayout, mode: rawMode, presetId, usageType: rawUsageType } = req.body as {
+    const {
+      roomId: rawRoomId,
+      roomName: rawRoomName,
+      mode: rawMode,
+      presetId,
+      usageType: rawUsageType,
+      recordingClass: rawRecordingClass,
+    } = req.body as {
       roomId?: string;
       roomName?: string;
-      layout?: string;
       mode?: string; // "cloud" | "dual"
       presetId?: string;
       usageType?: string;
+      recordingClass?: string;
     };
 
     const { roomId: canonicalRoomId, livekitRoomName, access: roomAccess } = getRoomAccess(req as any);
 
     // If caller sent a roomId/roomName in the body, ensure it matches the token (defensive only)
     if (rawRoomId && String(rawRoomId).trim() && String(rawRoomId).trim() !== canonicalRoomId) {
-      return res.status(400).json({ error: "room_mismatch" });
+      return res.status(400).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
     }
 
     const roomId = canonicalRoomId;
@@ -612,14 +776,83 @@ router.post("/start", requireAuth, requireRoomAccessToken as any, async (req, re
       throw err;
     }
 
-    // CRITICAL: Layout must be exactly "speaker" or "grid" - anything else causes 400
-    const layout = rawLayout === "speaker" ? "speaker" : "grid";
+    // Single mental model:
+    // - Room Layout is the source of truth
+    // - Recordings inherit Room Layout
+    // If a legacy room lacks roomLayout, seed it from account defaults before starting.
+    const roomRef = firestore.collection("rooms").doc(roomId);
+    const roomSnap = await roomRef.get();
+    let roomDoc = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+
+    if (!roomDoc.roomLayout) {
+      try {
+        const userSnap = await firestore.collection("users").doc(uid).get();
+        const userData = userSnap.exists ? ((userSnap.data() as any) || {}) : {};
+        const mediaPrefs = (userData as any).mediaPrefs || {};
+        const candidate = mediaPrefs.defaultRoomLayout;
+        if (candidate && typeof candidate === "object" && typeof candidate.mode === "string") {
+          await roomRef.set({ roomLayout: candidate }, { merge: true });
+          roomDoc = { ...roomDoc, roomLayout: candidate };
+        }
+      } catch (e: any) {
+        console.warn("[recordings/start] failed to seed missing roomLayout from mediaPrefs", e?.message || e);
+      }
+    }
+
+    const resolvedLayout = resolveCompositeLayoutFromRoom({ roomDoc, requestLayout: undefined, defaultMode: "speaker" });
+    const layout = resolvedLayout.mode;
     const mode = rawMode === "dual" ? "dual" : "cloud";
+
+    // Optional: emergency recordings have special retention rules.
+    const recordingClass = rawRecordingClass === "emergency" ? "emergency" : null;
 
     // Plan + features (canonical limits via EffectiveEntitlements)
     const entitlements = await getEffectiveEntitlements(uid);
     const planId = entitlements.planId;
     const plan = entitlements.plan.raw || {};
+
+    // Monthly usage gate: block non-overage plans; allow Pro and log totals.
+    try {
+      const monthKey = getCurrentMonthKey();
+      const usageDocId = `${uid}_${monthKey}`;
+      const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
+      const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
+      const usage = existing.usage || {};
+
+      const decision = evaluateUsageGate({
+        allowsOverages: !!(entitlements.features as any).allowsOverages,
+        limits: {
+          participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
+          transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
+        },
+        usage: {
+          participantMinutes: Number(usage.participantMinutes || 0),
+          transcodeMinutes: Number(usage.transcodeMinutes || 0),
+        },
+        checkParticipant: true,
+        checkTranscode: true,
+      });
+
+      if (!decision.allowed) {
+        return res.status(403).json({
+          success: false,
+          error: decision.reason || LIMIT_ERRORS.USAGE_EXHAUSTED,
+          reason: "Monthly usage limit reached",
+        });
+      }
+
+      if (decision.shouldLogOverages && decision.overageTotals) {
+        await upsertUsageMonthlyOverageTotals({
+          uid,
+          monthKey,
+          totals: decision.overageTotals,
+        });
+      }
+    } catch (e) {
+      // Do not block recording start on bookkeeping failures.
+      console.error("[recordings/start] usage gate failed", e);
+    }
+
     const dualAllowed = !!(plan?.features?.dualRecording || plan?.features?.dual_recording);
     const allowHigherRecordingThanStream = !!(
       plan?.features?.allowHigherRecordingThanStream || plan?.features?.allow_higher_recording_than_stream
@@ -678,12 +911,21 @@ router.post("/start", requireAuth, requireRoomAccessToken as any, async (req, re
       return res.status(500).json({ error: "R2 storage not configured" });
     }
 
-    // Generate recording path and ID
+    // Generate recording ID and storage paths
     const now = new Date();
-    const timestamp = now.getTime();
-    const objectKey = generateRecordingPath(uid, roomId, timestamp);
     const recordingId = firestore.collection("recordings").doc().id;
+    const { objectKey, prefix: r2Prefix } = generateRecordingPath(uid, roomId, recordingId);
     const recordingRef = firestore.collection("recordings").doc(recordingId);
+
+    const isEmergency = recordingClass === "emergency";
+    const emergencyCurrentRef = firestore
+      .collection("users")
+      .doc(uid)
+      .collection("emergencyRecording")
+      .doc("current");
+
+    const emergencyExpiresAt = new Date(now.getTime() + EMERGENCY_RETENTION_MS);
+    const emergencyExpiresAtMs = emergencyExpiresAt.getTime();
 
     const autoStopAt =
       maxRecordingMinutesPerClip > 0
@@ -697,7 +939,7 @@ router.post("/start", requireAuth, requireRoomAccessToken as any, async (req, re
     // =========================================================================
     // STEP 1: Create Firestore doc IMMEDIATELY with status=starting
     // =========================================================================
-    const initialDoc = {
+    const initialDoc: Record<string, any> = {
       id: recordingId,
       userId: uid,
       roomId,
@@ -705,10 +947,20 @@ router.post("/start", requireAuth, requireRoomAccessToken as any, async (req, re
       livekitRoomName,
       layout: layout || "grid",
       mode,
+      ...(isEmergency
+        ? {
+            recordingClass: "emergency",
+            emergencyAvailableUntilMs: emergencyExpiresAtMs,
+            deleteAfterMs: emergencyExpiresAtMs,
+          }
+        : {}),
       status: "starting",
       downloadReady: false,
       objectKey,
       downloadPath: null,
+      r2Keys: [objectKey],
+      r2Prefix,
+      r2Prefixes: [r2Prefix],
       fileSize: null,
       egressId: null,
       errorMessage: null,
@@ -741,8 +993,101 @@ router.post("/start", requireAuth, requireRoomAccessToken as any, async (req, re
       usageCountedAt: null,
     };
 
-    await recordingRef.set(initialDoc);
+    let previousEmergency: EmergencyCurrentDoc | null = null;
+
+    if (isEmergency) {
+      // Transactionally enforce: only one active emergency recording per user.
+      previousEmergency = await firestore.runTransaction(async (tx) => {
+        const currentSnap = await tx.get(emergencyCurrentRef);
+        const currentData = currentSnap.exists ? ((currentSnap.data() || {}) as EmergencyCurrentDoc) : null;
+
+        // If there's an existing emergency recording that isn't deleted, mark its recording doc as deleting.
+        if (currentData) {
+          const currentStatus = String(currentData.status || "").toLowerCase();
+          const oldRecordingId = currentData.recordingId ? String(currentData.recordingId) : "";
+          if (currentStatus !== "deleted" && oldRecordingId) {
+            tx.set(
+              firestore.collection("recordings").doc(oldRecordingId),
+              {
+                status: "deleting",
+                deleteReason: "replaced_emergency",
+                deletingAt: now,
+                updatedAt: now,
+              },
+              { merge: true }
+            );
+          }
+        }
+
+        // Always write the new recording doc as part of the same transaction.
+        tx.set(recordingRef, initialDoc);
+
+        // Overwrite current pointer
+        tx.set(
+          emergencyCurrentRef,
+          {
+            recordingId,
+            createdAt: now,
+            expiresAt: emergencyExpiresAt,
+            emergencyAvailableUntilMs: emergencyExpiresAtMs,
+            deleteAfterMs: emergencyExpiresAtMs,
+            status: "active",
+            r2Keys: [objectKey],
+            r2Prefix,
+          },
+          { merge: false }
+        );
+
+        return currentData;
+      });
+    } else {
+      await recordingRef.set(initialDoc);
+    }
+
     console.log(`[recordings/start] Created doc ${recordingId} status=starting`);
+
+    // Best-effort: publish latest recording pointer on the room doc.
+    try {
+      await roomRef.set(
+        {
+          latestRecordingId: recordingId,
+          latestRecordingStatus: "starting",
+          latestRecordingUpdatedAt: now,
+        },
+        { merge: true }
+      );
+    } catch (e: any) {
+      console.warn("[recordings/start] failed to set room latestRecording pointer", e?.message || e);
+    }
+
+    // Best-effort: if this replaced an older emergency recording, delete its assets asynchronously.
+    if (isEmergency && previousEmergency?.recordingId && previousEmergency.recordingId !== recordingId) {
+      const old = previousEmergency;
+      setTimeout(async () => {
+        try {
+          const oldRecordingId = String(old.recordingId || "").trim();
+          if (!oldRecordingId) return;
+
+          const oldKeys = Array.isArray(old.r2Keys)
+            ? old.r2Keys.map(String).map((s) => s.trim()).filter(Boolean)
+            : [];
+          const oldPrefix = old.r2Prefix ? String(old.r2Prefix).trim() : "";
+
+          if (oldKeys.length > 0) {
+            await deleteFiles(oldKeys);
+          } else if (oldPrefix) {
+            await deletePrefix(oldPrefix);
+          }
+
+          await firestore
+            .collection("recordings")
+            .doc(oldRecordingId)
+            .set({ status: "deleted", deletedAt: new Date(), updatedAt: new Date() }, { merge: true });
+        } catch (e: any) {
+          console.warn("[recordings/start] failed to delete replaced emergency recording assets", e?.message || e);
+        }
+      }, 0);
+    }
 
     // Initialize lock doc (best-effort)
     try {
@@ -941,7 +1286,8 @@ router.post("/start", requireAuth, requireRoomAccessToken as any, async (req, re
       details: err?.message,
     });
   }
-});
+  }
+);
 
 // =============================================================================
 // POST /sweep - Stop overdue recordings based on autoStopAt
@@ -991,13 +1337,18 @@ router.post("/sweep", async (_req, res) => {
 // POST /stop - Stop Recording
 // =============================================================================
 
-router.post("/stop", requireAuth, requireRoomAccessToken as any, async (req, res) => {
+router.post(
+  "/stop",
+  requireAuth,
+  requireMyContentRecordingsEnabled as any,
+  requireRoomAccessToken as any,
+  async (req, res) => {
   console.log("[recordings/stop] Request received");
 
   try {
     const uid = getAuthUserId(req);
     if (!uid) {
-      return res.status(401).json({ error: "Unauthorized" });
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
     const { recordingId } = req.body as { recordingId?: string };
@@ -1019,7 +1370,7 @@ router.post("/stop", requireAuth, requireRoomAccessToken as any, async (req, res
     // If the recording has a stored roomId, ensure it matches the caller's room
     const recordingRoomId: string | null = typeof (data as any).roomId === "string" ? (data as any).roomId.trim() : null;
     if (recordingRoomId && recordingRoomId !== canonicalRoomId) {
-      return res.status(400).json({ error: "room_mismatch" });
+      return res.status(400).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
     }
 
     const roomId = canonicalRoomId;
@@ -1242,17 +1593,70 @@ router.post("/stop", requireAuth, requireRoomAccessToken as any, async (req, res
     console.error("[recordings/stop] Error:", err);
     return res.status(500).json({ error: "Failed to stop recording" });
   }
-});
+  }
+);
 
 // =============================================================================
 // GET /emergency-latest - Get latest ready recording for user
 // Per spec: Query status=ready, order by createdAt desc, limit 1
 // =============================================================================
 
-router.get("/emergency-latest", requireAuth, async (req, res) => {
+// =============================================================================
+// GET /emergency-status - Get emergency retention status (for UI countdown)
+// =============================================================================
+
+router.get("/emergency-status", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
-    if (!uid) return res.status(401).json({ error: "Unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    const currentRef = firestore
+      .collection("users")
+      .doc(uid)
+      .collection("emergencyRecording")
+      .doc("current");
+
+    const snap = await currentRef.get();
+    if (!snap.exists) {
+      return res.json({ success: true, data: { exists: false } });
+    }
+
+    const current = (snap.data() || {}) as EmergencyCurrentDoc;
+    const status = String(current.status || "").toLowerCase();
+    const expiresAt = toDate(current.expiresAt);
+    const now = new Date();
+
+    const expiresAtMs = Number.isFinite(current.emergencyAvailableUntilMs)
+      ? (current.emergencyAvailableUntilMs as number)
+      : expiresAt
+        ? expiresAt.getTime()
+        : null;
+
+    const remainingMs = typeof expiresAtMs === "number" ? Math.max(0, expiresAtMs - now.getTime()) : null;
+    const expiresInSeconds = typeof remainingMs === "number" ? Math.floor(remainingMs / 1000) : null;
+
+    return res.json({
+      success: true,
+      data: {
+        exists: true,
+        recordingId: current.recordingId || null,
+        status: status || null,
+        expiresAt: expiresAt ? expiresAt.toISOString() : null,
+        expiresAtMs,
+        remainingMs,
+        expiresInSeconds,
+      },
+    });
+  } catch (err: any) {
+    console.error("[recordings/emergency-status] Error:", err);
+    return res.status(500).json({ error: "Failed to fetch emergency status" });
+  }
+});
+
+router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
+  try {
+    const uid = getAuthUserId(req);
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
     // Prevent CDN/browser caching so this endpoint never returns a 304 with an empty body
     res.set({
@@ -1262,6 +1666,109 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
       "Surrogate-Control": "no-store",
       ETag: `${Date.now()}`,
     });
+
+    // Prefer the emergency pointer if present (for emergency retention + countdown UX)
+    try {
+      const currentRef = firestore
+        .collection("users")
+        .doc(uid)
+        .collection("emergencyRecording")
+        .doc("current");
+
+      const currentSnap = await currentRef.get();
+      if (currentSnap.exists) {
+        const current = (currentSnap.data() || {}) as EmergencyCurrentDoc;
+        const status = String(current.status || "").toLowerCase();
+        const expiresAt = toDate(current.expiresAt);
+        const now = new Date();
+        const nowMs = now.getTime();
+
+        const emergencyAvailableUntilMs = Number.isFinite(current.emergencyAvailableUntilMs)
+          ? (current.emergencyAvailableUntilMs as number)
+          : expiresAt
+            ? expiresAt.getTime()
+            : null;
+
+        // Hard failure if expired: never return a URL with TTL=0 or that could still work.
+        if (status !== "deleted" && typeof emergencyAvailableUntilMs === "number" && nowMs >= emergencyAvailableUntilMs) {
+          return res.status(410).json({
+            success: false,
+            error: "recording_expired",
+            expiresAtMs: emergencyAvailableUntilMs,
+            remainingMs: 0,
+          });
+        }
+
+        if (status === "deleted") {
+          return res.status(410).json({
+            success: false,
+            error: "recording_deleted",
+            expiresAtMs: typeof emergencyAvailableUntilMs === "number" ? emergencyAvailableUntilMs : null,
+            remainingMs: 0,
+          });
+        }
+
+        if (typeof emergencyAvailableUntilMs === "number" && nowMs < emergencyAvailableUntilMs) {
+          const recordingId = current.recordingId ? String(current.recordingId) : "";
+          const keys = Array.isArray(current.r2Keys)
+            ? current.r2Keys.map(String).map((s) => s.trim()).filter(Boolean)
+            : [];
+
+          // Prefer explicit r2Keys; otherwise fall back to recording doc's objectKey.
+          let objectKey: string | null = normalizeStorageKey(keys[0]) || null;
+
+          if (!objectKey && recordingId) {
+            const recSnap = await firestore.collection("recordings").doc(recordingId).get();
+            const rec = recSnap.exists ? (recSnap.data() || {}) : {};
+            objectKey =
+              normalizeStorageKey(rec.objectKey as string | undefined) ||
+              normalizeStorageKey(rec.downloadPath as string | undefined) ||
+              null;
+          }
+
+          if (objectKey) {
+            // Handle historical drift where a leading slash may have been stored.
+            const normalizedKey = normalizeStorageKey(objectKey) || objectKey;
+            const size = await r2HeadObjectSize(normalizedKey);
+            if (size > 0) {
+              // Emergency link should be usable up to the emergency expiry window.
+              // Never hand out a URL that outlives the window (cap at 1 hour).
+              const remainingMs = Math.max(0, emergencyAvailableUntilMs - nowMs);
+              const expiresInSeconds = Math.floor(remainingMs / 1000);
+
+              if (expiresInSeconds <= 0) {
+                return res.status(410).json({
+                  success: false,
+                  error: "recording_expired",
+                  expiresAtMs: emergencyAvailableUntilMs,
+                  remainingMs: 0,
+                });
+              }
+
+              const signedTtlSeconds = Math.max(1, Math.min(60 * 60, expiresInSeconds));
+              const signedUrl = await getSignedDownloadUrl(normalizedKey, signedTtlSeconds);
+
+              return res.status(200).json({
+                success: true,
+                data: {
+                  url: signedUrl,
+                  recordingId: recordingId || null,
+                  fallbackUsed: false,
+                  emergency: true,
+                  expiresAt: new Date(emergencyAvailableUntilMs).toISOString(),
+                  expiresAtMs: emergencyAvailableUntilMs,
+                  remainingMs,
+                  expiresInSeconds,
+                  size,
+                },
+              });
+            }
+          }
+        }
+      }
+    } catch (e: any) {
+      console.warn("[recordings/emergency-latest] emergency pointer lookup failed", e?.message || e);
+    }
 
     // Per spec: Query recordings where userId == uid AND status == "ready"
     // Order by createdAt descending, limit 1
@@ -1309,7 +1816,8 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
         (fallbackData.objectKey as string | undefined) ||
         (fallbackData.downloadPath as string | undefined);
 
-      if (!fallbackKey) {
+      const normalizedFallbackKey = normalizeStorageKey(fallbackKey);
+      if (!normalizedFallbackKey) {
         return res.status(200).json({
           success: false,
           noRecording: true,
@@ -1317,7 +1825,7 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
         });
       }
 
-      const size = await r2HeadObjectSize(fallbackKey);
+      const size = await r2HeadObjectSize(normalizedFallbackKey);
       if (size <= 0) {
         return res.status(200).json({
           success: false,
@@ -1326,7 +1834,7 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
         });
       }
 
-      const signedUrl = await getSignedDownloadUrl(fallbackKey, 15 * 60);
+      const signedUrl = await getSignedDownloadUrl(normalizedFallbackKey, 15 * 60);
 
       const nowTs = Timestamp.now();
       await firestore
@@ -1337,8 +1845,8 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
             lastDownloadRequestedAt: nowTs,
             status: "ready",
             downloadReady: true,
-            objectKey: fallbackKey,
-            downloadPath: fallbackKey,
+            objectKey: normalizedFallbackKey,
+            downloadPath: normalizedFallbackKey,
             fileSize: size,
             readyAt: fallbackData.readyAt || nowTs,
             updatedAt: nowTs,
@@ -1354,6 +1862,7 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
           fallbackUsed: true,
           size,
           status: "ready",
+          emergency: false,
         },
       });
     }
@@ -1365,7 +1874,9 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
       (readyData.objectKey as string | undefined) ||
       (readyData.downloadPath as string | undefined);
 
-    if (!objectKey) {
+    const normalizedObjectKey = normalizeStorageKey(objectKey);
+
+    if (!normalizedObjectKey) {
       return res.json({
         success: false,
         noRecording: true,
@@ -1374,7 +1885,7 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
     }
 
     // Generate signed URL (15-minute TTL per spec)
-    const signedUrl = await getSignedDownloadUrl(objectKey, 15 * 60);
+    const signedUrl = await getSignedDownloadUrl(normalizedObjectKey, 15 * 60);
 
     const nowTs = Timestamp.now();
     await firestore
@@ -1383,8 +1894,8 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
       .set(
         {
           lastDownloadRequestedAt: nowTs,
-          objectKey,
-          downloadPath: objectKey,
+          objectKey: normalizedObjectKey,
+          downloadPath: normalizedObjectKey,
           status: "ready",
           downloadReady: true,
           updatedAt: nowTs,
@@ -1398,6 +1909,7 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
         url: signedUrl,
         recordingId: readyDoc.id,
         fallbackUsed: false,
+        emergency: false,
       },
     });
 
@@ -1411,7 +1923,7 @@ router.get("/emergency-latest", requireAuth, async (req, res) => {
 // GET /:id/storage-check - Debug: verify object exists in R2
 // =============================================================================
 
-router.get("/:id/storage-check", requireAuth, async (req, res) => {
+router.get("/:id/storage-check", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
     const recordingId = req.params.id;
@@ -1423,10 +1935,10 @@ router.get("/:id/storage-check", requireAuth, async (req, res) => {
 
     const data = snap.data() || {};
     if (data.userId && data.userId !== uid) {
-      return res.status(403).json({ error: "Forbidden" });
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    const objectKey = data.objectKey || data.downloadPath;
+    const objectKey = normalizeStorageKey(data.objectKey || data.downloadPath);
     if (!objectKey) {
       return res.json({ success: false, message: "No object key on recording" });
     }
@@ -1444,7 +1956,7 @@ router.get("/:id/storage-check", requireAuth, async (req, res) => {
 // GET /:id - Get recording status
 // =============================================================================
 
-router.get("/:id", requireAuth, async (req, res) => {
+router.get("/:id", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
     const recordingId = req.params.id;
@@ -1456,7 +1968,7 @@ router.get("/:id", requireAuth, async (req, res) => {
 
     const data = snap.data() || {};
     if (data.userId && data.userId !== uid) {
-      return res.status(403).json({ error: "Forbidden" });
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
     return res.json({ success: true, data: mapRecordingDoc(recordingId, data) });
@@ -1468,11 +1980,97 @@ router.get("/:id", requireAuth, async (req, res) => {
 });
 
 // =============================================================================
+// DELETE /:id - Delete a recording (bucket + Firestore)
+// Default behavior is SOFT delete (status="deleted"); pass ?hard=1 to delete the doc.
+// =============================================================================
+
+router.delete("/:id", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
+  try {
+    const uid = getAuthUserId(req);
+    const recordingId = req.params.id;
+
+    const snap = await firestore.collection("recordings").doc(recordingId).get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Recording not found" });
+    }
+
+    const data = snap.data() || {};
+    if (data.userId && data.userId !== uid) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    const storage = await deleteRecordingStorage(data);
+
+    // Best-effort: if the room pointer points to this recording, clear it.
+    try {
+      const roomId = typeof data.roomId === "string" ? String(data.roomId).trim() : "";
+      if (roomId) {
+        const roomRef = firestore.collection("rooms").doc(roomId);
+        const roomSnap = await roomRef.get();
+        const roomData = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+        const latestId = String(roomData.latestRecordingId || "").trim();
+        if (latestId === recordingId) {
+          await roomRef.set(
+            {
+              latestRecordingId: null,
+              latestRecordingStatus: null,
+              latestRecordingUpdatedAt: new Date(),
+            },
+            { merge: true }
+          );
+        }
+      }
+    } catch {}
+
+    // Best-effort: keep emergency pointer from referencing a deleted recording.
+    try {
+      const recordingClass = String(data.recordingClass || "").toLowerCase();
+      if (recordingClass === "emergency") {
+        const currentRef = firestore.collection("users").doc(uid).collection("emergencyRecording").doc("current");
+        const curSnap = await currentRef.get();
+        const cur = curSnap.exists ? ((curSnap.data() as any) || {}) : {};
+        if (String(cur.recordingId || "") === recordingId) {
+          await currentRef.set(
+            {
+              status: "deleted",
+              deletedAt: new Date(),
+              updatedAt: new Date(),
+            },
+            { merge: true }
+          );
+        }
+      }
+    } catch {}
+
+    const hard = req.query.hard === "1" || req.query.hard === "true";
+    if (hard) {
+      await firestore.collection("recordings").doc(recordingId).delete();
+    } else {
+      await firestore.collection("recordings").doc(recordingId).set(
+        {
+          status: "deleted",
+          deleteReason: "user_deleted",
+          deletedAt: new Date(),
+          updatedAt: new Date(),
+          downloadReady: false,
+        },
+        { merge: true }
+      );
+    }
+
+    return res.json({ success: true, recordingId, hard, storage });
+  } catch (err: any) {
+    console.error("[recordings/:id delete] Error:", err);
+    return res.status(500).json({ error: "Failed to delete recording" });
+  }
+});
+
+// =============================================================================
 // GET /:id/download-link - Get signed download URL (only if status=ready)
 // Per spec: 15-minute TTL, strict status === "ready" check
 // =============================================================================
 
-router.get("/:id/download-link", requireAuth, async (req, res) => {
+router.get("/:id/download-link", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
     const recordingId = req.params.id;
@@ -1486,7 +2084,7 @@ router.get("/:id/download-link", requireAuth, async (req, res) => {
     
     // Verify ownership
     if (data.userId && data.userId !== uid) {
-      return res.status(403).json({ error: "Forbidden" });
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
     // STRICT CHECK: Only allow download if status is exactly "ready"
@@ -1524,7 +2122,7 @@ router.get("/:id/download-link", requireAuth, async (req, res) => {
       });
     }
 
-    const objectKey = data.objectKey || data.downloadPath;
+    const objectKey = normalizeStorageKey(data.objectKey || data.downloadPath);
     if (!objectKey) {
       return res.status(500).json({
         success: false,
@@ -1571,7 +2169,7 @@ router.get("/:id/download-link", requireAuth, async (req, res) => {
 // POST /:id/report-download-issue - Report download problems
 // =============================================================================
 
-router.post("/:id/report-download-issue", requireAuth, async (req, res) => {
+router.post("/:id/report-download-issue", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
     const recordingId = req.params.id;
@@ -1583,7 +2181,7 @@ router.post("/:id/report-download-issue", requireAuth, async (req, res) => {
 
     const data = snap.data() || {};
     if (data.userId && data.userId !== uid) {
-      return res.status(403).json({ error: "Forbidden" });
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
     await firestore.collection("recordings").doc(recordingId).set(
@@ -1607,7 +2205,7 @@ router.post("/:id/report-download-issue", requireAuth, async (req, res) => {
 // GET /:id/download - Legacy direct download (placeholder)
 // =============================================================================
 
-router.get("/:id/download", requireAuth, async (req, res) => {
+router.get("/:id/download", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
     const recordingId = req.params.id;
@@ -1619,7 +2217,7 @@ router.get("/:id/download", requireAuth, async (req, res) => {
 
     const data = snap.data() || {};
     if (data.userId && data.userId !== uid) {
-      return res.status(403).send("Forbidden");
+      return res.status(403).send(PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS);
     }
 
     // Redirect to download-link endpoint for proper signed URL

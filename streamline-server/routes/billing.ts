@@ -7,11 +7,26 @@ import { requireAuth } from "../middleware/requireAuth";
 import { PLAN_IDS, PlanId, isPlanId } from "../types/plan";
 import { getUserAccount } from "../lib/userAccount";
 import { CURRENT_TOS_VERSION, hasAcceptedCurrentTos } from "../lib/tos";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { comparePlans } from "../lib/planRank";
+import {
+  applyDailyWindowReset,
+  applySuccessfulPlanChange,
+  assertDailyPlanLimit,
+  assertMonthlyDowngradeLimit,
+  normalizeBillingGuards,
+  type BillingGuards,
+} from "../lib/billingGuards";
+import { createOveragesEndpointHandler } from "../lib/overagesEndpoint";
 
-// Plan change guardrails
-const PLAN_CHANGE_WINDOW_MS = 5 * 24 * 60 * 60 * 1000; // 5 days
-const PLAN_CHANGE_MAX_IN_WINDOW = 2;
 const PLAN_CHANGE_LOCK_TTL_MS = 60 * 1000; // 60 seconds
+
+type CheckoutNoopReason =
+  | "ALREADY_ON_PLAN"
+  | "BILLING_DISABLED"
+  | "MISSING_PRICE_ID"
+  | "MISSING_STRIPE_KEY"
+  | "UNSUPPORTED_MODE";
 
 type PlanChangeHistoryEntry = {
   at: number; // epoch ms
@@ -26,6 +41,89 @@ const testPlanChangeThrottle = new Map<string, number>();
 
 function getUserRef(uid: string) {
   return db.collection("users").doc(uid);
+}
+
+/**
+ * Get or create a Stripe customer for a user, handling stale customer IDs.
+ * 
+ * If Firestore has a stripeCustomerId but Stripe says "no such customer" (404),
+ * this function will:
+ * 1. Clear the stale ID from Firestore
+ * 2. Create a new Stripe customer
+ * 3. Persist the new ID to Firestore
+ * 
+ * This ensures we never get stuck with orphaned customer references.
+ * 
+ * @param uid - User ID from Firebase Auth
+ * @param email - User's email address
+ * @param displayName - User's display name (optional)
+ * @returns Valid Stripe customer ID
+ */
+async function getOrCreateStripeCustomer(
+  uid: string,
+  email: string,
+  displayName?: string
+): Promise<string> {
+  const userRef = getUserRef(uid);
+  const snap = await userRef.get();
+  
+  if (!snap.exists) {
+    throw Object.assign(new Error("User not found"), { code: "USER_NOT_FOUND" });
+  }
+
+  const user = snap.data() as any;
+  const existingId = user?.stripeCustomerId || user?.billing?.customerId;
+
+  // If we have an existing customer ID, verify it's still valid in Stripe
+  if (existingId) {
+    try {
+      const customer = await stripe.customers.retrieve(existingId);
+      
+      // Customer exists and is not deleted
+      if (!('deleted' in customer) || !customer.deleted) {
+        return existingId;
+      }
+      
+      // Customer was explicitly deleted in Stripe - fall through to create new
+      console.warn(`[getOrCreateStripeCustomer] Stripe customer ${existingId} for uid=${uid} is deleted`);
+    } catch (err: any) {
+      // Stripe throws error with type "StripeInvalidRequestError" for "No such customer"
+      const isNotFound = err?.type === "StripeInvalidRequestError" && 
+                         (err?.statusCode === 404 || err?.code === "resource_missing");
+      
+      if (isNotFound) {
+        console.warn(`[getOrCreateStripeCustomer] Stale customer ID ${existingId} for uid=${uid} - will create new`);
+        // Fall through to create new customer
+      } else {
+        // Other Stripe error (network, auth, etc.) - rethrow
+        throw err;
+      }
+    }
+  }
+
+  // Create a new Stripe customer
+  console.log(`[getOrCreateStripeCustomer] Creating new Stripe customer for uid=${uid}, email=${email}`);
+  
+  const newCustomer = await stripe.customers.create({
+    email,
+    name: displayName,
+    metadata: { userId: uid },
+  });
+
+  // Persist the new customer ID to Firestore (overwrites stale ID if present)
+  await userRef.set(
+    {
+      stripeCustomerId: newCustomer.id,
+      billing: {
+        provider: "stripe",
+        customerId: newCustomer.id,
+        updatedAt: Date.now(),
+      },
+    },
+    { merge: true }
+  );
+
+  return newCustomer.id;
 }
 
 function sanitizeHistory(history: any): PlanChangeHistoryEntry[] {
@@ -45,8 +143,9 @@ function sanitizeHistory(history: any): PlanChangeHistoryEntry[] {
 async function acquirePlanChangeLock(params: {
   userRef: DocumentReference;
   requestId: string;
+  targetPlanId: PlanId;
 }) {
-  const { userRef, requestId } = params;
+  const { userRef, requestId, targetPlanId } = params;
   const now = Date.now();
 
   return db.runTransaction(async (tx) => {
@@ -56,25 +155,43 @@ async function acquirePlanChangeLock(params: {
     }
 
     const user = snap.data() as any;
-    const history = sanitizeHistory(user?.planChangeHistory);
 
-    // Cooldown check: block on 3rd change inside 5-day window
-    const recent = history.filter((entry) => entry.at >= now - PLAN_CHANGE_WINDOW_MS);
-    if (recent.length >= PLAN_CHANGE_MAX_IN_WINDOW) {
-      const oldestRecent = recent[0];
-      const cooldownUntil = oldestRecent.at + PLAN_CHANGE_WINDOW_MS;
+    const currentPlanId: PlanId = isPlanId(user?.planId) ? (user.planId as PlanId) : "free";
+    const direction = comparePlans(currentPlanId, targetPlanId);
+
+    // Canonical plan-change guards (stored on user doc).
+    let guards: BillingGuards = normalizeBillingGuards(user?.billingGuards, now);
+
+    // Daily limit (rolling 24h, max 3 changes) applies to upgrades and downgrades.
+    const daily = assertDailyPlanLimit(guards, now);
+    if (!daily.ok) {
+      throw Object.assign(new Error("plan_change_limit_daily"), {
+        code: "DAILY_LIMIT",
+        retryAfterMs: daily.retryAfterMs,
+      });
+    }
+
+    // If the window expired, reset it now (does not count as a change).
+    if ((daily as any).reset) {
+      guards = applyDailyWindowReset(guards, now);
       tx.set(
         userRef,
         {
-          planChangeCooldownUntil: cooldownUntil,
-          planChangeLock: null,
+          billingGuards: guards,
         },
         { merge: true }
       );
-      throw Object.assign(new Error("plan_change_cooldown"), {
-        code: "COOLDOWN",
-        cooldownUntil,
-      });
+    }
+
+    // Downgrade-only rule: once per rolling 30 days.
+    if (direction < 0) {
+      const down = assertMonthlyDowngradeLimit(guards, now);
+      if (!down.ok) {
+        throw Object.assign(new Error("downgrade_limit_monthly"), {
+          code: "MONTHLY_DOWNGRADE_LIMIT",
+          retryAfterMs: down.retryAfterMs,
+        });
+      }
     }
 
     const lock = user?.planChangeLock;
@@ -104,7 +221,7 @@ async function acquirePlanChangeLock(params: {
       { merge: true }
     );
 
-    return { user, newLock };
+    return { user, newLock, currentPlanId, direction };
   });
 }
 
@@ -138,24 +255,102 @@ function priceIdFor(plan: PlanId, planMeta?: any) {
 // Accept any PlanId + variant for checkout
 type CheckoutPlanVariant = `${PlanId}_paid` | `${PlanId}_trial` | PlanId;
 
-const PLAN_RANKS: Record<string, number> = {
-  free: 0,
-  starter: 1,
-  basic: 1,
-  pro: 2,
-  enterprise: 3,
-  internal_unlimited: 4,
-};
+function planIdFromStripeSubscription(sub: any): PlanId {
+  const metaPlan = String(sub?.metadata?.plan || "").trim();
+  if (isPlanId(metaPlan as any)) return metaPlan as PlanId;
 
-function getPlanRank(planId?: string | null): number {
-  if (!planId) return 0;
-  return PLAN_RANKS[planId] ?? 0;
+  const planVariant = String(sub?.metadata?.planVariant || "").trim();
+  if (planVariant === "pro") return "pro";
+  if (planVariant === "basic") return "basic";
+  if (planVariant.startsWith("starter")) return "starter";
+
+  const priceId = sub?.items?.data?.[0]?.price?.id;
+  if (priceId === process.env.STRIPE_PRICE_STARTER) return "starter";
+  if (priceId === process.env.STRIPE_PRICE_BASIC) return "basic";
+  if (priceId === process.env.STRIPE_PRICE_PRO) return "pro";
+  return "free";
+}
+
+function pickPrimarySubscriptionItem(sub: any): { itemId: string; priceId: string } | null {
+  const items: any[] = Array.isArray(sub?.items?.data) ? sub.items.data : [];
+  if (items.length === 0) return null;
+  if (items.length === 1) {
+    const priceId = items[0]?.price?.id;
+    return priceId ? { itemId: items[0].id, priceId } : null;
+  }
+
+  const knownPlanPriceIds = new Set(
+    [process.env.STRIPE_PRICE_STARTER, process.env.STRIPE_PRICE_BASIC, process.env.STRIPE_PRICE_PRO].filter(
+      (v): v is string => typeof v === "string" && v.length > 0
+    )
+  );
+
+  const known = items.find((it) => {
+    const priceId = it?.price?.id;
+    return typeof priceId === "string" && knownPlanPriceIds.has(priceId);
+  });
+  if (known) {
+    return { itemId: known.id, priceId: known.price.id };
+  }
+
+  // Prefer non-metered recurring items as a heuristic for the main plan.
+  const nonMetered = items.find((it) => {
+    const usageType = it?.price?.recurring?.usage_type;
+    return usageType !== "metered" && typeof it?.price?.id === "string";
+  });
+  if (nonMetered) {
+    return { itemId: nonMetered.id, priceId: nonMetered.price.id };
+  }
+
+  const fallbackPriceId = items[0]?.price?.id;
+  return typeof fallbackPriceId === "string" ? { itemId: items[0].id, priceId: fallbackPriceId } : null;
+}
+
+async function retrieveStripeSubscriptionSafe(id: string): Promise<any | null> {
+  const trimmed = String(id || "").trim();
+  if (!trimmed) return null;
+  try {
+    // Expand optional pointers so we can derive billing periods when fields are missing.
+    return await stripe.subscriptions.retrieve(trimmed, {
+      expand: ["latest_invoice", "latest_invoice.lines", "schedule"],
+    } as any);
+  } catch {
+    return null;
+  }
+}
+
+function extractId(maybe: any): string | null {
+  if (!maybe) return null;
+  if (typeof maybe === "string") return maybe;
+  if (typeof maybe === "object" && typeof maybe.id === "string") return maybe.id;
+  return null;
+}
+
+function pickBestSubscription(list: any): any | null {
+  const subs: any[] = Array.isArray(list?.data) ? list.data : [];
+  if (subs.length === 0) return null;
+  const scoreStatus = (status: string) => {
+    const s = String(status || "").toLowerCase();
+    // Prefer active/trialing; then states that still have a current period.
+    const order = ["active", "trialing", "past_due", "unpaid", "incomplete", "incomplete_expired", "canceled"];
+    const idx = order.indexOf(s);
+    return idx === -1 ? 999 : idx;
+  };
+  return [...subs]
+    .sort((a, b) => {
+      const sa = scoreStatus(a?.status);
+      const sb = scoreStatus(b?.status);
+      if (sa !== sb) return sa - sb;
+      const ca = Number(a?.created || 0);
+      const cb = Number(b?.created || 0);
+      return cb - ca;
+    })[0];
 }
 
 router.post("/checkout", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ success: false, error: "Unauthorized" });
+    if (!uid) return res.status(401).json({ success: false, error: PERMISSION_ERRORS.UNAUTHORIZED });
 
     const { plan, requestId, tosAccepted } = (req.body || {}) as {
       plan?: CheckoutPlanVariant;
@@ -197,7 +392,38 @@ router.post("/checkout", requireAuth, async (req, res) => {
       // Billing is OFF (dev/admin override). Allow preflight without Stripe checks.
       return res.json({
         success: true,
+        reason: "billing_disabled",
+        noopReason: "BILLING_DISABLED" satisfies CheckoutNoopReason,
         billing: { mode: "disabled" },
+        requestId,
+      });
+    }
+
+    // Stripe must be configured for any non-disabled billing flow.
+    if (!process.env.STRIPE_SECRET_KEY) {
+      return res.status(500).json({
+        success: false,
+        error: "missing_stripe_key",
+        noopReason: "MISSING_STRIPE_KEY" satisfies CheckoutNoopReason,
+      });
+    }
+
+    // Preflight Stripe price config BEFORE acquiring locks or writing anything.
+    // If misconfigured, return a safe error and leave Firestore unchanged.
+    let preflightPlanMeta: any = {};
+    try {
+      const planSnap = await db.collection("plans").doc(canonicalPlan).get();
+      if (planSnap.exists) preflightPlanMeta = planSnap.data();
+    } catch {}
+
+    let preflightPriceId: string;
+    try {
+      preflightPriceId = priceIdFor(canonicalPlan, preflightPlanMeta);
+    } catch {
+      return res.status(500).json({
+        success: false,
+        error: "missing_price_id",
+        noopReason: "MISSING_PRICE_ID" satisfies CheckoutNoopReason,
       });
     }
 
@@ -210,16 +436,24 @@ router.post("/checkout", requireAuth, async (req, res) => {
 
     // Idempotent: return the prior result if this requestId already finished
     if (user?.planChangeRequestId === requestId && user?.planChangeRequestResult) {
-      return res.json({ success: true, reused: true, ...user.planChangeRequestResult });
+      const prior = user.planChangeRequestResult as any;
+      const extraNoopReason =
+        prior?.mode === "noop" && !prior?.noopReason
+          ? ({ noopReason: "ALREADY_ON_PLAN" as CheckoutNoopReason } as const)
+          : null;
+      return res.json({ success: true, reused: true, ...prior, ...(extraNoopReason || {}) });
     }
 
-    // Acquire lock + cooldown enforcement
+    // Acquire lock + guard enforcement
     let lockedUser: any = null;
     try {
-      lockedUser = await acquirePlanChangeLock({ userRef, requestId });
+      lockedUser = await acquirePlanChangeLock({ userRef, requestId, targetPlanId: canonicalPlan });
     } catch (err: any) {
-      if (err?.code === "COOLDOWN") {
-        return res.status(429).json({ success: false, error: "plan_change_cooldown", cooldownUntil: err.cooldownUntil });
+      if (err?.code === "DAILY_LIMIT") {
+        return res.status(429).json({ success: false, error: "plan_change_limit_daily", retryAfterMs: err.retryAfterMs });
+      }
+      if (err?.code === "MONTHLY_DOWNGRADE_LIMIT") {
+        return res.status(429).json({ success: false, error: "downgrade_limit_monthly", retryAfterMs: err.retryAfterMs });
       }
       if (err?.code === "LOCKED") {
         return res.status(409).json({ success: false, error: "plan_change_locked", lockUntil: err.lockUntil });
@@ -231,6 +465,8 @@ router.post("/checkout", requireAuth, async (req, res) => {
     }
 
     const userAtLock = lockedUser?.user ?? user;
+    const currentPlanFromUser: PlanId = isPlanId(userAtLock?.planId) ? (userAtLock.planId as PlanId) : "free";
+    const directionFromUser = comparePlans(currentPlanFromUser, canonicalPlan);
 
     // Enforce Terms of Service acceptance before creating a checkout session.
     if (!hasAcceptedCurrentTos(userAtLock)) {
@@ -248,6 +484,7 @@ router.post("/checkout", requireAuth, async (req, res) => {
         (userAtLock as any).tosVersion = CURRENT_TOS_VERSION;
         (userAtLock as any).tosAcceptedAt = now;
       } else {
+        await userRef.set({ planChangeLock: null }, { merge: true });
         return res.status(403).json({
           success: false,
           error: "tos_not_accepted",
@@ -265,37 +502,286 @@ router.post("/checkout", requireAuth, async (req, res) => {
     const useTrial = variant === "trial" && !hasHadTrial;
     const trialDays = useTrial ? DEFAULT_TRIAL_DAYS : 0;
 
-    // Ensure Stripe customer exists
-    let customerId: string | undefined = userAtLock?.stripeCustomerId || userAtLock?.billing?.customerId;
+    const subscriptionIdFromUser: string | undefined = userAtLock?.billing?.subscriptionId || userAtLock?.stripeSubscriptionId;
+    const customerIdHint: string | undefined = userAtLock?.stripeCustomerId || userAtLock?.billing?.customerId;
 
-    if (!customerId) {
-      const customer = await stripe.customers.create({
-        email: userAtLock?.email,
-        name: userAtLock?.displayName,
-        metadata: { userId: uid },
-      });
+    // Fast-path: existing active subscription => apply upgrade immediately or schedule downgrade.
+    if (subscriptionIdFromUser || customerIdHint) {
+      // Prefer the stored subscriptionId, but if it's stale/missing, fall back to customer lookup.
+      let sub: any | null = null;
+      if (subscriptionIdFromUser) {
+        sub = await retrieveStripeSubscriptionSafe(subscriptionIdFromUser);
+      }
+      if (!sub && customerIdHint) {
+        try {
+          const list = await stripe.subscriptions.list({ customer: customerIdHint, status: "all", limit: 10 } as any);
+          const picked = pickBestSubscription(list);
+          const pickedId = extractId(picked?.id) || (typeof picked?.id === "string" ? picked.id : null);
+          if (pickedId) sub = await retrieveStripeSubscriptionSafe(pickedId);
+        } catch {}
+      }
 
-      customerId = customer.id;
+      if (!sub) {
+        // No subscription found. Continue to checkout creation flow below.
+      } else {
+      const subscriptionId = String(sub.id);
+      const billingStatus = String((sub as any)?.status || "none");
+      const billingActive = billingStatus === "active" || billingStatus === "trialing";
 
-      await userRef.set(
-        {
-          stripeCustomerId: customerId,
-          billing: {
-            provider: "stripe",
-            customerId,
-            updatedAt: Date.now(),
+      // Prefer Stripe as the source of truth for the current plan to avoid
+      // stale user docs causing incorrect direction calculations.
+      const currentPlanFromStripe: PlanId = planIdFromStripeSubscription(sub as any);
+      const direction = comparePlans(currentPlanFromStripe, canonicalPlan);
+
+      if (billingActive && direction === 0) {
+        const noopReason: CheckoutNoopReason = "ALREADY_ON_PLAN";
+
+        // Already on the requested plan.
+        // Important: reconcile the user doc with Stripe truth so the UI doesn't
+        // keep showing a stale planId (webhooks can lag/miss in dev/staging).
+        // SAFETY: Only do this Firestore reconciliation for ALREADY_ON_PLAN.
+        const now = Date.now();
+        const picked = pickPrimarySubscriptionItem(sub as any);
+        const currentPriceId: string | undefined = picked?.priceId;
+        const currentPeriodEndSec = (sub as any).current_period_end as number | undefined;
+        const currentPeriodEnd = typeof currentPeriodEndSec === "number" ? currentPeriodEndSec * 1000 : null;
+
+        await userRef.set(
+          {
+            planId: currentPlanFromStripe,
+            pendingPlan: null,
+            billingActive: true,
+            billingStatus,
+            billing: {
+              ...(userAtLock?.billing || {}),
+              provider: "stripe",
+              customerId: (sub as any)?.customer ?? userAtLock?.stripeCustomerId ?? userAtLock?.billing?.customerId ?? null,
+              subscriptionId: String((sub as any).id || "") || subscriptionId,
+              priceId: currentPriceId ?? (userAtLock?.billing?.priceId ?? null),
+              cancelAtPeriodEnd: !!(sub as any).cancel_at_period_end,
+              currentPeriodEnd,
+              updatedAt: now,
+            },
+            planChangeLock: null,
+            planChangeRequestId: requestId,
+            planChangeRequestResult: {
+              requestId,
+              status: "ok",
+              mode: "noop",
+              noopReason,
+              plan: canonicalPlan,
+              createdAt: now,
+            },
+            updatedAt: now,
           },
-        },
-        { merge: true }
-      );
+          { merge: true }
+        );
+
+        return res.json({
+          success: true,
+          mode: "noop",
+          reason: "already_on_plan",
+          noopReason,
+          planId: currentPlanFromStripe,
+          requestId,
+        });
+      }
+
+      if (billingActive && direction !== 0) {
+        const picked = pickPrimarySubscriptionItem(sub as any);
+        const itemId: string | undefined = picked?.itemId;
+        const currentPriceId: string | undefined = picked?.priceId;
+        if (!itemId || !currentPriceId) {
+          await userRef.set({ planChangeLock: null }, { merge: true });
+          return res.status(500).json({ success: false, error: "subscription_item_missing" });
+        }
+
+        const targetPriceId: string = preflightPriceId;
+        const now = Date.now();
+        const guards = normalizeBillingGuards(userAtLock?.billingGuards, now);
+        const nextGuards = applySuccessfulPlanChange({ guards, nowMs: now, isDowngrade: direction < 0 });
+
+        if (direction > 0) {
+          // Upgrade: effective immediately.
+          const updated = await stripe.subscriptions.update(subscriptionId, {
+            cancel_at_period_end: false,
+            items: [{ id: itemId, price: targetPriceId }],
+            proration_behavior: "always_invoice",
+            metadata: {
+              ...(sub as any)?.metadata,
+              userId: uid,
+              plan: canonicalPlan,
+              planVariant: canonicalPlan,
+            },
+          } as any);
+
+          const currentPeriodEndSec = (updated as any).current_period_end as number | undefined;
+          const currentPeriodEnd = typeof currentPeriodEndSec === "number" ? currentPeriodEndSec * 1000 : null;
+
+          const history = sanitizeHistory(userAtLock?.planChangeHistory);
+          const nextHistory =
+            currentPlanFromStripe === canonicalPlan
+              ? history
+              : [...history, { at: now, fromPlan: currentPlanFromStripe, toPlan: canonicalPlan, source: "upgrade" }].slice(-10);
+
+          await userRef.set(
+            {
+              planId: canonicalPlan,
+              pendingPlan: null,
+              scheduledPlanChange: null,
+              billingGuards: nextGuards,
+              planChangeHistory: nextHistory,
+              planChangeLock: null,
+              planChangeRequestId: requestId,
+              planChangeRequestResult: {
+                requestId,
+                status: "ok",
+                mode: "upgrade",
+                plan: canonicalPlan,
+                createdAt: now,
+              },
+              billingActive: billingStatus === "active" || billingStatus === "trialing",
+              billingStatus,
+              billing: {
+                ...(userAtLock?.billing || {}),
+                provider: "stripe",
+                customerId: (sub as any)?.customer ?? userAtLock?.stripeCustomerId ?? userAtLock?.billing?.customerId ?? null,
+                subscriptionId: subscriptionId,
+                priceId: targetPriceId,
+                cancelAtPeriodEnd: !!(updated as any).cancel_at_period_end,
+                currentPeriodEnd,
+                updatedAt: now,
+              },
+              updatedAt: now,
+            },
+            { merge: true }
+          );
+
+          return res.json({ success: true, mode: "upgrade", reason: "upgrade_applied", planId: canonicalPlan, requestId });
+        }
+
+        // Downgrade: schedule at period end.
+        const scheduleIdExistingRaw = (sub as any).schedule || (sub as any).subscription_schedule;
+        const scheduleIdExisting = extractId(scheduleIdExistingRaw);
+        let schedule: any = null;
+        try {
+          schedule = scheduleIdExisting
+            ? await stripe.subscriptionSchedules.retrieve(String(scheduleIdExisting))
+            : await stripe.subscriptionSchedules.create({ from_subscription: subscriptionId } as any);
+        } catch {}
+
+        const currentPeriodEndSec = (sub as any).current_period_end as number | undefined;
+        let currentPeriodEnd = typeof currentPeriodEndSec === "number" ? currentPeriodEndSec : null;
+        const currentPeriodStartSec = (sub as any).current_period_start as number | undefined;
+        let currentPeriodStart = typeof currentPeriodStartSec === "number" ? currentPeriodStartSec : Math.floor(now / 1000);
+
+        // Some Stripe states (and/or older stored subscription ids) can yield missing period fields.
+        // Derive them from the subscription schedule (preferred) or latest invoice as a fallback.
+        if (schedule && (!currentPeriodEnd || !currentPeriodStart)) {
+          const phase = (schedule as any).current_phase || (Array.isArray((schedule as any).phases) ? (schedule as any).phases[0] : null);
+          const startFromSchedule = phase?.start_date;
+          const endFromSchedule = phase?.end_date;
+          if (typeof startFromSchedule === "number") currentPeriodStart = startFromSchedule;
+          if (typeof endFromSchedule === "number") currentPeriodEnd = endFromSchedule;
+        }
+
+        if (!currentPeriodEnd) {
+          const latestInvoiceId = extractId((sub as any).latest_invoice);
+          if (latestInvoiceId) {
+            try {
+              const inv: any = await stripe.invoices.retrieve(String(latestInvoiceId));
+              const line = Array.isArray(inv?.lines?.data) ? inv.lines.data[0] : null;
+              const startFromInv = line?.period?.start;
+              const endFromInv = line?.period?.end;
+              if (typeof startFromInv === "number") currentPeriodStart = startFromInv;
+              if (typeof endFromInv === "number") currentPeriodEnd = endFromInv;
+            } catch {}
+          }
+        }
+
+        if (!currentPeriodEnd) {
+          await userRef.set({ planChangeLock: null }, { merge: true });
+          return res.status(500).json({ success: false, error: "subscription_period_missing" });
+        }
+
+        const scheduleId = schedule?.id;
+        if (!scheduleId) {
+          await userRef.set({ planChangeLock: null }, { merge: true });
+          return res.status(500).json({ success: false, error: "subscription_schedule_missing" });
+        }
+
+        await stripe.subscriptionSchedules.update(
+          scheduleId,
+          {
+            end_behavior: "release",
+            phases: [
+              {
+                start_date: currentPeriodStart,
+                end_date: currentPeriodEnd,
+                items: [{ price: currentPriceId, quantity: 1 }],
+                proration_behavior: "none",
+              },
+              {
+                start_date: currentPeriodEnd,
+                items: [{ price: targetPriceId, quantity: 1 }],
+                proration_behavior: "none",
+              },
+            ],
+          } as any
+        );
+
+        const effectiveAtMs = currentPeriodEnd * 1000;
+
+        const history = sanitizeHistory(userAtLock?.planChangeHistory);
+        const nextHistory = [...history, { at: now, fromPlan: currentPlanFromStripe, toPlan: canonicalPlan, source: "downgrade_scheduled" }].slice(-10);
+
+        await userRef.set(
+          {
+            // Keep current plan active until effective date.
+            planId: currentPlanFromStripe,
+            pendingPlan: canonicalPlan,
+            scheduledPlanChange: {
+              type: "downgrade",
+              targetPlanId: canonicalPlan,
+              effectiveAtMs,
+              scheduleId,
+            },
+            billingGuards: nextGuards,
+            planChangeHistory: nextHistory,
+            planChangeLock: null,
+            planChangeRequestId: requestId,
+            planChangeRequestResult: {
+              requestId,
+              status: "ok",
+              mode: "downgrade_scheduled",
+              plan: canonicalPlan,
+              effectiveAtMs,
+              createdAt: now,
+            },
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+
+        return res.json({ success: true, mode: "downgrade_scheduled", reason: "downgrade_scheduled_period_end", planId: currentPlanFromStripe, pendingPlan: canonicalPlan, effectiveAtMs, requestId });
+      }
+      }
     }
 
-    // Fetch plan metadata from Firestore for custom plans
-    let planMeta: any = {};
-    try {
-      const planSnap = await db.collection("plans").doc(canonicalPlan).get();
-      if (planSnap.exists) planMeta = planSnap.data();
-    } catch {}
+    // Ensure Stripe customer exists (needed for first-time checkout)
+    // Use robust customer resolution that handles stale/deleted customer IDs
+    const email = userAtLock?.email;
+    const displayName = userAtLock?.displayName;
+
+    if (!email) {
+      // Release lock before returning error
+      await userRef.set({ planChangeLock: null }, { merge: true });
+      return res.status(400).json({ success: false, error: "missing_email" });
+    }
+
+    const customerId = await getOrCreateStripeCustomer(uid, email, displayName);
+
+    const checkoutPriceId: string = preflightPriceId;
 
     // Create Checkout Session
     const subscription_data: Stripe.Checkout.SessionCreateParams.SubscriptionData = {
@@ -313,7 +799,7 @@ router.post("/checkout", requireAuth, async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
       customer: customerId,
-      line_items: [{ price: priceIdFor(canonicalPlan, planMeta), quantity: 1 }],
+      line_items: [{ price: checkoutPriceId, quantity: 1 }],
 
       success_url: `${CLIENT_URL}/billing/success`,
       cancel_url: `${CLIENT_URL}/billing/canceled`,
@@ -328,6 +814,8 @@ router.post("/checkout", requireAuth, async (req, res) => {
     });
 
     const now = Date.now();
+    const guards = normalizeBillingGuards(userAtLock?.billingGuards, now);
+    const nextGuards = applySuccessfulPlanChange({ guards, nowMs: now, isDowngrade: false });
     const history = sanitizeHistory(userAtLock?.planChangeHistory);
     const nextHistory = [
       ...history,
@@ -342,8 +830,9 @@ router.post("/checkout", requireAuth, async (req, res) => {
     await userRef.set(
       {
         pendingPlan: canonicalPlan,
+        scheduledPlanChange: null,
+        billingGuards: nextGuards,
         planChangeHistory: nextHistory,
-        planChangeCooldownUntil: null,
         planChangeLock: null,
         planChangeRequestId: requestId,
         planChangeRequestResult: {
@@ -357,9 +846,19 @@ router.post("/checkout", requireAuth, async (req, res) => {
       { merge: true }
     );
 
-    return res.json({ success: true, url: session.url, requestId });
+    return res.json({ success: true, url: session.url, reason: "checkout_session_created", requestId });
   } catch (err: any) {
     console.error("POST /api/billing/checkout failed:", err?.message || err);
+
+    const code = String(err?.code || "").toUpperCase();
+    if (code === "MISSING_STRIPE_KEY" || String(err?.message || "") === "missing_stripe_key") {
+      return res.status(500).json({
+        success: false,
+        error: "missing_stripe_key",
+        noopReason: "MISSING_STRIPE_KEY" satisfies CheckoutNoopReason,
+      });
+    }
+
     if (req?.body?.requestId) {
       try {
         await getUserRef((req as any).user?.uid).set(
@@ -370,29 +869,37 @@ router.post("/checkout", requireAuth, async (req, res) => {
         );
       } catch {}
     }
-    return res.status(500).json({ success: false, error: err?.message || "Server error" });
+    return res.status(500).json({
+      success: false,
+      error: err?.message || "Server error",
+      noopReason: "UNSUPPORTED_MODE" satisfies CheckoutNoopReason,
+    });
   }
 });
 
 router.post("/portal", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ success: false, error: "Unauthorized" });
+    if (!uid) return res.status(401).json({ success: false, error: PERMISSION_ERRORS.UNAUTHORIZED });
     const account = (req as any).account || await getUserAccount(uid);
     if (account.effectiveBillingEnabled === false) {
-      // Billing is disabled (Test Mode). Do not talk to Stripe; instead signal
-      // to the client that the portal is unavailable due to billing being off,
-      // but use a 200 status so this is not treated as a hard auth error.
-      return res.json({ success: false, error: "billing_disabled" });
+      // Billing is disabled (Test Mode). Do not talk to Stripe.
+      return res.status(403).json({ success: false, error: "billing_disabled" });
     }
 
     const snap = await getUserRef(uid).get();
     if (!snap.exists) return res.status(404).json({ success: false, error: "User not found" });
 
     const user = snap.data() as any;
+    const email = user?.email;
+    const displayName = user?.displayName;
 
-    const customerId = user?.stripeCustomerId || user?.billing?.customerId;
-    if (!customerId) return res.status(400).json({ success: false, error: "No Stripe customer" });
+    if (!email) {
+      return res.status(400).json({ success: false, error: "missing_email" });
+    }
+
+    // Use robust customer ID resolution that handles stale/deleted customers
+    const customerId = await getOrCreateStripeCustomer(uid, email, displayName);
 
     const CLIENT_URL = process.env.CLIENT_URL;
     if (!CLIENT_URL) throw new Error("Missing env var: CLIENT_URL");
@@ -405,6 +912,12 @@ router.post("/portal", requireAuth, async (req, res) => {
     return res.json({ success: true, url: portal.url });
   } catch (err: any) {
     console.error("POST /api/billing/portal failed:", err?.message || err);
+
+    const code = String(err?.code || "").toUpperCase();
+    if (code === "MISSING_STRIPE_KEY" || String(err?.message || "") === "missing_stripe_key") {
+      return res.status(500).json({ success: false, error: "missing_stripe_key" });
+    }
+
     return res.status(500).json({ success: false, error: err?.message || "Server error" });
   }
 });
@@ -413,7 +926,7 @@ router.post("/portal", requireAuth, async (req, res) => {
 router.post("/test/change-plan", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ success: false, error: "Unauthorized" });
+    if (!uid) return res.status(401).json({ success: false, error: PERMISSION_ERRORS.UNAUTHORIZED });
 
     const { newPlanId } = (req.body || {}) as { newPlanId?: string };
     if (!newPlanId || typeof newPlanId !== "string") {
@@ -429,19 +942,18 @@ router.post("/test/change-plan", requireAuth, async (req, res) => {
         .json({ success: false, error: "billing_live" });
     }
 
+    const isProd = process.env.NODE_ENV === "production";
     const platformDisabled = account.platformBillingEnabled === false;
     const userDisabled = account.billingEnabled === false;
 
-    // Optional safety rail:
-    // - If billing is disabled platform-wide, treat it as an intentional test/staging mode and allow.
-    // - If only the user is in test mode while platform billing is enabled, require explicit tester flag in production.
-    const isProd = process.env.NODE_ENV === "production";
+    // Safety rails (especially for production):
+    // - If billing is disabled platform-wide, treat it as an intentional test/staging mode and allow self-service.
+    // - If only the user is in test mode while platform billing is enabled, require explicit tester flag in prod.
+    // - Admins are always allowed.
     const raw = account.rawUser || {};
     const isTester = !!(raw.tester || raw.isTester);
-    if (isProd && !platformDisabled && userDisabled && !isTester) {
-      return res
-        .status(403)
-        .json({ success: false, error: "test_mode_disabled" });
+    if (isProd && !account.isAdmin && !platformDisabled && userDisabled && !isTester) {
+      return res.status(403).json({ success: false, error: "test_mode_disabled" });
     }
 
     const planIdCandidate = newPlanId as PlanId;
@@ -499,7 +1011,7 @@ router.post("/test/change-plan", requireAuth, async (req, res) => {
 router.post("/clear-pending", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ success: false, error: "Unauthorized" });
+    if (!uid) return res.status(401).json({ success: false, error: PERMISSION_ERRORS.UNAUTHORIZED });
     await getUserRef(uid).set({ pendingPlan: null }, { merge: true });
     return res.json({ success: true });
   } catch (err: any) {
@@ -508,10 +1020,283 @@ router.post("/clear-pending", requireAuth, async (req, res) => {
   }
 });
 
+// Cancel a scheduled plan change (downgrade or upgrade pending)
+router.post("/cancel-plan-change", requireAuth, async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ success: false, error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    const userRef = getUserRef(uid);
+    const snap = await userRef.get();
+    if (!snap.exists) return res.status(404).json({ success: false, error: "User not found" });
+
+    const user = snap.data() as any;
+    const scheduledPlanChange = user?.scheduledPlanChange || null;
+    const pendingPlan = user?.pendingPlan || null;
+
+    // If no plan change is pending, nothing to cancel
+    if (!pendingPlan && !scheduledPlanChange) {
+      return res.json({ success: true, message: "No pending plan change to cancel" });
+    }
+
+    // If there's a Stripe subscription schedule, release it
+    if (scheduledPlanChange?.scheduleId) {
+      try {
+        const scheduleId = scheduledPlanChange.scheduleId;
+        console.log(`[cancel-plan-change] Releasing subscription schedule ${scheduleId} for user ${uid}`);
+        
+        // Release the subscription schedule (removes the scheduled changes)
+        await stripe.subscriptionSchedules.release(scheduleId);
+        console.log(`[cancel-plan-change] Successfully released schedule ${scheduleId}`);
+      } catch (stripeErr: any) {
+        // If schedule doesn't exist or already released, that's fine - continue
+        if (stripeErr?.code === "resource_missing") {
+          console.log(`[cancel-plan-change] Schedule already released or missing for user ${uid}`);
+        } else {
+          console.error(`[cancel-plan-change] Stripe error releasing schedule:`, stripeErr?.message || stripeErr);
+          // Don't fail the request - still clear the local state
+        }
+      }
+    }
+
+    // Clear both pendingPlan and scheduledPlanChange from user doc
+    await userRef.set(
+      {
+        pendingPlan: null,
+        scheduledPlanChange: null,
+        updatedAt: Date.now(),
+      },
+      { merge: true }
+    );
+
+    console.log(`[cancel-plan-change] Cleared pending plan change for user ${uid}`);
+    return res.json({ 
+      success: true, 
+      message: "Plan change canceled successfully",
+      clearedPendingPlan: !!pendingPlan,
+      clearedSchedule: !!scheduledPlanChange
+    });
+  } catch (err: any) {
+    console.error("POST /api/billing/cancel-plan-change failed:", err?.message || err);
+    return res.status(500).json({ success: false, error: err?.message || "Server error" });
+  }
+});
+
+// Self-healing reconcile: if webhooks lag/miss, fetch Stripe subscription state and
+// update planId + clear pendingPlan when the subscription is active/trialing.
+router.post("/refresh", requireAuth, async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ success: false, error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    const account = (req as any).account || await getUserAccount(uid);
+    if (account.effectiveBillingEnabled === false) {
+      return res.json({ success: false, error: "billing_disabled" });
+    }
+
+    const userRef = getUserRef(uid);
+    const snap = await userRef.get();
+    if (!snap.exists) return res.status(404).json({ success: false, error: "User not found" });
+    const user = snap.data() as any;
+
+    const subscriptionId: string | undefined = user?.billing?.subscriptionId || user?.stripeSubscriptionId;
+    const customerId: string | undefined = user?.stripeCustomerId || user?.billing?.customerId;
+    if (!subscriptionId && !customerId) {
+      return res.status(400).json({ success: false, error: "no_stripe_customer" });
+    }
+
+    let sub: any = null;
+    if (subscriptionId) {
+      try {
+        sub = await stripe.subscriptions.retrieve(subscriptionId);
+      } catch (err: any) {
+        // Subscription ID might be stale/deleted - try customer lookup below
+        console.warn(`[/refresh] Failed to retrieve subscription ${subscriptionId}:`, err?.message);
+      }
+    }
+    
+    if (!sub && customerId) {
+      try {
+        const list = await stripe.subscriptions.list({ customer: customerId, status: "all", limit: 10 });
+        const data = Array.isArray((list as any)?.data) ? (list as any).data : [];
+        sub =
+          data.find((s: any) => s?.status === "active" || s?.status === "trialing") ||
+          data[0] ||
+          null;
+      } catch (err: any) {
+        // Customer ID might be stale/deleted
+        const isNotFound = err?.type === "StripeInvalidRequestError" && 
+                          (err?.statusCode === 404 || err?.code === "resource_missing");
+        
+        if (isNotFound) {
+          console.warn(`[/refresh] Stale customer ID ${customerId} for uid=${uid}`);
+          // Clear the stale customer ID from Firestore
+          await userRef.set(
+            {
+              stripeCustomerId: null,
+              billing: {
+                ...(user?.billing || {}),
+                customerId: null,
+                updatedAt: Date.now(),
+              },
+            },
+            { merge: true }
+          );
+          return res.status(404).json({ 
+            success: false, 
+            error: "no_subscription",
+            staleCustomerCleared: true 
+          });
+        }
+        // Other errors - rethrow
+        throw err;
+      }
+    }
+
+    if (!sub) {
+      return res.status(404).json({ success: false, error: "no_subscription" });
+    }
+
+    const nextPlan = planIdFromStripeSubscription(sub);
+    const billingStatus = String(sub.status || "none");
+    const billingActive = billingStatus === "active" || billingStatus === "trialing";
+    const currentPeriodEndSec = (sub as any).current_period_end as number | undefined;
+    const currentPeriodEnd = typeof currentPeriodEndSec === "number" ? currentPeriodEndSec * 1000 : null;
+    const priceId = sub?.items?.data?.[0]?.price?.id ?? null;
+
+    const stripeIndicatesScheduledChange =
+      !!(sub as any).cancel_at_period_end ||
+      !!(sub as any).pending_update ||
+      !!(sub as any).schedule ||
+      !!(sub as any).subscription_schedule;
+
+    const prevPlan = (user?.planId as PlanId) || "free";
+    const now = Date.now();
+    const history = sanitizeHistory(user?.planChangeHistory);
+    const nextHistory =
+      prevPlan === nextPlan
+        ? history
+        : [...history, { at: now, fromPlan: prevPlan, toPlan: nextPlan, source: "billing_refresh" }].slice(-10);
+
+    const scheduledPlanChange = user?.scheduledPlanChange || null;
+    const preservePendingPlan =
+      scheduledPlanChange &&
+      scheduledPlanChange.type === "downgrade" &&
+      typeof scheduledPlanChange.effectiveAtMs === "number" &&
+      scheduledPlanChange.effectiveAtMs > now &&
+      stripeIndicatesScheduledChange;
+
+    const shouldClearScheduledPlanChange =
+      scheduledPlanChange &&
+      scheduledPlanChange.type === "downgrade" &&
+      typeof scheduledPlanChange.effectiveAtMs === "number" &&
+      scheduledPlanChange.effectiveAtMs <= now &&
+      typeof scheduledPlanChange.targetPlanId === "string" &&
+      scheduledPlanChange.targetPlanId === nextPlan;
+
+    const shouldClearStaleFutureScheduledPlanChange =
+      scheduledPlanChange &&
+      scheduledPlanChange.type === "downgrade" &&
+      typeof scheduledPlanChange.effectiveAtMs === "number" &&
+      scheduledPlanChange.effectiveAtMs > now &&
+      !stripeIndicatesScheduledChange;
+
+    const desiredPlanId = billingActive ? nextPlan : "free";
+    const willClearScheduledPlanChange = !!(shouldClearScheduledPlanChange || shouldClearStaleFutureScheduledPlanChange);
+    const desiredPendingPlan = preservePendingPlan
+      ? (user?.pendingPlan ?? null)
+      : billingActive
+        ? null
+        : (user?.pendingPlan ?? null);
+
+    const pendingPlanCleared = (user?.pendingPlan ?? null) !== null && desiredPendingPlan === null;
+
+    const changes: string[] = [];
+    if ((user?.planId ?? "free") !== desiredPlanId) changes.push("updated_planId");
+    if ((user?.pendingPlan ?? null) !== desiredPendingPlan && desiredPendingPlan === null) changes.push("cleared_pendingPlan");
+    if (willClearScheduledPlanChange && (user?.scheduledPlanChange ?? null) !== null) changes.push("cleared_scheduledPlanChange");
+    if (String(user?.billingStatus || "none") !== billingStatus) changes.push("updated_billingStatus");
+    if (Boolean(user?.billingActive) !== billingActive) changes.push("updated_billingActive");
+    if (Number(user?.billing?.currentPeriodEnd ?? null) !== Number(currentPeriodEnd ?? null)) changes.push("updated_currentPeriodEndMs");
+    if (Boolean(user?.billing?.cancelAtPeriodEnd) !== Boolean(sub.cancel_at_period_end)) changes.push("updated_cancelAtPeriodEnd");
+
+    const changed = changes.length > 0;
+
+    await userRef.set(
+      {
+        planId: desiredPlanId,
+        pendingPlan: desiredPendingPlan,
+        ...(willClearScheduledPlanChange ? { scheduledPlanChange: null } : {}),
+        planChangeHistory: nextHistory,
+        planChangeLock: null,
+        planChangeRequestId: null,
+        planChangeRequestResult: null,
+        billingActive,
+        billingStatus,
+        billing: {
+          ...(user?.billing || {}),
+          provider: "stripe",
+          customerId: customerId ?? sub.customer ?? null,
+          subscriptionId: sub.id ?? subscriptionId ?? null,
+          priceId,
+          cancelAtPeriodEnd: !!sub.cancel_at_period_end,
+          currentPeriodEnd,
+          updatedAt: now,
+        },
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    return res.json({
+      success: true,
+      planId: desiredPlanId,
+      billingStatus,
+      billingActive,
+      pendingPlanCleared,
+      changed,
+      changes,
+      stripe: {
+        subscriptionStatus: billingStatus,
+        hasSchedule: stripeIndicatesScheduledChange,
+        currentPeriodEndMs: currentPeriodEnd,
+      },
+    });
+  } catch (err: any) {
+    console.error("POST /api/billing/refresh failed:", err?.message || err);
+    return res.status(500).json({ success: false, error: err?.message || "Server error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Overages toggle (Pro-only)
+// POST /api/billing/overages
+// Body: { enabled: boolean }
+// - When enabling, requires Stripe readiness (customer + default payment method)
+// - Persists billingSettings.overagesEnabled (plus legacy mirrors)
+// ---------------------------------------------------------------------------
+
+router.post(
+  "/overages",
+  requireAuth,
+  createOveragesEndpointHandler({
+    getAccount: async (uid) => await getUserAccount(uid),
+    getUserDoc: async (uid) => {
+      const snap = await getUserRef(uid).get();
+      return snap.exists ? ((snap.data() as any) || {}) : null;
+    },
+    patchUserDoc: async (uid, patch) => {
+      await getUserRef(uid).set(patch, { merge: true });
+    },
+    retrieveStripeCustomer: async (customerId) => await stripe.customers.retrieve(customerId),
+    now: () => Date.now(),
+  })
+);
+
 router.get("/me", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "Unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     const account = (req as any).account || await getUserAccount(uid);
 
     const snap = await getUserRef(uid).get();
@@ -536,7 +1321,7 @@ router.get("/me", requireAuth, async (req, res) => {
 router.get("/pending-change", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "Unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     const account = (req as any).account || await getUserAccount(uid);
 
     const snap = await getUserRef(uid).get();
@@ -617,7 +1402,7 @@ router.get("/pending-change", requireAuth, async (req, res) => {
 router.get("/status", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "Unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     const account = (req as any).account || await getUserAccount(uid);
 
     const snap = await getUserRef(uid).get();
@@ -625,9 +1410,11 @@ router.get("/status", requireAuth, async (req, res) => {
     const user = snap.data() as any;
 
     const now = Date.now();
-    const cooldownUntil = typeof user?.planChangeCooldownUntil === "number" ? user.planChangeCooldownUntil : null;
-    const cooldownActive = !!(cooldownUntil && cooldownUntil > now);
     const lock = user?.planChangeLock || null;
+
+    const guards = normalizeBillingGuards(user?.billingGuards, now);
+    const daily = assertDailyPlanLimit(guards, now);
+    const dailyRemaining = daily.ok ? Math.max(0, 3 - (guards.changeCountInWindow ?? 0)) : 0;
 
     const subscriptionId: string | undefined =
       user?.billing?.subscriptionId || user?.stripeSubscriptionId;
@@ -678,15 +1465,21 @@ router.get("/status", requireAuth, async (req, res) => {
 
     const planId = user?.planId || "free";
     const pendingPlan = user?.pendingPlan ?? null;
+    const scheduledPlanChange = user?.scheduledPlanChange ?? null;
 
     let state: string = "ACTIVE";
-    if (cooldownActive) {
-      state = "COOLDOWN";
-    } else if (cancelAtPeriodEnd) {
+    if (cancelAtPeriodEnd) {
       state = "CANCEL_AT_PERIOD_END";
+    } else if (
+      scheduledPlanChange &&
+      scheduledPlanChange.type === "downgrade" &&
+      typeof scheduledPlanChange.effectiveAtMs === "number" &&
+      scheduledPlanChange.effectiveAtMs > now
+    ) {
+      state = "PENDING_DOWNGRADE";
     } else if (scheduledChange) {
       if (pendingPlan && pendingPlan !== planId) {
-        state = getPlanRank(pendingPlan) > getPlanRank(planId) ? "PENDING_UPGRADE" : "PENDING_DOWNGRADE";
+        state = comparePlans(planId, pendingPlan) > 0 ? "PENDING_UPGRADE" : "PENDING_DOWNGRADE";
       } else {
         state = "PENDING_CHANGE";
       }
@@ -706,13 +1499,23 @@ router.get("/status", requireAuth, async (req, res) => {
       state,
       planId,
       pendingPlan,
+      scheduledPlanChange,
       billingStatus: status || null,
       billingActive,
       subscriptionId: subscriptionId || null,
       scheduledChange,
       scheduledEffectiveDate,
       cancelAtPeriodEnd,
-      cooldownUntil: cooldownUntil || null,
+      guards: {
+        changeWindowStartMs: guards.changeWindowStartMs,
+        changeCountInWindow: guards.changeCountInWindow,
+        lastDowngradeAtMs: guards.lastDowngradeAtMs,
+        lastPlanChangeAtMs: guards.lastPlanChangeAtMs,
+      },
+      daily: {
+        remaining: dailyRemaining,
+        retryAfterMs: daily.ok ? 0 : (daily as any).retryAfterMs,
+      },
       lock: lock || null,
       request: {
         lastRequestId: user?.planChangeRequestId ?? null,

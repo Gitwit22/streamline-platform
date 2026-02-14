@@ -7,10 +7,100 @@
  */
 
 import fetch from 'node-fetch';
+import jwt from 'jsonwebtoken';
 
 const API_BASE = process.env.API_BASE || 'http://localhost:5137';
-const ADMIN_USER_ID = process.env.ADMIN_USER_ID || 'test-admin-123';
+const JWT_SECRET = process.env.JWT_SECRET || '';
+
+// Prefer explicitly provided auth for running in shared dev/staging.
+const ADMIN_JWT = process.env.TEST_ADMIN_JWT || '';
+const ATTACKER_JWT = process.env.TEST_ATTACKER_JWT || '';
+const ADMIN_EMAIL = process.env.TEST_ADMIN_EMAIL || '';
+const ADMIN_PASSWORD = process.env.TEST_ADMIN_PASSWORD || '';
+const ATTACKER_EMAIL = process.env.TEST_ATTACKER_EMAIL || '';
+const ATTACKER_PASSWORD = process.env.TEST_ATTACKER_PASSWORD || '';
+
+// Allow a dedicated env var for tests; fall back to existing ADMIN_USER_ID usage.
+const ADMIN_USER_ID = process.env.TEST_ADMIN_UID || process.env.ADMIN_USER_ID || 'test-admin-uid';
 const TEST_USER_ID = process.env.TEST_USER_ID || 'test-user-456';
+
+function makeJwt(uid: string) {
+  if (!JWT_SECRET) {
+    throw new Error('Missing JWT_SECRET for signing. Provide TEST_ADMIN_JWT/TEST_ATTACKER_JWT or TEST_*_EMAIL/TEST_*_PASSWORD instead.');
+  }
+  return jwt.sign({ uid }, JWT_SECRET, { expiresIn: '1h' });
+}
+
+async function loginAndGetJwt(email: string, password: string): Promise<string> {
+  const url = `${API_BASE}/api/auth/login`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  const text = await res.text();
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Login failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  const token = json?.token;
+  if (!token || typeof token !== 'string') {
+    throw new Error('Login response missing token');
+  }
+  return token;
+}
+
+async function getJwtForUser(kind: 'admin' | 'attacker'): Promise<string> {
+  if (kind === 'admin') {
+    if (ADMIN_JWT) return ADMIN_JWT;
+    if (ADMIN_EMAIL && ADMIN_PASSWORD) return loginAndGetJwt(ADMIN_EMAIL, ADMIN_PASSWORD);
+    if (JWT_SECRET && JWT_SECRET !== 'dev-secret') return makeJwt(ADMIN_USER_ID);
+    return '';
+  }
+  if (ATTACKER_JWT) return ATTACKER_JWT;
+  if (ATTACKER_EMAIL && ATTACKER_PASSWORD) return loginAndGetJwt(ATTACKER_EMAIL, ATTACKER_PASSWORD);
+  if (JWT_SECRET && JWT_SECRET !== 'dev-secret') return makeJwt('non-admin-user-999');
+  return '';
+}
+
+async function ensureAdminUser(uid: string) {
+  if (process.env.SKIP_FIRESTORE_SEED === '1') {
+    console.log('Setup: SKIP_FIRESTORE_SEED=1 set; skipping Firestore admin seeding');
+    return;
+  }
+
+  let firestore: any;
+  try {
+    // Lazy import so tests don't hard-crash when Firebase credentials aren't configured.
+    ({ firestore } = await import('../streamline-server/firebaseAdmin'));
+  } catch (err: any) {
+    console.warn(
+      'Setup: skipping Firestore admin seeding (Firebase service account not configured in this test process).'
+    );
+    console.warn(
+      'Set FIREBASE_SERVICE_ACCOUNT_JSON/FIREBASE_SERVICE_ACCOUNT_BASE64/FIREBASE_SERVICE_ACCOUNT_PATH to enable deterministic admin seeding.'
+    );
+    return;
+  }
+
+  // Write both the new canonical and legacy admin markers so either path passes.
+  await firestore.doc(`users/${uid}`).set(
+    { isAdmin: true, admin: { isAdmin: true } },
+    { merge: true }
+  );
+  await firestore.doc(`admins/${uid}`).set({ isAdmin: true }, { merge: true });
+}
+
+function authHeadersFromJwt(token: string) {
+  return {
+    Authorization: `Bearer ${token}`,
+  };
+}
 
 // Helper function to make admin API calls
 async function adminRequest(
@@ -19,25 +109,36 @@ async function adminRequest(
   body?: any
 ) {
   const url = `${API_BASE}${endpoint}`;
+
+  const adminJwt = await getJwtForUser('admin');
+  if (!adminJwt) {
+    throw new Error('Admin auth not configured. Provide TEST_ADMIN_JWT or TEST_ADMIN_EMAIL/TEST_ADMIN_PASSWORD (or set a real JWT_SECRET for local signing).');
+  }
+
   const options: any = {
     method,
     headers: {
       'Content-Type': 'application/json',
+      ...authHeadersFromJwt(adminJwt),
     },
   };
+
+  const urlObj = new URL(url);
 
   if (body) {
     options.body = JSON.stringify({
       ...body,
+      // Fallback path used by requireAdmin when JWT is missing/invalid.
       adminUserId: ADMIN_USER_ID,
     });
-  } else if (method === 'GET') {
-    const urlObj = new URL(url);
-    urlObj.searchParams.append('adminUserId', ADMIN_USER_ID);
-    return fetch(urlObj.toString(), options);
   }
 
-  return fetch(url, options);
+  if (method === 'GET') {
+    // Fallback path used by requireAdmin when JWT is missing/invalid.
+    urlObj.searchParams.set('adminUserId', ADMIN_USER_ID);
+  }
+
+  return fetch(urlObj.toString(), options);
 }
 
 // Test: Non-admin gets 403
@@ -46,10 +147,19 @@ async function testNonAdminBlocked() {
   console.log('─'.repeat(60));
 
   try {
-    const url = new URL(`${API_BASE}/api/admin/users`);
-    url.searchParams.append('adminUserId', 'non-admin-user-999');
+    const attackerJwt = await getJwtForUser('attacker');
+    if (!attackerJwt) {
+      console.log('⚠️  SKIP: Non-admin test requires TEST_ATTACKER_JWT or TEST_ATTACKER_EMAIL/TEST_ATTACKER_PASSWORD (or a real JWT_SECRET for local signing).');
+      return true;
+    }
 
-    const response = await fetch(url.toString());
+    const url = new URL(`${API_BASE}/api/admin/users`);
+    url.searchParams.set('adminUserId', 'non-admin-user-999');
+    const response = await fetch(url.toString(), {
+      headers: {
+        ...authHeadersFromJwt(attackerJwt),
+      },
+    });
     
     if (response.status === 403) {
       console.log('✅ PASS: Non-admin correctly blocked (403)');
@@ -141,6 +251,12 @@ async function testChangePlanUpdatesLimits() {
     // Step 1: Get user's current plan
     console.log('Step 1: Fetching user current plan...');
     const userBefore = await adminRequest(`/api/admin/users/${TEST_USER_ID}`);
+
+    if (!userBefore.ok) {
+      console.log(`❌ FAIL: Could not fetch user (${userBefore.status})`);
+      return false;
+    }
+
     const userDataBefore = await userBefore.json();
     
     const oldPlan = userDataBefore.user.planId;
@@ -395,6 +511,10 @@ async function runAllTests() {
   console.log(`\nAPI Base: ${API_BASE}`);
   console.log(`Admin User ID: ${ADMIN_USER_ID}`);
   console.log(`Test User ID: ${TEST_USER_ID}`);
+
+  console.log(`\nSetup: ensuring admin user exists in Firestore (${ADMIN_USER_ID})...`);
+  await ensureAdminUser(ADMIN_USER_ID);
+  console.log('Setup: admin user ensured');
 
   const tests = [
     { name: 'Non-admin blocked', fn: testNonAdminBlocked, required: true },

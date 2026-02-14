@@ -3,8 +3,10 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  DeleteObjectsCommand,
   HeadObjectCommand,
   HeadObjectCommandOutput,
+  ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -28,6 +30,31 @@ const s3Client = new S3Client({
   endpoint: R2_ENDPOINT,
   forcePathStyle: true,
 });
+
+export function isR2Configured(): boolean {
+  return !!(R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET && R2_ENDPOINT);
+}
+
+/**
+ * HEAD check on R2 to verify object exists and get size.
+ * Returns 0 when not found or when R2 is not configured.
+ */
+export async function headObjectSize(remotePath: string): Promise<number> {
+  const key = String(remotePath || "").trim().replace(/^\//, "");
+  if (!key) return 0;
+  if (!R2_BUCKET || !isR2Configured()) return 0;
+
+  try {
+    const resp = await s3Client.send(new HeadObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+    return typeof resp.ContentLength === "number" ? resp.ContentLength : 0;
+  } catch (err: any) {
+    if (err?.name === "NotFound" || err?.$metadata?.httpStatusCode === 404) {
+      return 0;
+    }
+    console.warn(`[r2] headObjectSize error for ${key}:`, err?.message || err);
+    return 0;
+  }
+}
 
 /**
  * Generate R2 public URL for a given storage path
@@ -140,6 +167,84 @@ export async function deleteFile(remotePath: string): Promise<void> {
     console.error(`❌ Failed to delete ${remotePath}:`, error);
     throw new Error(`Failed to delete file from R2: ${error}`);
   }
+}
+
+/**
+ * Delete multiple files from R2 (idempotent).
+ * Uses batch delete when possible, falling back to single deletes.
+ */
+export async function deleteFiles(remotePaths: string[]): Promise<void> {
+  const keys = (remotePaths || []).map(String).map((s) => s.trim()).filter(Boolean);
+  if (keys.length === 0) return;
+
+  // S3 DeleteObjects supports up to 1000 keys per request.
+  const chunkSize = 1000;
+  for (let i = 0; i < keys.length; i += chunkSize) {
+    const chunk = keys.slice(i, i + chunkSize);
+    try {
+      const command = new DeleteObjectsCommand({
+        Bucket: R2_BUCKET,
+        Delete: {
+          Objects: chunk.map((Key) => ({ Key })),
+          Quiet: true,
+        },
+      });
+      await s3Client.send(command);
+      for (const k of chunk) console.log(`✅ Deleted: ${k}`);
+    } catch (error) {
+      // Batch delete sometimes fails on providers; fall back to single deletes.
+      console.warn("⚠️  Batch delete failed; falling back to single deletes", (error as any)?.message || error);
+      for (const k of chunk) {
+        try {
+          await deleteFile(k);
+        } catch (singleErr) {
+          console.warn(`⚠️  Failed to delete ${k}:`, (singleErr as any)?.message || singleErr);
+        }
+      }
+    }
+  }
+}
+
+/**
+ * List object keys under a prefix.
+ */
+export async function listKeysByPrefix(prefix: string, maxKeys: number = 1000): Promise<string[]> {
+  const p = String(prefix || "").trim();
+  if (!p) return [];
+
+  const keys: string[] = [];
+  let continuationToken: string | undefined;
+
+  while (true) {
+    const command = new ListObjectsV2Command({
+      Bucket: R2_BUCKET,
+      Prefix: p,
+      ContinuationToken: continuationToken,
+      MaxKeys: Math.min(1000, Math.max(1, maxKeys - keys.length)),
+    });
+
+    const resp = await s3Client.send(command);
+    const contents = resp.Contents || [];
+    for (const obj of contents) {
+      if (obj.Key) keys.push(obj.Key);
+      if (keys.length >= maxKeys) return keys;
+    }
+
+    if (!resp.IsTruncated || !resp.NextContinuationToken) break;
+    continuationToken = resp.NextContinuationToken;
+  }
+
+  return keys;
+}
+
+/**
+ * Delete all objects under a prefix (idempotent).
+ */
+export async function deletePrefix(prefix: string, maxKeys: number = 5000): Promise<{ deleted: number }> {
+  const keys = await listKeysByPrefix(prefix, maxKeys);
+  if (keys.length === 0) return { deleted: 0 };
+  await deleteFiles(keys);
+  return { deleted: keys.length };
 }
 
 /**

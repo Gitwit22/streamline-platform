@@ -6,8 +6,49 @@ import { ensureRoomDoc, DEFAULT_ROOM_HLS_CONFIG, type RoomHlsConfig } from "../s
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { asOptionalBoolean, asOptionalEnum, asTrimmedString } from "../lib/inputValidation";
 import { isAdmin } from "../middleware/adminAuth";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { LIMIT_ERRORS } from "../lib/limitErrors";
 
 const router = Router();
+
+async function getPlatformHlsEnabled(): Promise<boolean> {
+  try {
+    const snap = await db.collection("featureFlags").doc("hlsSettingsTab").get();
+    const data = snap.exists ? snap.data() || {} : {};
+    const hlsEnabled = (data as any).hlsEnabled;
+    const enabled = (data as any).enabled;
+    if (typeof hlsEnabled === "boolean") return hlsEnabled;
+    if (typeof enabled === "boolean") return enabled;
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+async function assertHlsSetupAllowed(req: any, res: any, uid: string): Promise<boolean> {
+  const platformEnabled = await getPlatformHlsEnabled();
+  if (!platformEnabled) {
+    res.status(403).json({ error: LIMIT_ERRORS.FEATURE_DISABLED });
+    return false;
+  }
+
+  const entitlements = await getEffectiveEntitlements(req.account || uid);
+  const features: any = entitlements?.features || {};
+  const canCustomize =
+    typeof features.hlsCustomizationEnabled === "boolean"
+      ? features.hlsCustomizationEnabled
+      : typeof features.canCustomizeHlsPage === "boolean"
+        ? features.canCustomizeHlsPage
+        : !!(features.hls ?? features.hlsEnabled ?? features.canHls);
+
+  if (!canCustomize) {
+    res.status(403).json({ error: "hls_not_in_plan" });
+    return false;
+  }
+
+  return true;
+}
 
 type SavedEmbedDoc = {
   // Stable identifier for the viewer page / saved embed.
@@ -98,7 +139,9 @@ function parseHlsConfigOverrides(input: unknown):
 // POST /api/saved-embeds
 router.post("/", requireAuth as any, async (req: any, res) => {
   const uid = req.user?.uid;
-  if (!uid) return res.status(401).json({ error: "Unauthorized" });
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+  if (!(await assertHlsSetupAllowed(req, res, uid))) return;
 
   // Accept either the new "name" field or legacy "label".
   const nameRes = asTrimmedString(req.body?.name, { required: false, maxLen: 60 });
@@ -192,7 +235,7 @@ router.post("/", requireAuth as any, async (req: any, res) => {
 // GET /api/saved-embeds
 router.get("/", requireAuth as any, async (req: any, res) => {
   const uid = req.user?.uid;
-  if (!uid) return res.status(401).json({ error: "Unauthorized" });
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
   try {
     // Query top-level collection by owner + archived flag, then sort in memory by updatedAt desc.
@@ -287,7 +330,9 @@ router.get("/public/:savedEmbedId", async (req: any, res) => {
 // PUT /api/saved-embeds/:embedId
 router.put("/:embedId", requireAuth as any, async (req: any, res) => {
   const uid = req.user?.uid;
-  if (!uid) return res.status(401).json({ error: "Unauthorized" });
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+  if (!(await assertHlsSetupAllowed(req, res, uid))) return;
 
   const embedId = String(req.params.embedId || "").trim();
   if (!embedId) return errorResponse(res, 400, "invalid_input");
@@ -324,7 +369,7 @@ router.put("/:embedId", requireAuth as any, async (req: any, res) => {
     if (ownerId && ownerId !== uid) {
       const adminOk = await isAdmin(uid);
       if (!adminOk) {
-        return res.status(403).json({ error: "forbidden" });
+        return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
       }
     }
 

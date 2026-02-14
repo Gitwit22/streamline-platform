@@ -3,6 +3,7 @@ import { firestore as db } from "../firebaseAdmin";
 import { extractRoomAccessToken, verifyRoomAccessToken } from "../middleware/roomAccessToken";
 import { verifyInviteToken } from "../middleware/requireAuth";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 
 const router = Router();
 
@@ -14,13 +15,16 @@ router.get("/resolve", async (req, res) => {
     }
 
     let claims: any;
+    let tokenType: "invite" | "roomAccess" = "roomAccess";
     try {
       // Prefer invite tokens (support public share links)
       claims = verifyInviteToken(rawToken) as any;
+      tokenType = "invite";
     } catch {
       try {
         // Fallback to roomAccessToken (signed with ROOM_ACCESS_TOKEN_SECRET)
         claims = verifyRoomAccessToken(rawToken) as any;
+        tokenType = "roomAccess";
       } catch {
         return res.status(401).json({ error: "invalid_token" });
       }
@@ -42,7 +46,7 @@ router.get("/resolve", async (req, res) => {
     const ref = db.collection("rooms").doc(roomId);
     const snap = await ref.get();
     if (!snap.exists) {
-      return res.status(404).json({ error: "room_not_found" });
+      return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
     }
 
     const data = snap.data() || {};
@@ -58,6 +62,7 @@ router.get("/resolve", async (req, res) => {
     return res.json({
       roomId,
       roomName,
+      tokenType,
       role: claims?.role || null,
       permissions: claims?.permissions || {},
       hls,

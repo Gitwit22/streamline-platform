@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { fetchDestinations, createDestination, validateDestinationPreCreate, preflight, updateDestination, deleteDestination, type DestinationItem } from "../services/destinations";
 import { getMeCached } from "../lib/meCache";
+import { useFeatureAccess } from "../hooks/useFeatureAccess";
 
 function StatusBadge({ status, reason }: { status: string; reason?: string | null }) {
   const color = status === "connected" ? "#16a34a" : status === "disconnected" ? "#6b7280" : "#f59e0b";
@@ -11,14 +12,27 @@ function StatusBadge({ status, reason }: { status: string; reason?: string | nul
   );
 }
 
-export default function SettingsDestinations() {
+export default function SettingsDestinations(
+  props: {
+    locked?: boolean;
+    lockReason?: string;
+    onUpgrade?: () => void;
+  } = {}
+) {
   const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
+  const [effectiveEntitlements, setEffectiveEntitlements] = useState<any | null>(null);
+  const { access } = useFeatureAccess(effectiveEntitlements);
+
+  const locked = props.locked ?? !access.plan.destinations;
+  const lockReason = props.lockReason || "Stream Destinations are not included in your current plan.";
   const [items, setItems] = useState<DestinationItem[]>([]);
   const [usedCount, setUsedCount] = useState<number | undefined>(undefined);
   const [limit, setLimit] = useState<number | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [connectedPlatforms, setConnectedPlatforms] = useState<{ youtube: boolean; facebook: boolean; twitch: boolean }>({ youtube: false, facebook: false, twitch: false });
+
+  const platformDisabled = access.platform.transcodeEnabled === false;
 
   const [platform, setPlatform] = useState("youtube");
   const [mode, setMode] = useState<"manual" | "connected">("manual");
@@ -59,10 +73,15 @@ export default function SettingsDestinations() {
   }
 
   useEffect(() => {
-    load();
+    if (!locked && !platformDisabled) {
+      load();
+    }
     const loadAccount = async () => {
       try {
         const data = await getMeCached();
+        if (typeof props.locked === "undefined") {
+          setEffectiveEntitlements(data?.effectiveEntitlements || data?.entitlements || null);
+        }
         if (data?.connectedPlatforms) {
           setConnectedPlatforms({
             youtube: !!data.connectedPlatforms.youtube,
@@ -75,7 +94,70 @@ export default function SettingsDestinations() {
       }
     };
     loadAccount();
-  }, []);
+  }, [locked, platformDisabled, props.locked]);
+
+  if (platformDisabled) {
+    return (
+      <div
+        style={{
+          border: "1px solid rgba(148,163,184,0.25)",
+          borderRadius: 12,
+          padding: 16,
+          background: "rgba(15,23,42,0.35)",
+          color: "#e5e7eb",
+        }}
+      >
+        <div style={{ fontSize: 14, fontWeight: 800, marginBottom: 8 }}>Stream Destinations</div>
+        <div
+          style={{
+            fontSize: 13,
+            color: "#cbd5e1",
+            lineHeight: 1.4,
+          }}
+        >
+          Stream Destinations are temporarily disabled by the platform.
+        </div>
+      </div>
+    );
+  }
+
+  if (locked) {
+    return (
+      <div style={{
+        border: "1px solid rgba(148,163,184,0.25)",
+        borderRadius: 12,
+        padding: 16,
+        background: "rgba(15,23,42,0.35)",
+        color: "#e5e7eb",
+      }}>
+        <div style={{ fontSize: 14, fontWeight: 800, marginBottom: 8 }}>Stream Keys</div>
+        <div style={{
+          fontSize: 13,
+          color: "#cbd5e1",
+          lineHeight: 1.4,
+          marginBottom: 12,
+        }}>
+          {lockReason}
+        </div>
+        <button
+          type="button"
+          onClick={() => props.onUpgrade?.()}
+          style={{
+            padding: "10px 12px",
+            borderRadius: 10,
+            border: "1px solid rgba(59,130,246,0.45)",
+            background: "rgba(37,99,235,0.20)",
+            color: "#bfdbfe",
+            fontWeight: 800,
+            cursor: props.onUpgrade ? "pointer" : "default",
+          }}
+          disabled={!props.onUpgrade}
+        >
+          Upgrade
+        </button>
+      </div>
+    );
+  }
 
   async function onValidate() {
     setError(null);

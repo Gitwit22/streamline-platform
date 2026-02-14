@@ -8,12 +8,15 @@ import express from "express";
 
 import { firestore } from "../firebaseAdmin";
 import { requireAdmin, logAdminAction } from "../middleware/adminAuth";
+import { computeUsageSummaryResult } from "./usageRoutes";
 import { invalidatePlatformBillingCache } from "../lib/userAccount";
 
 import type { UserUsageSummary } from "../types/admin.types";
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { PLAN_IDS, PlanId, isPlanId, getAllPlanIds } from "../types/plan";
 import { resolveMaxDestinations } from "../lib/planLimits";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 
 const router = express.Router();
 
@@ -37,7 +40,7 @@ router.get("/env-sanity", async (req, res) => {
     const uid = adminUser?.uid;
 
     if (!uid) {
-      return res.status(401).json({ error: "unauthorized", message: "Missing admin uid" });
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED, message: "Missing admin uid" });
     }
 
     const userSnap = await firestore.collection("users").doc(uid).get();
@@ -153,6 +156,10 @@ router.get("/users", async (req, res) => {
     const limit = parseInt(req.query.limit as string) || 50;
     const offset = parseInt(req.query.offset as string) || 0;
     const planFilter = req.query.plan as PlanId | undefined;
+    const includeDeleted = (() => {
+      const raw = String(req.query.includeDeleted || "").trim().toLowerCase();
+      return raw === "1" || raw === "true" || raw === "yes";
+    })();
 
     let query = firestore.collection("users").orderBy("createdAt", "desc");
 
@@ -162,14 +169,44 @@ router.get("/users", async (req, res) => {
 
     const snapshot = await query.limit(limit).offset(offset).get();
 
-    const users = snapshot.docs.map((doc) => ({
-      uid: doc.id,
-      ...doc.data(),
-    }));
+    const now = Date.now();
+
+    const users = snapshot.docs.map((doc) => {
+      const raw = doc.data() || {};
+      const planId = typeof (raw as any).planId === "string" && String((raw as any).planId).trim() ? (raw as any).planId : "free";
+      const billingTruth = normalizeBillingTruthFromUser({ ...raw, planId }, now);
+      return {
+        uid: doc.id,
+        ...raw,
+        planId,
+        billingTruth,
+        billingReady: true,
+        stripeConnected: Boolean(billingTruth.stripeCustomerId),
+      };
+    });
+
+    const filteredUsers = includeDeleted
+      ? users.map((u: any) => {
+          // Always include deletedAtMs and deleteAfterMs for deleted users
+          if (typeof u?.deletedAtMs === "number" && u.deletedAtMs > 0) {
+            return {
+              ...u,
+              deletedAt: new Date(u.deletedAtMs).toISOString(),
+              deleteAfter: new Date(u.deleteAfterMs || 0).toISOString(),
+              purgeInDays: u.deleteAfterMs ? Math.max(0, Math.ceil((u.deleteAfterMs - Date.now()) / (1000 * 60 * 60 * 24))) : null,
+            };
+          }
+          return u;
+        })
+      : users.filter((u: any) => {
+          const status = typeof u?.accountStatus === "string" ? String(u.accountStatus).toLowerCase() : "";
+          const deletedAtMs = typeof u?.deletedAtMs === "number" ? u.deletedAtMs : null;
+          return status !== "deleted" && !(deletedAtMs && deletedAtMs > 0);
+        });
 
     res.json({
-      users,
-      total: snapshot.size,
+      users: filteredUsers,
+      total: filteredUsers.length,
       limit,
       offset,
     });
@@ -623,15 +660,21 @@ router.post("/feature-flags/billing", async (req, res) => {
         ? beforeData.billingSystemEnabled
         : true;
 
-    await docRef.set(
-      {
-        billingSystemEnabled: enabled,
-        updatedAt: now,
-        updatedBy: req.adminUser!.uid,
-        reason: typeof reason === "string" ? reason : undefined,
-      },
-      { merge: true }
-    );
+    // Firestore rejects `undefined` values unless ignoreUndefinedProperties is enabled.
+    // Build the payload explicitly to avoid accidentally writing `reason: undefined`.
+    const update: any = {
+      billingSystemEnabled: enabled,
+      updatedAt: now,
+      updatedBy: req.adminUser!.uid,
+    };
+    if (typeof reason === "string") {
+      update.reason = reason;
+    } else if (enabled === true) {
+      // Clear any previous disable reason when billing is enabled.
+      update.reason = null;
+    }
+
+    await docRef.set(update, { merge: true });
 
     // Invalidate in-memory cache so the new value is visible immediately
     // from subsequent getUserAccount() calls on this instance.
@@ -667,6 +710,19 @@ router.get("/usage", async (req, res) => {
     const planFilter = req.query.plan as PlanId | undefined;
     const monthKey = getCurrentMonthKey();
 
+    // Load platform billing flag once so the admin UI can accurately show
+    // whether Stripe is globally enabled.
+    let platformBillingEnabled = true;
+    try {
+      const featuresSnap = await firestore.collection("config").doc("features").get();
+      const features = featuresSnap.exists ? (featuresSnap.data() as any) : {};
+      if (typeof features?.billingSystemEnabled === "boolean") {
+        platformBillingEnabled = features.billingSystemEnabled;
+      }
+    } catch {
+      // default true
+    }
+
     // Get all users
     let usersQuery = firestore.collection("users");
     if (planFilter) {
@@ -691,6 +747,12 @@ router.get("/usage", async (req, res) => {
         const minutesUsed = Number(
           usage.participantMinutes ?? usage.streamMinutes ?? usage.minutes ?? 0
         );
+
+        const overages = (usageData.overages || {}) as any;
+        const overageParticipantMinutes = Number(overages.participantMinutes ?? 0);
+        const overageTranscodeMinutes = Number(overages.transcodeMinutes ?? 0);
+        const overageMinutesTotal = overageParticipantMinutes + overageTranscodeMinutes;
+
         const planIdRaw = userData.planId || "free";
         // Canonicalize planId using isPlanId
         const planId: PlanId | string = isPlanId(planIdRaw) ? planIdRaw : planIdRaw;
@@ -703,12 +765,27 @@ router.get("/usage", async (req, res) => {
         const bonusMinutes = userData.bonusMinutes || 0;
         const effectiveLimit = planLimit + bonusMinutes;
 
+        // billingEnabled is tri-state in Firestore; missing => true.
+        const billingEnabled = userData.billingEnabled === false ? false : true;
+        const effectiveBillingEnabled = platformBillingEnabled && billingEnabled;
+
+        const billingTruth = normalizeBillingTruthFromUser(userData, Date.now());
+
         return {
           userId,
           email: userData.email,
           displayName: userData.displayName,
           planId,
+          billingTruthStatus: billingTruth.status,
+          stripeConnected: Boolean(billingTruth.stripeCustomerId),
+          stripeCustomerId: billingTruth.stripeCustomerId,
+          billingEnabled,
+          platformBillingEnabled,
+          effectiveBillingEnabled,
           minutesUsed,
+          overageParticipantMinutes,
+          overageTranscodeMinutes,
+          overageMinutesTotal,
           bonusMinutes,
           planLimit,
           effectiveLimit,
@@ -730,6 +807,30 @@ router.get("/usage", async (req, res) => {
   } catch (error: any) {
     console.error("Failed to fetch usage stats:", error);
     res.status(500).json({ error: "Failed to fetch usage stats", details: error.message });
+  }
+});
+
+/**
+ * GET /api/admin/usage/summary?uid=...
+ * Admin-only usage summary lookup for any user.
+ * Uses the same payload shape as GET /api/usage/summary.
+ */
+router.get("/usage/summary", async (req, res) => {
+  try {
+    const uid = String(req.query.uid || "").trim();
+    if (!uid) {
+      return res.status(400).json({ success: false, error: "uid query param is required" });
+    }
+
+    const result = await computeUsageSummaryResult(uid);
+    return res.status(result.status).json(result.body);
+  } catch (error: any) {
+    console.error("Admin usage summary lookup failed:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to fetch usage summary",
+      details: error?.message,
+    });
   }
 });
 

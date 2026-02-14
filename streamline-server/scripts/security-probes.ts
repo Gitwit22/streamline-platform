@@ -13,13 +13,30 @@ const FOREIGN_RECORDING_ID = process.env.SEC_PROBE_FOREIGN_RECORDING_ID || "";
 const waitSeconds = Number(process.env.SEC_PROBE_WAIT_SECONDS ?? "65") || 65;
 const hlsExpect = (process.env.SEC_PROBE_HLS_EXPECT ?? "both") as "off" | "on" | "both";
 
-if (!JWT_SECRET) {
-  console.error("[security-probes] Missing JWT_SECRET env var – cannot sign tokens.");
-  process.exit(1);
-}
+const HOST_JWT = process.env.SEC_PROBE_HOST_JWT || "";
+const ATTACKER_JWT = process.env.SEC_PROBE_ATTACKER_JWT || "";
+
+const HOST_EMAIL = process.env.SEC_PROBE_HOST_EMAIL || "";
+const HOST_PASSWORD = process.env.SEC_PROBE_HOST_PASSWORD || "";
+const ATTACKER_EMAIL = process.env.SEC_PROBE_ATTACKER_EMAIL || "";
+const ATTACKER_PASSWORD = process.env.SEC_PROBE_ATTACKER_PASSWORD || "";
+
+const PUBLIC_ONLY = process.env.SEC_PROBE_PUBLIC_ONLY === "true";
 
 function makeJwt(uid: string): string {
+  if (!JWT_SECRET) {
+    throw new Error("Missing JWT_SECRET env var – cannot sign tokens. Provide SEC_PROBE_*_JWT or SEC_PROBE_*_EMAIL/PASSWORD instead.");
+  }
   return jwt.sign({ uid }, JWT_SECRET, { expiresIn: "7d" });
+}
+
+function makeExpiredJwt(uid: string): string {
+  // Explicitly set an expiration in the past so jwt.verify() rejects.
+  const exp = Math.floor(Date.now() / 1000) - 60;
+  if (!JWT_SECRET) {
+    throw new Error("Missing JWT_SECRET env var – cannot sign expired tokens. Provide SEC_PROBE_*_JWT or SEC_PROBE_*_EMAIL/PASSWORD instead.");
+  }
+  return jwt.sign({ uid, exp }, JWT_SECRET);
 }
 
 type HttpJsonResponse = {
@@ -53,8 +70,67 @@ async function fetchWithJwt(path: string, jwtToken: string, init: RequestInit = 
   return { url, status: res.status, text, snippet, json };
 }
 
+async function fetchNoAuth(path: string, init: RequestInit = {}): Promise<HttpJsonResponse> {
+  const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
+  const res = await fetch(url, init);
+  const text = await res.text();
+  const snippet = text.slice(0, 200);
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  return { url, status: res.status, text, snippet, json };
+}
+
+async function loginAndGetJwt(email: string, password: string): Promise<string> {
+  const url = `${API_BASE}/api/auth/login`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+  const text = await res.text();
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Login failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  const token = json?.token;
+  if (!token || typeof token !== "string") {
+    throw new Error("Login response missing token");
+  }
+  return token;
+}
+
+let cachedHostJwt: string | null = null;
+let cachedAttackerJwt: string | null = null;
+
+async function getHostJwt(): Promise<string> {
+  if (cachedHostJwt) return cachedHostJwt;
+  if (HOST_JWT) return (cachedHostJwt = HOST_JWT);
+  if (HOST_EMAIL && HOST_PASSWORD) return (cachedHostJwt = await loginAndGetJwt(HOST_EMAIL, HOST_PASSWORD));
+  if (HOST_UID && JWT_SECRET) return (cachedHostJwt = makeJwt(HOST_UID));
+  throw new Error("Missing host auth. Provide SEC_PROBE_HOST_JWT, or SEC_PROBE_HOST_EMAIL/SEC_PROBE_HOST_PASSWORD, or SEC_PROBE_HOST_UID + JWT_SECRET.");
+}
+
+async function getAttackerJwt(): Promise<string> {
+  if (cachedAttackerJwt) return cachedAttackerJwt;
+  if (ATTACKER_JWT) return (cachedAttackerJwt = ATTACKER_JWT);
+  if (ATTACKER_EMAIL && ATTACKER_PASSWORD) return (cachedAttackerJwt = await loginAndGetJwt(ATTACKER_EMAIL, ATTACKER_PASSWORD));
+  if (ATTACKER_UID && JWT_SECRET) return (cachedAttackerJwt = makeJwt(ATTACKER_UID));
+  throw new Error("Missing attacker auth. Provide SEC_PROBE_ATTACKER_JWT, or SEC_PROBE_ATTACKER_EMAIL/SEC_PROBE_ATTACKER_PASSWORD, or SEC_PROBE_ATTACKER_UID + JWT_SECRET.");
+}
+
 async function authedFetch(path: string, uid: string, init: RequestInit = {}): Promise<HttpJsonResponse> {
-  const token = makeJwt(uid);
+  // Backward compatible: if caller passes HOST_UID/ATTACKER_UID we choose the matching token.
+  // Prefer explicit actor config (JWT or login) over signing.
+  const token = uid === ATTACKER_UID ? await getAttackerJwt() : await getHostJwt();
   return fetchWithJwt(path, token, init);
 }
 
@@ -142,6 +218,107 @@ async function testMultistreamWrongUser(): Promise<ProbeResult> {
       bodySnippet: res.snippet,
       ok,
     });
+    return ok ? "pass" : "fail";
+  } catch (err) {
+    console.log("   ❌ ERROR:", err);
+    return "fail";
+  }
+}
+
+async function testStartEndpointsRejectUnauthed(): Promise<ProbeResult> {
+  if (!HOST_ROOM_ID) {
+    console.log("   ⚠️ Skipping – SEC_PROBE_HOST_ROOM_ID not set.");
+    return "skip";
+  }
+
+  try {
+    const res = await fetchNoAuth(`/api/multistream/${HOST_ROOM_ID}/start-multistream`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+
+    const ok = res.status === 401;
+    printResult({
+      name: "multistream/start unauthenticated",
+      actor: "(none)",
+      expected: 401,
+      actual: res.status,
+      url: res.url,
+      bodySnippet: res.snippet,
+      ok,
+    });
+    return ok ? "pass" : "fail";
+  } catch (err) {
+    console.log("   ❌ ERROR:", err);
+    return "fail";
+  }
+}
+
+async function testStartEndpointsRejectExpiredJwt(): Promise<ProbeResult> {
+  if (!HOST_ROOM_ID || !HOST_UID || !JWT_SECRET) {
+    console.log("   ⚠️ Skipping – requires SEC_PROBE_HOST_ROOM_ID, SEC_PROBE_HOST_UID, and JWT_SECRET to mint an expired token.");
+    return "skip";
+  }
+
+  try {
+    const expired = makeExpiredJwt(HOST_UID);
+    const res = await fetchWithJwt(`/api/multistream/${HOST_ROOM_ID}/start-multistream`, expired, {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+
+    const ok = res.status === 401;
+    printResult({
+      name: "multistream/start expired JWT",
+      actor: HOST_UID || "(unset)",
+      expected: 401,
+      actual: res.status,
+      url: res.url,
+      bodySnippet: res.snippet,
+      ok,
+    });
+    return ok ? "pass" : "fail";
+  } catch (err) {
+    console.log("   ❌ ERROR:", err);
+    return "fail";
+  }
+}
+
+async function testPublicEndpointsRemainPublic(): Promise<ProbeResult> {
+  try {
+    const hls = await fetchNoAuth("/api/public/hls/does-not-exist");
+    const embeds = await fetchNoAuth("/api/saved-embeds/public/does-not-exist");
+    const invitesResolve = await fetchNoAuth("/api/invites/resolve", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inviteToken: "" }),
+    });
+    const invitesTrack = await fetchNoAuth("/api/invites/track-landing", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ inviteToken: "", stage: "join_page" }),
+    });
+
+    // These endpoints should not be 401/403 due to auth. We accept 400/404/200.
+    const ok =
+      ![401, 403].includes(hls.status) &&
+      ![401, 403].includes(embeds.status) &&
+      ![401, 403].includes(invitesResolve.status) &&
+      ![401, 403].includes(invitesTrack.status);
+
+    printResult({
+      name: "public endpoints remain public",
+      actor: "(none)",
+      ok,
+      extra: {
+        hlsStatus: hls.status,
+        embedsStatus: embeds.status,
+        invitesResolveStatus: invitesResolve.status,
+        invitesTrackStatus: invitesTrack.status,
+      },
+    });
+
     return ok ? "pass" : "fail";
   } catch (err) {
     console.log("   ❌ ERROR:", err);
@@ -293,7 +470,10 @@ async function getHostRoomAccessToken(hostJwt: string): Promise<{ ok: boolean; t
   if (!HOST_ROOM_ID) {
     return { ok: false, resp: null };
   }
-  const resp = await postJson("/api/roomToken", hostJwt, { roomId: HOST_ROOM_ID });
+  const resp = await postJson(`/api/rooms/${encodeURIComponent(HOST_ROOM_ID)}/token`, hostJwt, {
+    identity: "Host",
+    displayName: "Host",
+  });
   const token = resp.json?.roomAccessToken as string | undefined;
   return { ok: !!token, token, resp };
 }
@@ -518,6 +698,7 @@ async function main() {
   console.log("API_BASE =", API_BASE);
   console.log("HOST_UID =", HOST_UID || "(unset)");
   console.log("ATTACKER_UID =", ATTACKER_UID || "(unset)");
+  console.log("SEC_PROBE_PUBLIC_ONLY =", PUBLIC_ONLY);
   console.log("HOST_ROOM_ID =", HOST_ROOM_ID || "(unset)");
   console.log("HOST_LIVEKIT_ROOM_NAME =", HOST_LIVEKIT_ROOM_NAME || "(unset)");
   console.log("FOREIGN_RECORDING_ID =", FOREIGN_RECORDING_ID || "(unset)");
@@ -525,15 +706,24 @@ async function main() {
   console.log("SEC_PROBE_WAIT_SECONDS =", waitSeconds);
 
   const probes: Array<{ name: string; fn: () => Promise<ProbeResult> }> = [
-    { name: "multistream/start wrong user", fn: testMultistreamWrongUser },
-    { name: "recordings/start wrong user", fn: testRecordingsStartWrongUser },
-    { name: "recordings/stop wrong user", fn: testRecordingsStopWrongUser },
-    { name: "invites/create wrong user", fn: testInvitesCreateWrongUser },
-    { name: "invites/create host", fn: testInvitesCreateHost },
-    { name: "roomModeration/mute-all wrong user", fn: testMuteAllWrongUser },
+    { name: "public endpoints remain public", fn: testPublicEndpointsRemainPublic },
   ];
 
-   if (HOST_UID && HOST_ROOM_ID) {
+  // Only run auth-heavy probes when explicitly enabled.
+  if (!PUBLIC_ONLY) {
+    probes.push(
+      { name: "multistream/start unauthenticated", fn: testStartEndpointsRejectUnauthed },
+      { name: "multistream/start expired JWT", fn: testStartEndpointsRejectExpiredJwt },
+      { name: "multistream/start wrong user", fn: testMultistreamWrongUser },
+      { name: "recordings/start wrong user", fn: testRecordingsStartWrongUser },
+      { name: "recordings/stop wrong user", fn: testRecordingsStopWrongUser },
+      { name: "invites/create wrong user", fn: testInvitesCreateWrongUser },
+      { name: "invites/create host", fn: testInvitesCreateHost },
+      { name: "roomModeration/mute-all wrong user", fn: testMuteAllWrongUser },
+    );
+  }
+
+   if (!PUBLIC_ONLY && HOST_ROOM_ID) {
      if (hlsExpect === "off" || hlsExpect === "both") {
        probes.push({ name: "HLS start denied when plan OFF", fn: testHlsStartPlanOff });
      }

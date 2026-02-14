@@ -4,7 +4,9 @@ import bcrypt from "bcryptjs";
 import { requireAuth } from "../middleware/requireAuth";
 import { firestore as db } from "../firebaseAdmin";
 import { getUserAccount } from "../lib/userAccount";
-import { CURRENT_TOS_VERSION } from "../lib/tos";
+import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { buildNewUserDoc } from "../lib/newUserDefaults";
 
 console.log("✅ auth router loaded");
 
@@ -66,12 +68,35 @@ router.get("/me", requireAuth, async (req, res) => {
   try {
     const user = (req as any).user || {};
     const userId = user.id || user.uid;
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
+    if (!userId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     const account = (req as any).account || await getUserAccount(userId);
 
     // Load the latest Firestore snapshot so we can strip sensitive fields
     const snap = await db.collection("users").doc(userId).get();
     const raw = stripSensitiveUserFields(snap.data() || account.rawUser || {});
+
+    // Ensure billingTruth/planId are present for legacy docs.
+    // This keeps admin + client display consistent even for free users.
+    try {
+      const planIdMissing = typeof (raw as any).planId !== "string" || !String((raw as any).planId).trim();
+      const billingTruthMissing = !(raw as any).billingTruth;
+
+      if (planIdMissing || billingTruthMissing) {
+        const now = Date.now();
+        const nextPlanId = planIdMissing ? "free" : (raw as any).planId;
+        const patch: any = { updatedAt: now };
+        if (planIdMissing) patch.planId = "free";
+        if (billingTruthMissing) {
+          patch.billingTruth = normalizeBillingTruthFromUser({ ...raw, planId: nextPlanId }, now);
+        }
+        await db.collection("users").doc(userId).set(patch, { merge: true });
+        // Keep response in sync without requiring another round-trip.
+        if (planIdMissing) (raw as any).planId = "free";
+        if (billingTruthMissing) (raw as any).billingTruth = patch.billingTruth;
+      }
+    } catch {
+      // non-fatal
+    }
 
     const body = {
       id: userId,
@@ -190,20 +215,15 @@ router.post("/signup", async (req, res) => {
 
     const now = Date.now();
 
-    const userData = {
+    const userData = buildNewUserDoc({
       email: emailNorm,
-      displayName: displayName ? String(displayName) : "",
       passwordHash,
-      planId: "free",
-      billingActive: false,
-      billingStatus: "none",
-      createdAt: now,
-      timeZone: timeZone ? String(timeZone) : "America/Chicago",
-      tosVersion: CURRENT_TOS_VERSION,
-      tosAcceptedAt: now,
+      displayName,
+      timeZone,
+      nowMs: now,
       tosAcceptedIp: req.ip || undefined,
       tosUserAgent: req.get("user-agent") || undefined,
-    };
+    });
 
     await userRef.set(userData);
 

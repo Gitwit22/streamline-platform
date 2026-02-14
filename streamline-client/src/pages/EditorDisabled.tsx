@@ -21,7 +21,7 @@ const EditorDisabled: React.FC = () => {
           WebkitBackgroundClip: 'text',
           WebkitTextFillColor: 'transparent'
         }}>
-          Coming Soon! ✨
+          Feature Unavailable
         </h1>
         <p style={{
           fontSize: '1.2rem',
@@ -29,10 +29,10 @@ const EditorDisabled: React.FC = () => {
           marginBottom: '2rem',
           lineHeight: '1.6'
         }}>
-          Our powerful editing suite is coming soon. For now, focus on creating amazing live streams!
+          Post-production tools are currently disabled platform-wide. You can keep streaming and managing recordings from your dashboard.
         </p>
         <button
-          onClick={() => window.location.href = '/'}
+          onClick={() => window.location.href = '/join'}
           style={{
             padding: '1rem 2rem',
             fontSize: '1.1rem',
@@ -53,7 +53,7 @@ const EditorDisabled: React.FC = () => {
             e.currentTarget.style.boxShadow = 'none';
           }}
         >
-          Back to Streaming
+          Back to Join
         </button>
       </div>
     </div>

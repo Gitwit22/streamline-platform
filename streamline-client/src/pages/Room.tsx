@@ -1,25 +1,118 @@
-import { useEffect, useState, useRef } from "react";
+import { getFeatureErrorMessage } from "../lib/featureErrors";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { logAuthDebugContext } from "../lib/logAuthDebug";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { apiStartRecording, apiStopRecording, apiFetch, getAuthToken, clearAuthStorage } from "../lib/api";
-import { LiveKitRoom, VideoConference } from "@livekit/components-react";
-import "@livekit/components-styles";
-import { fetchDestinations, preflight, type DestinationItem } from "../services/destinations";
-import StreamSetupModalV2 from "../components/StreamSetupModal";
-import { ErrorBoundary } from "../components/ErrorBoundary";
-import RoleOverlay from "../components/RoleOverlay";
-import { RoleChangeToast } from "../components/RoleChangeToast";
 import { API_BASE } from "../lib/apiBase";
 import { APP_BASE } from "../lib/appBase";
-import { normalizeUiRolePresetId } from "../lib/roles";
+import {
+  LiveKitRoom,
+  useRoomContext,
+  useLocalParticipant,
+} from "@livekit/components-react";
+import { RoomEvent } from "livekit-client";
+import {
+  apiStartRecording,
+  apiStopRecording,
+  apiFetch,
+  apiFetchAuth,
+  getAuthToken,
+  apiGetRoomPolicy,
+  apiUpdateRoomPolicy,
+} from "../lib/api";
+import RoleOverlay from "../components/RoleOverlay";
+import StreamSetupModalV2 from "../components/StreamSetupModal";
+import { ErrorBoundary } from "../components/ErrorBoundary";
+import { RoleChangeToast } from "../components/RoleChangeToast";
+import SafeVideoConference from "../components/SafeVideoConference";
+import { useEffectiveEntitlements } from "../hooks/useEffectiveEntitlements";
+import { useFeatureAccess } from "../hooks/useFeatureAccess";
+import { useHlsStatus } from "../hooks/useHlsStatus";
+import {
+  RECONNECT_MEDIA_MESSAGE_TYPE,
+  reconnectMedia,
+  tryParseLiveKitDataMessage,
+} from "../lib/mediaRecovery";
+import { setPlatformFlagsValue } from "../lib/platformFlagsStore";
+import { fetchDestinations, preflight, type DestinationItem } from "../services/destinations";
 
 const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
+
+function ReconnectCommandListener() {
+  const room = useRoomContext();
+
+  useEffect(() => {
+    if (!room) return;
+
+    const onData = (payload: Uint8Array) => {
+      try {
+        const msg = tryParseLiveKitDataMessage(payload);
+        if (msg?.type !== RECONNECT_MEDIA_MESSAGE_TYPE) return;
+        reconnectMedia(room);
+      } catch {
+        // ignore
+      }
+    };
+
+    room.on(RoomEvent.DataReceived, onData as any);
+    return () => {
+      room.off(RoomEvent.DataReceived, onData as any);
+    };
+  }, [room]);
+
+  return null;
+}
 
 // Use relative paths - Vite proxy forwards /api/* to http://localhost:5137
 type StreamStatus = "idle" | "starting" | "live" | "stopping";
 type RecordingStatus = "idle" | "recording" | "stopping" | "stopped" | "error";
 
 type GuestStatus = "viewing_join" | "entered_room" | null;
+
+function pendingDownloadBannerKey(roomId: string) {
+  return `sl_pending_download_banner:${roomId}`;
+}
+
+function recordingBannerDismissedKey(recordingId: string) {
+  return `sl_banner_dismissed:${recordingId}`;
+}
+
+function extractApiErrorCode(payload: any): string | null {
+  const code = payload?.error ?? payload?.code ?? payload?.data?.error ?? payload?.data?.code;
+  return typeof code === "string" && code.trim() ? code.trim() : null;
+}
+
+function mapJoinErrorMessage(code: string | null): string | null {
+  if (!code) return null;
+
+  if (code === "login_required") {
+    return "This room requires an account to join. Please sign in or ask the host to enable guest access.";
+  }
+
+  if (code === "room_not_live") {
+    return "Host hasn’t started the room yet.";
+  }
+
+  if (
+    code === "invite_invalid" ||
+    code === "invalid_invite" ||
+    code === "invite_expired" ||
+    code === "invite_revoked" ||
+    code === "invite_max_used"
+  ) {
+    return "Invite invalid or expired.";
+  }
+
+  return null;
+}
+
+function getGuestSessionToken(roomId: string | null): string | null {
+  if (!roomId) return null;
+  try {
+    return sessionStorage.getItem(`sl_guest_session:${roomId}`) || null;
+  } catch {
+    return null;
+  }
+}
 
 type RoomPermissions = {
   canStream: boolean;
@@ -158,7 +251,8 @@ function ThankYouScreen({ showHomeButton = false, onHome }: { showHomeButton?: b
 
 function PermissionsDebugOverlay({ dashboardRole }: { dashboardRole: "host" | "participant" }) {
   const { localParticipant } = useLocalParticipant();
-  const localPermissions: any = useLocalParticipantPermissions();
+  const localPermissions: any =
+    (localParticipant as any)?.permissions || (localParticipant as any)?.participant?.permissions;
   const rawRolePresetId = ((localParticipant as any)?.identityMetadata as any)?.rolePresetId;
   const normalizedRolePresetId = normalizeUiRolePresetId(rawRolePresetId);
 
@@ -199,98 +293,29 @@ function PermissionsDebugOverlay({ dashboardRole }: { dashboardRole: "host" | "p
 
 function StreamEndedModal({
   recordingId,
-  onStartEditing,
+  processing,
+  ready,
   onExitRoom,
   onStayInRoom,
 }: {
   recordingId: string;
-  onStartEditing: () => void;
+  processing: boolean;
+  ready: boolean;
   onExitRoom: () => void;
   onStayInRoom: () => void;
 }) {
-  const [processing, setProcessing] = useState(true);
-  const [ready, setReady] = useState(false);
+  const nav = useNavigate();
+  const { effectiveEntitlements } = useEffectiveEntitlements();
+  const { access } = useFeatureAccess(effectiveEntitlements);
+  const canMyContentRecordings = !!access?.myContentRecordings?.allowed;
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [confirmMessage, setConfirmMessage] = useState<string | null>(null);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const pollCountRef = useRef(0);
-  const MAX_POLLS = 100;
-
-  useEffect(() => {
-    if (!recordingId) return;
-
-    const pollStatus = async () => {
-      pollCountRef.current += 1;
-      if (pollCountRef.current > MAX_POLLS) {
-        console.warn("⚠️ Max polling attempts reached. Stopping.");
-        if (intervalRef.current) {
-          clearInterval(intervalRef.current);
-          intervalRef.current = null;
-        }
-        setProcessing(false);
-        return;
-      }
-
-      try {
-        const res = await fetch(`${API_BASE}/api/recordings/${recordingId}`, {
-          credentials: "include",
-        });
-        if (!res.ok) throw new Error("Failed to fetch recording status");
-
-        const text = await res.text();
-        if (!text) throw new Error("Empty response from server");
-
-        let payload: any;
-        try {
-          payload = JSON.parse(text);
-        } catch (err) {
-          throw new Error(`Non-JSON poll response (possible auth/CORS): ${text.slice(0, 120)}`);
-        }
-        console.log("🔍 Full response:", payload);
-
-        const status = payload?.data?.status ?? payload?.status ?? "PROCESSING";
-        const downloadReady = !!payload?.data?.downloadReady;
-
-        console.log("📊 Recording status:", status);
-        console.log("📦 downloadReady:", downloadReady);
-
-        if (downloadReady) {
-          console.log("✅ downloadReady is true - enabling download button!");
-          if (intervalRef.current) {
-            clearInterval(intervalRef.current);
-            intervalRef.current = null;
-            console.log("🛑 Polling stopped - recording is ready!");
-          }
-          setProcessing(false);
-          setReady(true);
-          return;
-        }
-
-        setProcessing(true);
-      } catch (err) {
-        console.error("❌ Poll error:", err);
-        setProcessing(true);
-      }
-    };
-
-    pollStatus();
-    intervalRef.current = setInterval(pollStatus, 3000);
-
-    return () => {
-      if (intervalRef.current) {
-        clearInterval(intervalRef.current);
-        intervalRef.current = null;
-      }
-    };
-  }, [recordingId]);
 
   const handleDownload = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/recordings/${recordingId}/download-link`, {
-        credentials: "include",
-      });
+      const res = await apiFetchAuth(`${API_BASE}/api/recordings/${recordingId}/download-link`, {}, { allowNonOk: true });
       if (res.status === 410) {
-        alert("This recording link expired. Use Settings → Usage → Emergency Download.");
+        alert("This recording link expired. Use Settings → Usage → Latest video.");
         return;
       }
       if (res.status === 402) {
@@ -310,15 +335,13 @@ function StreamEndedModal({
       setShowConfirmModal(true);
     } catch (err) {
       console.error(err);
-      alert("Failed to download recording. Use Settings → Usage → Emergency Download.");
+      alert("Failed to download recording. Use Settings → Usage → Latest video.");
     }
   };
 
   const handleConfirmYes = async () => {
     try {
-      await fetch(`${API_BASE}/api/recordings/${recordingId}/download-link?confirm=true`, {
-        credentials: "include",
-      });
+      await apiFetchAuth(`${API_BASE}/api/recordings/${recordingId}/download-link?confirm=true`, {}, { allowNonOk: true });
       setConfirmMessage("Great — you're all set. Save the file somewhere safe.");
     } catch (e) {
       setConfirmMessage("Noted. Thanks for confirming.");
@@ -329,14 +352,17 @@ function StreamEndedModal({
 
   const handleConfirmNo = async () => {
     try {
-      await fetch(`${API_BASE}/api/recordings/${recordingId}/report-download-issue`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ reason: "user_reported_issue" }),
-      });
+      await apiFetchAuth(
+        `${API_BASE}/api/recordings/${recordingId}/report-download-issue`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: "user_reported_issue" }),
+        },
+        { allowNonOk: true }
+      );
     } catch {}
-    setConfirmMessage("Use Settings → Usage → Emergency Download (Latest Recording) if you're having trouble.");
+    setConfirmMessage("Use Settings → Usage → Latest video if you're having trouble.");
     setShowConfirmModal(false);
   };
 
@@ -369,56 +395,73 @@ function StreamEndedModal({
         {processing && (
           <div style={{ marginBottom: '1rem', fontWeight: 600, color: '#fbbf24', textAlign: 'center' }}>
             <div style={{ fontSize: '2rem', marginBottom: '0.5rem' }}>⏳</div>
-            <div>Processing recording...</div>
+            <div>Processing recording…</div>
             <div style={{ fontSize: '0.85rem', color: '#9ca3af', marginTop: '0.5rem' }}>
-              This usually takes 1-2 minutes. The download button will activate when ready.
+              This usually takes 1-2 minutes. {canMyContentRecordings ? 'It will appear in My Content when ready.' : 'The download button will activate when ready.'}
             </div>
           </div>
         )}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', width: '100%' }}>
+          {canMyContentRecordings ? (
+            <>
+              <button
+                onClick={() => nav('/content', { replace: true })}
+                style={{
+                  width: "100%",
+                  padding: "12px 16px",
+                  borderRadius: "8px",
+                  border: "none",
+                  fontSize: "14px",
+                  fontWeight: 700,
+                  cursor: "pointer",
+                  transition: "all 0.3s ease",
+                  background: "#16a34a",
+                  color: "#fff",
+                }}
+              >
+                📁 View in My Content
+              </button>
+              <button
+                onClick={handleDownload}
+                disabled={!ready}
+                style={{
+                  width: "100%",
+                  padding: "12px 16px",
+                  borderRadius: "8px",
+                  border: "none",
+                  fontSize: "14px",
+                  fontWeight: 600,
+                  cursor: !ready ? "not-allowed" : "pointer",
+                  opacity: !ready ? 0.6 : 1,
+                  transition: "all 0.3s ease",
+                  background: ready ? "rgba(255,255,255,0.12)" : "#374151",
+                  color: "#fff",
+                }}
+              >
+                {ready ? "⬇️ Download Recording" : "⏳ Processing..."}
+              </button>
+            </>
+          ) : (
             <button
-              onClick={onStartEditing}
+              onClick={handleDownload}
+              disabled={!ready}
               style={{
-                width: '100%',
-                padding: '1rem',
-                background: 'linear-gradient(to right, #4b5563, #374151)',
-                color: '#d1d5db',
-                border: 'none',
-                borderRadius: '0.5rem',
-                fontSize: '1rem',
-                fontWeight: '600',
-                cursor: 'not-allowed',
-                transition: 'all 0.3s ease',
-                opacity: 0.8,
+                width: "100%",
+                padding: "12px 16px",
+                borderRadius: "8px",
+                border: "none",
+                fontSize: "14px",
+                fontWeight: 600,
+                cursor: !ready ? "not-allowed" : "pointer",
+                opacity: !ready ? 0.6 : 1,
+                transition: "all 0.3s ease",
+                background: ready ? "#16a34a" : "#374151",
+                color: "#fff",
               }}
-              disabled
             >
-              ✂️ Editing (Coming Soon)
+              {ready ? "⬇️ Download Recording" : "⏳ Processing..."}
             </button>
-            <div style={{ fontSize: '0.8rem', color: '#9ca3af', textAlign: 'center' }}>
-              Editing suite is coming soon. Stay tuned!
-            </div>
-          </div>
-          <button
-            onClick={handleDownload}
-            disabled={!ready}
-            style={{
-              width: "100%",
-              padding: "12px 16px",
-              borderRadius: "8px",
-              border: "none",
-              fontSize: "14px",
-              fontWeight: 600,
-              cursor: !ready ? "not-allowed" : "pointer",
-              opacity: !ready ? 0.6 : 1,
-              transition: "all 0.3s ease",
-              background: ready ? "#16a34a" : "#374151",
-              color: "#fff",
-            }}
-          >
-            {ready ? "⬇️ Download Recording" : "⏳ Processing..."}
-          </button>
+          )}
           {confirmMessage && (
             <div
               style={{
@@ -446,7 +489,7 @@ function StreamEndedModal({
               transition: 'all 0.3s ease',
             }}
           >
-            🚪 Exit Room
+            🚪 Back to Join
           </button>
           <button
             onClick={onStayInRoom}
@@ -471,7 +514,7 @@ function StreamEndedModal({
         <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 20 }}>
           <div style={{ background: "#111", border: "1px solid #333", borderRadius: 12, padding: 20, width: 320 }}>
             <h4 style={{ margin: 0, marginBottom: 10, color: "#fff" }}>Did your download start?</h4>
-            <p style={{ margin: 0, marginBottom: 16, color: "#d1d5db", fontSize: 14 }}>If not, you can retry via Emergency Download in Settings → Usage.</p>
+            <p style={{ margin: 0, marginBottom: 16, color: "#d1d5db", fontSize: 14 }}>If not, retry via Settings → Usage → Latest video.</p>
             <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
               <button onClick={handleConfirmNo} style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #444", background: "#1f2937", color: "#fff", cursor: "pointer" }}>No</button>
               <button onClick={handleConfirmYes} style={{ padding: "8px 12px", borderRadius: 8, border: "none", background: "linear-gradient(135deg,#dc2626,#ef4444)", color: "#fff", cursor: "pointer" }}>Yes</button>
@@ -518,6 +561,7 @@ type LiveKitShellProps = {
   dashboardGreenroomEnabled: boolean;
   dashboardOverlaysEnabled: boolean;
   dashboardRole: "host" | "moderator" | "participant";
+  onLeaveRequested?: () => void;
   onDisconnected: () => void;
 };
 
@@ -543,10 +587,12 @@ function LiveKitShell({
   dashboardGreenroomEnabled,
   dashboardOverlaysEnabled,
   dashboardRole,
+  onLeaveRequested,
   onDisconnected,
 }: LiveKitShellProps) {
   const [guestStatus, setGuestStatus] = useState<GuestStatus>(null);
   const statusRef = useRef<GuestStatus>(null);
+  const mediaRootRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!isHost || !roomId) return;
@@ -586,6 +632,37 @@ function LiveKitShell({
     };
   }, [isHost, roomId]);
 
+  // Prevent double-audio playback from LiveKit DOM:
+  // in some browser/component combinations, audio can play via both an <audio>
+  // element and an unmuted <video> tile, boosting perceived volume (often noticed
+  // with screen share audio).
+  useEffect(() => {
+    const root = mediaRootRef.current;
+    if (!root) return;
+
+    const applyMute = () => {
+      const videos = root.querySelectorAll("video");
+      videos.forEach((el) => {
+        try {
+          const video = el as HTMLVideoElement;
+          const stream = video.srcObject as MediaStream | null;
+          const hasAudio =
+            !!stream && typeof stream.getAudioTracks === "function" && stream.getAudioTracks().length > 0;
+          if (hasAudio) {
+            video.muted = true;
+          }
+        } catch {
+          // ignore
+        }
+      });
+    };
+
+    applyMute();
+    const obs = new MutationObserver(() => applyMute());
+    obs.observe(root, { childList: true, subtree: true });
+    return () => obs.disconnect();
+  }, []);
+
   return (
     <LiveKitRoom
       data-lk-theme="default"
@@ -597,6 +674,8 @@ function LiveKitShell({
       token={token}
       serverUrl={serverUrl}
       connect={true}
+      audio={!isViewer}
+      video={!isViewer}
       connectOptions={isViewer ? { autoSubscribe: true } : undefined}
       onDisconnected={onDisconnected}
       style={{
@@ -605,7 +684,8 @@ function LiveKitShell({
         position: "relative",
       }}
     >
-      <div style={{ width: "100%", height: "100%", position: "relative" }}>
+      <div ref={mediaRootRef} style={{ width: "100%", height: "100%", position: "relative" }}>
+        <ReconnectCommandListener />
         {isHost && !isViewer && (
           <div
             style={{
@@ -631,7 +711,76 @@ function LiveKitShell({
             Guest is viewing the join page.
           </div>
         )}
-        <VideoConference />
+        <div
+          style={{ width: "100%", height: "100%" }}
+          onClickCapture={(e) => {
+            // LiveKit prefab renders a DisconnectButton ("Leave") inside the ControlBar.
+            // We intercept it so it runs the same exit flow as our app-level "Exit Room" button,
+            // preventing inconsistent/legacy exit routing.
+            const target = e.target as unknown as HTMLElement | null;
+            const disconnectEl = target?.closest?.('.lk-disconnect-button');
+            if (!disconnectEl) return;
+
+            e.preventDefault();
+            e.stopPropagation();
+            const native: any = e.nativeEvent as any;
+            if (native?.stopImmediatePropagation) native.stopImmediatePropagation();
+
+            if (typeof onLeaveRequested === 'function') {
+              onLeaveRequested();
+            }
+          }}
+        >
+          <ErrorBoundary
+            fallback={
+              <div
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  padding: "24px",
+                  textAlign: "center",
+                  color: "#fff",
+                  background: "#000",
+                }}
+              >
+                <div style={{ maxWidth: 520 }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>
+                    Live room failed to load
+                  </div>
+                  <div style={{ fontSize: 13, color: "rgba(255,255,255,0.75)", marginBottom: 14, lineHeight: 1.5 }}>
+                    Refresh the page. If it keeps happening, open the browser console and send the error.
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      try {
+                        window.location.reload();
+                      } catch {
+                        // ignore
+                      }
+                    }}
+                    style={{
+                      padding: "10px 14px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(255,255,255,0.18)",
+                      background: "rgba(255,255,255,0.06)",
+                      color: "#fff",
+                      fontWeight: 600,
+                      cursor: "pointer",
+                    }}
+                  >
+                    Refresh
+                  </button>
+                </div>
+              </div>
+            }
+          >
+            <SafeVideoConference />
+          </ErrorBoundary>
+        </div>
         {watermarkEnabled && (
           <img
             src="/logo.png"
@@ -672,6 +821,8 @@ function RoomPage() {
   const routeRoomId = routeRoomNameParam ? decodeURIComponent(routeRoomNameParam) : null;
   const [searchParams] = useSearchParams();
 
+  const { effectiveEntitlements: myEffectiveEntitlements } = useEffectiveEntitlements();
+
   const [displayName, setDisplayName] = useState(() => {
     // Prefer profile displayName if available, then fall back to cached value
     try {
@@ -691,6 +842,9 @@ function RoomPage() {
   const [dashboardOpen, setDashboardOpen] = useState(false);
   const [showStreamSetup, setShowStreamSetup] = useState(false);
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
+  const [allowGuests, setAllowGuests] = useState<boolean | null>(null);
+  const [allowGuestsLoading, setAllowGuestsLoading] = useState(false);
+  const [allowGuestsSaving, setAllowGuestsSaving] = useState(false);
   const [egressId, setEgressId] = useState<string | null>(null);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>("idle");
   const [showGoodbye, setShowGoodbye] = useState(false);
@@ -715,7 +869,14 @@ function RoomPage() {
   const [isViewer, setIsViewer] = useState(false);
   const [roomPermissions, setRoomPermissions] = useState<RoomPermissions | null>(null);
   const [needsReauth, setNeedsReauth] = useState(false);
+  const [reauthBannerText, setReauthBannerText] = useState<string>(
+    "Session expired — re-auth to enable host tools."
+  );
+  const [roomTokenMode, setRoomTokenMode] = useState<"unknown" | "auth" | "guest">("unknown");
   const roomTokenMintInFlightRef = useRef(false);
+  const [roomGateStatus, setRoomGateStatus] = useState<"unknown" | "idle" | "live" | "blocked">("unknown");
+  const roomGatePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hostToolsHydratedKeyRef = useRef<string | null>(null);
   const [controlsPanelOpen, setControlsPanelOpen] = useState(false);
   const [effectiveControls, setEffectiveControls] = useState<EffectiveControls>(() => ({
     canPublishAudio: true,
@@ -790,10 +951,11 @@ function RoomPage() {
 
   const confirmReauthed = async () => {
     try {
-      const res = await apiFetch("/api/account/me", undefined, { allowNonOk: true });
+      const res = await apiFetchAuth("/api/account/me", undefined, { allowNonOk: true });
       if (res.ok) {
         setAuthStatus("authed");
         setNeedsReauth(false);
+        setReauthBannerText("Session expired — re-auth to enable host tools.");
         return;
       }
       if (res.status === 401 || res.status === 403) {
@@ -866,6 +1028,18 @@ function RoomPage() {
   const [recordingPlanId, setRecordingPlanId] = useState<string | null>(null);
   const [maxRecordingMinutesPerClip, setMaxRecordingMinutesPerClip] = useState<number | null>(null);
   const [recordingToast, setRecordingToast] = useState<string | null>(null);
+  const [recordingBackgroundNotice, setRecordingBackgroundNotice] = useState<null | {
+    kind: "processing" | "ready";
+    recordingId: string;
+    downloadUrl?: string | null;
+  }>(null);
+  const [postStopDownloadUrl, setPostStopDownloadUrl] = useState<string | null>(null);
+  const [postStopProcessing, setPostStopProcessing] = useState(false);
+  const [postStopReady, setPostStopReady] = useState(false);
+  const [postStopStatus, setPostStopStatus] = useState<string | null>(null);
+  const [stayedInRoomDuringProcessing, setStayedInRoomDuringProcessing] = useState(false);
+  const postStopIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const postStopPollCountRef = useRef(0);
   const [copiedInviteLabel, setCopiedInviteLabel] = useState<string | null>(null);
   const copiedInviteTimeoutRef = useRef<number | null>(null);
   const lastStopWasAutoRef = useRef<boolean>(false);
@@ -901,14 +1075,76 @@ function RoomPage() {
   const [selectedPresetId, setSelectedPresetId] = useState<string>("standard_720p30");
   const [effectivePresetId, setEffectivePresetId] = useState<string | null>(null);
   const [presetClamped, setPresetClamped] = useState(false);
-  const [defaultLayoutPref, setDefaultLayoutPref] = useState<"speaker" | "grid">("speaker");
   const [defaultRecordingModePref, setDefaultRecordingModePref] = useState<"cloud" | "dual">("cloud");
   const [firestoreRoomId, setFirestoreRoomId] = useState<string | null>(null);
   const [roomAccessToken, setRoomAccessToken] = useState<string | null>(null);
   const [participantIdentity, setParticipantIdentity] = useState<string | null>(null);
+  const [adminOverride, setAdminOverride] = useState<boolean>(false);
   const [, setAuthStatus] = useState<"unknown" | "authed" | "guest">("unknown");
     const [effectivePermissionsMode, setEffectivePermissionsMode] = useState<"simple" | "advanced">("simple");
   const roomId = firestoreRoomId ?? routeRoomId ?? null;
+
+  const { data: hlsStatusData } = useHlsStatus({
+    apiBase: API_BASE,
+    roomId: roomId || "",
+    roomAccessToken: roomAccessToken || "",
+  });
+
+  useEffect(() => {
+    if (!inviteModalOpen) return;
+    if (!roomId || !roomAccessToken) return;
+    if (!isHost) return;
+
+    let cancelled = false;
+    (async () => {
+      setAllowGuestsLoading(true);
+      try {
+        const data = await apiGetRoomPolicy(roomId, roomAccessToken);
+        if (cancelled) return;
+        setAllowGuests(typeof (data as any)?.allowGuests === "boolean" ? (data as any).allowGuests : null);
+      } catch {
+        if (!cancelled) setAllowGuests(null);
+      } finally {
+        if (!cancelled) setAllowGuestsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [inviteModalOpen, roomId, roomAccessToken, isHost]);
+
+  const setAllowGuestsPolicy = async (next: boolean) => {
+    if (!roomId || !roomAccessToken) return;
+    if (needsReauth) {
+      setNeedsReauth(true);
+      return;
+    }
+
+    setAllowGuestsSaving(true);
+    try {
+      const resp = await apiUpdateRoomPolicy(roomId, roomAccessToken, { allowGuests: next });
+      setAllowGuests(resp.allowGuests);
+    } catch (err: any) {
+      if (err?.status === 401 || err?.status === 403 || err?.name === "ApiUnauthorizedError") {
+        setNeedsReauth(true);
+      }
+    } finally {
+      setAllowGuestsSaving(false);
+    }
+  };
+
+  useEffect(() => {
+    // New room => allow fresh host tools hydration
+    hostToolsHydratedKeyRef.current = null;
+  }, [roomId]);
+
+  useEffect(() => {
+    // If all host tools are closed, allow a future open to hydrate again.
+    if (!showStreamSetup && !dashboardOpen) {
+      hostToolsHydratedKeyRef.current = null;
+    }
+  }, [showStreamSetup, dashboardOpen]);
   const [roomName, setRoomName] = useState<string>(() => {
     const fromState = (location.state as any)?.livekitRoomName;
     if (typeof fromState === "string" && fromState.trim()) return fromState.trim();
@@ -916,6 +1152,21 @@ function RoomPage() {
     return cached || "";
   });
   const effectiveRoomName = roomName;
+
+  const rtmpCap = planRtmpDestinationsMax ?? 0;
+  const roomEffectiveEntitlementsForAccess = useMemo(
+    () => ({
+      features: {
+        hls: planHlsEnabled,
+        hlsCustomizationEnabled: planHlsCustomizationEnabled,
+      },
+      limits: {
+        rtmpDestinationsMax: rtmpCap,
+      },
+    }),
+    [planHlsEnabled, planHlsCustomizationEnabled, rtmpCap],
+  );
+  const { access: featureAccess } = useFeatureAccess(roomEffectiveEntitlementsForAccess);
 
   useEffect(() => {
     // When navigating between rooms in a single SPA session, always
@@ -938,7 +1189,18 @@ function RoomPage() {
     const candidateKey = roomId;
     if (!candidateKey) return;
     const createdRooms = JSON.parse(localStorage.getItem("sl_created_rooms") || "[]");
-    const willBeHost = createdRooms.includes(candidateKey);
+    const localIsAdmin = (() => {
+      try {
+        const raw = localStorage.getItem("sl_user");
+        if (!raw || raw === "undefined") return false;
+        const parsed = JSON.parse(raw);
+        return !!(parsed?.isAdmin || parsed?.admin?.isAdmin);
+      } catch {
+        return false;
+      }
+    })();
+
+    const willBeHost = createdRooms.includes(candidateKey) || localIsAdmin;
     setIsHost(willBeHost);
     const storedRole = (() => {
       try {
@@ -1132,6 +1394,7 @@ function RoomPage() {
           const resolvedRoomId = String(data.roomId || "").trim();
           const resolvedRoomName = String(data.roomName || "").trim();
           const resolvedRole = String(data.role || "").trim();
+          const tokenType = String((data as any).tokenType || "").trim();
 
           if (resolvedRoomId) setFirestoreRoomId(resolvedRoomId);
           if (resolvedRoomName) setRoomName(resolvedRoomName);
@@ -1145,16 +1408,60 @@ function RoomPage() {
             }
           }
 
-          // Treat the incoming token as a roomAccessToken for downstream
-          // APIs (HLS, status, etc.). /api/roomToken will return a refreshed
-          // token which will overwrite this state when available.
-          setRoomAccessToken(t);
+          // If this is an invite token, route it through the canonical invite flow
+          // (/invite/:inviteId -> redeem -> sl_guest cookie) instead of persisting query tokens.
+          if (tokenType === "invite") {
+            try {
+              const legacyRes = await fetch(`${API_BASE}/api/invites/legacy/resolve`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ inviteToken: t }),
+              });
+              if (legacyRes.ok) {
+                const legacy = await legacyRes.json().catch(() => null as any);
+                const inviteId = String(legacy?.inviteId || "").trim();
+                if (inviteId) {
+                  window.location.replace(`/invite/${encodeURIComponent(inviteId)}`);
+                  return;
+                }
+              }
+            } catch (e) {
+              console.warn("[Room] legacy invite resolve failed; falling back to roomAccessToken", e);
+            }
+            // Fallback: if legacy resolve failed, treat token as roomAccessToken
+            setRoomAccessToken(t);
+          }
+
+          if (tokenType !== "invite") {
+            // Treat the incoming token as a roomAccessToken for downstream
+            // APIs (HLS, status, etc.). /api/rooms/:roomId/token will return a refreshed
+            // token which will overwrite this state when available.
+            setRoomAccessToken(t);
+          }
           return;
         }
 
-        // If resolve fails (legacy tokens, pure invites, etc.), fall back to
-        // the previous behavior of treating `t` as an invite token only.
+        // If resolve fails, treat it as a legacy invite and route through /invite/:inviteId.
         console.warn("[Room] /api/rooms/resolve failed for token route", res.status);
+        try {
+          const legacyRes = await fetch(`${API_BASE}/api/invites/legacy/resolve`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ inviteToken: t }),
+          });
+          if (legacyRes.ok) {
+            const legacy = await legacyRes.json().catch(() => null as any);
+            const inviteId = String(legacy?.inviteId || "").trim();
+            if (inviteId) {
+              window.location.replace(`/invite/${encodeURIComponent(inviteId)}`);
+              return;
+            }
+          }
+        } catch {
+          // ignore
+        }
+
+        // Final fallback: preserve legacy behavior if resolve endpoint is unreachable.
         setInviteToken(t);
         try {
           localStorage.setItem("sl_invite_token", t);
@@ -1164,6 +1471,25 @@ function RoomPage() {
       } catch (err) {
         if (cancelled) return;
         console.warn("[Room] /api/rooms/resolve error; treating t as invite", err);
+        try {
+          const legacyRes = await fetch(`${API_BASE}/api/invites/legacy/resolve`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ inviteToken: t }),
+          });
+          if (legacyRes.ok) {
+            const legacy = await legacyRes.json().catch(() => null as any);
+            const inviteId = String(legacy?.inviteId || "").trim();
+            if (inviteId) {
+              window.location.replace(`/invite/${encodeURIComponent(inviteId)}`);
+              return;
+            }
+          }
+        } catch {
+          // ignore
+        }
+
+        // Final fallback: preserve legacy behavior.
         setInviteToken(t);
         try {
           localStorage.setItem("sl_invite_token", t);
@@ -1192,6 +1518,9 @@ function RoomPage() {
 
   const applyEntitlementsAndPlatform = (eff: any, platformFlags: any) => {
     const platform = platformFlags && typeof platformFlags === "object" ? platformFlags : {};
+
+    // Publish roomToken-provided flags to the shared store (most recent fetch wins).
+    setPlatformFlagsValue(platform as any);
 
     if (platform && Object.prototype.hasOwnProperty.call(platform, "hlsEnabled")) {
       if (typeof (platform as any).hlsEnabled === "boolean") {
@@ -1329,7 +1658,9 @@ function RoomPage() {
   useEffect(() => {
     if (!hostCheckReady) return;
     if (!displayName) return;
-    if (!roomId && !effectiveRoomName) return;
+    if (!roomId) return;
+    // Guests should only request RTC tokens once the room is live.
+    if (!isHost && roomGateStatus !== "live") return;
     // If we already have a valid token+serverUrl for this mount, avoid
     // refetching room tokens on every minor state change. This prevents
     // duplicate /api/roomToken calls that can cause spurious 401s and
@@ -1338,92 +1669,90 @@ function RoomPage() {
     if (roomTokenMintInFlightRef.current) return;
     // Role used to mint the LiveKit token + roomAccessToken.
     // IMPORTANT: Hosts must request role="host" so /api/hls/start isn't rejected as insufficient_role.
-    const requestedRole = isHost ? "host" : userRole === "moderator" ? "participant" : userRole;
-    const roleNeedsAuth = requestedRole === "cohost" || requestedRole === "host";
+    const requestedRole = isHost ? "host" : "participant";
     const role = requestedRole;
-    const isGuest = role === "guest";
 
     const fetchToken = async () => {
       try {
         roomTokenMintInFlightRef.current = true;
         console.log(`[Room] Fetching room token (role=${role || "host"})...`);
-        const buildRoomTokenRequest = (mode: "auth" | "guest") => {
-          const endpoint = mode === "guest" ? `${API_BASE}/api/roomToken/guest` : `${API_BASE}/api/roomToken`;
+        const bearerToken = getAuthToken();
+        // Force invite mode when a token is present in the URL and we are not authed.
+        // This matches the legacy participant join flow: /room/<roomId>?t=<inviteToken>
+        // Also fall back to any locally-stored invite token for backward compatibility.
+        const guestSessionToken = getGuestSessionToken(roomId);
+        const inviteTokenFromUrl = new URLSearchParams(window.location.search).get("t");
+        const inviteTokenForJoin = (!guestSessionToken ? (inviteTokenFromUrl || inviteToken || null) : null)?.trim?.() || null;
+        const buildRoomTokenRequest = () => {
+          const canonicalRoomId = roomId || "";
+          const endpoint = `${API_BASE}/api/rooms/${encodeURIComponent(canonicalRoomId)}/token`;
           const payload: any = { identity: displayName };
 
-          // If we have a canonical roomId, send only that.
-          // Otherwise, fall back to roomName so the server can resolve.
-          if (roomId) {
-            payload.roomId = roomId;
-          } else {
-            payload.roomName = effectiveRoomName;
-          }
-
-          // Hosts should never rely on invite tokens for room access.
-          // Using a stale invite for a different room can cause
-          // invite_room_mismatch 403 errors when minting host tokens.
-          if (inviteToken && !isHost) {
-            payload.inviteToken = inviteToken;
-          }
+          // New API uses the URL roomId; keep displayName in the body so
+          // participant name is set in LiveKit.
 
           // Tell the backend what role we want this token minted as.
           // The backend will clamp/lock it as needed.
+          // If we failed auth for a privileged role, always request a low-trust role
+          // for the guest fallback so the UI can honestly operate in viewer/guest mode.
           payload.role = role;
 
-          if (mode === "guest") {
-            payload.displayName = displayName;
-            payload.guestId = getOrCreateUid();
-          } else {
-            payload.uid = getOrCreateUid();
-            payload.displayName = displayName;
-            // Invites are currently guest/participant-only (no elevated roles).
+          payload.uid = getOrCreateUid();
+          payload.displayName = displayName;
+          // Always forward invite tokens when present.
+          // This allows authenticated participants to join invite-scoped/private rooms
+          // (server will clamp roles and validate invite-room match).
+          if (inviteTokenForJoin) {
+            payload.inviteToken = inviteTokenForJoin;
+          }
+
+          if (!bearerToken && guestSessionToken) {
+            payload.guestSessionToken = guestSessionToken;
           }
 
           return { endpoint, payload };
         };
 
-        const tryFetch = async (mode: "auth" | "guest", opts?: { omitInvite?: boolean }) => {
-          const { endpoint, payload } = buildRoomTokenRequest(mode);
-          if (opts?.omitInvite) {
-            delete (payload as any).inviteToken;
-          }
-          // endpoint is a relative path (e.g. "/api/roomToken"); apiFetch
-          // will prepend API_BASE and attach Authorization and cookies.
-          const res = await apiFetch(endpoint, {
-            method: "POST",
-            body: JSON.stringify(payload),
-          }, { allowNonOk: true });
-          return { res, mode };
-        };
+        const { endpoint, payload } = buildRoomTokenRequest();
 
-        // Primary: if role is not guest, try auth token first.
-        // If denied due to auth, we only fall back to guest for low-trust roles.
-        let attempt = await tryFetch(isGuest ? "guest" : "auth");
-        if (!attempt.res.ok && !isGuest && (attempt.res.status === 401 || attempt.res.status === 403)) {
-          // For privileged roles: degrade gracefully to a guest token and surface re-auth banner.
-          if (roleNeedsAuth) {
-            setNeedsReauth(true);
-            setAuthStatus("guest");
-          }
-          console.warn("[Room] auth roomToken denied; falling back to guest token", attempt.res.status);
-          attempt = await tryFetch("guest");
-        }
+        const mode: "auth" | "invite" = bearerToken ? "auth" : payload.inviteToken ? "invite" : "auth";
+        const tokenRes = bearerToken
+          ? await apiFetchAuth(
+              endpoint,
+              {
+                method: "POST",
+                headers: {
+                  ...(inviteTokenForJoin ? { "x-invite-token": inviteTokenForJoin } : {}),
+                },
+                body: JSON.stringify(payload),
+              },
+              { allowNonOk: true },
+            )
+          : await apiFetch(
+              endpoint,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  ...(inviteTokenForJoin ? { "x-invite-token": inviteTokenForJoin } : {}),
+                  ...(guestSessionToken ? { "x-guest-session": guestSessionToken } : {}),
+                },
+                body: JSON.stringify(payload),
+              },
+              { allowNonOk: true }
+            );
 
-        // If a guest token request fails with 403 (e.g. stale or mismatched invite),
-        // retry once without the invite token so a valid participant link doesn't leave
-        // the user stuck without video.
-        if (isGuest && !attempt.res.ok && attempt.res.status === 403) {
-          console.warn("[Room] guest roomToken denied; retrying without invite token", attempt.res.status);
-          attempt = await tryFetch("guest", { omitInvite: true });
-        }
+        const attempt = { res: tokenRes, mode };
 
         const res = attempt.res;
         console.log("[Room] roomToken status:", res.status, "mode:", attempt.mode);
+        setRoomTokenMode(attempt.mode);
 
         // If an authenticated mint succeeds, we can clear the banner without probing /me in the background.
         if (res.ok && attempt.mode === "auth") {
           setAuthStatus("authed");
           setNeedsReauth(false);
+          setReauthBannerText("Session expired — re-auth to enable host tools.");
         }
 
         let data: any = null;
@@ -1448,6 +1777,46 @@ function RoomPage() {
 
         if (!res.ok) {
           console.error("[Room] roomToken HTTP error", res.status, rawText);
+          const errCode = extractApiErrorCode(data);
+          const mapped = mapJoinErrorMessage(errCode);
+
+          if (res.status === 409) {
+            setRoomGateStatus("idle");
+            if (mapped) setReauthBannerText(mapped);
+            return;
+          }
+
+          if (res.status === 401) {
+            setNeedsReauth(true);
+            setAuthStatus("guest");
+            setReauthBannerText(
+              mapped ||
+                (inviteToken
+                  ? "Invite invalid or expired."
+                  : "This room requires an account to join. Please sign in.")
+            );
+            // Only force login redirect when we truly have no invite to attempt guest join.
+            if (!inviteToken) {
+              try {
+                const next = `${location.pathname}${location.search}`;
+                nav(`/login?next=${encodeURIComponent(next)}`, { replace: true });
+              } catch {
+                // ignore
+              }
+            }
+            return;
+          }
+
+          if (res.status === 403) {
+            setNeedsReauth(true);
+            setAuthStatus("guest");
+            setReauthBannerText(mapped || "Not allowed to join this room.");
+            return;
+          }
+
+          if (mapped) {
+            setReauthBannerText(mapped);
+          }
           return;
         }
         if (!data) {
@@ -1482,7 +1851,13 @@ function RoomPage() {
         if (data.effectiveEntitlements || data.platformFlags) {
           applyEntitlementsAndPlatform(data.effectiveEntitlements, data.platformFlags || {});
         }
-        const { token, serverUrl, roomId: returnedRoomId, roomAccessToken: roomAccessTokenRaw, participantIdentity: participantIdentityRaw } = data as any;
+        const {
+          token: lkToken,
+          serverUrl: serverUrlFromApi,
+          roomId: returnedRoomId,
+          roomAccessToken: roomAccessTokenRaw,
+          participantIdentity: participantIdentityRaw,
+        } = data as any;
         if (typeof returnedRoomId === "string" && returnedRoomId.trim()) {
           setFirestoreRoomId(returnedRoomId.trim());
         } else {
@@ -1494,14 +1869,21 @@ function RoomPage() {
         } else {
           setRoomAccessToken(null);
         }
+
+        if (typeof (data as any)?.adminOverride === "boolean") {
+          setAdminOverride(!!(data as any).adminOverride);
+        } else {
+          setAdminOverride(false);
+        }
+
         if (typeof participantIdentityRaw === "string" && participantIdentityRaw.trim()) {
           setParticipantIdentity(participantIdentityRaw.trim());
         } else {
           setParticipantIdentity(null);
         }
-        const finalServerUrl = serverUrl || import.meta.env.VITE_LIVEKIT_URL;
-        console.log("[Room] token received:", !!token, "serverUrl:", finalServerUrl);
-        setToken(token);
+        const finalServerUrl = serverUrlFromApi || import.meta.env.VITE_LIVEKIT_URL;
+        console.log("[Room] token received:", !!lkToken, "serverUrl:", finalServerUrl);
+        setToken(typeof lkToken === "string" && lkToken.trim() ? lkToken : null);
         setServerUrl(finalServerUrl || null);
         if (typeof data?.isViewer === "boolean") {
           setIsViewer(data.isViewer);
@@ -1513,12 +1895,14 @@ function RoomPage() {
         if (typeof data?.effectiveRoleKey === "string") {
           setUserRole(data.effectiveRoleKey);
           if (data.effectiveRoleKey === "viewer") setIsHost(false);
+          if (data.effectiveRoleKey === "host") setIsHost(true);
         } else if (typeof data?.role === "string") {
           setUserRole(data.role);
           if (data.role === "viewer") setIsHost(false);
+          if (data.role === "host") setIsHost(true);
         }
-        if (!token || !finalServerUrl) {
-          console.error("[Room] Missing token or serverUrl", { token, serverUrl });
+        if (!lkToken || !finalServerUrl) {
+          console.error("[Room] Missing token or serverUrl", { token: lkToken, serverUrl: serverUrlFromApi });
         }
       } catch (err) {
         console.error("[Room] fetchToken error:", err);
@@ -1528,7 +1912,7 @@ function RoomPage() {
     };
 
     fetchToken();
-  }, [displayName, roomId, effectiveRoomName, inviteToken, userRole, isHost, hostCheckReady, token, serverUrl]);
+  }, [displayName, roomId, effectiveRoomName, inviteToken, userRole, isHost, hostCheckReady, token, serverUrl, roomGateStatus]);
 
   
 
@@ -1537,6 +1921,76 @@ function RoomPage() {
       setShowStreamSetup(false);
     }
   }, [isViewer, showStreamSetup]);
+
+  // Guest flow: poll idle/live and auto-join when live.
+  // Hosts can join anytime (they flip the room live on join).
+  useEffect(() => {
+    if (!roomId) return;
+
+    // Host can proceed immediately.
+    if (isHost) {
+      setRoomGateStatus("live");
+      return;
+    }
+
+    let cancelled = false;
+
+    const poll = async () => {
+      try {
+        const guestSessionToken = getGuestSessionToken(roomId);
+        const res = await apiFetch(
+          `/api/rooms/${encodeURIComponent(roomId)}/status`,
+          {
+            headers: {
+              ...(!guestSessionToken && inviteToken ? { "x-invite-token": inviteToken } : {}),
+              ...(guestSessionToken ? { "x-guest-session": guestSessionToken } : {}),
+            },
+          },
+          { allowNonOk: true }
+        );
+        if (cancelled) return;
+
+        if (res.status === 401 || res.status === 403) {
+          const body = await res.json().catch(() => null);
+          const errCode = extractApiErrorCode(body);
+          const mapped = mapJoinErrorMessage(errCode);
+          setRoomGateStatus("blocked");
+          setNeedsReauth(true);
+          setReauthBannerText(
+            mapped || "This room requires an account to join. Please sign in or ask the host to enable guest access."
+          );
+          return;
+        }
+
+        if (!res.ok) {
+          setRoomGateStatus("blocked");
+          return;
+        }
+
+        const data = await res.json().catch(() => null);
+        const status = data?.status === "live" ? "live" : "idle";
+        setRoomGateStatus(status);
+
+        if (status === "idle") {
+          roomGatePollRef.current = setTimeout(poll, 4000);
+        }
+      } catch {
+        if (!cancelled) {
+          roomGatePollRef.current = setTimeout(poll, 5000);
+        }
+      }
+    };
+
+    poll();
+
+    return () => {
+      cancelled = true;
+      if (roomGatePollRef.current) {
+        clearTimeout(roomGatePollRef.current);
+        roomGatePollRef.current = null;
+      }
+    };
+  }, [roomId, isHost, inviteToken]);
 
   // Load effective entitlements + media presets only when the user explicitly opens host tools.
   // (Nuclear option 2: avoid background /me calls after connect.)
@@ -1547,13 +2001,17 @@ function RoomPage() {
     if (needsReauth) return;
     if (!canManageStream) return;
 
+    const toolsKey = `${roomId || ""}:${showStreamSetup ? "setup" : "dashboard"}`;
+    if (hostToolsHydratedKeyRef.current === toolsKey) return;
+    hostToolsHydratedKeyRef.current = toolsKey;
+
     let cancelled = false;
 
     (async () => {
       try {
         const [presetsRes, meRes] = await Promise.all([
-          apiFetch("/api/account/presets"),
-          apiFetch("/api/account/me"),
+          apiFetchAuth("/api/account/presets"),
+          apiFetchAuth("/api/account/me"),
         ]);
 
         if (!cancelled && presetsRes.ok) {
@@ -1579,9 +2037,6 @@ function RoomPage() {
           setAuthStatus("authed");
           const me = await meRes.json();
           const prefs = me?.mediaPrefs || {};
-          if (prefs.defaultLayout === "grid" || prefs.defaultLayout === "speaker") {
-            setDefaultLayoutPref(prefs.defaultLayout);
-          }
           if (prefs.defaultRecordingMode === "cloud" || prefs.defaultRecordingMode === "dual") {
             setDefaultRecordingModePref(prefs.defaultRecordingMode);
           }
@@ -1627,12 +2082,160 @@ function RoomPage() {
       lastRecordingStatusRef.current !== "stopped"
     ) {
       setShowStreamEndedModal(true);
+      setStayedInRoomDuringProcessing(false);
     } else if (recordingStatus !== "stopped") {
       setShowStreamEndedModal(false);
     }
 
     lastRecordingStatusRef.current = recordingStatus;
   }, [recordingStatus, recordingId]);
+
+  // Keep polling recording readiness even if the StreamEndedModal is dismissed.
+  // This prevents getting stuck in a "processing not finished" state after clicking "Stay in room".
+  useEffect(() => {
+    if (postStopIntervalRef.current) {
+      clearInterval(postStopIntervalRef.current);
+      postStopIntervalRef.current = null;
+    }
+    postStopPollCountRef.current = 0;
+
+    if (recordingStatus !== "stopped" || !recordingId) {
+      setPostStopProcessing(false);
+      setPostStopReady(false);
+      setPostStopStatus(null);
+      setPostStopDownloadUrl(null);
+      return;
+    }
+
+    let cancelled = false;
+    const MAX_POLLS = 120; // 6 minutes at 3s interval
+
+    const poll = async () => {
+      postStopPollCountRef.current += 1;
+      if (postStopPollCountRef.current > MAX_POLLS) {
+        if (!cancelled) {
+          setPostStopProcessing(false);
+        }
+        if (postStopIntervalRef.current) {
+          clearInterval(postStopIntervalRef.current);
+          postStopIntervalRef.current = null;
+        }
+        return;
+      }
+
+      try {
+        const res = await apiFetchAuth(`${API_BASE}/api/recordings/${recordingId}`, {}, { allowNonOk: true });
+        if (!res.ok) {
+          if (!cancelled) setPostStopProcessing(true);
+          return;
+        }
+
+        const payload = await res.json().catch(() => null);
+        const status = String(payload?.data?.status ?? payload?.status ?? "unknown").toLowerCase();
+        const downloadReady = payload?.data?.downloadReady === true || status === "ready";
+
+        if (!cancelled) {
+          setPostStopStatus(status);
+          setPostStopProcessing(!downloadReady);
+          setPostStopReady(downloadReady);
+        }
+
+        if (downloadReady && postStopIntervalRef.current) {
+          clearInterval(postStopIntervalRef.current);
+          postStopIntervalRef.current = null;
+        }
+      } catch {
+        if (!cancelled) setPostStopProcessing(true);
+      }
+    };
+
+    setPostStopProcessing(true);
+    void poll();
+    postStopIntervalRef.current = setInterval(() => {
+      void poll();
+    }, 3000);
+
+    return () => {
+      cancelled = true;
+      if (postStopIntervalRef.current) {
+        clearInterval(postStopIntervalRef.current);
+        postStopIntervalRef.current = null;
+      }
+    };
+  }, [API_BASE, recordingId, recordingStatus]);
+
+  // When a post-stop recording becomes ready, prefetch the signed download URL.
+  useEffect(() => {
+    if (recordingStatus !== "stopped" || !recordingId) return;
+    if (!postStopReady) return;
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetchAuth(`${API_BASE}/api/recordings/${recordingId}/download-link`, {}, { allowNonOk: true });
+        if (!res.ok) {
+          if (!cancelled) setPostStopDownloadUrl(null);
+          return;
+        }
+        const data = await res.json().catch(() => null);
+        const url = data?.data?.url;
+        if (!cancelled) setPostStopDownloadUrl(typeof url === "string" && url.trim() ? url.trim() : null);
+      } catch {
+        if (!cancelled) setPostStopDownloadUrl(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [API_BASE, recordingId, recordingStatus, postStopReady]);
+
+  // Re-notify rule: if user clicked Stay in room for this recording, show a banner.
+  // If they dismissed it while still processing, show a new one when ready.
+  useEffect(() => {
+    if (recordingStatus !== "stopped") return;
+    if (!roomId || !recordingId) return;
+
+    // Only show if a "Stay in room" action marked this recording as pending.
+    const pendingId = sessionStorage.getItem(pendingDownloadBannerKey(roomId));
+    if (!pendingId || pendingId !== recordingId) return;
+
+    if (!postStopReady) return;
+
+    // If the user dismissed the READY banner, don't show again.
+    const dismissed = sessionStorage.getItem(recordingBannerDismissedKey(recordingId));
+    if (dismissed === "ready") return;
+
+    setStayedInRoomDuringProcessing(false);
+    setRecordingBackgroundNotice({ kind: "ready", recordingId, downloadUrl: postStopDownloadUrl });
+
+    // Optional: browser-level notification (only if the user previously allowed it).
+    try {
+      if (typeof window !== "undefined" && "Notification" in window) {
+        if (window.Notification.permission === "granted") {
+          const n = new window.Notification("Recording is ready to download", {
+            body: "Click Download in the room banner (or open Settings → Usage → Latest video).",
+          });
+          n.onclick = () => {
+            try {
+              window.focus();
+            } catch {}
+
+            try {
+              nav("/settings/billing", {
+                state: {
+                  openTab: "usage",
+                  usageRoomId: effectiveRoomName || undefined,
+                },
+              });
+            } catch {}
+          };
+        }
+      }
+    } catch {
+      // ignore
+    }
+  }, [recordingStatus, roomId, recordingId, postStopReady, postStopDownloadUrl, nav, effectiveRoomName]);
 
   useEffect(() => {
     if (streamStatus === "live") {
@@ -1818,12 +2421,15 @@ function RoomPage() {
     console.log("[usage] sending streamEnded", payload);
 
     try {
-      const res = await fetch(`${API_BASE}/api/usage/streamEnded`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(payload),
-      });
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/usage/streamEnded`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        { allowNonOk: true }
+      );
       const text = await res.text();
       console.log("[usage] streamEnded response", { status: res.status, body: text });
     } catch (e) {
@@ -1844,17 +2450,20 @@ function RoomPage() {
 
     // When the host leaves, request that the server
     // disconnect all remaining participants from this room.
-    if (isHost && effectiveRoomName && roomAccessToken) {
+    if (isHost && !adminOverride && effectiveRoomName && roomAccessToken) {
       try {
-        fetch(`${API_BASE}/api/roomModeration/remove-all`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-room-access-token": roomAccessToken,
+        apiFetchAuth(
+          `${API_BASE}/api/roomModeration/remove-all`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "x-room-access-token": roomAccessToken,
+            },
+            body: JSON.stringify({ room: effectiveRoomName }),
           },
-          credentials: "include",
-          body: JSON.stringify({ room: effectiveRoomName }),
-        }).catch(() => {
+          { allowNonOk: true }
+        ).catch(() => {
           // best-effort only
         });
       } catch {
@@ -1862,11 +2471,7 @@ function RoomPage() {
       }
     }
 
-    if (isHost) {
-      nav('/join', { replace: true });
-    } else {
-      setShowGoodbye(true);
-    }
+    nav('/join', { replace: true });
   };
 
   const handleHomeClick = () => {
@@ -1874,6 +2479,38 @@ function RoomPage() {
   };
 
   const handleStayInRoom = () => {
+    if (roomId && recordingId) {
+      try {
+        sessionStorage.setItem(pendingDownloadBannerKey(roomId), recordingId);
+      } catch {}
+    }
+
+    if (!postStopReady) {
+      setStayedInRoomDuringProcessing(true);
+
+      if (recordingId) {
+        // Show an immediate, dismissable banner with a disabled Download button.
+        setRecordingBackgroundNotice({ kind: "processing", recordingId, downloadUrl: null });
+      }
+
+      // Request notification permission once (user gesture) so we can alert them when ready.
+      try {
+        if (typeof window !== "undefined" && "Notification" in window) {
+          const alreadyAsked = localStorage.getItem("sl_recording_notify_perm_requested") === "1";
+          if (!alreadyAsked && window.Notification.permission === "default") {
+            localStorage.setItem("sl_recording_notify_perm_requested", "1");
+            void window.Notification.requestPermission();
+          }
+        }
+      } catch {
+        // ignore
+      }
+    } else {
+      // If ready already, show the banner immediately.
+      if (recordingId) {
+        setRecordingBackgroundNotice({ kind: "ready", recordingId, downloadUrl: postStopDownloadUrl });
+      }
+    }
     setShowStreamEndedModal(false);
   };
 
@@ -1884,7 +2521,7 @@ function RoomPage() {
     layout = "grid",
     mode = "cloud",
     presetId,
-  }: { layout?: "speaker" | "grid"; mode?: "cloud" | "dual"; presetId?: string }) => {
+  }: { mode: "cloud" | "dual"; presetId?: string }) => {
     if (isViewer) {
       console.warn("startRecording blocked for viewer role");
       return;
@@ -1915,7 +2552,7 @@ function RoomPage() {
       console.warn("Dual recording requested but not allowed; falling back to cloud mode.");
     }
 
-    console.log("🎬 startRecording called. roomId:", roomId, "layout:", layout, "mode:", requestedMode);
+    console.log("🎬 startRecording called. roomId:", roomId, "mode:", requestedMode);
 
     autoStopTriggeredRef.current = false;
 
@@ -1936,7 +2573,7 @@ function RoomPage() {
       setRecordingCountdown("You're recording");
       try {
         console.log("📡 Calling apiStartRecording...");
-        const response = await apiStartRecording(roomId, layout, requestedMode, presetId || selectedPresetId, roomAccessToken || undefined);
+        const response = await apiStartRecording(roomId, requestedMode, presetId || selectedPresetId, roomAccessToken || undefined);
         console.log("📡 Got response:", response);
         const recId = response?.data?.recordingId ?? response?.recordingId;
         console.log("🎬 Extracted recordingId:", recId);
@@ -1959,7 +2596,11 @@ function RoomPage() {
       } catch (e) {
         console.error("❌ Failed to start recording:", e);
         setRecordingStatus("error");
-        alert(`Failed to start recording: ${(e as Error).message || "Unknown error"}`);
+        const anyErr: any = e as any;
+        const body = anyErr?.body;
+        const code = String(body?.error || body?.code || "").trim();
+        const friendly = code ? getFeatureErrorMessage(code, "recording") : null;
+        alert(friendly ? `Failed to start recording: ${friendly}` : `Failed to start recording: ${anyErr?.message || "Unknown error"}`);
       } finally {
         const clearTimer = setTimeout(() => {
           setRecordingCountdown(null);
@@ -2022,13 +2663,8 @@ function RoomPage() {
       alert("⏹️ Recording is still active. Stop the stream first.");
       return;
     }
-    // At this point stream/recording are stopped. Post usage then exit.
-    sendUsageOnExit();
-    if (isHost) {
-      nav('/join', { replace: true });
-    } else {
-      setShowGoodbye(true);
-    }
+    // At this point stream/recording are stopped. Exit to Join.
+    handleLeftRoom();
   };
 
   const handleLeaveRoom = () => {
@@ -2143,9 +2779,14 @@ function RoomPage() {
       : [];
     const hasSessionKeys = Object.values(sessionKeyMap || {}).some((entry) => !!entry?.streamKey);
     const hasDirectKeys = !!(youtubeKey || facebookKey || twitchKey);
+    const hasExtraDestinations = (extraDestinations || []).some((d) => {
+      const rtmpUrl = typeof (d as any)?.rtmpUrl === "string" ? (d as any).rtmpUrl.trim() : "";
+      const streamKey = typeof (d as any)?.streamKey === "string" ? (d as any).streamKey.trim() : "";
+      return !!(rtmpUrl && streamKey);
+    });
 
-    if (!hasDirectKeys && !hasSessionKeys && destIds.length === 0) {
-      alert("Select at least one saved stream destination or enter a stream key.");
+    if (!hasDirectKeys && !hasSessionKeys && destIds.length === 0 && !hasExtraDestinations) {
+      alert("Select at least one stream destination or enter a stream key.");
       return;
     }
     const sequence = ["3", "2", "1"];
@@ -2174,8 +2815,7 @@ function RoomPage() {
           presetId: selectedPresetId,
           extraDestinations: extraDestinations.length ? extraDestinations : undefined,
         };
-        console.log("   Sending to API:", requestBody);
-        const res = await fetch(
+        const res = await apiFetchAuth(
           `${API_BASE}/api/multistream/${encodeURIComponent(roomId)}/start-multistream`,
           {
             method: "POST",
@@ -2184,32 +2824,55 @@ function RoomPage() {
               ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
             },
             body: JSON.stringify(requestBody),
-            credentials: "include",
-          }
+          },
+          { allowNonOk: true }
         );
         const raw = await res.text();
         let data: any = {};
         if (raw && raw.trim().length > 0) {
           try {
             data = JSON.parse(raw);
-          } catch (parseErr) {
-            console.error("start-multistream parse error", parseErr, raw);
+          } catch {
+            console.warn("start-multistream parse error");
             data = { raw };
           }
         } else {
           console.warn("start-multistream empty response body");
           data = { raw: "" };
         }
-        console.log("🔍 startMultistream full response:", data);
         if (!res.ok) {
-          console.error("Start multistream failed", data);
-          alert(`Failed to start streaming to Stream Destinations: ${data.error || data.message || "Unknown error"}`);
+          const code = data?.error ?? data?.code ?? data?.data?.error ?? data?.data?.code;
+          const mapped = getFeatureErrorMessage(code, code === "TRANSCODE_DISABLED" ? "transcode" : "multistream");
+          const message =
+            mapped !== "Feature unavailable."
+              ? mapped
+              : `Failed to start streaming to Stream Destinations: ${data?.message || data?.error || "Unknown error"}`;
+
+          if (code === "TRANSCODE_DISABLED") {
+            console.warn("Start multistream blocked by transcode kill-switch");
+          } else {
+            console.error("Start multistream failed", data);
+          }
+
+          alert(message);
           setStreamStatus("idle");
           return;
         }
         if (data?.success === false || data?.error) {
-          console.error("Start multistream API indicated failure", data);
-          alert(`Failed to start streaming to Stream Destinations: ${data.error || data.message || "Unknown error"}`);
+          const code = data?.error ?? data?.code ?? data?.data?.error ?? data?.data?.code;
+          const mapped = getFeatureErrorMessage(code, code === "TRANSCODE_DISABLED" ? "transcode" : "multistream");
+          const message =
+            mapped !== "Feature unavailable."
+              ? mapped
+              : `Failed to start streaming to Stream Destinations: ${data?.message || data?.error || "Unknown error"}`;
+
+          if (code === "TRANSCODE_DISABLED") {
+            console.warn("Start multistream blocked by transcode kill-switch");
+          } else {
+            console.error("Start multistream API indicated failure", data);
+          }
+
+          alert(message);
           setStreamStatus("idle");
           return;
         }
@@ -2274,7 +2937,7 @@ function RoomPage() {
     }, 10000);
     try {
       setStreamStatus("stopping");
-      const res = await fetch(
+      const res = await apiFetchAuth(
         `${API_BASE}/api/multistream/${encodeURIComponent(roomId)}/stop-multistream`,
         {
           method: "POST",
@@ -2283,9 +2946,9 @@ function RoomPage() {
             ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
           },
           body: JSON.stringify({ egressId: streamEgressId }),
-          credentials: "include",
           signal: controller.signal,
-        }
+        },
+        { allowNonOk: true }
       );
       if (!res.ok) {
         const text = await res.text().catch(() => "");
@@ -2321,12 +2984,15 @@ function RoomPage() {
           alert("No room identity available yet");
           return;
         }
-        const res = await fetch(`${API_BASE}/api/invites/create`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({ roomId: roomId || undefined, roomName: effectiveRoomName || undefined, role: _role }),
-        });
+        const res = await apiFetchAuth(
+          `${API_BASE}/api/invites/create`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ roomId: roomId || undefined, roomName: effectiveRoomName || undefined, role: _role }),
+          },
+          { allowNonOk: true }
+        );
 
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data?.inviteToken) {
@@ -2526,7 +3192,7 @@ function RoomPage() {
   }
 
   const guestCapLabel = typeof maxGuestsAllowed === "number" && maxGuestsAllowed > 0 ? `${maxGuestsAllowed}` : "—";
-  const rtmpCap = planRtmpDestinationsMax ?? 0;
+
   const entitlementSummary = `Rec:${planRecordingEnabled ? "on" : "off"} • Dual:${dualRecordingAllowed ? "on" : "off"} • RTMP:${rtmpCap === 0 ? "off" : rtmpCap === 1 ? "1" : `up to ${rtmpCap}`} • HLS:${planHlsEnabled ? "on" : "off"} • HLS Setup:${planHlsCustomizationEnabled ? "on" : "off"} • Guests:${guestCapLabel}`;
   const recordingEnabled =
     planRecordingEnabled &&
@@ -2534,16 +3200,53 @@ function RoomPage() {
     !needsReauth &&
     !isViewer &&
     (isHost || can("canRecord") || !!effectiveControls.canStartStopRecording);
-  const canMultistream = (rtmpCap > 0) && !needsReauth && !isViewer && (isHost || can("canDestinations") || !!effectiveControls.canManageDestinations);
-  const hlsAvailable =
-    planHlsEnabled &&
-    platformHlsEnabled &&
-    !needsReauth;
+  const canMultistream =
+    featureAccess.canUse.destinations &&
+    !needsReauth &&
+    !isViewer &&
+    (isHost || can("canDestinations") || !!effectiveControls.canManageDestinations);
+  const hlsAvailable = featureAccess.canUse.hlsRuntime && !needsReauth;
   const canStartStopHls =
     !isViewer &&
     (isHost || can("canStream") || !!effectiveControls.canStartStopStream);
 
   const handleUpgradeHls = () => {
+    nav("/settings/billing");
+  };
+
+  const myPlanId =
+    typeof (myEffectiveEntitlements as any)?.planId === "string"
+      ? String((myEffectiveEntitlements as any).planId)
+      : typeof recordingPlanId === "string"
+        ? recordingPlanId
+        : null;
+
+  const showUpgradeButton = myPlanId === "free" || myPlanId === "starter" || myPlanId === "basic";
+
+  const handleUpgradePlanFromRoom = () => {
+    const recordingActive =
+      recordingStatus === "recording" ||
+      recordingStatus === "stopping" ||
+      isRecordingCountdown;
+
+    const streamingActive = streamStatus !== "idle";
+
+    const hlsStatus = String(hlsStatusData?.status || "").toLowerCase();
+    const hlsActive =
+      !!roomId &&
+      !!roomAccessToken &&
+      (hlsStatus === "starting" || hlsStatus === "live" || hlsStatus === "active");
+
+    if (recordingActive || streamingActive || hlsActive) {
+      const blockers: string[] = [];
+      if (recordingActive) blockers.push("recording");
+      if (streamingActive) blockers.push("streaming");
+      if (hlsActive) blockers.push("HLS");
+
+      alert(`You can't leave the room while ${blockers.join(", ")}${blockers.length === 1 ? " is" : " are"} running. Stop it first, then upgrade.`);
+      return;
+    }
+
     nav("/settings/billing");
   };
 
@@ -2555,10 +3258,18 @@ function RoomPage() {
           👀 View-only mode — publishing controls are disabled.
         </div>
       )}
+      {!isHost && roomGateStatus === "idle" && !token && (
+        <div className="w-full bg-slate-900 text-white text-sm font-semibold px-4 py-2 flex items-center justify-between gap-3">
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span>Not started yet — waiting for the host to start.</span>
+          </div>
+          <div style={{ fontSize: 12, opacity: 0.85 }}>This page will auto-join when live.</div>
+        </div>
+      )}
       {!isViewer && needsReauth && (
         <div className="w-full bg-red-600 text-white text-sm font-semibold px-4 py-2 flex items-center justify-between gap-3">
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span>Session expired — re-auth to enable host tools.</span>
+            <span>{reauthBannerText}</span>
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <button
@@ -2634,7 +3345,7 @@ function RoomPage() {
 
               {needsReauth && (
                 <div style={{ marginTop: 10, fontSize: 11, color: "#fecaca" }}>
-                  Session expired — re-auth to edit.
+                  Session expired — re-auth to continue.
                 </div>
               )}
             </div>
@@ -2709,6 +3420,26 @@ function RoomPage() {
               title="Copy invite links"
             >
               🔗 Invite Links
+            </button>
+          )}
+
+          {showUpgradeButton && (
+            <button
+              onClick={handleUpgradePlanFromRoom}
+              style={{
+                fontSize: '0.75rem',
+                padding: '0.5rem 0.75rem',
+                border: '1px solid rgba(251, 191, 36, 0.55)',
+                borderRadius: '0.375rem',
+                background: 'rgba(251, 191, 36, 0.08)',
+                color: '#fbbf24',
+                cursor: 'pointer',
+                transition: 'all 0.3s ease',
+                fontWeight: '600'
+              }}
+              title="Upgrade your plan"
+            >
+              ⬆️ Upgrade
             </button>
           )}
 
@@ -2810,6 +3541,25 @@ function RoomPage() {
                 </button>
               </>
             )}
+
+            {!canManageStream && !isViewer && roomTokenMode === "guest" && (
+              <button
+                disabled
+                title="Host auth required"
+                style={{
+                  padding: '0.375rem 0.75rem',
+                  fontSize: '0.75rem',
+                  borderRadius: '0.375rem',
+                  background: 'rgba(255, 255, 255, 0.08)',
+                  color: 'rgba(255, 255, 255, 0.7)',
+                  border: '1px solid rgba(255, 255, 255, 0.18)',
+                  cursor: 'not-allowed',
+                  fontWeight: '500'
+                }}
+              >
+                Setup Stream
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -2837,6 +3587,9 @@ function RoomPage() {
           dashboardGreenroomEnabled={dashboardGreenroomEnabled}
           dashboardOverlaysEnabled={dashboardOverlaysEnabled}
           dashboardRole={isHost ? "host" : "participant"}
+          onLeaveRequested={() => {
+            void handleEndStream();
+          }}
           onDisconnected={handleLeftRoom}
         />
       )}
@@ -2886,6 +3639,41 @@ function RoomPage() {
             <p style={{ marginTop: 0, marginBottom: 14, color: "#94a3b8", fontSize: 13 }}>
               Copy a participant link to invite someone on stage.
             </p>
+
+            {isHost && roomId && roomAccessToken && (
+              <div
+                style={{
+                  marginBottom: 14,
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  border: "1px solid #1f2937",
+                  background: "rgba(255,255,255,0.02)",
+                }}
+              >
+                <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Guest access</div>
+                <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, cursor: allowGuestsSaving ? "not-allowed" : "pointer" }}>
+                  <input
+                    type="checkbox"
+                    disabled={allowGuestsLoading || allowGuestsSaving}
+                    checked={allowGuests !== false}
+                    onChange={(e) => {
+                      const next = !!(e.target as HTMLInputElement).checked;
+                      void setAllowGuestsPolicy(next);
+                    }}
+                  />
+                  <span>Allow guests to join without signing in</span>
+                </label>
+                <div style={{ marginTop: 6, fontSize: 12, color: "#9ca3af", lineHeight: 1.4 }}>
+                  {allowGuestsLoading
+                    ? "Loading guest access policy…"
+                    : allowGuests === false
+                      ? "Guests are currently disabled for this room."
+                      : allowGuests === true
+                        ? "Guests are enabled for this room (still subject to server settings and room live status)."
+                        : "Not configured yet — currently treated as enabled for compatibility."}
+                </div>
+              </div>
+            )}
 
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div
@@ -2972,14 +3760,13 @@ function RoomPage() {
         }
       >
         <StreamSetupModalV2
-          open={showStreamSetup && canManageStream}
+          open={showStreamSetup}
           onClose={() => setShowStreamSetup(false)}
           roomName={roomName ?? ""}
           roomId={roomId || ""}
           roomAccessToken={roomAccessToken || undefined}
           
           selectedPresetId={selectedPresetId}
-          defaultLayout={defaultLayoutPref}
           defaultRecordingMode={defaultRecordingModePref}
           streamStatus={streamStatus}
           onStartStream={handleStartMultistream}
@@ -2991,7 +3778,7 @@ function RoomPage() {
           rtmpDestinationsMax={planRtmpDestinationsMax ?? undefined}
           multistreamAllowed={canMultistream}
           hlsEnabled={hlsAvailable}
-          hlsCustomizationEnabled={planHlsCustomizationEnabled && (isHost || can("canLayout"))}
+          hlsCustomizationEnabled={featureAccess.canUse.hlsSetup && (isHost || can("canLayout"))}
           showHlsSection={hlsAvailable}
           canStartStopHls={canStartStopHls}
           entitlementsReady={entitlementsReady}
@@ -3023,7 +3810,8 @@ function RoomPage() {
       {showStreamEndedModal && recordingId && (
         <StreamEndedModal
           recordingId={recordingId}
-          onStartEditing={() => nav('/edit', { replace: true })}
+          processing={postStopProcessing}
+          ready={postStopReady}
           onExitRoom={() => nav('/join', { replace: true })}
           onStayInRoom={handleStayInRoom}
         />
@@ -3051,6 +3839,162 @@ function RoomPage() {
         </div>
       )}
 
+      {/* Recording background processing/ready notice */}
+      {recordingBackgroundNotice && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: recordingToast ? 74 : 24,
+            right: 24,
+            zIndex: 1201,
+            background: "rgba(15,23,42,0.98)",
+            border: "1px solid rgba(148,163,184,0.25)",
+            borderRadius: 12,
+            padding: "12px 12px",
+            color: "#e5e7eb",
+            width: "min(380px, calc(100vw - 48px))",
+            boxShadow: "0 18px 60px rgba(0,0,0,0.7)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+            <div style={{ fontWeight: 700, fontSize: 13 }}>
+              {recordingBackgroundNotice.kind === "processing"
+                ? "Recording is processing"
+                : "Recording is ready to download"}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                try {
+                  sessionStorage.setItem(
+                    recordingBannerDismissedKey(recordingBackgroundNotice.recordingId),
+                    recordingBackgroundNotice.kind
+                  );
+                } catch {}
+                setRecordingBackgroundNotice(null);
+              }}
+              style={{
+                border: "none",
+                background: "transparent",
+                color: "#94a3b8",
+                cursor: "pointer",
+                fontSize: 16,
+                lineHeight: 1,
+              }}
+              aria-label="Dismiss"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div style={{ marginTop: 6, fontSize: 12, color: "#cbd5e1", lineHeight: 1.35 }}>
+            {recordingBackgroundNotice.kind === "processing" ? (
+              <>
+                Recording is processing in the background. Download it from{" "}
+                <span style={{ color: "#e5e7eb", fontWeight: 600 }}>Settings → Usage → Latest video</span>{" "}
+                when it turns green.
+              </>
+            ) : (
+              <>
+                Recording is ready. Click <span style={{ color: "#e5e7eb", fontWeight: 700 }}>Download</span> (opens a new tab).{" "}
+                <span style={{ color: "#94a3b8" }}>Link lasts 1 hour.</span>
+              </>
+            )}
+          </div>
+
+          <div style={{ marginTop: 10, display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={() =>
+                nav("/settings/billing", {
+                  state: {
+                    openTab: "usage",
+                    usageRoomId: effectiveRoomName || undefined,
+                  },
+                })
+              }
+              style={{
+                padding: "8px 10px",
+                borderRadius: 10,
+                border: "1px solid rgba(34, 197, 94, 0.35)",
+                background: "rgba(34, 197, 94, 0.12)",
+                color: "#bbf7d0",
+                cursor: "pointer",
+                fontWeight: 700,
+                fontSize: 12,
+              }}
+            >
+              Open Settings
+            </button>
+
+            <button
+              type="button"
+              disabled={recordingBackgroundNotice.kind !== "ready"}
+              onClick={async () => {
+                if (recordingBackgroundNotice.kind !== "ready") return;
+
+                const rid = recordingBackgroundNotice.recordingId;
+
+                const openUrl = (url: string) => {
+                  try {
+                    window.open(url, "_blank", "noopener,noreferrer");
+                  } catch {
+                    window.open(url, "_blank");
+                  }
+                };
+
+                // Use prefetched URL when available; otherwise fetch on-demand.
+                const prefetched = recordingBackgroundNotice.downloadUrl || postStopDownloadUrl;
+                if (typeof prefetched === "string" && prefetched.trim()) {
+                  openUrl(prefetched.trim());
+                  return;
+                }
+
+                try {
+                  const res = await apiFetchAuth(`${API_BASE}/api/recordings/${rid}/download-link`, {}, { allowNonOk: true });
+                  if (res.status === 410) {
+                    alert("This recording link expired. Use Settings → Usage → Latest video.");
+                    return;
+                  }
+                  if (res.status === 402) {
+                    alert("Upgrade required to download this recording.");
+                    return;
+                  }
+                  if (!res.ok) throw new Error("Failed to get download link");
+
+                  const data = await res.json().catch(() => null);
+                  const url = data?.data?.url;
+                  if (!data?.success || !url) throw new Error(data?.error || "Invalid download link response");
+                  openUrl(String(url));
+                } catch (err) {
+                  console.error(err);
+                  alert("Failed to download recording. Use Settings → Usage → Latest video.");
+                }
+              }}
+              style={{
+                padding: "8px 10px",
+                borderRadius: 10,
+                border:
+                  recordingBackgroundNotice.kind === "ready"
+                    ? "1px solid rgba(34, 197, 94, 0.35)"
+                    : "1px solid rgba(148,163,184,0.25)",
+                background:
+                  recordingBackgroundNotice.kind === "ready"
+                    ? "rgba(34, 197, 94, 0.22)"
+                    : "rgba(148,163,184,0.08)",
+                color: recordingBackgroundNotice.kind === "ready" ? "#bbf7d0" : "#94a3b8",
+                cursor: recordingBackgroundNotice.kind === "ready" ? "pointer" : "not-allowed",
+                fontWeight: 800,
+                fontSize: 12,
+                opacity: recordingBackgroundNotice.kind === "ready" ? 1 : 0.75,
+              }}
+            >
+              {recordingBackgroundNotice.kind === "ready" ? "Download" : "Processing…"}
+            </button>
+          </div>
+        </div>
+      )}
+
       <style>{`
         @keyframes pulse {
           0%, 100% { opacity: 1; }
@@ -3064,6 +4008,15 @@ function RoomPage() {
           100% { opacity: 0; transform: scale(0.94); }
         }
 
+        /* Ensure LiveKit prefab fills the available room height */
+        .sl-layout .lk-video-conference,
+        .sl-layout .lk-video-conference-inner,
+        .sl-layout .lk-grid-layout-wrapper,
+        .sl-layout .lk-focus-layout-wrapper {
+          height: 100% !important;
+          min-height: 0 !important;
+        }
+
         ${isViewer ? `
         .sl-layout.sl-viewer .lk-control-bar .lk-button-microphone,
         .sl-layout.sl-viewer .lk-control-bar .lk-button-camera,
@@ -3072,6 +4025,7 @@ function RoomPage() {
         .sl-layout.sl-viewer .lk-control-bar [data-lk-button="toggle_mic"],
         .sl-layout.sl-viewer .lk-control-bar [data-lk-button="toggle_camera"],
         .sl-layout.sl-viewer .lk-control-bar [data-lk-button="toggle_screen_share"],
+        .sl-layout.sl-viewer .lk-control-bar [data-lk-button="start_audio"],
         .sl-layout.sl-viewer .lk-control-bar button[aria-label*="Microphone"],
         .sl-layout.sl-viewer .lk-control-bar button[aria-label*="Camera"],
         .sl-layout.sl-viewer .lk-control-bar button[aria-label*="Screen"] {

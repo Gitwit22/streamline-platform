@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { type DestinationItem } from "../services/destinations";
 import { formatLimitLabel } from "../lib/entitlements";
 import { API_BASE } from "../lib/apiBase";
+import { apiFetchAuth } from "../lib/api";
 import { APP_BASE } from "../lib/appBase";
 import { getHlsStatus, startHls, stopHls } from "../services/hls";
 import CollapsibleSection from "./CollapsibleSection";
+import { getFeatureErrorMessage } from "../lib/featureErrors";
 
 type PlatformKey = "youtube" | "facebook" | "twitch" | "instagram" | "custom";
 
@@ -79,6 +81,9 @@ type SessionRtmpDestination = {
   rtmpUrl: string;
   streamKey: string;
   label?: string;
+  // Optional per-destination layout hints (kept minimal in UI; defaults applied automatically)
+  layoutPreset?: "instagram_reels_9x16";
+  videoFit?: "cover" | "contain";
 };
 
 interface Props {
@@ -88,7 +93,6 @@ interface Props {
   roomId: string;
   roomAccessToken?: string;
   selectedPresetId?: string;
-  defaultLayout?: "speaker" | "grid";
   defaultRecordingMode?: "cloud" | "dual";
   
   // Stream state
@@ -107,7 +111,7 @@ interface Props {
   
   // Recording state (independent from stream)
   recordingStatus: "idle" | "recording" | "stopping" | "stopped" | "error";
-  onStartRecording: (params: { layout: "speaker" | "grid"; mode: "cloud" | "dual"; presetId?: string }) => Promise<void>;
+  onStartRecording: (params: { mode: "cloud" | "dual"; presetId?: string }) => Promise<void>;
   onStopRecording: () => Promise<void>;
   recordingEnabled?: boolean;
   recordingElapsedSeconds?: number;
@@ -144,7 +148,6 @@ export default function StreamSetupModalV2({
   roomId,
   roomAccessToken,
   selectedPresetId,
-  defaultLayout = "speaker",
   defaultRecordingMode = "cloud",
   streamStatus,
   onStartStream,
@@ -199,7 +202,6 @@ export default function StreamSetupModalV2({
 
   const platformOrder: PlatformKey[] = ["youtube", "facebook", "twitch", "instagram", "custom"];
 
-  const [layout, setLayout] = useState<"speaker" | "grid">(defaultLayout);
   const [recordingMode, setRecordingMode] = useState<"cloud" | "dual">(defaultRecordingMode);
 
   // Canonical: HLS is always keyed by Firestore roomId.
@@ -222,14 +224,9 @@ export default function StreamSetupModalV2({
     : "";
 
   const authHeaders = useMemo(() => {
-    const token = typeof window !== "undefined" ? window.localStorage.getItem("sl_token") : null;
+    const token = typeof window !== "undefined" ? window.localStorage.getItem("authToken") : null;
     return token ? { Authorization: `Bearer ${token}` } : {};
   }, []);
-
-  // Keep local layout/mode in sync with defaults from account prefs
-  useEffect(() => {
-    setLayout(defaultLayout);
-  }, [defaultLayout]);
 
   useEffect(() => {
     setRecordingMode(defaultRecordingMode);
@@ -307,13 +304,16 @@ export default function StreamSetupModalV2({
     let cancelled = false;
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(hlsRoomId)}/active-embed`, {
-          credentials: "include",
-          cache: "no-store",
-          headers: {
-            ...authHeaders,
+        const res = await apiFetchAuth(
+          `${API_BASE}/api/rooms/${encodeURIComponent(hlsRoomId)}/active-embed`,
+          {
+            cache: "no-store",
+            headers: {
+              ...authHeaders,
+            },
           },
-        });
+          { allowNonOk: true }
+        );
         const payload = await res.json().catch(() => null);
         if (!res.ok) {
           return;
@@ -421,7 +421,11 @@ export default function StreamSetupModalV2({
               const parsed = JSON.parse(parts[1] || "{}");
               const code = String((parsed && (parsed.error || parsed.reason)) || "").trim();
               if (code === "hls_not_in_plan") {
-                friendly = "HLS Broadcast Page is not included in this plan.";
+                friendly = getFeatureErrorMessage("hls_not_in_plan", "hls");
+              } else if (code === "feature_not_entitled") {
+                friendly = getFeatureErrorMessage("feature_not_entitled", "hls");
+              } else if (code === "feature_disabled") {
+                friendly = getFeatureErrorMessage("feature_disabled", "hls");
               } else if (code === "room_mismatch") {
                 friendly = "This embed is linked to a different show. Create a new embed for this room from Settings → HLS Setup.";
               }
@@ -476,7 +480,11 @@ export default function StreamSetupModalV2({
                 const parsed = JSON.parse(parts[1] || "{}");
                 const code = String((parsed && (parsed.error || parsed.reason)) || "").trim();
                 if (code === "hls_not_in_plan") {
-                  friendly = "HLS Broadcast Page is not included in this plan.";
+                  friendly = getFeatureErrorMessage("hls_not_in_plan", "hls");
+                } else if (code === "feature_not_entitled") {
+                  friendly = getFeatureErrorMessage("feature_not_entitled", "hls");
+                } else if (code === "feature_disabled") {
+                  friendly = getFeatureErrorMessage("feature_disabled", "hls");
                 } else if (code === "room_mismatch") {
                   friendly = "This embed is linked to a different show. Create a new embed for this room from Settings → HLS Setup.";
                 }
@@ -592,15 +600,7 @@ export default function StreamSetupModalV2({
 
   if (!open) return null;
 
-  if (!entitlementsReady) {
-    return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-        <div className="rounded-lg bg-slate-900 px-4 py-3 text-sm text-slate-100 shadow-lg">
-          Loading stream features...
-        </div>
-      </div>
-    );
-  }
+  const isEntitlementsLoading = !entitlementsReady;
 
   const streamIsLive = streamStatus === "live";
   const streamIsBusy = streamStatus === "starting" || streamStatus === "stopping";
@@ -671,13 +671,21 @@ export default function StreamSetupModalV2({
   const instagramState = platformState.instagram;
   const instagramHasManual = instagramState.manualFields.some((f) => (f.value && f.value.trim()) || (f.base && f.base.trim()));
   const instagramSelected = instagramState.selected || instagramHasManual;
-  const anyPlatformSelection = selectedPlatforms.length > 0 || customHasManual;
-  const missingKeySelected = selectedPlatforms.some((p) => {
+  const anyPlatformSelection = selectedPlatforms.length > 0 || customHasManual || instagramSelected;
+  const instagramMissingKeySelected = (() => {
+    if (!instagramSelected) return false;
+    const firstManual = instagramState.manualFields.find((f) => (f.value && f.value.trim()) || (f.base && f.base.trim()));
+    const rtmpUrl = (firstManual?.base || "").trim();
+    const streamKey = (firstManual?.value || "").trim();
+    return !(rtmpUrl && streamKey);
+  })();
+  const missingKeySelected =
+    selectedPlatforms.some((p) => {
     const main = mainByPlatform[p];
     const mainUsable = !!(main && main.hasKey && main.mode !== "connected");
     const manual = platformState[p].manualFields.find((f) => f.value.trim());
     return !(mainUsable || manual);
-  });
+  }) || instagramMissingKeySelected;
   const startDisabled =
     streamIsBusy ||
     streamDisallowed ||
@@ -786,6 +794,8 @@ export default function StreamSetupModalV2({
           rtmpUrl,
           streamKey,
           label: "Instagram",
+          layoutPreset: "instagram_reels_9x16",
+          videoFit: "cover",
         });
 
         if (!hasMain && !state.manualFields.length) {
@@ -903,7 +913,7 @@ export default function StreamSetupModalV2({
   };
 
   const handleStartRecording = async () => {
-    await onStartRecording({ layout, mode: recordingMode, presetId: selectedPresetId });
+    await onStartRecording({ mode: recordingMode, presetId: selectedPresetId });
   };
 
   return (
@@ -1035,6 +1045,7 @@ export default function StreamSetupModalV2({
           )}
 
           {/* SECTION 1: STREAM PLATFORMS */}
+          {rtmpDestinationsAllowed && (
           <CollapsibleSection
             id="destinations"
             title="Stream Destinations"
@@ -1151,7 +1162,7 @@ export default function StreamSetupModalV2({
                     {!main && (
                       <div style={{ fontSize: '0.75rem', color: 'rgba(226,232,240,0.7)' }}>
                         {platform === 'instagram'
-                          ? 'Instagram Live is session-only. Enter RTMP URL + Stream Key from Instagram Live Producer each time you go live.'
+                          ? 'Instagram Live is session-only. Enter RTMP URL + Stream Key from Instagram Live Producer each time you go live. (Auto: 9:16 Reels preset)'
                           : 'No saved destination yet. Add one in Settings → Stream Destinations to reuse across sessions.'}
                       </div>
                     )}
@@ -1379,6 +1390,7 @@ export default function StreamSetupModalV2({
             </div>
           </div>
           </CollapsibleSection>
+          )}
 
           {/* SECTION 2: RECORDING CONTROL */}
           {showRecordingControls && (
@@ -1444,31 +1456,6 @@ export default function StreamSetupModalV2({
                   </div>
                 )}
               </div>
-
-              {/* Layout Selector */}
-              <label style={{ fontSize: '0.875rem', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-                <span style={{ fontWeight: 600 }}>Layout:</span>
-                <select
-                  value={layout}
-                  onChange={e => setLayout(e.target.value as "speaker" | "grid")}
-                  disabled={recordingIsActive}
-                  style={{
-                    padding: '0.4rem 0.7rem',
-                    borderRadius: '0.3rem',
-                    border: '1px solid #ef4444',
-                    background: '#18181b',
-                    color: '#fff',
-                    fontWeight: 600,
-                    fontSize: '0.85rem',
-                    outline: 'none',
-                    cursor: recordingIsActive ? 'not-allowed' : 'pointer',
-                    opacity: recordingIsActive ? 0.5 : 1
-                  }}
-                >
-                  <option value="speaker">Speaker</option>
-                  <option value="grid">Grid</option>
-                </select>
-              </label>
 
               {/* Status */}
               {recordingStatus === "error" && (
@@ -1577,8 +1564,8 @@ export default function StreamSetupModalV2({
           )}
 
             {/* HLS Broadcast section (runtime start/stop).
-              Gated by platform-level flag via showHlsSection. */}
-            {showHlsSection && (
+              Gated by platform-level flag via showHlsSection and plan via hlsAllowed. */}
+            {showHlsSection && hlsAllowed && (
             <CollapsibleSection
               id="hls"
               title="HLS Broadcast"
@@ -1645,6 +1632,9 @@ export default function StreamSetupModalV2({
                   : !boundEmbedId
                     ? 'This room is not connected to a Saved Embed yet. Create one in Settings → HLS Setup and join using that Saved Room to go live.'
                     : 'Connected to your Saved Embed. Start HLS to begin broadcasting to its viewer link.'}
+              </div>
+              <div style={{ fontSize: '0.75rem', color: 'rgba(148, 163, 184, 0.95)', marginBottom: '0.75rem' }}>
+                Broadcasting uses Broadcast minutes.
               </div>
               {boundEmbedId && (
                 <div style={{

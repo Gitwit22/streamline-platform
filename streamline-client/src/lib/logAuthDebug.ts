@@ -16,7 +16,7 @@ export function logAuthDebugContext(contextLabel = "") {
   try {
     // LocalStorage values
     const sl_user = localStorage.getItem("sl_user");
-    const sl_token = localStorage.getItem("sl_token");
+    const sl_token = localStorage.getItem("authToken");
     const sl_userId = localStorage.getItem("sl_userId");
     const sl_displayName = localStorage.getItem("sl_displayName");
     const sl_current_role = localStorage.getItem("sl_current_role");
@@ -57,7 +57,7 @@ export function logAuthDebugContext(contextLabel = "") {
         : sl_user
         ? { present: true }
         : null],
-      ["sl_token", sl_token ? mask(sl_token) : null],
+      ["authToken", sl_token ? mask(sl_token) : null],
       ["sl_userId", sl_userId ? mask(sl_userId) : null],
       ["sl_displayName", sl_displayName || null],
       ["sl_current_role", sl_current_role || null],

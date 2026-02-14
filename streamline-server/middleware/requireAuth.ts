@@ -2,8 +2,9 @@
 import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { getUserAccount } from "../lib/userAccount";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 
-type AuthUser = { uid: string };
+type AuthUser = { uid: string; iatSec?: number };
 
 export type InviteClaims = {
   roomId?: string;
@@ -55,13 +56,19 @@ export function tryGetAuthUser(req: Request): AuthUser | null {
   if (headerToken) {
     try {
       const decoded = jwt.verify(headerToken, getJwtSecret()) as any;
-      const uid = typeof decoded?.uid === "string" ? decoded.uid : "";
+      const uid =
+        typeof decoded?.uid === "string"
+          ? decoded.uid
+          : typeof decoded?.id === "string"
+            ? decoded.id
+            : "";
       if (uid) {
+        const iatSec = typeof decoded?.iat === "number" ? decoded.iat : undefined;
         if (shouldLogAuthDebug(req)) {
           console.log("[auth-debug] Verified header JWT for uid", uid);
         }
         (req as any)._authUsed = "header";
-        return { uid };
+        return { uid, iatSec };
       }
       if (shouldLogAuthDebug(req)) {
         console.warn("[auth-debug] Header JWT verified but missing uid; falling back to cookie");
@@ -78,13 +85,19 @@ export function tryGetAuthUser(req: Request): AuthUser | null {
   if (cookieToken) {
     try {
       const decoded = jwt.verify(cookieToken, getJwtSecret()) as any;
-      const uid = typeof decoded?.uid === "string" ? decoded.uid : "";
+      const uid =
+        typeof decoded?.uid === "string"
+          ? decoded.uid
+          : typeof decoded?.id === "string"
+            ? decoded.id
+            : "";
       if (uid) {
+        const iatSec = typeof decoded?.iat === "number" ? decoded.iat : undefined;
         if (shouldLogAuthDebug(req)) {
           console.log("[auth-debug] Verified cookie JWT for uid", uid);
         }
         (req as any)._authUsed = "cookie";
-        return { uid };
+        return { uid, iatSec };
       }
       if (shouldLogAuthDebug(req)) {
         console.warn("[auth-debug] Cookie JWT verified but missing uid");
@@ -102,7 +115,7 @@ export function tryGetAuthUser(req: Request): AuthUser | null {
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   try {
     const user = tryGetAuthUser(req);
-    if (!user) return res.status(401).json({ error: "Unauthorized" });
+    if (!user) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
     // If the request included a bad/stale Authorization header but a valid
     // cookie session exists, tell the client so it can clear its cached token.
@@ -123,6 +136,27 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     try {
       const account = await getUserAccount(user.uid);
       (req as any).account = account;
+
+      // Enforce immediate lockout for deleted accounts.
+      const raw = account.rawUser || {};
+      const deletedAtMs =
+        typeof (raw as any).deletedAtMs === "number"
+          ? (raw as any).deletedAtMs
+          : typeof (raw as any).deletedAt === "number"
+            ? (raw as any).deletedAt
+            : null;
+      if (deletedAtMs && deletedAtMs > 0) {
+        return res.status(403).json({ error: "account_deleted" });
+      }
+
+      // Session revocation: reject tokens issued before authRevokedAtMs.
+      const revokedAtMs = typeof (raw as any).authRevokedAtMs === "number" ? (raw as any).authRevokedAtMs : null;
+      if (revokedAtMs && revokedAtMs > 0 && typeof user.iatSec === "number") {
+        const tokenIssuedAtMs = user.iatSec * 1000;
+        if (tokenIssuedAtMs < revokedAtMs) {
+          return res.status(401).json({ error: "session_revoked" });
+        }
+      }
     } catch (err) {
       console.error("[requireAuth] getUserAccount failed:", (err as any)?.message || err);
       // Continue without req.account; callers can still compute it on demand.
@@ -131,7 +165,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     return next();
   } catch (err) {
     console.error("[requireAuth] Unauthorized:", (err as any)?.message || err);
-    return res.status(401).json({ error: "Unauthorized" });
+    return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
   }
 }
 
@@ -140,8 +174,42 @@ export function verifyInviteToken(rawInviteToken: string): InviteClaims {
   if (!secret) {
     throw new Error("Invite token secret not configured");
   }
-  const decoded = jwt.verify(rawInviteToken, secret) as InviteClaims;
-  return decoded;
+
+  // Strict verification:
+  // - Reject alg=none
+  // - Restrict algorithms (default: HS256)
+  // - Enforce exp presence + expiry check
+  // - Optional issuer/audience checks when configured
+  const complete = jwt.decode(rawInviteToken, { complete: true }) as any;
+  const alg = String(complete?.header?.alg || "").trim();
+  if (!alg || alg.toLowerCase() === "none") {
+    throw new Error("invalid_invite");
+  }
+
+  const allowedAlgs = String(process.env.INVITE_TOKEN_ALGS || "HS256")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (allowedAlgs.length && !allowedAlgs.includes(alg)) {
+    throw new Error("invalid_invite");
+  }
+
+  const verifyOptions: jwt.VerifyOptions = {
+    algorithms: allowedAlgs.length ? (allowedAlgs as any) : undefined,
+  };
+
+  const iss = String(process.env.INVITE_TOKEN_ISS || "").trim();
+  const aud = String(process.env.INVITE_TOKEN_AUD || "").trim();
+  if (iss) verifyOptions.issuer = iss;
+  if (aud) verifyOptions.audience = aud;
+
+  const decoded = jwt.verify(rawInviteToken, secret, verifyOptions) as any;
+  if (typeof decoded?.exp !== "number" || !Number.isFinite(decoded.exp) || decoded.exp <= 0) {
+    // We require exp for invite tokens so they can't be perpetual.
+    throw new Error("invalid_invite");
+  }
+
+  return decoded as InviteClaims;
 }
 
 export function requireAuthOrInvite(req: Request, res: Response, next: NextFunction) {
@@ -179,7 +247,7 @@ export function requireAuthOrInvite(req: Request, res: Response, next: NextFunct
     (req.query as any)?.inviteToken;
 
   if (!inviteToken) {
-    return res.status(401).json({ error: "Unauthorized" });
+    return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
   }
 
   try {
@@ -188,6 +256,6 @@ export function requireAuthOrInvite(req: Request, res: Response, next: NextFunct
     return next();
   } catch (err) {
     console.error("[requireAuthOrInvite] Invite token invalid:", (err as any)?.message || err);
-    return res.status(401).json({ error: "Unauthorized" });
+    return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
   }
 }

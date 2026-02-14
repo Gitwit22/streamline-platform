@@ -2,6 +2,8 @@ import admin from "firebase-admin";
 import { randomUUID } from "node:crypto";
 import { firestore as db } from "../firebaseAdmin";
 import type { HlsPresetId } from "./livekitEgress";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import type { RoomLayout } from "../lib/roomLayout";
 
 export type RoomHlsConfig = {
   enabled: boolean;
@@ -27,6 +29,14 @@ export const DEFAULT_ROOM_HLS_CONFIG: RoomHlsConfig = {
 export type RoomDoc = {
   ownerId: string;
   livekitRoomName?: string;
+  // Canonical room layout configuration (controls viewer/participant layout;
+  // recordings inherit this by default).
+  roomLayout?: RoomLayout;
+  // Room access policy (server-enforced during token issuance).
+  // Defaults are intentionally secure.
+  visibility?: "public" | "unlisted" | "private";
+  requiresAuth?: boolean;
+  requiresPayment?: boolean;
   // Optional link to a saved embed / viewer page
   savedEmbedId?: string;
   roomType?: string;
@@ -56,22 +66,38 @@ export async function ensureRoomDoc(params: {
   livekitRoomName: string;
   roomType?: string;
   initialStatus?: string;
+  initialRoomLayout?: RoomLayout;
   // When provided, bind this room to a specific saved embed.
   savedEmbedId?: string;
+  // Optional policy overrides (otherwise defaults apply).
+  visibility?: RoomDoc["visibility"];
+  requiresAuth?: boolean;
+  requiresPayment?: boolean;
 }): Promise<{
   ref: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
   data: RoomDoc;
 }> {
-  const { roomId, ownerId, livekitRoomName, roomType, initialStatus, savedEmbedId } = params;
+  const { roomId, ownerId, livekitRoomName, roomType, initialStatus, savedEmbedId, initialRoomLayout } = params;
   const ref = db.collection("rooms").doc(roomId);
   const snap = await ref.get();
   const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
+
+  const visibility: RoomDoc["visibility"] =
+    params.visibility === "public" || params.visibility === "unlisted" || params.visibility === "private"
+      ? params.visibility
+      : "unlisted";
+  const requiresAuth = params.requiresAuth === undefined ? true : !!params.requiresAuth;
+  const requiresPayment = params.requiresPayment === undefined ? false : !!params.requiresPayment;
 
   if (!snap.exists) {
     const doc: Partial<RoomDoc> = {
       ownerId,
       roomType: roomType || "rtc",
       livekitRoomName,
+      ...(initialRoomLayout ? { roomLayout: initialRoomLayout } : {}),
+      visibility,
+      requiresAuth,
+      requiresPayment,
       ...(savedEmbedId ? { savedEmbedId } : {}),
       createdAt: serverTimestamp,
       updatedAt: serverTimestamp,
@@ -87,7 +113,13 @@ export async function ensureRoomDoc(params: {
     if (!existing.ownerId) patch.ownerId = ownerId;
     if (!existing.roomType) patch.roomType = roomType || "rtc";
     if (!existing.livekitRoomName) patch.livekitRoomName = livekitRoomName;
+    if (existing.visibility !== "public" && existing.visibility !== "unlisted" && existing.visibility !== "private") {
+      patch.visibility = visibility;
+    }
+    if (typeof existing.requiresAuth !== "boolean") patch.requiresAuth = requiresAuth;
+    if (typeof existing.requiresPayment !== "boolean") patch.requiresPayment = requiresPayment;
     if (savedEmbedId && !existing.savedEmbedId) patch.savedEmbedId = savedEmbedId;
+    if (initialRoomLayout && !existing.roomLayout) patch.roomLayout = initialRoomLayout;
     if (!("createdAt" in existing)) patch.createdAt = serverTimestamp;
     patch.updatedAt = serverTimestamp;
     if (!existing.status) patch.status = initialStatus || "live";
@@ -110,7 +142,7 @@ export async function getRoom(roomId: string): Promise<{
   const ref = db.collection("rooms").doc(roomId);
   const snap = await ref.get();
   if (!snap.exists) {
-    throw new Error("room_not_found");
+    throw new Error(PERMISSION_ERRORS.ROOM_NOT_FOUND);
   }
   const data = snap.data() as RoomDoc;
   return { ref, data };

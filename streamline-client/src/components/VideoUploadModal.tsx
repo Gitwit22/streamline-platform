@@ -1,4 +1,5 @@
 import { useState, useRef } from "react";
+import { apiFetchAuth } from "../lib/api";
 
 interface VideoUploadModalProps {
   isOpen: boolean;
@@ -125,10 +126,14 @@ export default function VideoUploadModal({ isOpen, onClose, onUploadComplete }: 
           });
         }, 200);
 
-        const response = await fetch('/api/editing/upload', {
-          method: 'POST',
-          body: formData,
-        });
+        const response = await apiFetchAuth(
+          '/api/editing/upload',
+          {
+            method: 'POST',
+            body: formData,
+          },
+          { allowNonOk: true }
+        );
 
         clearInterval(progressInterval);
 

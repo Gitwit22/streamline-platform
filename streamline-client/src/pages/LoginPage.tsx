@@ -1,6 +1,6 @@
 import React, { FormEvent, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { apiFetch, clearAuthStorage } from "../lib/api";
+import { apiFetchAuth, clearAuthStorage } from "../lib/api";
 
 // Email validation function
 function validateEmail(email: string): boolean {
@@ -26,6 +26,14 @@ export const LoginPage: React.FC = () => {
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
+
+  const accountDeleted = useMemo(() => {
+    try {
+      return Boolean((location.state as any)?.accountDeleted);
+    } catch {
+      return false;
+    }
+  }, [location.state]);
 
   const nextUrl = useMemo(() => {
     try {
@@ -94,17 +102,22 @@ export const LoginPage: React.FC = () => {
       }
 
       const token = (loginBody as any)?.token as string | undefined;
-      if (token) {
-        try {
-          localStorage.setItem("sl_token", token);
-        } catch {}
+      if (!token) {
+        clearAuthStorage();
+        setError("Login failed: missing token from server");
+        setLoading(false);
+        return;
       }
+
+      try {
+        localStorage.setItem("authToken", token);
+      } catch {}
 
       // Hydrate user from canonical /api/account/me. If this fails,
       // treat it as a hard error instead of redirecting into a
       // half-authed state that causes room join "blink".
       try {
-        const meRes = await apiFetch("/api/account/me");
+        const meRes = await apiFetchAuth("/api/account/me");
         const me = await meRes.json();
         try {
           localStorage.setItem("sl_user", JSON.stringify(me));
@@ -118,9 +131,6 @@ export const LoginPage: React.FC = () => {
       }
 
       setLoading(false);
-      if (typeof document !== "undefined") {
-        console.log("[Login] Cookies after login:", document.cookie);
-      }
       nav(nextUrl || "/join");
     } catch (err) {
       console.error(err);
@@ -214,6 +224,23 @@ export const LoginPage: React.FC = () => {
             marginBottom: "24px",
           }}
         >
+          {accountDeleted && (
+            <div
+              style={{
+                marginBottom: 16,
+                padding: "10px 12px",
+                borderRadius: 12,
+                border: "1px solid rgba(255, 255, 255, 0.12)",
+                background: "rgba(0,0,0,0.35)",
+                color: "#e5e7eb",
+                fontSize: 13,
+                lineHeight: 1.4,
+              }}
+            >
+              Your account has been deleted. Please sign in with a different account.
+            </div>
+          )}
+
           {inviteRoleHint && (
             <div
               style={{

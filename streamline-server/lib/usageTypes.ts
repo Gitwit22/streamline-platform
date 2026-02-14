@@ -25,12 +25,11 @@ export type UsageSnapshot = {
   transcodeMinutes: number;
 };
 
-export type GateResult = {
-  allowed: boolean;
-  reason?: string;
-  requiresUpgrade?: boolean;
-  requiresOveragesEnabled?: boolean;
-};
+import type { LimitErrorCode } from "./limitErrors";
+
+export type GateResult =
+  | { allowed: true }
+  | { allowed: false; reason: LimitErrorCode; status?: number; requiresUpgrade?: boolean; requiresOveragesEnabled?: boolean };
 
 export type CanStartStreamParams = {
   uid: string;

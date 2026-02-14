@@ -11,10 +11,10 @@ A complete MVP for live streaming, recording, and video editing. Built with Reac
 - **Host/Guest Roles** - Different experiences for hosts and participants
 
 ### 📊 Recording Management
-- **Auto-Processing** - Mock 8-second processing simulation
-- **Real-time Progress** - Live progress bar during processing
-- **localStorage Persistence** - Recordings persist across sessions
-- **Recording Metadata** - Edit title, description, privacy level
+- **Server-backed Recordings** - Recording state stored in Firestore (survives refresh)
+- **Room Exit Page** - `/room-exit/:recordingId` shows status and next steps
+- **Signed Downloads** - Signed URLs for downloading recorded media (when storage is configured)
+- **Legacy Redirect** - `/stream-summary/:recordingId` redirects to `/room-exit/:recordingId`
 
 ### 🎞️ Video Editor
 - **Timeline Editor** - Visual timeline with clip management
@@ -112,8 +112,8 @@ streamline/
 │   │   ├── pages/             # Auth, Join, Room, Dashboard
 │   │   ├── components/        # UsageBanner, RoleOverlay
 │   │   ├── editing/           # Editor, AssetLibrary, Projects
-│   │   ├── hooks/             # useRecordingProgress
-│   │   ├── services/          # mockRecording, API integration
+│   │   ├── hooks/             # Feature/entitlement hooks
+│   │   ├── services/          # API integration
 │   │   └── App.tsx            # Main routing
 │   └── package.json
 │
@@ -143,17 +143,20 @@ streamline/
 - `/join` - Create/join room
 - `/room/:roomName` - Live streaming room
 - `/room-exit/:recordingId` - Exit flow with options
-- `/stream-summary/:recordingId` - Recording summary & metadata editor
-- `/editing/assets` - Asset library
-- `/editing/projects` - Projects dashboard
+- `/stream-summary/:recordingId` - Legacy redirect to `/room-exit/:recordingId`
+- `/content` - Asset library (canonical)
+- `/projects` - Projects dashboard (canonical)
+- `/editing/assets` - Legacy redirect to `/content`
+- `/editing/projects` - Legacy redirect to `/projects`
 - `/editing/editor/:projectId` - Timeline video editor
 
 ### Backend API Routes
 - `POST /api/auth/login` - User login
 - `POST /api/auth/signup` - User signup
-- `GET /api/roomToken` - Get LiveKit room token
+- `POST /api/rooms/{roomId}/token` - Get LiveKit room token (RTC)
 - `POST /api/usage/streamEnded` - Log stream completion
 - `GET /api/usage/summary` - Get user usage stats
+  - Response header: `x-sl-usage-summary-version: v1`
 - `POST /api/editing/*` - Editing API endpoints
 - `POST /api/rooms/*` - Multistream endpoints
 
@@ -178,7 +181,7 @@ streamline/
 
 ### Infrastructure
 - **Localhost:5137** - Single port architecture
-- **localStorage** - Client-side persistence
+- **localStorage** - Auth token and small UI state (not source of truth for recordings)
 - **Firebase/Firestore** - User & data storage
 
 ## 📝 Features Implemented
@@ -188,11 +191,10 @@ streamline/
 - [x] Live streaming room
 - [x] Auto-recording on host join
 - [x] Recording status tracking
-- [x] Real-time progress bar
+- [x] Post-stream exit flow (`/room-exit/:recordingId`)
 
 ### Phase 2 ✅
-- [x] Stream summary page
-- [x] Recording metadata editor
+- [x] Legacy redirect `/stream-summary/:recordingId` → `/room-exit/:recordingId`
 - [x] Asset library with filtering
 - [x] Projects dashboard with CRUD
 - [x] Timeline video editor
@@ -220,8 +222,7 @@ Follow [TEST_PLAN.md](TEST_PLAN.md) for complete testing guide:
 2. Create/join room
 3. Stream for 30+ seconds
 4. End stream → see exit page
-5. Edit recording metadata
-6. Go to editor
+5. Go to editor
 7. Test clip operations (split, trim, delete)
 8. Export project with options
 9. View dashboard
@@ -243,17 +244,15 @@ Join Room
   ↓
 LiveKit token generated
   ↓
-Host joins → Recording starts (mockRecordingApi)
+Host starts recording
   ↓
-Recording stores in localStorage (sl_recordings)
+Firestore: recording document created/updated
   ↓
 Stream ends → Usage logged to Firestore
   ↓
-Recording processing (8-second mock animation)
+Post-stream exit page (`/room-exit/:recordingId`)
   ↓
-Summary page shows progress
-  ↓
-Ready → Edit in timeline editor
+Optional: open `/content` → Create Project → `/editing/editor/new?recordingId=...`
 ```
 
 ## 📊 Usage Tracking
@@ -281,13 +280,13 @@ users/{uid}
       ├── resetDate
       └── lastUsageUpdate
 
-recordings/ (localStorage)
-  ├── id
+recordings/{recordingId}
   ├── title
-  ├── duration
-  ├── peakViewers
-  ├── status (recording/processing/ready)
-  └── createdAt
+  ├── createdAt
+  ├── durationSeconds
+  ├── status
+  ├── viewerCount
+  └── peakViewers
 ```
 
 ## 🚀 Deployment
@@ -332,9 +331,8 @@ VITE_API_BASE=http://localhost:5137
 
 ### Current (MVP)
 - Video URL hardcoded to BigBuckBunny sample
-- Recording processing is mocked (8 seconds)
-- No real video processing
-- localStorage limited to ~5MB
+- Recording media/download availability depends on storage configuration
+- Real recording egress/transcoding depends on LiveKit + backend setup
 - No multi-track timeline yet
 - No effects/transitions
 - No real transcription

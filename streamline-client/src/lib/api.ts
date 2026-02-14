@@ -9,11 +9,7 @@ import { API_BASE } from "./apiBase";
 export function getAuthToken(): string | null {
   if (typeof window === "undefined") return null;
   try {
-    return (
-      window.localStorage.getItem("sl_token") ||
-      window.localStorage.getItem("auth_token") ||
-      null
-    );
+    return window.localStorage.getItem("authToken") || null;
   } catch {
     return null;
   }
@@ -22,8 +18,7 @@ export function getAuthToken(): string | null {
 export function clearAuthToken() {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.removeItem("sl_token");
-    window.localStorage.removeItem("auth_token");
+    window.localStorage.removeItem("authToken");
   } catch {}
 }
 
@@ -45,6 +40,30 @@ function looksLikeJwt(token: string): boolean {
   return parts.every((p) => typeof p === "string" && p.length > 0);
 }
 
+export class ApiUnauthorizedError extends Error {
+  name = "ApiUnauthorizedError";
+  status = 401;
+  constructor() {
+    super("unauthorized");
+  }
+}
+
+function emitUnauthorizedEventOnce(detail?: string) {
+  if (typeof window === "undefined") return;
+  const w = window as any;
+  const now = Date.now();
+  // Rate limit (avoid event storms if several calls fail at once)
+  if (typeof w.__sl_last_unauthorized_event_ts === "number" && now - w.__sl_last_unauthorized_event_ts < 2000) {
+    return;
+  }
+  w.__sl_last_unauthorized_event_ts = now;
+  try {
+    window.dispatchEvent(new CustomEvent("sl:unauthorized", { detail: { reason: detail || "unauthorized" } }));
+  } catch {
+    // ignore
+  }
+}
+
 /**
  * API helper that always sends credentials and, when available, a
  * Bearer token header. Callers should pass a path like "/api/...";
@@ -52,24 +71,18 @@ function looksLikeJwt(token: string): boolean {
  * and will be used as-is.
  */
 export async function apiFetch(path: string, init: RequestInit = {}, options?: { allowNonOk?: boolean }) {
-  let token = getAuthToken();
-  if (token && !looksLikeJwt(token)) {
-    clearAuthToken();
-    token = null;
-  }
   const headers = new Headers(init.headers || {});
 
   // Default JSON content-type when sending a body unless overridden.
-  if (init.body && !headers.has("Content-Type")) {
+  // NOTE: Only auto-set for string bodies (JSON.stringify). Do NOT set this for
+  // FormData uploads (browser must set multipart boundaries), blobs, etc.
+  if (typeof init.body === "string" && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 
-  // Header-based auth fallback: prefer explicit Authorization on init,
-  // otherwise attach the stored token if present.
-  const attachedAuthFromStorage = Boolean(token) && !headers.has("Authorization");
-  if (token && !headers.has("Authorization")) {
-    headers.set("Authorization", `Bearer ${token}`);
-  }
+  // Cookie-primary auth: always send credentials.
+  // NOTE: Do not auto-attach Authorization from localStorage here; callers
+  // that truly need header auth should set it explicitly.
 
   const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
 
@@ -78,25 +91,6 @@ export async function apiFetch(path: string, init: RequestInit = {}, options?: {
     credentials: "include",
     headers,
   });
-
-  // If the server had to ignore a bad Authorization header and fall back
-  // to a valid cookie session, quietly clear the stored token to prevent
-  // future stale-token poisoning.
-  if (
-    res.ok &&
-    attachedAuthFromStorage &&
-    (path === "/api/account/me" || path === "/api/auth/me")
-  ) {
-    const fallback = (res.headers.get("x-sl-auth-fallback") || "").toLowerCase();
-    const headerInvalid = res.headers.get("x-sl-auth-header-invalid") === "1";
-    if (fallback === "cookie" || headerInvalid) {
-      const hadStoredToken = Boolean(getAuthToken());
-      clearAuthToken();
-      if (hadStoredToken) {
-        logClearedStaleHeaderTokenOnce();
-      }
-    }
-  }
 
   if (!options?.allowNonOk && !res.ok) {
     if ((res.status === 401 || res.status === 403) && (path === "/api/account/me" || path === "/api/auth/me")) {
@@ -114,6 +108,90 @@ export async function apiFetch(path: string, init: RequestInit = {}, options?: {
   return res;
 }
 
+/**
+ * Strict auth wrapper for protected endpoints.
+ * - Reads the token from localStorage at call time
+ * - Always attaches `Authorization: Bearer ...`
+ * - Still uses cookie credentials via apiFetch
+ */
+export async function apiFetchAuth(
+  path: string,
+  init: RequestInit = {},
+  options?: { allowNonOk?: boolean }
+) {
+  if (typeof window === "undefined") {
+    throw new ApiUnauthorizedError();
+  }
+
+  let token: string | null = null;
+  try {
+    token = window.localStorage.getItem("authToken");
+  } catch {}
+
+  if (!token || !looksLikeJwt(token)) {
+    clearAuthToken();
+    emitUnauthorizedEventOnce("missing_or_invalid_token");
+    throw new ApiUnauthorizedError();
+  }
+
+  const headers = new Headers(init.headers || {});
+  const hadExplicitAuthHeader = headers.has("Authorization");
+  if (!hadExplicitAuthHeader) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  // Always allow non-ok here so we can handle 401 consistently, while keeping
+  // the same thrown error shape as apiFetch for other non-ok responses.
+  const res = await apiFetch(path, { ...init, headers }, { allowNonOk: true });
+
+  if (res.status === 401) {
+    // Tiny but high ROI: a single retry can recover from multi-tab token updates
+    // or very small races where authToken was updated after this request began.
+    if (!hadExplicitAuthHeader) {
+      try {
+        const nextToken = window.localStorage.getItem("authToken");
+        if (nextToken && nextToken !== token && looksLikeJwt(nextToken)) {
+          const retryHeaders = new Headers(init.headers || {});
+          retryHeaders.set("Authorization", `Bearer ${nextToken}`);
+          const retryRes = await apiFetch(path, { ...init, headers: retryHeaders }, { allowNonOk: true });
+          if (retryRes.status !== 401) {
+            if (!options?.allowNonOk && !retryRes.ok) {
+              let errBody: any = null;
+              try {
+                errBody = await retryRes.json();
+              } catch {}
+              throw Object.assign(new Error(`HTTP ${retryRes.status}`), {
+                status: retryRes.status,
+                body: errBody,
+              });
+            }
+            return retryRes;
+          }
+        }
+      } catch {
+        // ignore retry failures; fall through to unauthorized handling
+      }
+    }
+
+    clearAuthToken();
+    emitUnauthorizedEventOnce("401");
+    throw new ApiUnauthorizedError();
+  }
+
+  if (!options?.allowNonOk && !res.ok) {
+    let errBody: any = null;
+    try {
+      errBody = await res.json();
+    } catch {}
+    throw Object.assign(new Error(`HTTP ${res.status}`), {
+      status: res.status,
+      body: errBody,
+    });
+  }
+
+  return res;
+}
+
 export async function getToken(
   roomId: string,
   userId: string,
@@ -128,14 +206,13 @@ export async function getToken(
 
 export async function apiStartRecording(
   roomId: string,
-  layout: "speaker" | "grid",
   mode: "cloud" | "dual" = "cloud",
   presetId?: string,
   roomAccessToken?: string | null
 ) {
-  const res = await apiFetch("/api/recordings/start", {
+  const res = await apiFetchAuth("/api/recordings/start", {
     method: "POST",
-    body: JSON.stringify({ roomId, layout, mode, presetId }),
+    body: JSON.stringify({ roomId, mode, presetId }),
     headers: roomAccessToken
       ? {
           "x-room-access-token": roomAccessToken,
@@ -146,7 +223,7 @@ export async function apiStartRecording(
 }
 
 export async function apiStopRecording(recordingId: string, roomAccessToken?: string | null) {
-  const res = await apiFetch("/api/recordings/stop", {
+  const res = await apiFetchAuth("/api/recordings/stop", {
     method: "POST",
     body: JSON.stringify({ recordingId }),
     headers: roomAccessToken
@@ -158,11 +235,97 @@ export async function apiStopRecording(recordingId: string, roomAccessToken?: st
   return res.json() as Promise<{ ok: true }>;
 }
 
+export type RoomLayoutMode = "speaker" | "grid" | "carousel" | "pip";
+
+export type RoomLayout = {
+  mode: RoomLayoutMode;
+  maxTiles?: number;
+  followSpeaker?: boolean;
+  pinnedIdentity?: string | null;
+};
+
+export async function apiGetRoomLayout(roomId: string, roomAccessToken: string) {
+  const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/layout`, {
+    method: "GET",
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+  return res.json() as Promise<{
+    ok: true;
+    roomId: string;
+    roomLayout: RoomLayout | null;
+    effectiveLayoutMode: "speaker" | "grid";
+    effectiveLayoutSource: "roomLayout" | "legacyRecordingLayout" | "request" | "default";
+  }>;
+}
+
+export async function apiUpdateRoomLayout(
+  roomId: string,
+  roomAccessToken: string,
+  roomLayout: Pick<RoomLayout, "mode"> & Partial<RoomLayout>
+) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/layout`, {
+    method: "PATCH",
+    body: JSON.stringify({ roomLayout }),
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; roomLayout: RoomLayout }>;
+}
+
+export type RoomPolicy = {
+  visibility: "public" | "unlisted" | "private";
+  requiresAuth: boolean;
+  requiresPayment: boolean;
+  allowGuests: boolean | null;
+};
+
+export async function apiGetRoomPolicy(roomId: string, roomAccessToken: string) {
+  const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/policy`, {
+    method: "GET",
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+
+  return res.json() as Promise<{ ok: true; roomId: string } & RoomPolicy>;
+}
+
+export async function apiUpdateRoomPolicy(
+  roomId: string,
+  roomAccessToken: string,
+  patch: Pick<Required<RoomPolicy>, "allowGuests">
+) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/policy`, {
+    method: "PATCH",
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+    body: JSON.stringify(patch),
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; allowGuests: boolean }>;
+}
+
 export function clearAuthStorage() {
   if (typeof window === "undefined") return;
   try {
     clearAuthToken();
-    window.localStorage.removeItem("sl_user");
-    window.localStorage.removeItem("sl_userId");
+    // Clear all Streamline-scoped session state (auth + cached user/session hints)
+    // so stale tabs/deep-links can't reuse old localStorage values.
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (!key) continue;
+      if (key === "authToken" || key.startsWith("sl_")) {
+        keysToRemove.push(key);
+      }
+    }
+    for (const key of keysToRemove) {
+      try {
+        window.localStorage.removeItem(key);
+      } catch {}
+    }
   } catch {}
 }

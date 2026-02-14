@@ -1,6 +1,6 @@
 import "dotenv/config";
 import express from "express";
-import cors from "cors";
+import cors, { type CorsOptions } from "cors";
 import cookieParser from "cookie-parser";
 import webhookRouter from "./routes/webhook";
 import authRoutes from "./routes/auth";
@@ -15,21 +15,32 @@ import plansRoutes from "./routes/plans";
 import roomTokenRoute from "./routes/roomToken";
 import roomsCreateRoutes from "./routes/roomsCreate";
 import invitesRoutes from "./routes/invites";
+import roomInvitesRoutes from "./routes/roomInvites";
+import roomGuestAccessRoutes from "./routes/roomGuestAccess";
 import multistreamRoutes from "./routes/multistream";
 import roomsResolveRoutes from "./routes/roomsResolve";
 import roomsHlsConfigRoutes from "./routes/roomsHlsConfig";
 import roomsActiveEmbedRoutes from "./routes/roomsActiveEmbed";
 import roomControlsRoutes from "./routes/roomControls";
+import roomChatRoutes from "./routes/roomChat";
+import roomsLayoutRoutes from "./routes/roomsLayout";
+import roomsPolicyRoutes from "./routes/roomsPolicy";
+import roomsRecordingsRoutes from "./routes/roomsRecordings";
 import destinationsRoutes from "./routes/destinations";
 import liveRoutes from "./routes/live";
 import statsRoutes from "./routes/stats";
 import telemetryRoutes from "./routes/telemetry";
 import savedEmbedsRoutes from "./routes/savedEmbeds";
+import editingRoutes from "./routes/editing";
+import maintenanceRoutes from "./routes/maintenance";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
 import { getLiveKitSdk } from "./lib/livekit"; // adjust path
 import type { RoomServiceClient } from "livekit-server-sdk";
 import { getCurrentMonthKey } from "./lib/usageTracker";
+import { getEffectiveEntitlements } from "./lib/effectiveEntitlements";
+import { evaluateUsageGate } from "./lib/usageOverages";
+import { upsertUsageMonthlyOverageTotals } from "./lib/usageOveragesWriter";
 import admin from "firebase-admin";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
@@ -39,7 +50,10 @@ import publicRoomsHlsConfigRoutes from "./routes/publicRoomsHlsConfig";
 import { sanitizeDisplayName } from "./lib/sanitizeDisplayName";
 import { resolveRoomIdentity } from "./lib/roomIdentity";
 import { assertRoomPerm, RoomPermissionError } from "./lib/rolePermissions";
+import { PERMISSION_ERRORS } from "./lib/permissionErrors";
 import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "./middleware/roomAccessToken";
+
+import { requireAdmin } from "./middleware/adminAuth";
 
 
 import { uploadVideo } from "./lib/storageClient";
@@ -62,35 +76,66 @@ function normalizeControlsDocId(raw: any): string {
 }
 
 // Allow primary client plus local dev hosts for testing/incognito shares
-const allowedOrigins = [
-  process.env.CLIENT_URL,
-  process.env.CLIENT_URL_2,
-  "http://localhost:5173",
-  "http://127.0.0.1:5173",
-  "http://localhost:4173",
-  "http://127.0.0.1:4173",
-].filter(Boolean) as string[];
+const normalizeOrigin = (origin: string) => {
+  const trimmed = String(origin || "").trim();
+  return trimmed.endsWith("/") ? trimmed.slice(0, -1) : trimmed;
+};
 
+const allowedOrigins = new Set(
+  [
+    process.env.CLIENT_URL,
+    process.env.CLIENT_URL_2,
+    // Render deployments
+    "https://streamline-platform.onrender.com",
+    "https://streamline-hls-dev-web.onrender.com",
+    // Production custom domains
+    "https://streamline.nxtlvlts.com",
+    "https://www.streamline.nxtlvlts.com",
+    // Local dev
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+  ]
+    .filter(Boolean)
+    .map((o) => normalizeOrigin(String(o)))
+);
 
-
-app.use(cors({
+const corsOptions: CorsOptions = {
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error(`Not allowed by CORS: ${origin}`));
+    // Allow same-origin / server-to-server / curl (no Origin header)
+    if (!origin) return callback(null, true);
+
+    // Normalize (strip trailing slash)
+    const normalized = normalizeOrigin(origin);
+
+    // Note: for disallowed browser origins, do NOT throw (which becomes a 500).
+    // Instead, disable CORS for that request (no ACAO header) and let the browser block it.
+    if (allowedOrigins.has(normalized)) return callback(null, true);
+    return callback(null, false);
   },
   credentials: true,
-  methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: [
     "Content-Type",
     "Authorization",
+    "X-Requested-With",
     "Cache-Control",
     // Room-level access token used by in-room APIs (HLS, multistream, controls, etc.).
     // Explicitly allow both typical header casings to satisfy browser preflight checks.
     "x-room-access-token",
     "X-Room-Access-Token",
+    // Legacy invite JWT (join links) used for guest RTC join/status without auth.
+    "x-invite-token",
+    "X-Invite-Token",
   ],
   exposedHeaders: ["x-sl-auth-fallback", "x-sl-auth-header-invalid"],
-}));
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+// Preflight
+app.options(/.*/, cors(corsOptions));
 
 
 
@@ -109,6 +154,9 @@ app.use("/api/account", accountRoutes);
 
 // Admin routes
 app.use("/api/admin", adminRoutes);
+
+// Maintenance routes (admin-only)
+app.use("/api/maintenance", maintenanceRoutes);
 
 
 // Health endpoint
@@ -136,6 +184,9 @@ app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
 // Recordings API - This handles GET /:id and POST /start, /stop
 app.use("/api/recordings", recordingsRoutes);
 
+// Editing API (authenticated)
+app.use("/api/editing", editingRoutes);
+
 // Health check
 app.get("/", (_req, res) => res.send("API up"));
 app.use("/api/usage", usageRoutes); // gives /api/usage/summary
@@ -144,11 +195,16 @@ app.use("/api/usage", usageRoutes); // gives /api/usage/summary
 // API ROUTES - Order matters! More specific routes first
 // =============================================================================
 
-// Token route used by the frontend
-app.use("/api/roomToken", roomTokenRoute);
+// RTC token minting: use /api/rooms/:roomId/token (mounted via roomGuestAccessRoutes)
 
 // Room creation (host flow)
 app.use("/api/rooms", roomsCreateRoutes);
+
+// Room invite creation (authenticated)
+app.use("/api/rooms", roomInvitesRoutes);
+
+// Guest invite redeem + room status/token (mixed auth)
+app.use("/api", roomGuestAccessRoutes);
 
 // Invite resolve/accept flow
 app.use("/api/invites", invitesRoutes);
@@ -157,8 +213,16 @@ app.use("/api/invites", invitesRoutes);
 app.use("/api/multistream", multistreamRoutes);
 // Room resolve endpoint (/api/rooms/resolve)
 app.use("/api/rooms", roomsResolveRoutes);
+// Room access policy (allowGuests, etc.)
+app.use("/api/rooms", roomsPolicyRoutes);
 // Realtime in-room controls (host/cohost writes; all participants read via roomAccessToken)
 app.use("/api/rooms", roomControlsRoutes);
+// Per-session persistent chat (roomAccessToken scoped)
+app.use("/api/rooms", roomChatRoutes);
+// Persistent room layout config (controls viewer layout; recordings inherit)
+app.use("/api/rooms", roomsLayoutRoutes);
+// Latest recording state + reconcile helpers
+app.use("/api/rooms", roomsRecordingsRoutes);
 // Room-level persistent HLS config (NOT runtime HLS state)
 app.use("/api/rooms", roomsHlsConfigRoutes);
 // Room-level selection of which Saved Embed to use for HLS control
@@ -181,9 +245,24 @@ app.use("/api/stats", statsRoutes);
 // Lightweight telemetry events
 app.use("/api/telemetry", telemetryRoutes);
 
+// Protected config health (helps diagnose env drift across Render services)
+app.get("/api/health/config", requireAuth, (req, res) => {
+  const asBool = (v: any) => (v ? true : false);
+  return res.json({
+    ok: true,
+    env: String(process.env.NODE_ENV || "development"),
+    tokenGrants: "v3-no-sources",
+    hasLivekitUrl: asBool(process.env.LIVEKIT_URL),
+    hasLivekitApiKey: asBool(process.env.LIVEKIT_API_KEY),
+    hasLivekitApiSecret: asBool(process.env.LIVEKIT_API_SECRET),
+    hasJwtSecret: asBool(process.env.JWT_SECRET),
+    hasRoomAccessTokenSecret: asBool(process.env.ROOM_ACCESS_TOKEN_SECRET),
+  });
+});
+
 
 // Storage test route
-app.get("/api/storage/test", async (req, res) => {
+app.get("/api/storage/test", requireAdmin, async (req, res) => {
   try {
     const testContent = `StreamLine Storage Test - ${new Date().toISOString()}`;
     const testBuffer = Buffer.from(testContent);
@@ -231,33 +310,28 @@ async function assertEffectiveRoomControl(
 ): Promise<void> {
   const trimmedRoomId = String(roomId || "").trim();
   if (!trimmedRoomId) {
-    throw new RoomPermissionError(400, "invalid_room", "roomId is required");
+    throw new RoomPermissionError(400, PERMISSION_ERRORS.INVALID_ROOM, "roomId is required");
   }
 
   const ctx = await assertRoomPerm(req as any, trimmedRoomId, perm);
   const access = ctx.roomAccess as RoomAccessClaims | undefined;
 
   if (!access || !access.roomId) {
-    throw new RoomPermissionError(401, "room_token_required");
+    throw new RoomPermissionError(401, PERMISSION_ERRORS.UNAUTHORIZED);
   }
   if (access.roomId !== trimmedRoomId) {
-    throw new RoomPermissionError(403, "room_mismatch");
+    throw new RoomPermissionError(403, PERMISSION_ERRORS.ROOM_MISMATCH);
   }
 
+  // Moderation endpoints are permission-gated via roomAccessToken permissions
+  // (assertRoomPerm above). Some deployments may want host-only moderation.
   const role = String(access.role || "").toLowerCase();
-  const requiredRole = "host";
-  const roleOk = role === requiredRole;
-  if (process.env.AUTH_DEBUG === "1") {
-    console.log("[perm-debug] moderation role check", {
-      role,
-      required: requiredRole,
-      pass: roleOk,
-    });
-  }
-  // Updated policy: only hosts can use roomModeration endpoints.
-  // Non-hosts are blocked here regardless of controls docs.
-  if (!roleOk) {
-    throw new RoomPermissionError(403, "insufficient_role");
+  const hostOnly = process.env.ROOM_MODERATION_HOST_ONLY === "1";
+  if (hostOnly && role !== "host") {
+    if (process.env.AUTH_DEBUG === "1") {
+      console.log("[perm-debug] moderation host-only blocked", { role, perm });
+    }
+    throw new RoomPermissionError(403, PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS);
   }
 }
 
@@ -292,11 +366,10 @@ app.post("/api/roomModeration/mute", requireAuth, requireRoomAccessToken as any,
     const TrackSource = sdk.TrackSource;
 
     const participant = await roomService.getParticipant(livekitRoomName, identity);
-    const audioTrack = participant.tracks?.find((t: any) => {
-      const isAudioType = t.type === TrackType.AUDIO;
-      const isMicSource = t.source === TrackSource.MICROPHONE;
-      return isAudioType || isMicSource;
-    });
+    const tracks: any[] = Array.isArray((participant as any)?.tracks) ? (participant as any).tracks : [];
+    const audioTrack =
+      tracks.find((t: any) => t?.source === TrackSource.MICROPHONE) ||
+      tracks.find((t: any) => t?.type === TrackType.AUDIO);
 
     if (!audioTrack) {
       console.warn("No audio track found for", { roomId, livekitRoomName, identity });
@@ -367,11 +440,10 @@ app.post("/api/roomModeration/mute-all", requireAuth, requireRoomAccessToken as 
     const results: Array<{ identity: string; trackSid: string | null; changed: boolean }> = [];
 
     for (const p of participants) {
-      const audioTrack = p.tracks?.find((t: any) => {
-        const isAudioType = t.type === TrackType.AUDIO;
-        const isMicSource = t.source === TrackSource.MICROPHONE;
-        return isAudioType || isMicSource;
-      });
+      const tracks: any[] = Array.isArray((p as any)?.tracks) ? (p as any).tracks : [];
+      const audioTrack =
+        tracks.find((t: any) => t?.source === TrackSource.MICROPHONE) ||
+        tracks.find((t: any) => t?.type === TrackType.AUDIO);
 
       if (!audioTrack) {
         results.push({ identity: p.identity, trackSid: null, changed: false });
@@ -437,18 +509,33 @@ app.post("/api/roomModeration/mute-lock", requireAuth, requireRoomAccessToken as
       const sdk = (await getLiveKitSdk()) as any;
       const TrackSource = sdk.TrackSource;
 
+      const toSourceString = (s: any): string => {
+        if (typeof s === "string") return s.toLowerCase();
+        // LiveKit server SDK may surface TrackSource values as enums; normalize to strings
+        if (s === TrackSource.MICROPHONE) return "microphone";
+        if (s === TrackSource.CAMERA) return "camera";
+        if (s === TrackSource.SCREEN_SHARE) return "screen_share";
+        if (s === TrackSource.SCREEN_SHARE_AUDIO) return "screen_share_audio";
+        return String(s).toLowerCase();
+      };
+
       const participants = await roomService.listParticipants(livekitRoomName);
 
       for (const p of participants) {
         if (hostIdentity && p.identity === hostIdentity) continue; // never restrict host
 
         const currentPerms: any = (p as any).permission || {};
-        const currentSources: any[] = currentPerms.canPublishSources || [];
+        const currentSourcesRaw: any[] = Array.isArray(currentPerms.canPublishSources)
+          ? currentPerms.canPublishSources
+          : [];
+        const currentSources = currentSourcesRaw.map(toSourceString).filter(Boolean);
+
+        const isMic = (s: any) => toSourceString(s) === "microphone";
+        const isScreenShareAudio = (s: any) => toSourceString(s) === "screen_share_audio";
 
         if (muteLock) {
           // Remove audio-related publish sources (mic + screen share audio)
-          const blocked = new Set([TrackSource.MICROPHONE, TrackSource.SCREEN_SHARE_AUDIO]);
-          const nextSources = currentSources.filter((s) => !blocked.has(s));
+          const nextSources = currentSources.filter((s) => !(isMic(s) || isScreenShareAudio(s)));
 
           await roomService.updateParticipant(livekitRoomName, p.identity, {
             permission: {
@@ -457,9 +544,10 @@ app.post("/api/roomModeration/mute-lock", requireAuth, requireRoomAccessToken as
             },
           });
         } else {
-          // Restore audio publish ability while preserving any existing sources
-          const toEnsure = [TrackSource.MICROPHONE, TrackSource.SCREEN_SHARE_AUDIO];
-          const merged = Array.from(new Set([...currentSources, ...toEnsure]));
+          // Restore audio publish ability while preserving any existing sources.
+          // Always use string publish sources for LiveKit compatibility.
+          const toEnsure = ["microphone", "screen_share_audio"];
+          const merged = Array.from(new Set([...(currentSources || []), ...toEnsure]));
 
           await roomService.updateParticipant(livekitRoomName, p.identity, {
             permission: {
@@ -828,34 +916,8 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-app.get("/api/usage/summary", async (req, res) => {
-  try {
-    const uid = req.query.uid as string;
-    if (!uid) return res.status(400).json({ error: "uid required" });
-
-    const userRef = db.collection("users").doc(uid);
-    const userSnap = await userRef.get();
-
-    if (!userSnap.exists) {
-      return res.status(404).json({ error: "user not found" });
-    }
-
-    const userData = userSnap.data() || {};
-    const usage = (userData.usage || {}) as any;
-
-    return res.json({
-      hoursStreamedToday: usage.hoursStreamedToday || 0,
-      hoursStreamedThisMonth: usage.hoursStreamedThisMonth || 0,
-      ytdHours: usage.ytdHours || 0,
-      guestCountToday: usage.guestCountToday || 0,
-      periodStart: usage.periodStart ? usage.periodStart.toDate() : null,
-      resetDate: usage.resetDate ? usage.resetDate.toDate() : null,
-    });
-  } catch (err) {
-    console.error("usage summary error", err);
-    return res.status(500).json({ error: "internal server error" });
-  }
-});
+// NOTE: /api/usage/summary is implemented in routes/usageRoutes.ts
+// and is requireAuth-protected with a stable payload.
 
 app.post("/api/usage/streamEnded", async (req, res) => {
   try {
@@ -1014,6 +1076,35 @@ app.post("/api/usage/streamEnded", async (req, res) => {
       { merge: true }
     );
 
+    // Pro-only: compute and persist overage totals when the user is over limit.
+    // Best-effort: do not fail streamEnded if this bookkeeping write fails.
+    try {
+      const entitlements = await getEffectiveEntitlements(uid);
+      const decision = evaluateUsageGate({
+        allowsOverages: !!(entitlements.features as any).allowsOverages,
+        limits: {
+          participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
+          transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
+        },
+        usage: {
+          participantMinutes: Number(nextUsage.participantMinutes || 0),
+          transcodeMinutes: Number(nextUsage.transcodeMinutes || 0),
+        },
+        checkParticipant: true,
+        checkTranscode: true,
+      });
+
+      if (decision.shouldLogOverages && decision.overageTotals) {
+        await upsertUsageMonthlyOverageTotals({
+          uid,
+          monthKey,
+          totals: decision.overageTotals,
+        });
+      }
+    } catch (e) {
+      console.error("[usage] failed to update overage totals", e);
+    }
+
     console.log("[usage] updated usageMonthly", {
       uid,
       monthKey,
@@ -1052,4 +1143,13 @@ app.use((req, res) => {
 
 app.listen(PORT, () => {
   console.log(`✅ Server listening on http://localhost:${PORT}`);
+  console.log("[config-health]", {
+    env: String(process.env.NODE_ENV || "development"),
+    tokenGrants: "v3-no-sources",
+    hasLivekitUrl: !!process.env.LIVEKIT_URL,
+    hasLivekitApiKey: !!process.env.LIVEKIT_API_KEY,
+    hasLivekitApiSecret: !!process.env.LIVEKIT_API_SECRET,
+    hasJwtSecret: !!process.env.JWT_SECRET,
+    hasRoomAccessTokenSecret: !!process.env.ROOM_ACCESS_TOKEN_SECRET,
+  });
 });

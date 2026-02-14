@@ -7,13 +7,29 @@ import { useLocation, useNavigate } from "react-router-dom";
 import "./SettingsBilling.css";
 import { S } from "./SettingsBilling.styles";
 import SettingsDestinations from "./SettingsDestinations";
-import { apiFetch, clearAuthStorage } from "../lib/api";
+import { ApiUnauthorizedError, apiFetch, apiFetchAuth, clearAuthStorage, type RoomLayout, type RoomLayoutMode } from "../lib/api";
 import { useAuthMe, isAuthUserInTestMode } from "../hooks/useAuthMe";
 import { formatLimitLabel } from "../lib/entitlements";
 import SettingsHlsSetup from "./settings/SettingsHlsSetup";
 import { getMeCached, clearMeCache } from "../lib/meCache";
+import { clearPlatformFlagsCache } from "../lib/platformFlagsCache";
+import { isFeatureAvailable, isPlatformEnabled } from "../lib/featureAvailability";
+import { getUsageGating, usageLabels, usageTooltips } from "../lib/usageLabels";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
+
+async function apiFetchWithCookieFallback(path: string, init: RequestInit = {}) {
+  try {
+    return await apiFetchAuth(path, init);
+  } catch (err: any) {
+    // In cookie-auth setups (Admin flow), we may not have a localStorage JWT.
+    // Fall back to cookie-based auth so test-mode plan switching works.
+    if (err instanceof ApiUnauthorizedError) {
+      return await apiFetch(path, init);
+    }
+    throw err;
+  }
+}
 
 type RolePresetId = "participant" | "cohost";
 
@@ -136,8 +152,10 @@ const DEFAULT_ENTITLEMENTS = {
 };
 
 const DEFAULT_USAGE = {
-  streamingMinutes: { used: 0, limit: 0, lifetime: 0 },
+  inRoomMinutes: { used: 0, limit: 0, lifetime: 0 },
+  broadcastMinutes: { used: 0, limit: 0, lifetime: 0 },
   recordingMinutes: { used: 0, lifetime: 0 },
+  overages: { participantMinutes: 0, transcodeMinutes: 0 },
   rtmpDestinations: { used: 0, limit: 0 },
   storage: { used: 0, limit: 0 },
   projects: { used: 0, limit: 0 },
@@ -146,6 +164,7 @@ const DEFAULT_USAGE = {
 const DEFAULT_MEDIA_PREFS = {
   defaultPresetId: "standard_720p30",
   defaultLayout: "speaker" as "speaker" | "grid",
+  defaultRoomLayout: { mode: "speaker" as RoomLayoutMode } as RoomLayout,
   defaultRecordingMode: "cloud" as "cloud" | "dual",
   destinationsDefaultMode: "last_used" as "last_used" | "pick_each_time",
   warnOnHighQuality: true,
@@ -153,6 +172,11 @@ const DEFAULT_MEDIA_PREFS = {
 };
 
 type CheckoutPlanVariant = "starter_trial" | "starter_paid" | "basic" | "pro";
+
+function checkoutVariantToPlanId(plan: CheckoutPlanVariant): PlanId {
+  if (plan === "starter_paid" || plan === "starter_trial") return "starter";
+  return plan;
+}
 
 function formatDate(input: any): string {
   if (!input) return "—";
@@ -191,8 +215,17 @@ function getStatusBadge(status: string | undefined, cancelAtPeriodEnd?: boolean)
   return { text: status, icon: "ℹ️", color: "#6b7280", bg: "rgba(55,65,81,0.35)" };
 }
 
-function getPlanActionLabel(current: PlanId, target: PlanId, isProcessing: boolean): string {
-  if (isProcessing) return "Pending change";
+function getPlanActionLabel(
+  current: PlanId,
+  target: PlanId,
+  params: { isProcessing: boolean; pendingPlan?: string | null }
+): string {
+  const pendingPlan = String(params.pendingPlan || "").trim();
+
+  // Only show "Pending" on the target plan, not every card.
+  if (pendingPlan && target === (pendingPlan as any)) return "Pending change";
+
+  if (params.isProcessing) return "Processing…";
   if (current === target) return "Current plan";
   const order: PlanId[] = ["free", "basic", "starter", "pro"];
   const curIdx = order.indexOf(current);
@@ -212,12 +245,28 @@ function checkoutPlanForResubscribe(user: any): CheckoutPlanVariant {
 }
 
 export default function SettingsBilling() {
+  const location = useLocation();
   const nav = useNavigate();
   const { user: authUser, refresh: refreshAuth } = useAuthMe();
+
+  const isAdmin = Boolean((authUser as any)?.isAdmin);
 
   const [user, setUser] = useState<any | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Stripe can redirect back before webhooks apply the new plan.
+  // BillingSuccess may navigate here with a hint so we can show a calm "processing" banner.
+  const [upgradeProcessing, setUpgradeProcessing] = useState<boolean>(
+    Boolean((location.state as any)?.upgradeProcessing)
+  );
+
+  // If we ever arrive here again with the flag set, re-enable the banner.
+  useEffect(() => {
+    if ((location.state as any)?.upgradeProcessing) {
+      setUpgradeProcessing(true);
+    }
+  }, [location.state]);
 
   const [plans, setPlans] = useState<any[]>([]);
   const [entitlements, setEntitlements] = useState<typeof DEFAULT_ENTITLEMENTS>(DEFAULT_ENTITLEMENTS);
@@ -226,6 +275,7 @@ export default function SettingsBilling() {
   const [platformHlsEnabled, setPlatformHlsEnabled] = useState<boolean>(true);
   const [platformTranscodeEnabled, setPlatformTranscodeEnabled] = useState<boolean>(true);
   const [platformHlsSettingsTabEnabled, setPlatformHlsSettingsTabEnabled] = useState<boolean>(true);
+  const [platformRecordingEnabled, setPlatformRecordingEnabled] = useState<boolean>(true);
 
   const [mediaPrefs, setMediaPrefs] = useState<typeof DEFAULT_MEDIA_PREFS>(DEFAULT_MEDIA_PREFS);
   const [presetOptions, setPresetOptions] = useState<Array<{ id: string; label: string }>>([]);
@@ -280,6 +330,19 @@ export default function SettingsBilling() {
   const [toast, setToast] = useState<string | null>(null);
   const [emergencyLoading, setEmergencyLoading] = useState(false);
   const [emergencyMessage, setEmergencyMessage] = useState<string | null>(null);
+  const [emergencyExpiresAtMs, setEmergencyExpiresAtMs] = useState<number | null>(null);
+  const [emergencyCountdown, setEmergencyCountdown] = useState<string | null>(null);
+  const [emergencyRoomId, setEmergencyRoomId] = useState<string>(() => {
+    try {
+      return localStorage.getItem("sl_last_room") || "";
+    } catch {
+      return "";
+    }
+  });
+  const [latestVideoState, setLatestVideoState] = useState<"none" | "processing" | "ready" | "failed">("none");
+  const [latestVideoUrl, setLatestVideoUrl] = useState<string | null>(null);
+  const latestVideoPollIntervalRef = useRef<number | null>(null);
+  const latestVideoPollCountRef = useRef(0);
 
   const [actionLoading, setActionLoading] = useState<CheckoutPlanVariant | "portal" | null>(null);
 
@@ -295,17 +358,104 @@ export default function SettingsBilling() {
   const [showManagePicker, setShowManagePicker] = useState(false);
   const [showLifetimeDetails, setShowLifetimeDetails] = useState(false);
 
-  const [activeTab, setActiveTab] = useState<"plan" | "usage" | "destinations" | "hls" | "defaults" | "roles">("plan");
+  const [overagesToggleSaving, setOveragesToggleSaving] = useState(false);
+  const [overagesToggleMessage, setOveragesToggleMessage] = useState<string | null>(null);
+
+  const [billingStatusSnapshot, setBillingStatusSnapshot] = useState<any | null>(null);
+
+  const [closeCancelLoading, setCloseCancelLoading] = useState(false);
+  const [closeDeleteLoading, setCloseDeleteLoading] = useState(false);
+  const [closeDeleteConfirmed, setCloseDeleteConfirmed] = useState(false);
+  const [closeDeleteText, setCloseDeleteText] = useState("");
+
+  const [activeTab, setActiveTab] = useState<"plan" | "usage" | "destinations" | "hls" | "defaults" | "roles" | "close">("plan");
+
+  // Allow other pages to deep-link into a specific settings tab.
+  // Example: nav('/settings/billing', { state: { openTab: 'usage', usageRoomId: 'my-room' } })
+  useEffect(() => {
+    const openTab = (location.state as any)?.openTab;
+    const validTabs: Array<typeof activeTab> = ["plan", "usage", "destinations", "hls", "defaults", "roles", "close"];
+    if (typeof openTab === "string" && validTabs.includes(openTab as any)) {
+      setActiveTab(openTab as any);
+    }
+
+    const usageRoomId = (location.state as any)?.usageRoomId;
+    if (typeof usageRoomId === "string" && usageRoomId.trim()) {
+      setEmergencyRoomId(usageRoomId.trim());
+    }
+  }, [location.state]);
+
+  // If a platform-wide feature is disabled, avoid landing on a hidden tab.
+  useEffect(() => {
+    if (activeTab === "destinations" && platformTranscodeEnabled === false) {
+      setActiveTab("plan");
+    }
+    if (activeTab === "hls" && platformHlsSettingsTabEnabled === false) {
+      setActiveTab("plan");
+    }
+  }, [activeTab, platformTranscodeEnabled, platformHlsSettingsTabEnabled]);
 
   const simpleMode = advancedPermissions.effectivePermissionsMode !== "advanced";
+
+  const formatEmergencyCountdown = (msRemaining: number): string => {
+    if (!Number.isFinite(msRemaining) || msRemaining <= 0) return "0m";
+    const totalMinutes = Math.ceil(msRemaining / 60_000);
+    const hours = Math.floor(totalMinutes / 60);
+    const minutes = totalMinutes % 60;
+    if (hours <= 0) return `${minutes}m`;
+    return `${hours}h ${minutes}m`;
+  };
+
+  useEffect(() => {
+    if (!emergencyExpiresAtMs) {
+      setEmergencyCountdown(null);
+      return;
+    }
+
+    const tick = () => {
+      const diff = emergencyExpiresAtMs - Date.now();
+      setEmergencyCountdown(formatEmergencyCountdown(diff));
+    };
+
+    tick();
+    const id = window.setInterval(tick, 30_000);
+    return () => window.clearInterval(id);
+  }, [emergencyExpiresAtMs]);
+
+  useEffect(() => {
+    // Stop any polling when leaving Usage.
+    if (activeTab !== "usage") {
+      if (latestVideoPollIntervalRef.current) {
+        window.clearInterval(latestVideoPollIntervalRef.current);
+        latestVideoPollIntervalRef.current = null;
+      }
+      latestVideoPollCountRef.current = 0;
+      return;
+    }
+
+    // Default room to last used room when opening Usage.
+    try {
+      const cached = localStorage.getItem("sl_last_room") || "";
+      if (cached && !emergencyRoomId) setEmergencyRoomId(cached);
+    } catch {
+      // ignore
+    }
+  }, [activeTab, emergencyRoomId]);
 
   // If billing is active or trialing, ensure pendingPlan is cleared to avoid stuck UI
   useEffect(() => {
     if (!user) return;
-    if ((user.billingStatus === "active" || user.billingStatus === "trialing") && user.pendingPlan) {
+    const scheduled = (user as any)?.scheduledPlanChange;
+    const hasFutureScheduledDowngrade =
+      scheduled &&
+      scheduled.type === "downgrade" &&
+      typeof scheduled.effectiveAtMs === "number" &&
+      scheduled.effectiveAtMs > Date.now();
+
+    if (!hasFutureScheduledDowngrade && (user.billingStatus === "active" || user.billingStatus === "trialing") && user.pendingPlan) {
       setUser((prev: any) => (prev ? { ...prev, pendingPlan: null } : prev));
     }
-  }, [user?.billingStatus, user?.pendingPlan]);
+  }, [user?.billingStatus, user?.pendingPlan, (user as any)?.scheduledPlanChange?.effectiveAtMs, (user as any)?.scheduledPlanChange?.type]);
 
   // Reset transient actionLoading when page regains visibility (e.g., returning from Stripe)
   useEffect(() => {
@@ -315,6 +465,9 @@ export default function SettingsBilling() {
       }
     };
     const onPageShow = () => {
+      // Clear caches so fresh plan/billing data is fetched after Stripe portal changes
+      clearMeCache();
+      clearPlatformFlagsCache();
       setActionLoading(null);
       loadAllData();
     };
@@ -337,6 +490,7 @@ export default function SettingsBilling() {
         loadPlans(),
         loadUsage(),
         loadEntitlements(),
+        loadBillingStatus(),
         loadMediaPrefs(),
         loadCohostProfile(),
         loadRolePresets(),
@@ -348,11 +502,133 @@ export default function SettingsBilling() {
     }
   };
 
+  const finalizeBillingAfterPlanChange = async (params?: {
+    expectedPlanId?: PlanId;
+    expectedDowngradeScheduled?: boolean;
+    maxPollAttempts?: number;
+    pollIntervalMs?: number;
+  }) => {
+    const maxAttempts = Math.max(1, Math.min(5, params?.maxPollAttempts ?? 5));
+    const intervalMs = Math.max(400, Math.min(4000, params?.pollIntervalMs ?? 1200));
+
+    const shouldStop = (me: any | null) => {
+      if (!me) return false;
+
+      if (params?.expectedPlanId) {
+        const planId = canonicalPlanId(me?.effectiveEntitlements?.planId ?? me?.planId);
+        if (planId === params.expectedPlanId) return true;
+      }
+
+      if (params?.expectedDowngradeScheduled) {
+        const scheduled = (me as any)?.scheduledPlanChange;
+        const ok =
+          scheduled &&
+          scheduled.type === "downgrade" &&
+          typeof scheduled.effectiveAtMs === "number" &&
+          scheduled.effectiveAtMs > Date.now();
+        if (ok) return true;
+      }
+
+      // If we don't know what to expect, just do a single refresh pass.
+      if (!params?.expectedPlanId && !params?.expectedDowngradeScheduled) return true;
+
+      return false;
+    };
+
+    // Make sure any in-memory cache is invalidated first.
+    clearMeCache();
+
+    // Kick Stripe->DB reconciliation; ignore failures (user may still get updated via webhooks).
+    try {
+      await apiFetchWithCookieFallback("/api/billing/refresh", { method: "POST" });
+    } catch {
+      // ignore
+    }
+
+    // Force-refresh the local sources of truth the page actually reads.
+    try {
+      await refreshAuth();
+    } catch {
+      // ignore
+    }
+
+    let me: any | null = null;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      try {
+        me = await loadUser({ forceRefresh: true });
+      } catch {
+        me = null;
+      }
+
+      try {
+        await Promise.all([loadEntitlements(), loadUsage(), loadBillingStatus()]);
+      } catch {
+        // ignore
+      }
+
+      if (shouldStop(me)) return me;
+      await new Promise((r) => window.setTimeout(r, intervalMs));
+    }
+
+    return me;
+  };
+
+  const handleRefreshStatus = async () => {
+    try {
+      // Try to reconcile Stripe -> Firestore (self-heals when webhooks lag/miss)
+      const res = await apiFetchWithCookieFallback("/api/billing/refresh", { method: "POST" });
+      const { json } = await safeReadJson(res);
+      const changed = Boolean((json as any)?.changed);
+      if (res.ok) {
+        showToast(changed ? "Status refreshed." : "No changes found.");
+      }
+      clearMeCache();
+    } catch {
+      // ignore; still allow the user to refresh local state
+    }
+    await loadAllData();
+  };
+
+  // Post-Stripe return polish: if we land here with a processing hint, auto-sync
+  // plan state so the page feels instant once webhooks/refresh apply.
   useEffect(() => {
+    if (!upgradeProcessing) return;
+
+    let cancelled = false;
+
+    (async () => {
+      const expectedFromState = (location.state as any)?.expectedPlanId;
+      const expectedPlanId: PlanId | undefined = isPlanId(expectedFromState)
+        ? (expectedFromState as PlanId)
+        : "pro";
+
+      await finalizeBillingAfterPlanChange({ expectedPlanId, maxPollAttempts: 5, pollIntervalMs: 1200 });
+
+      if (cancelled) return;
+
+      setUpgradeProcessing(false);
+      try {
+        // Remove the router state so refresh doesn't keep the banner.
+        nav(location.pathname, { replace: true, state: {} });
+      } catch {
+        // ignore
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [upgradeProcessing, location.pathname, location.state, nav]);
+
+  useEffect(() => {
+    // Billing state changes quickly (Stripe/webhooks/refresh). Always start
+    // from a fresh /api/account/me payload to avoid stale plan cards.
+    clearMeCache();
     loadAllData();
   }, []);
 
-  const loadUser = async (opts?: { forceRefresh?: boolean }) => {
+  const loadUser = async (opts?: { forceRefresh?: boolean }): Promise<any | null> => {
     try {
       if (opts?.forceRefresh) {
         clearMeCache();
@@ -368,6 +644,7 @@ export default function SettingsBilling() {
           }
         }
       } catch {}
+      return data;
     } catch (err: any) {
       if (err?.status === 401 || err?.status === 403) {
         clearAuthStorage();
@@ -377,11 +654,49 @@ export default function SettingsBilling() {
     }
   };
 
+  const loadBillingStatus = async () => {
+    try {
+      const res = await apiFetchWithCookieFallback("/api/billing/status", { method: "GET" });
+      const { json } = await safeReadJson(res);
+      if (!res.ok) return;
+      if ((json as any)?.success) {
+        setBillingStatusSnapshot(json);
+      }
+    } catch {
+      // Non-critical UI. Billing page should still work without this.
+    }
+  };
+
   const loadPlans = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/plans`, { credentials: "include" });
+      // Avoid any intermediate caching; plans must reflect admin edits quickly.
+      const bust = Date.now();
+      const res = await apiFetchAuth(`${API_BASE}/api/plans?ts=${bust}`, { cache: "no-store" }, { allowNonOk: true });
       if (res.ok) {
         const data = await res.json();
+        console.log("[SettingsBilling] /api/plans response:", data);
+
+        // Keep platform flags consistent with the same source as the plan grid.
+        // Default semantics: enabled when missing.
+        try {
+          const pf = (data as any)?.platformFlags || {};
+          setPlatformHlsEnabled(isPlatformEnabled(pf.hlsEnabled));
+          setPlatformRecordingEnabled(isPlatformEnabled(pf.recordingEnabled));
+          setPlatformTranscodeEnabled(isPlatformEnabled(pf.transcodeEnabled));
+          const hlsTabFlag =
+            typeof pf.hlsSettingsTab === "boolean"
+              ? pf.hlsSettingsTab
+              : typeof pf.hlsEnabled === "boolean"
+                ? pf.hlsEnabled
+                : true;
+          setPlatformHlsSettingsTabEnabled(hlsTabFlag);
+        } catch {
+          setPlatformHlsEnabled(true);
+          setPlatformRecordingEnabled(true);
+          setPlatformTranscodeEnabled(true);
+          setPlatformHlsSettingsTabEnabled(true);
+        }
+
         if (Array.isArray(data.plans) && data.plans.length) {
           // Only use plans with visibility: 'public' (backend should already filter, but double-check)
           const visiblePlans = data.plans.filter((p: any) => p.visibility === "public");
@@ -401,34 +716,8 @@ export default function SettingsBilling() {
       // Prefer canonical effectiveEntitlements from /api/account/me
       const data = await getMeCached();
 
-      try {
-        const platformFlags = (data as any)?.platformFlags || {};
-        if (typeof platformFlags.hlsEnabled === "boolean") {
-          setPlatformHlsEnabled(platformFlags.hlsEnabled);
-        } else {
-          setPlatformHlsEnabled(true);
-        }
-
-        if (typeof platformFlags.transcodeEnabled === "boolean") {
-          setPlatformTranscodeEnabled(platformFlags.transcodeEnabled);
-        } else {
-          setPlatformTranscodeEnabled(true);
-        }
-
-        // Settings gate: default to visible unless explicitly disabled.
-        // Prefer platformFlags.hlsSettingsTab, fall back to platformFlags.hlsEnabled.
-        const hlsTabFlag =
-          typeof platformFlags.hlsSettingsTab === "boolean"
-            ? platformFlags.hlsSettingsTab
-            : typeof platformFlags.hlsEnabled === "boolean"
-              ? platformFlags.hlsEnabled
-              : true;
-        setPlatformHlsSettingsTabEnabled(hlsTabFlag);
-      } catch {
-        setPlatformHlsEnabled(true);
-        setPlatformHlsSettingsTabEnabled(true);
-        setPlatformTranscodeEnabled(true);
-      }
+      // NOTE: platform-wide flags are sourced from /api/plans to keep the plan grid
+      // 100% server-driven and to avoid stale cached values from /api/account/me.
 
       // Capture Terms of Service metadata for display and gating.
       setUser((prev) =>
@@ -485,7 +774,7 @@ export default function SettingsBilling() {
       }
 
       // Fallback: legacy usage entitlements endpoint
-      const legacyRes = await apiFetch("/api/usage/entitlements");
+      const legacyRes = await apiFetchAuth("/api/usage/entitlements", {}, { allowNonOk: true });
       if (!legacyRes.ok) throw new Error("usage/entitlements failed");
       const legacy = await legacyRes.json();
       setEntitlements({
@@ -512,48 +801,67 @@ export default function SettingsBilling() {
  
   const loadUsage = async () => {
     try {
-      const res = await apiFetch("/api/usage/me");
+      const res = await apiFetchAuth("/api/usage/me");
       const data = await res.json();
       const limits = data?.plan?.limits || {};
 
       const usageMonthly = data?.usageMonthly || {};
       const usageInner = usageMonthly.usage || {};
+      const overages = usageMonthly.overages || {};
       const usageWrapper = data?.usage || {};
       const usageMinutes = usageWrapper.minutes || usageInner.minutes || {};
+      const ytdMinutes = usageMonthly?.ytd?.minutes || {};
       // Fallback to legacy hours on user.usage if monthly doc not present
       const legacyHours = Number(data?.user?.usage?.hoursStreamedThisMonth || 0);
       const legacyMinutes = Math.max(0, Math.round(legacyHours * 60));
       const participantUsed = Number(usageMonthly.participantMinutes ?? usageInner.participantMinutes ?? legacyMinutes ?? 0);
+      const transcodeUsed = Number(usageMonthly.transcodeMinutes ?? usageInner.transcodeMinutes ?? 0);
 
-      const liveCurrent = Number(
-        usageMinutes.live?.currentPeriod ?? usageInner.minutes?.live?.currentPeriod ?? participantUsed
+      const inRoomCurrent = Number(usageMinutes.inRoom?.currentPeriod ?? participantUsed);
+      const inRoomLifetime = Number(
+        usageMinutes.inRoom?.lifetime ??
+          ytdMinutes.inRoom?.lifetime ??
+          usageMonthly?.ytd?.participantMinutes ??
+          participantUsed
       );
-      const liveLifetime = Number(
-        usageMinutes.live?.lifetime ??
-        usageMonthly?.ytd?.minutes?.live?.lifetime ??
-        usageInner.minutes?.live?.lifetime ??
-        usageMonthly?.ytd?.participantMinutes ??
-        participantUsed
+
+      const broadcastCurrent = Number(usageMinutes.broadcast?.currentPeriod ?? usageMinutes.transcode?.currentPeriod ?? transcodeUsed);
+      const broadcastLifetime = Number(
+        usageMinutes.broadcast?.lifetime ??
+          usageMinutes.transcode?.lifetime ??
+          ytdMinutes.broadcast?.lifetime ??
+          ytdMinutes.transcode?.lifetime ??
+          usageMonthly?.ytd?.transcodeMinutes ??
+          0
       );
       const recordingCurrent = Number(
         usageMinutes.recording?.currentPeriod ?? usageInner.minutes?.recording?.currentPeriod ?? 0
       );
       const recordingLifetime = Number(
         usageMinutes.recording?.lifetime ??
-        usageMonthly?.ytd?.minutes?.recording?.lifetime ??
+        ytdMinutes?.recording?.lifetime ??
         usageInner.minutes?.recording?.lifetime ??
         0
       );
 
       setUsage({
-        streamingMinutes: {
-          used: liveCurrent,
+        inRoomMinutes: {
+          used: inRoomCurrent,
           limit: Number(limits.participantMinutes ?? 0) || (data?.plan?.id === "pro" ? 1200 : data?.plan?.id === "starter" ? 300 : 60),
-          lifetime: liveLifetime,
+          lifetime: inRoomLifetime,
+        },
+        broadcastMinutes: {
+          used: broadcastCurrent,
+          limit: Number(limits.transcodeMinutes ?? 0),
+          lifetime: broadcastLifetime,
         },
         recordingMinutes: {
           used: recordingCurrent,
           lifetime: recordingLifetime,
+        },
+        overages: {
+          participantMinutes: Number(overages.participantMinutes ?? 0),
+          transcodeMinutes: Number(overages.transcodeMinutes ?? 0),
         },
         rtmpDestinations: {
           used: 0,
@@ -578,7 +886,7 @@ export default function SettingsBilling() {
   const loadMediaPrefs = async () => {
     try {
       const [presetsRes, me] = await Promise.all([
-        fetch(`${API_BASE}/api/account/presets`, { credentials: "include" }),
+        apiFetchAuth(`${API_BASE}/api/account/presets`, {}, { allowNonOk: true }),
         getMeCached(),
       ]);
 
@@ -656,7 +964,7 @@ export default function SettingsBilling() {
 
   const loadCohostProfile = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/account/cohost-profile`, { credentials: "include" });
+      const res = await apiFetchAuth(`${API_BASE}/api/account/cohost-profile`, {}, { allowNonOk: true });
       if (!res.ok) throw new Error("cohost profile endpoint failed");
       const data = await res.json();
       if (data?.profile) {
@@ -669,7 +977,7 @@ export default function SettingsBilling() {
 
   const loadRolePresets = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/account/role-presets`, { credentials: "include" });
+      const res = await apiFetchAuth(`${API_BASE}/api/account/role-presets`, {}, { allowNonOk: true });
       if (!res.ok) throw new Error("role-presets endpoint failed");
       const data = await res.json();
       if (data?.presets) {
@@ -718,12 +1026,15 @@ export default function SettingsBilling() {
     setCohostSaving(true);
     setCohostMessage(null);
     try {
-      const res = await fetch(`${API_BASE}/api/account/cohost-profile`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(cohostProfile),
-      });
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/account/cohost-profile`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(cohostProfile),
+        },
+        { allowNonOk: true }
+      );
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || "Failed to save co-host defaults");
@@ -743,12 +1054,15 @@ export default function SettingsBilling() {
     setCohostSaving(true);
     setCohostMessage(null);
     try {
-      const res = await fetch(`${API_BASE}/api/account/cohost-profile`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(next),
-      });
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/account/cohost-profile`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(next),
+        },
+        { allowNonOk: true }
+      );
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || "Failed to save co-host defaults");
@@ -767,12 +1081,15 @@ export default function SettingsBilling() {
   const saveRolePreset = async (presetId: RolePresetId, patch: Partial<RolePresetDoc>) => {
     setRolePresetsSaving((prev) => ({ ...prev, [presetId]: "saving" }));
     try {
-      const res = await fetch(`${API_BASE}/api/account/role-presets/${presetId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(patch),
-      });
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/account/role-presets/${presetId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        },
+        { allowNonOk: true }
+      );
       const data = await res.json().catch(() => null);
       if (!res.ok || (data as any)?.error) {
         throw new Error(((data as any)?.error as string) || "Failed to update role defaults");
@@ -808,12 +1125,27 @@ export default function SettingsBilling() {
     setMediaPrefsMessage(null);
     setMediaPrefsError(null);
     try {
-      const res = await fetch(`${API_BASE}/api/account/media-prefs`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify(mediaPrefs),
-      });
+      const roomMode = (mediaPrefs as any)?.defaultRoomLayout?.mode;
+      const derivedDefaultLayout: "speaker" | "grid" =
+        roomMode === "grid" || roomMode === "carousel" ? "grid" : "speaker";
+
+      const payload = {
+        ...mediaPrefs,
+        // Single mental model: destinations reuse last-used automatically.
+        destinationsDefaultMode: "last_used" as const,
+        // Keep legacy composite layout in sync for older callers.
+        defaultLayout: derivedDefaultLayout,
+      };
+
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/account/media-prefs`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        { allowNonOk: true }
+      );
       if (!res.ok) {
         const text = await res.text();
         throw new Error(text || "Failed to save media preferences");
@@ -844,6 +1176,88 @@ export default function SettingsBilling() {
     window.setTimeout(() => setToast(null), 3000);
   };
 
+  const setOveragesEnabled = async (nextEnabled: boolean) => {
+    setOveragesToggleSaving(true);
+    setOveragesToggleMessage(null);
+
+    const prevEnabled = Boolean((user as any)?.billingSettings?.overagesEnabled);
+
+    // Optimistic UI (will be corrected by /me refetch).
+    setUser((prev: any) =>
+      prev
+        ? {
+            ...prev,
+            billingSettings: {
+              ...(prev.billingSettings || {}),
+              overagesEnabled: nextEnabled,
+            },
+          }
+        : prev
+    );
+
+    try {
+      const res = await apiFetchWithCookieFallback("/api/billing/overages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: nextEnabled }),
+      });
+
+      const { json, text } = await safeReadJson(res);
+
+      if (!res.ok) {
+        const err = String((json as any)?.error || "").trim();
+        if (res.status === 409 && err === "payment_method_required") {
+          setOveragesToggleMessage("Add a default payment method to enable overages.");
+
+          // Ensure toggle stays OFF.
+          setUser((prev: any) =>
+            prev
+              ? {
+                  ...prev,
+                  billingSettings: {
+                    ...(prev.billingSettings || {}),
+                    overagesEnabled: false,
+                  },
+                }
+              : prev
+          );
+        } else if (res.status === 403 && err === "overages_not_allowed") {
+          setOveragesToggleMessage(null);
+        } else {
+          setOveragesToggleMessage(
+            (text && text.length < 140 ? text : null) || "Could not update overages. Please try again."
+          );
+        }
+      } else {
+        showToast(nextEnabled ? "Overages enabled" : "Overages disabled");
+      }
+    } catch (err: any) {
+      setOveragesToggleMessage(err?.message || "Could not update overages. Please try again.");
+
+      // Revert optimistic state if we couldn't reach the server.
+      setUser((prev: any) =>
+        prev
+          ? {
+              ...prev,
+              billingSettings: {
+                ...(prev.billingSettings || {}),
+                overagesEnabled: prevEnabled,
+              },
+            }
+          : prev
+      );
+    } finally {
+      // Always refresh /me so UI matches server truth.
+      try {
+        clearMeCache();
+        await loadUser({ forceRefresh: true });
+      } catch {
+        // ignore
+      }
+      setOveragesToggleSaving(false);
+    }
+  };
+
   const scheduleCohostProfileSave = (nextProfile: any) => {
     if (cohostProfileSaveTimerRef.current) {
       window.clearTimeout(cohostProfileSaveTimerRef.current);
@@ -865,44 +1279,120 @@ export default function SettingsBilling() {
   };
 
   const handleEmergencyDownload = async () => {
+    if (latestVideoPollIntervalRef.current) {
+      window.clearInterval(latestVideoPollIntervalRef.current);
+      latestVideoPollIntervalRef.current = null;
+    }
+    latestVideoPollCountRef.current = 0;
+
     try {
       setEmergencyLoading(true);
       setEmergencyMessage(null);
+      setLatestVideoUrl(null);
+      setLatestVideoState("none");
+      setEmergencyExpiresAtMs(null);
 
-      let res: Response;
-      try {
-        res = await fetch(`${API_BASE}/api/recordings/emergency-latest`, {
-          credentials: "include",
-          cache: "no-store",
-        });
-      } catch (err) {
-        console.error("Emergency download failed (network)", err);
-        setEmergencyMessage("Network error. Check your connection and try again.");
+      const roomId = (emergencyRoomId || "").trim();
+      if (!roomId) {
+        setEmergencyMessage("Enter a room name to fetch the latest recording.");
         return;
       }
 
-      const { json, text } = await safeReadJson(res);
+      const pollOnce = async (openWhenReady: boolean) => {
+        let res: Response;
+        try {
+          res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/latest-recording`, { cache: "no-store" }, { allowNonOk: true });
+        } catch (err) {
+          console.error("Latest video fetch failed (network)", err);
+          setEmergencyMessage("Network error. Check your connection and try again.");
+          return;
+        }
 
-      if (!res.ok) {
-        console.error("Emergency download failed (http)", {
-          status: res.status,
-          body: json ?? text,
-        });
-        setEmergencyMessage("Server error fetching recording. Try again.");
-        return;
+        const { json, text } = await safeReadJson(res);
+        if (!res.ok) {
+          console.error("Latest video fetch failed (http)", { status: res.status, body: json ?? text });
+          setEmergencyMessage("Server error fetching latest recording. Try again.");
+          return;
+        }
+
+        const state = String((json as any)?.state || "none").toLowerCase();
+        const expiresAtMs = (json as any)?.expiresAtMs;
+        const url =
+          typeof (json as any)?.downloadUrl === "string"
+            ? (json as any).downloadUrl
+            : typeof (json as any)?.signedUrl === "string"
+            ? (json as any).signedUrl
+            : null;
+
+        if (state === "ready") {
+          setLatestVideoState("ready");
+          setLatestVideoUrl(url);
+          setEmergencyExpiresAtMs(typeof expiresAtMs === "number" && Number.isFinite(expiresAtMs) ? expiresAtMs : null);
+
+          if (openWhenReady) {
+            if (url) {
+              window.open(url, "_blank");
+              setEmergencyMessage("Download link opened.");
+            } else {
+              const errCode = String((json as any)?.error || "");
+              setEmergencyMessage(
+                errCode === "storage_not_configured"
+                  ? "Storage is not configured on the server (R2 env vars missing). Download is unavailable."
+                  : "Recording is ready, but the download URL is unavailable."
+              );
+            }
+          }
+          return;
+        }
+
+        if (state === "processing") {
+          setLatestVideoState("processing");
+          setLatestVideoUrl(null);
+          setEmergencyExpiresAtMs(null);
+          setEmergencyMessage("Processing… we'll keep checking.");
+          return;
+        }
+
+        if (state === "failed") {
+          setLatestVideoState("failed");
+          setLatestVideoUrl(null);
+          setEmergencyExpiresAtMs(null);
+          setEmergencyMessage("Processing failed. Try recording again.");
+          return;
+        }
+
+        setLatestVideoState("none");
+        setLatestVideoUrl(null);
+        setEmergencyExpiresAtMs(null);
+        const errCode = String((json as any)?.error || "");
+        setEmergencyMessage(errCode === "room_not_found" ? "Room not found. Double-check the room name." : "No recordings found for this room yet.");
+      };
+
+      await pollOnce(true);
+
+      // If processing, start modest polling until terminal state.
+      if (latestVideoPollIntervalRef.current) {
+        window.clearInterval(latestVideoPollIntervalRef.current);
+        latestVideoPollIntervalRef.current = null;
       }
+      latestVideoPollCountRef.current = 0;
+      latestVideoPollIntervalRef.current = window.setInterval(() => {
+        latestVideoPollCountRef.current += 1;
+        void pollOnce(false);
 
-      const url = (json as any)?.url || (json as any)?.data?.url;
-      if (!url) {
-        console.error("Emergency download failed (shape)", { body: json ?? text });
-        setEmergencyMessage("Recording URL missing. Contact support.");
-        return;
-      }
+        // nudge reconcile occasionally
+        if (latestVideoPollCountRef.current % 4 === 0) {
+          void apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/recordings/reconcile`, { method: "POST" }, { allowNonOk: true }).catch(() => {});
+        }
 
-      window.open(url, "_blank");
-      setEmergencyMessage("Download link opened.");
+        // stop after ~10 minutes
+        if (latestVideoPollCountRef.current > 40 && latestVideoPollIntervalRef.current) {
+          window.clearInterval(latestVideoPollIntervalRef.current);
+          latestVideoPollIntervalRef.current = null;
+        }
+      }, 15000);
     } catch (err) {
-      console.error("Emergency download failed (unexpected)", err);
+      console.error("Latest video fetch failed (unexpected)", err);
       setEmergencyMessage("Unexpected error. Try again.");
     } finally {
       setEmergencyLoading(false);
@@ -915,7 +1405,19 @@ export default function SettingsBilling() {
 const startCheckout = async (plan: CheckoutPlanVariant) => {
   // In test mode, Stripe checkout is disabled in favor of test-mode plan switching.
   if (isTestMode) {
-    setError("Billing is disabled in Test Mode. Use 'Switch Plan (Test Mode)' below instead.");
+    const platformDisabled = user?.platformBillingEnabled === false;
+    const userDisabled = user?.billingEnabled === false;
+    if (platformDisabled) {
+      setError(
+        "Stripe checkout is disabled because Platform Billing is OFF. Enable Platform Billing in the Admin Dashboard, then retry."
+      );
+    } else if (userDisabled) {
+      setError(
+        "Stripe checkout is disabled for your account because billing is turned OFF for this user. An admin must enable billing for your user, then retry."
+      );
+    } else {
+      setError("Billing is disabled in Test Mode. Use 'Switch Plan (Test Mode)' below instead.");
+    }
     setActionLoading(null);
     return;
   }
@@ -934,24 +1436,125 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
   const requestId = `${plan}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
   try {
-    const res = await apiFetch("/api/billing/checkout", {
+    const res = await apiFetchWithCookieFallback("/api/billing/checkout", {
       method: "POST",
       body: JSON.stringify({ plan, requestId, tosAccepted: true }),
     });
 
     const data = await res.json();
-    if (!data.success || !data.url) {
-      throw new Error(data.error || "Checkout failed");
+    if (!data.success) {
+      throw Object.assign(new Error(data.error || "Checkout failed"), { status: res.status, body: data });
     }
 
-    window.location.href = data.url;
+    // Billing disabled can return success without a Stripe URL or mode.
+    if (data?.billing?.mode === "disabled") {
+      setError("Billing is currently disabled for this account. Contact an admin/support to enable billing, then retry.");
+      setActionLoading(null);
+      setUser((prev) => (prev ? { ...prev, pendingPlan: null } : prev));
+      return;
+    }
+
+    // First-time paid subscription flow (Stripe Checkout)
+    if (data.url) {
+      window.location.href = data.url;
+      return;
+    }
+
+    // Existing subscriber flow: server may apply upgrade immediately or schedule downgrade.
+    if (data.mode === "upgrade") {
+      setToast("Plan updated");
+      setActionLoading(null);
+      try {
+        await finalizeBillingAfterPlanChange({
+          expectedPlanId: checkoutVariantToPlanId(plan),
+          maxPollAttempts: 5,
+          pollIntervalMs: 1200,
+        });
+      } catch {}
+      return;
+    }
+
+    if (data.mode === "noop") {
+      const noopReason = String(data?.noopReason || "").trim();
+
+      // Only treat noop as a "Stripe truth" signal when the server explicitly
+      // says the user is already on the plan.
+      if (!noopReason || noopReason === "ALREADY_ON_PLAN") {
+        setToast("You’re already on that plan");
+        setActionLoading(null);
+        const serverPlanId = canonicalPlanId(String(data?.planId || ""));
+        setUser((prev) => (prev ? { ...prev, planId: serverPlanId, pendingPlan: null } : prev));
+        try {
+          await finalizeBillingAfterPlanChange({ expectedPlanId: serverPlanId, maxPollAttempts: 5, pollIntervalMs: 1200 });
+        } catch {}
+        return;
+      }
+
+      // Any other noopReason: do not mutate local plan state; show a clear message.
+      if (noopReason === "BILLING_DISABLED") {
+        setError("Billing is currently disabled for this account. Contact an admin/support to enable billing, then retry.");
+      } else if (noopReason === "MISSING_STRIPE_KEY") {
+        setError("Billing isn’t configured on the server (missing Stripe key). Contact support.");
+      } else if (noopReason === "MISSING_PRICE_ID") {
+        setError("Billing configuration is incomplete (missing Stripe price id). Contact support.");
+      } else {
+        setError("Plan change could not be completed. Please try again or contact support.");
+      }
+      setActionLoading(null);
+      setUser((prev) => (prev ? { ...prev, pendingPlan: null } : prev));
+      return;
+    }
+
+    if (data.mode === "downgrade_scheduled") {
+      const effectiveAtMs = typeof data.effectiveAtMs === "number" ? data.effectiveAtMs : null;
+      const dateLabel = effectiveAtMs ? new Date(effectiveAtMs).toLocaleString() : "your renewal date";
+      setToast(`Downgrade scheduled for ${dateLabel}`);
+      setActionLoading(null);
+      try {
+        await finalizeBillingAfterPlanChange({
+          expectedDowngradeScheduled: true,
+          maxPollAttempts: 5,
+          pollIntervalMs: 1200,
+        });
+      } catch {}
+      return;
+    }
+
+    setToast("Plan change requested");
+    setActionLoading(null);
   } catch (err: any) {
-    if (err?.status === 403 && err?.body?.error === "billing_disabled") {
+    const bodyError = err?.body?.error;
+    const retryAfterMs = typeof err?.body?.retryAfterMs === "number" ? err.body.retryAfterMs : null;
+    const lockUntil = typeof err?.body?.lockUntil === "number" ? err.body.lockUntil : null;
+
+    if (bodyError === "plan_change_limit_daily") {
+      const hours = retryAfterMs ? Math.max(1, Math.ceil(retryAfterMs / 3600000)) : 24;
+      setError(`You can change plans again in ${hours} hour${hours === 1 ? "" : "s"}.`);
+    } else if (bodyError === "downgrade_limit_monthly") {
+      const date = retryAfterMs ? new Date(Date.now() + retryAfterMs) : null;
+      const label = date ? date.toLocaleDateString() : "later";
+      setError(`You can downgrade again on ${label}.`);
+    } else if (bodyError === "plan_change_locked") {
+      const label = lockUntil ? new Date(lockUntil).toLocaleTimeString() : "shortly";
+      setError(`A plan change is already in progress. Try again ${lockUntil ? `after ${label}` : "in a moment"}.`);
+    } else if (bodyError === "subscription_period_missing") {
+      setError(
+        "We couldn’t determine your current billing period from Stripe. Hit Refresh Status, then try again. If it still fails, use Manage Billing (Portal) or contact support."
+      );
+    } else if (bodyError === "subscription_schedule_missing" || bodyError === "subscription_item_missing") {
+      setError(
+        "Your Stripe subscription is missing some expected fields. Hit Refresh Status, then try again. If it still fails, use Manage Billing (Portal) or contact support."
+      );
+    } else if (err?.status === 403 && bodyError === "billing_disabled") {
       setError("Billing is disabled for this account. Use Test Mode plan switching instead.");
-    } else if (err?.status === 403 && err?.body?.error === "tos_not_accepted") {
+    } else if (err?.status === 403 && bodyError === "tos_not_accepted") {
       setCheckoutTosError("You must agree to the Terms of Service before changing plans.");
-    } else if (err?.body?.error) {
-      setError(err.body.error);
+    } else if (bodyError === "missing_stripe_key") {
+      setError("Billing isn’t configured on the server (missing Stripe key). Contact support.");
+    } else if (bodyError === "missing_price_id") {
+      setError("Billing configuration is incomplete (missing Stripe price id). Contact support.");
+    } else if (bodyError) {
+      setError(bodyError);
     } else {
       setError(err.message || "Failed to start checkout. Please try again.");
     }
@@ -959,6 +1562,90 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
     setUser((prev) => (prev ? { ...prev, pendingPlan: null } : prev));
   }
 };
+
+  const cancelSubscription = async () => {
+    if (closeCancelLoading) return;
+    setCloseCancelLoading(true);
+    setError(null);
+    try {
+      const res = await apiFetchWithCookieFallback("/api/account/close", {
+        method: "POST",
+        body: JSON.stringify({ mode: "cancel_only" }),
+      });
+      const data = await res.json();
+      if (!res.ok || data?.error) {
+        throw Object.assign(new Error(data?.error || "Cancel failed"), { status: res.status, body: data });
+      }
+      setToast("Subscription will cancel at period end");
+      try {
+        clearMeCache();
+        const me = await loadUser({ forceRefresh: true });
+        await loadEntitlements();
+        setUser(me);
+      } catch {}
+    } catch (err: any) {
+      setError(err?.body?.error || err?.message || "Failed to cancel subscription");
+    } finally {
+      setCloseCancelLoading(false);
+    }
+  };
+
+  const cancelPlanChange = async () => {
+    if (actionLoading === "cancel-plan-change") return;
+    setActionLoading("cancel-plan-change");
+    setError(null);
+    try {
+      const res = await apiFetchWithCookieFallback("/api/billing/cancel-plan-change", {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (!res.ok || data?.error) {
+        throw Object.assign(new Error(data?.error || "Failed to cancel plan change"), { status: res.status, body: data });
+      }
+      setToast(data?.message || "Plan change canceled successfully");
+      // Refresh user data to clear pendingPlan and scheduledPlanChange
+      try {
+        clearMeCache();
+        const me = await loadUser({ forceRefresh: true });
+        await loadEntitlements();
+        setUser(me);
+      } catch {}
+    } catch (err: any) {
+      setError(err?.body?.error || err?.message || "Failed to cancel plan change");
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const deleteAccount = async () => {
+    if (closeDeleteLoading) return;
+    if (!closeDeleteConfirmed || closeDeleteText.trim().toUpperCase() !== "DELETE") {
+      setError("Confirm deletion by checking the box and typing DELETE.");
+      return;
+    }
+    setCloseDeleteLoading(true);
+    setError(null);
+    try {
+      const res = await apiFetchWithCookieFallback("/api/account/close", {
+        method: "POST",
+        body: JSON.stringify({ mode: "delete" }),
+      });
+      const data = await res.json();
+      if (!res.ok || data?.error) {
+        throw Object.assign(new Error(data?.error || "Delete failed"), { status: res.status, body: data });
+      }
+
+      clearAuthStorage();
+      clearMeCache();
+      clearPlatformFlagsCache();
+      setToast("Account deletion requested");
+      nav("/login", { replace: true, state: { accountDeleted: true } });
+    } catch (err: any) {
+      setError(err?.body?.error || err?.message || "Failed to delete account");
+    } finally {
+      setCloseDeleteLoading(false);
+    }
+  };
 
 
 
@@ -970,18 +1657,34 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
         setActionLoading(null);
         return;
       }
-      // If no Stripe customer, guide user into Checkout to create one
-      if (!hasStripeCustomer) {
-        setShowManagePicker(true);
-        setActionLoading(null);
-        return;
-      }
-      const res = await apiFetch("/api/billing/portal", {
+      
+      const res = await apiFetchWithCookieFallback("/api/billing/portal", {
         method: "POST",
       });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || "Portal failed");
-      window.location.href = data.url;
+      const data = await safeReadJson(res);
+
+      if (!res.ok) {
+        const errCode = String((data as any)?.error || "");
+        if (res.status === 403 && errCode === "billing_disabled") {
+          throw new Error("Billing is currently disabled for this workspace.");
+        }
+        if (res.status === 400 && errCode === "missing_customer") {
+          // No Stripe customer yet - guide user to create one via checkout
+          setShowManagePicker(true);
+          setActionLoading(null);
+          return;
+        }
+        if (res.status === 500 && errCode === "missing_stripe_key") {
+          throw new Error("Billing is temporarily unavailable (Stripe is not configured).");
+        }
+        throw new Error(errCode || "Portal failed");
+      }
+
+      const url = String((data as any)?.url || "");
+      if (!url) throw new Error("Portal failed");
+      
+      // Redirect to Stripe billing portal
+      window.location.href = url;
     } catch (err: any) {
       setError(err.message);
       setActionLoading(null);
@@ -993,7 +1696,7 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
       setCheckoutTosSubmitting(true);
       setCheckoutTosError(null);
       try {
-        const res = await apiFetch("/api/account/accept-tos", {
+        const res = await apiFetchWithCookieFallback("/api/account/accept-tos", {
           method: "POST",
         });
         const data = await res.json();
@@ -1034,7 +1737,7 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
     setTestModeLoading(true);
     setError(null);
     try {
-      const res = await apiFetch("/api/billing/test/change-plan", {
+      const res = await apiFetchWithCookieFallback("/api/billing/test/change-plan", {
         method: "POST",
         body: JSON.stringify({ newPlanId: testModeTargetPlan }),
       });
@@ -1060,7 +1763,15 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
       if (code === "billing_live") {
         setError("Live billing is enabled on this account. Test Mode switching is disabled.");
       } else if (code === "test_mode_disabled") {
-        setError("Test Mode plan switching is disabled for this account.");
+        setError(
+          "Test Mode plan switching isn’t enabled for your user. This is a setting/permission: ask an admin to mark your account as a tester (tester=true) or enable platform-wide Test Mode (disable billing system)."
+        );
+      } else if (code === "insufficient_permissions") {
+        setError(
+          "You don’t have permission to switch plans in Test Mode. This is a setting/permission: ask an admin to grant tester access or switch this environment into platform-wide Test Mode."
+        );
+      } else if (code === "unauthorized") {
+        setError("You’re not signed in (or your session expired). Please sign in again and retry.");
       } else if (code === "too_many_requests") {
         setError("Please wait a moment before switching plans again.");
       } else if (code === "invalid_plan") {
@@ -1083,7 +1794,10 @@ function canonicalPlanId(planId: string | undefined): PlanId {
   return "free";
 }
 
-const userPlanId: PlanId = canonicalPlanId(user?.planId);
+// Always prefer effectiveEntitlements.planId for UI, since it reflects the
+// server's reconciled billing truth even if the raw user doc lags.
+const effectivePlanIdForUi: PlanId = canonicalPlanId((user as any)?.effectiveEntitlements?.planId ?? user?.planId);
+const userPlanId: PlanId = effectivePlanIdForUi;
 const currentPlan = plans.find((p) => canonicalPlanId(p.id) === userPlanId);
 const status = user?.billingStatus;
 const hasStripeCustomer = !!(user?.billing?.customerId || (user as any)?.stripeCustomerId);
@@ -1109,8 +1823,9 @@ const isPaidPlan = userPlanId === "starter" || userPlanId === "pro" || userPlanI
 const isBlocked = isPaidPlan && (status === "past_due" || status === "unpaid");
 const isPaidValid = status === "active" || status === "trialing";
 
-// Only treat pendingPlan as processing for paid plans; always consider active action loads
-const isProcessing = !!actionLoading || (userPlanId !== "free" && !!user?.pendingPlan);
+// Only treat pendingPlan as processing for paid plans; always consider active action loads.
+// Also consider the explicit Stripe-return hint to cover free->paid upgrades.
+const isProcessing = !!actionLoading || (userPlanId !== "free" && !!user?.pendingPlan) || upgradeProcessing;
 
 const statusBadge = getStatusBadge(status, user?.billing?.cancelAtPeriodEnd);
 const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
@@ -1260,13 +1975,15 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
           >
             Usage
           </button>
-          <button
-            type="button"
-            style={activeTab === "destinations" ? { ...S.tab, ...S.tabActive } : S.tab}
-            onClick={() => setActiveTab("destinations")}
-          >
-            Stream Keys
-          </button>
+          {platformTranscodeEnabled !== false && (
+            <button
+              type="button"
+              style={activeTab === "destinations" ? { ...S.tab, ...S.tabActive } : S.tab}
+              onClick={() => setActiveTab("destinations")}
+            >
+              Stream Keys
+            </button>
+          )}
           {platformHlsSettingsTabEnabled !== false && (
             <button
               type="button"
@@ -1289,6 +2006,13 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
             onClick={() => setActiveTab("roles")}
           >
             Mod/Guest Setup
+          </button>
+          <button
+            type="button"
+            style={activeTab === "close" ? { ...S.tab, ...S.tabActive } : S.tab}
+            onClick={() => setActiveTab("close")}
+          >
+            Close Account
           </button>
         </div>
 
@@ -1476,6 +2200,43 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
         {/* ================================================================ */}
         {activeTab === "plan" && (
           <>
+            {(() => {
+              const remaining = (billingStatusSnapshot as any)?.daily?.remaining;
+              const retryAfterMs = (billingStatusSnapshot as any)?.daily?.retryAfterMs;
+              if (typeof remaining !== "number") return null;
+              const hours = typeof retryAfterMs === "number" && retryAfterMs > 0
+                ? Math.max(1, Math.ceil(retryAfterMs / 3600000))
+                : 0;
+              return (
+                <div
+                  style={{
+                    marginBottom: 14,
+                    padding: "10px 12px",
+                    borderRadius: 12,
+                    border: "1px solid rgba(148,163,184,0.22)",
+                    background: "rgba(148,163,184,0.06)",
+                    color: "#e5e7eb",
+                    fontSize: 13,
+                    fontWeight: 700,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    gap: 10,
+                    flexWrap: "wrap",
+                  }}
+                >
+                  <div>
+                    Plan changes available (next 24h): <span style={{ color: remaining > 0 ? "#22c55e" : "#f59e0b" }}>{remaining}</span> / 3
+                  </div>
+                  {remaining === 0 && hours > 0 && (
+                    <div style={{ fontSize: 12, color: "#cbd5e1", fontWeight: 700 }}>
+                      Next change in ~{hours} hour{hours === 1 ? "" : "s"}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             {isBlocked && !isTestMode && (
               <div style={S.warningCard}>
                 <div style={S.warningIcon}>⚠️</div>
@@ -1503,13 +2264,62 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
             <div style={{ ...S.card, opacity: isBlocked ? 0.6 : 1 }}>
               <div style={S.cardHeader}>
                 <h2 style={S.cardTitle}>Your Plan</h2>
-                {isProcessing && (
-                  <span style={S.processingBadge}>
-                    {user?.billing?.cancelAtPeriodEnd
-                      ? `Cancellation scheduled — ends ${formatDate(user?.billing?.currentPeriodEnd)}`
-                      : `Plan change scheduled — applies on next billing date${user?.billing?.currentPeriodEnd ? ` (${formatDate(user?.billing?.currentPeriodEnd)})` : ""}`}
-                  </span>
-                )}
+                <div style={S.cardHeaderRight}>
+                  {/* Only show Manage billing for users with Stripe context or paid plan history */}
+                  {(hasStripeCustomer || isPaidPlan || status === "trialing" || status === "active") && (
+                    <button
+                      type="button"
+                      onClick={openPortal}
+                      style={S.manageBillingHeaderBtn}
+                      disabled={!!actionLoading || isTestMode}
+                      title={
+                        isTestMode
+                          ? "Billing portal is disabled in Test Mode"
+                          : "Open Stripe billing portal to manage your subscription"
+                      }
+                    >
+                      {actionLoading === "portal" ? "Loading…" : "Manage billing"}
+                    </button>
+                  )}
+
+                  {isProcessing && (
+                    <span style={S.processingBadge}>
+                      {upgradeProcessing
+                        ? "Upgrade processing — this can take a few seconds."
+                        : user?.billing?.cancelAtPeriodEnd
+                          ? `Cancellation scheduled — ends ${formatDate(user?.billing?.currentPeriodEnd)}`
+                          : (user as any)?.scheduledPlanChange?.type === "downgrade" &&
+                              typeof (user as any)?.scheduledPlanChange?.effectiveAtMs === "number" &&
+                              (user as any)?.scheduledPlanChange?.effectiveAtMs > Date.now()
+                            ? `Downgrade scheduled — stays active until ${formatDate((user as any).scheduledPlanChange.effectiveAtMs)}`
+                            : `Plan change scheduled — applies on next billing date${user?.billing?.currentPeriodEnd ? ` (${formatDate(user?.billing?.currentPeriodEnd)})` : ""}`}
+                    </span>
+                  )}
+
+                  {/* Cancel Plan Change Button - Shows when there's a pending plan change */}
+                  {(user?.pendingPlan || (user as any)?.scheduledPlanChange) && !upgradeProcessing && !user?.billing?.cancelAtPeriodEnd && (
+                    <button
+                      type="button"
+                      onClick={cancelPlanChange}
+                      disabled={actionLoading === "cancel-plan-change"}
+                      style={{
+                        padding: "6px 12px",
+                        borderRadius: 6,
+                        border: "1px solid rgba(251,191,36,0.4)",
+                        background: "rgba(251,191,36,0.1)",
+                        color: "#fbbf24",
+                        fontSize: 12,
+                        fontWeight: 600,
+                        cursor: actionLoading === "cancel-plan-change" ? "not-allowed" : "pointer",
+                        opacity: actionLoading === "cancel-plan-change" ? 0.6 : 1,
+                        transition: "all 0.2s ease",
+                      }}
+                      title="Cancel the scheduled plan change and stay on your current plan"
+                    >
+                      {actionLoading === "cancel-plan-change" ? "⏳ Canceling..." : "✕ Cancel Plan Change"}
+                    </button>
+                  )}
+                </div>
               </div>
 
               {currentPlan ? (
@@ -1522,7 +2332,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                       </span>
                     </div>
                     <div style={S.planPrice}>
-                      <span style={S.priceAmount}>${currentPlan.price}</span>
+                      <span style={S.priceAmount}>${(currentPlan as any).priceMonthly ?? currentPlan.price}</span>
                       <span style={S.pricePeriod}>/month</span>
                     </div>
                     {currentPlan.description && (
@@ -1743,7 +2553,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
 
                     {/* Processing */}
                     {isProcessing && (
-                      <button onClick={loadAllData} style={S.secondaryBtn}>
+                      <button onClick={handleRefreshStatus} style={S.secondaryBtn}>
                         🔄 Refresh Status
                       </button>
                     )}
@@ -1755,8 +2565,61 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
             {/* ================================================================ */}
             {/* SECTION 4: PLAN COMPARISON */}
             {/* ================================================================ */}
+
             <div style={S.card}>
-              <h2 style={S.cardTitle}>📊 Compare Plans</h2>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                <h2 style={S.cardTitle}>📊 Compare Plans</h2>
+                {isAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => loadPlans()}
+                    style={{
+                      padding: "6px 10px",
+                      borderRadius: 999,
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      background: "rgba(15,23,42,0.8)",
+                      color: "#e2e8f0",
+                      fontSize: 12,
+                      fontWeight: 700,
+                      cursor: "pointer",
+                      whiteSpace: "nowrap",
+                    }}
+                    title="Force refresh from /api/plans"
+                  >
+                    🔄 Refresh plans
+                  </button>
+                )}
+                <a
+                  href="/pricing/explainer"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    color: "#60a5fa",
+                    fontSize: 13,
+                    textDecoration: "underline",
+                    fontWeight: 500,
+                  }}
+                >
+                  Click here to get an explanation of our pricing
+                </a>
+              </div>
+
+              {(!platformRecordingEnabled || !platformHlsEnabled || !platformTranscodeEnabled) && (
+                <div
+                  style={{
+                    marginTop: 12,
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(245,158,11,0.45)",
+                    background: "rgba(245,158,11,0.12)",
+                    color: "#fde68a",
+                    fontSize: 13,
+                    lineHeight: 1.35,
+                  }}
+                >
+                  <div style={{ fontWeight: 700 }}>Some features are temporarily unavailable platform-wide.</div>
+                </div>
+              )}
 
               <div style={S.plansGrid}>
                 {plans.map((plan) => {
@@ -1794,7 +2657,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                       <div style={S.planCardHeader}>
                         <h3 style={{ ...S.planCardName, color }}>{plan.name}</h3>
                         <div style={S.planCardPrice}>
-                          <span style={S.planCardAmount}>${plan.price}</span>
+                          <span style={S.planCardAmount}>${plan.priceMonthly ?? plan.price}</span>
                           <span style={S.planCardPeriod}>/mo</span>
                         </div>
                         {plan.description && (
@@ -1804,14 +2667,41 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                         )}
                       </div>
                       <ul style={S.featureList}>
-                        <FeatureRow label="Monthly minutes" value={plan.limits.monthlyMinutesIncluded} />
+                        <FeatureRow label={usageLabels.inRoomMinutes} value={plan.limits.monthlyMinutesIncluded} />
+                        {platformTranscodeEnabled !== false && plan.limits.transcodeMinutes > 0 && (
+                          <FeatureRow
+                            label={usageLabels.broadcastMinutes}
+                            value={plan.limits.transcodeMinutes}
+                          />
+                        )}
                         <FeatureRow label="Max guests" value={plan.limits.maxGuests} />
                         <FeatureRow label="Stream destinations" value={plan.limits.rtmpDestinationsMax} />
-                        {entitlements.recording && (
-                          <FeatureRow label="Recording" value={plan.features.recording} />
+                        {platformRecordingEnabled !== false && (
+                          <FeatureRow
+                            label="Recording"
+                            value={Boolean((plan as any).features?.recording)}
+                            lockedText="Not included in this plan"
+                          />
                         )}
-                        <FeatureRow label="Multistream" value={(plan as any).features?.multistream ?? (plan as any).multistreamEnabled} />
-                        {platformHlsEnabled ? <FeatureRow label="HLS Broadcast Page" value={(plan as any).features?.canHls} /> : null}
+                        {platformTranscodeEnabled !== false && (
+                          <FeatureRow
+                            label="Multistream"
+                            value={Boolean((plan as any).features?.multistream ?? (plan as any).multistreamEnabled)}
+                            lockedText="Not included in this plan"
+                          />
+                        )}
+                        {platformHlsEnabled !== false && (
+                          <FeatureRow
+                            label="HLS Broadcast Page"
+                            value={Boolean(
+                              (plan as any).features?.hlsCustomizationEnabled ??
+                              (plan as any).features?.canCustomizeHlsPage ??
+                              (plan as any).features?.canHls ??
+                              (plan as any).features?.hls
+                            )}
+                            lockedText="Not included in this plan"
+                          />
+                        )}
                         {/* Advanced Permissions is now removed from plan marketing UI; all accounts use simple Participant/Co-host defaults. */}
                         {plan.editing?.access && (
                           <>
@@ -1820,6 +2710,21 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                           </>
                         )}
                       </ul>
+                      {(planId !== "free" && planId !== "basic") && (
+                        <div style={{ color: "#94a3b8", fontSize: 12, margin: "8px 0 0 0", lineHeight: 1.45 }}>
+                          <div>
+                            <span style={{ color: "#60a5fa" }}>{usageLabels.inRoomMinutes}</span> {" "}
+                            {usageTooltips.inRoomMinutes}
+                          </div>
+                          <div style={{ marginTop: 6 }}>
+                            <span style={{ color: "#a78bfa" }}>{usageLabels.broadcastMinutes}</span> {" "}
+                            {usageTooltips.broadcastMinutes}
+                          </div>
+                          <div style={{ marginTop: 8 }}>
+                            Broadcast minutes are counted per destination, per minute.
+                          </div>
+                        </div>
+                      )}
                       <div style={S.planCardAction}>
                         {isTestMode ? (
                           isCurrent ? (
@@ -1837,7 +2742,21 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                             </button>
                           )
                         ) : isCurrent ? (
-                          <span style={S.currentLabel}>✅ Current Plan</span>
+                          // Current plan: show manage billing button ONLY for paid plans (not free)
+                          planId === "free" ? (
+                            <span style={S.currentLabel}>✅ Current Plan</span>
+                          ) : (
+                            <button
+                              onClick={openPortal}
+                              style={{
+                                ...S.planUpgradeBtn,
+                                background: `linear-gradient(135deg, ${color}, ${color}dd)`,
+                              }}
+                              disabled={!!actionLoading}
+                            >
+                              {actionLoading === "portal" ? "⏳ Loading..." : "⚙️ Manage billing"}
+                            </button>
+                          )
                         ) : planId === "basic" && (userPlan === "free" || userPlan === "starter") ? (
                           <button
                             onClick={() => startCheckout("basic")}
@@ -1847,7 +2766,12 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                             }}
                             disabled={!!actionLoading || isBlocked || isProcessing}
                           >
-                            {actionLoading === "basic" ? "⏳..." : getPlanActionLabel(userPlan, "basic" as any, isProcessing)}
+                            {actionLoading === "basic"
+                              ? "⏳..."
+                              : getPlanActionLabel(userPlan, "basic" as any, {
+                                  isProcessing,
+                                  pendingPlan: user?.pendingPlan,
+                                })}
                           </button>
                         ) : planId === "starter" && (userPlan === "free" || userPlan === "basic") ? (
                           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -1859,7 +2783,12 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                               }}
                               disabled={!!actionLoading || isBlocked || isProcessing}
                             >
-                              {actionLoading === "starter_paid" ? "⏳..." : getPlanActionLabel(userPlan, "starter", isProcessing)}
+                              {actionLoading === "starter_paid"
+                                ? "⏳..."
+                                : getPlanActionLabel(userPlan, "starter", {
+                                    isProcessing,
+                                    pendingPlan: user?.pendingPlan,
+                                  })}
                             </button>
                             <button
                               onClick={() => startCheckout("starter_trial")}
@@ -1881,7 +2810,12 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                             }}
                             disabled={!!actionLoading || isBlocked || isProcessing}
                           >
-                            {actionLoading === "pro" ? "⏳..." : getPlanActionLabel(userPlan, "pro", isProcessing)}
+                            {actionLoading === "pro"
+                              ? "⏳..."
+                              : getPlanActionLabel(userPlan, "pro", {
+                                  isProcessing,
+                                  pendingPlan: user?.pendingPlan,
+                                })}
                           </button>
                         ) : planId === "free" && (userPlan === "starter" || userPlan === "pro" || userPlan === "basic") ? (
                           <button
@@ -1889,25 +2823,23 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                             style={{
                               ...S.planUpgradeBtn,
                               background: `linear-gradient(135deg, ${color}, ${color}dd)`,
-                              opacity: 0.85,
                             }}
                             disabled={!!actionLoading || isBlocked}
                           >
-                            Manage in Billing Portal
+                            {actionLoading === "portal" ? "⏳ Loading..." : "⚙️ Manage billing"}
                           </button>
-                        ) : (
+                        ) : isDowngrade ? (
                           <button
                             onClick={openPortal}
                             style={{
                               ...S.planUpgradeBtn,
                               background: `linear-gradient(135deg, ${color}, ${color}dd)`,
-                              opacity: 0.85,
                             }}
                             disabled={!!actionLoading || isBlocked}
                           >
-                            {getPlanActionLabel(userPlan, planId as any, isProcessing)}
+                            {actionLoading === "portal" ? "⏳ Loading..." : "⚙️ Manage billing"}
                           </button>
-                        )}
+                        ) : null}
                       </div>
                     </div>
                   );
@@ -1979,19 +2911,23 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
         {activeTab === "defaults" && (
           <div style={{ ...S.card, opacity: isBlocked ? 0.6 : 1 }}>
             <div style={S.cardHeader}>
-              <h2 style={S.cardTitle}>🎛️ Streaming & Recording Defaults</h2>
+              <h2 style={S.cardTitle}>Media Defaults</h2>
               <span style={{ padding: "4px 10px", borderRadius: 999, border: "1px solid rgba(255,255,255,0.15)", color: "#cbd5e1", fontSize: 12 }}>
                 Plan: {entitlements.planName || currentPlan?.name || "Free"}
               </span>
             </div>
 
             <p style={{ color: "#94a3b8", marginTop: 4, marginBottom: 14, fontSize: 13 }}>
-              These defaults pre-fill the in-room setup for new streams and recordings. Higher presets may be clamped by your plan automatically.
+              These settings define how new streams and recordings behave by default.
             </p>
 
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 12 }}>
+              {/* SECTION A — Quality (applies to everything) */}
               <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, background: "rgba(255,255,255,0.02)" }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Media Preset</div>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Stream & Recording Quality</div>
+                <div style={{ fontSize: 12, color: "#94a3b8", marginBottom: 10 }}>
+                  How good should it look?
+                </div>
                 <select
                   value={mediaPrefs.defaultPresetId}
                   onChange={(e) => setMediaPrefs((prev) => ({ ...prev, defaultPresetId: e.target.value }))}
@@ -2003,44 +2939,145 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                   ))}
                 </select>
                 <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
-                  Applies to both streaming and recording quality; plan caps still apply.
+                  Applies to live streaming and recordings. Plan limits may apply.
+                </div>
+
+                <div style={{ marginTop: 10, borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: 10 }}>
+                  <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700 }}>
+                    <input
+                      type="checkbox"
+                      checked={mediaPrefs.warnOnHighQuality}
+                      onChange={(e) => setMediaPrefs((prev) => ({ ...prev, warnOnHighQuality: e.target.checked }))}
+                    />
+                    <span>Warn when using high-quality presets</span>
+                  </label>
+                  <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
+                    Shows a reminder before starting streams with higher resource usage.
+                  </div>
                 </div>
               </div>
 
+              {/* SECTION B — Room Layout (single source of truth) */}
               <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, background: "rgba(255,255,255,0.02)" }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Recording Layout</div>
-                <div style={{ display: "flex", gap: 10 }}>
-                  {(["speaker", "grid"] as const).map((opt) => (
-                    <label key={opt} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14 }}>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Room Layout (Default)</div>
+                <div style={{ marginTop: 2, fontSize: 12, color: "#94a3b8" }}>
+                  Controls how participants and viewers are arranged. Recordings automatically use this layout.
+                </div>
+
+                <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
+                  <label style={{ display: "grid", gap: 6, fontSize: 13, color: "#cbd5e1" }}>
+                    <span style={{ fontWeight: 600, color: "#e2e8f0" }}>Layout Mode</span>
+                    <select
+                      value={mediaPrefs.defaultRoomLayout?.mode || "speaker"}
+                      onChange={(e) => {
+                        const mode = e.target.value as RoomLayoutMode;
+                        setMediaPrefs((prev) => {
+                          const prevLayout = (prev.defaultRoomLayout || ({ mode: "speaker" } as RoomLayout)) as RoomLayout;
+                          const next: RoomLayout = {
+                            ...prevLayout,
+                            mode,
+                            // Max tiles only applies to grid/carousel.
+                            ...(mode === "grid" || mode === "carousel" ? {} : { maxTiles: undefined }),
+                          };
+                          return { ...prev, defaultRoomLayout: next };
+                        });
+                      }}
+                      style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: "#0f172a", color: "#e2e8f0" }}
+                    >
+                      {(["speaker", "grid", "carousel"] as const).map((m) => (
+                        <option key={m} value={m}>
+                          {m.charAt(0).toUpperCase() + m.slice(1)}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                    <label style={{ display: "grid", gap: 6, fontSize: 13, color: "#cbd5e1" }}>
+                      <span style={{ fontWeight: 600, color: "#e2e8f0" }}>Max tiles</span>
                       <input
-                        type="radio"
-                        name="recLayout"
-                        value={opt}
-                        checked={mediaPrefs.defaultLayout === opt}
-                        onChange={() => setMediaPrefs((prev) => ({ ...prev, defaultLayout: opt }))}
+                        type="number"
+                        min={1}
+                        max={64}
+                        disabled={!(mediaPrefs.defaultRoomLayout?.mode === "grid" || mediaPrefs.defaultRoomLayout?.mode === "carousel")}
+                        value={typeof mediaPrefs.defaultRoomLayout?.maxTiles === "number" ? String(mediaPrefs.defaultRoomLayout.maxTiles) : ""}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          const next = raw === "" ? undefined : Number(raw);
+                          setMediaPrefs((prev) => ({
+                            ...prev,
+                            defaultRoomLayout: {
+                              ...(prev.defaultRoomLayout || ({ mode: "speaker" } as RoomLayout)),
+                              maxTiles: Number.isFinite(next as any) ? (next as number) : undefined,
+                            },
+                          }));
+                        }}
+                        placeholder="Auto"
+                        style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: "#0f172a", color: "#e2e8f0", opacity: (mediaPrefs.defaultRoomLayout?.mode === "grid" || mediaPrefs.defaultRoomLayout?.mode === "carousel") ? 1 : 0.55 }}
                       />
-                      <span style={{ textTransform: "capitalize" }}>{opt}</span>
                     </label>
-                  ))}
-                </div>
-                <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
-                  Used when starting recordings from the room controls.
+
+                    <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: "#cbd5e1", paddingTop: 26 }}>
+                      <input
+                        type="checkbox"
+                        checked={mediaPrefs.defaultRoomLayout?.followSpeaker === true}
+                        onChange={(e) => {
+                          setMediaPrefs((prev) => ({
+                            ...prev,
+                            defaultRoomLayout: {
+                              ...(prev.defaultRoomLayout || ({ mode: "speaker" } as RoomLayout)),
+                              followSpeaker: e.target.checked,
+                            },
+                          }));
+                        }}
+                      />
+                      <span>Follow active speaker</span>
+                    </label>
+                  </div>
+
+                  <label style={{ display: "grid", gap: 6, fontSize: 13, color: "#cbd5e1" }}>
+                    <span style={{ fontWeight: 600, color: "#e2e8f0" }}>Pinned participant (optional)</span>
+                    <input
+                      type="text"
+                      value={mediaPrefs.defaultRoomLayout?.pinnedIdentity || ""}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setMediaPrefs((prev) => ({
+                          ...prev,
+                          defaultRoomLayout: {
+                            ...(prev.defaultRoomLayout || ({ mode: "speaker" } as RoomLayout)),
+                            pinnedIdentity: v.trim() ? v : null,
+                          },
+                        }));
+                      }}
+                      placeholder="Participant identity (optional)"
+                      style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: "#0f172a", color: "#e2e8f0" }}
+                    />
+                    <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
+                      Keeps a specific participant visible by default.
+                    </div>
+                  </label>
                 </div>
               </div>
 
+              {/* SECTION C — Recording Behavior (storage & reliability) */}
               <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, background: "rgba(255,255,255,0.02)" }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Recording Mode</div>
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Recording Storage</div>
                 <select
                   value={mediaPrefs.defaultRecordingMode}
                   onChange={(e) => setMediaPrefs((prev) => ({ ...prev, defaultRecordingMode: e.target.value as "cloud" | "dual" }))}
                   style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: entitlements.dualRecording ? "#0f172a" : "rgba(15,23,42,0.6)", color: "#e2e8f0" }}
                 >
-                  <option value="cloud">Standard Recording (cloud only)</option>
-                  <option value="dual" disabled={!entitlements.dualRecording}>Backup Recording (cloud + local)</option>
+                  <option value="cloud">Standard Recording (Cloud) — Recommended</option>
+                  <option value="dual" disabled={!entitlements.dualRecording}>Redundant Recording (Cloud + Backup)</option>
                 </select>
-                <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8", display: "grid", gap: 4 }}>
-                  <span style={{ color: "#22c55e" }}><strong>Standard Recording:</strong> saves one final video to the cloud. Uses less storage.</span>
-                  <span style={{ color: "#f87171" }}><strong>Backup Recording:</strong> saves the cloud video and a local backup for recovery or editing. Uses more storage.</span>
+                <div style={{ marginTop: 8, fontSize: 12, color: "#94a3b8", display: "grid", gap: 6 }}>
+                  <div>
+                    <strong style={{ color: "#e2e8f0" }}>Standard Recording (Cloud):</strong> Saves a single finalized recording to the cloud. Uses less storage and is suitable for most streams.
+                  </div>
+                  <div>
+                    <strong style={{ color: "#e2e8f0" }}>Redundant Recording (Cloud + Backup):</strong> Saves a cloud recording and an additional backup for recovery or editing. Uses more storage.
+                  </div>
                 </div>
                 {!entitlements.dualRecording && (
                   <div style={{ marginTop: 6, fontSize: 12, color: "#fbbf24" }}>
@@ -2049,41 +3086,12 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 )}
               </div>
 
+              {/* SECTION D — Defaults Behavior (implicit) */}
               <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, background: "rgba(255,255,255,0.02)" }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Destinations Default</div>
-                <div style={{ display: "flex", gap: 10 }}>
-                  {([
-                    { id: "last_used", label: "Reuse last" },
-                    { id: "pick_each_time", label: "Pick each time" },
-                  ] as const).map((opt) => (
-                    <label key={opt.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14 }}>
-                      <input
-                        type="radio"
-                        name="destMode"
-                        value={opt.id}
-                        checked={mediaPrefs.destinationsDefaultMode === opt.id}
-                        onChange={() => setMediaPrefs((prev) => ({ ...prev, destinationsDefaultMode: opt.id }))}
-                      />
-                      <span>{opt.label}</span>
-                    </label>
-                  ))}
-                </div>
-                <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
-                  Controls how the stream setup modal seeds destination selection.
-                </div>
-              </div>
-
-              <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, background: "rgba(255,255,255,0.02)" }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700 }}>
-                  <input
-                    type="checkbox"
-                    checked={mediaPrefs.warnOnHighQuality}
-                    onChange={(e) => setMediaPrefs((prev) => ({ ...prev, warnOnHighQuality: e.target.checked }))}
-                  />
-                  <span>Warn when using high-quality presets</span>
-                </label>
-                <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
-                  Shows a reminder before starting with higher-bitrate presets.
+                <div style={{ fontWeight: 700, marginBottom: 6 }}>Defaults Behavior</div>
+                <div style={{ fontSize: 12, color: "#94a3b8", display: "grid", gap: 8 }}>
+                  <div>These defaults are applied automatically when creating new rooms and streams.</div>
+                  <div>Destination selections reuse the most recent configuration unless changed during setup.</div>
                 </div>
               </div>
             </div>
@@ -2100,6 +3108,9 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
             )}
 
             <div style={{ marginTop: 14, display: "flex", justifyContent: "flex-end", gap: 10, flexWrap: "wrap" }}>
+              <div style={{ flex: "1 1 auto", minWidth: 220, alignSelf: "center", fontSize: 12, color: "#94a3b8" }}>
+                Changes apply to newly created rooms and streams.
+              </div>
               <button
                 type="button"
                 onClick={saveMediaPrefs}
@@ -2114,7 +3125,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                   cursor: mediaPrefsSaving ? "not-allowed" : "pointer",
                 }}
               >
-                {mediaPrefsSaving ? "Saving..." : "Save defaults"}
+                {mediaPrefsSaving ? "Saving..." : "Save Defaults"}
               </button>
             </div>
           </div>
@@ -2191,10 +3202,31 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
             <div style={{ marginTop: 8, marginBottom: 12, padding: 12, border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, background: "rgba(255,255,255,0.02)" }}>
               <div style={{ fontWeight: 700, color: "#e5e7eb", marginBottom: 6 }}>Minutes Used (This Month)</div>
               <div style={{ color: "#cbd5e1", marginBottom: 4 }}>
-                Live streaming: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.streamingMinutes.used}</span> min
+                {usageLabels.inRoomMinutes}: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.inRoomMinutes.used}</span> min
               </div>
+              {getUsageGating(user).canShowBroadcastMinutes && (
+                <div style={{ color: "#cbd5e1", marginBottom: 4 }}>
+                  {usageLabels.broadcastMinutes}: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.broadcastMinutes.used}</span> min
+                </div>
+              )}
               <div style={{ color: "#cbd5e1", marginBottom: 6 }}>
                 Recording: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.recordingMinutes.used}</span> min
+              </div>
+              <div style={{ color: "#cbd5e1", marginBottom: 6 }}>
+                <div style={{ fontWeight: 700, color: "#e5e7eb", marginBottom: 2 }}>Overage (this month)</div>
+                <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 4 }}>
+                  Minutes used beyond the plan’s included limits.
+                </div>
+                <span style={{ color: "#fff", fontWeight: 700 }}>
+                  {Number(usage.overages?.participantMinutes ?? 0) + Number(usage.overages?.transcodeMinutes ?? 0)}
+                </span>
+                {" "}min
+                <span style={{ color: "#94a3b8", fontSize: 12 }}>
+                  {" "}(in-room: {Number(usage.overages?.participantMinutes ?? 0)} / broadcast: {Number(usage.overages?.transcodeMinutes ?? 0)})
+                </span>
+              </div>
+              <div style={{ color: "#94a3b8", fontSize: 12 }}>
+                {usageTooltips.inRoomMinutes} {usageTooltips.broadcastMinutes}
               </div>
               <div style={{ color: "#94a3b8", fontSize: 12 }}>Recording minutes are included in your total usage.</div>
               <div style={{ marginTop: 8 }}>
@@ -2216,23 +3248,91 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
               </div>
               {showLifetimeDetails && (
                 <div style={{ marginTop: 8, color: "#cbd5e1", fontSize: 13 }}>
-                  <div>Lifetime live minutes: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.streamingMinutes.lifetime ?? 0}</span> min</div>
+                  <div>Lifetime in-room minutes: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.inRoomMinutes.lifetime ?? 0}</span> min</div>
+                  {getUsageGating(user).canShowBroadcastMinutes && (
+                    <div>Lifetime broadcast minutes: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.broadcastMinutes.lifetime ?? 0}</span> min</div>
+                  )}
                   <div>Lifetime recording minutes: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.recordingMinutes.lifetime}</span> min</div>
                 </div>
               )}
             </div>
 
+            {(() => {
+              const eff = (user as any)?.effectiveEntitlements;
+              const planId = String(eff?.planId || "").trim();
+              const overagesAllowed = eff?.features?.overagesAllowed === true;
+              const canShowOveragesToggle = planId === "pro" || overagesAllowed;
+              if (!canShowOveragesToggle) return null;
+
+              const enabled = Boolean((user as any)?.billingSettings?.overagesEnabled);
+
+              return (
+                <div style={{
+                  marginTop: 8,
+                  marginBottom: 12,
+                  padding: 12,
+                  border: "1px solid rgba(255,255,255,0.06)",
+                  borderRadius: 12,
+                  background: "rgba(255,255,255,0.02)",
+                }}>
+                  <div style={{ fontWeight: 800, color: "#e5e7eb", marginBottom: 4 }}>Overages</div>
+                  <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 10 }}>
+                    $10 per additional 100 minutes — billed automatically after your stream ends.
+                  </div>
+
+                  <label style={{ display: "flex", alignItems: "center", gap: 10, fontWeight: 700, color: "#e5e7eb" }}>
+                    <input
+                      type="checkbox"
+                      checked={enabled}
+                      disabled={overagesToggleSaving}
+                      onChange={(e) => setOveragesEnabled(e.target.checked)}
+                    />
+                    <span>{enabled ? "Enabled" : "Disabled"}</span>
+                  </label>
+
+                  <div style={{ marginTop: 6, color: "#94a3b8", fontSize: 12 }}>
+                    Applies to in-room minutes over your plan limit.
+                  </div>
+
+                  {overagesToggleMessage && (
+                    <div style={{
+                      marginTop: 10,
+                      padding: 10,
+                      borderRadius: 8,
+                      border: "1px solid rgba(239,68,68,0.4)",
+                      background: "rgba(239,68,68,0.12)",
+                      color: "#fecdd3",
+                      fontSize: 13,
+                    }}>
+                      {overagesToggleMessage}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+
             <div style={S.usageGrid}>
               <UsageBar
-                label="Streaming Minutes"
-                used={usage.streamingMinutes.used}
+                label={usageLabels.inRoomMinutes}
+                used={usage.inRoomMinutes.used}
                 limit={
-                  usage.streamingMinutes.limit ||
+                  usage.inRoomMinutes.limit ||
                   currentPlan.limits?.monthlyMinutesIncluded ||
                   0
                 }
                 unit="min"
               />
+              {getUsageGating(user).canShowBroadcastMinutes && (
+                <UsageBar
+                  label={usageLabels.broadcastMinutes}
+                  used={usage.broadcastMinutes.used}
+                  limit={
+                    usage.broadcastMinutes.limit ||
+                    0
+                  }
+                  unit="min"
+                />
+              )}
               <UsageBar
                 label="Stream Destinations"
                 used={usage.rtmpDestinations.used}
@@ -2264,7 +3364,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
 
             <div style={{ marginTop: 16, padding: 12, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, background: "rgba(255,255,255,0.02)" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                <div style={{ color: "#e5e7eb", fontWeight: 600 }}>Emergency Download (Latest Recording)</div>
+                <div style={{ color: "#e5e7eb", fontWeight: 600 }}>Latest video (1-hour link)</div>
                 <button
                   type="button"
                   onClick={handleEmergencyDownload}
@@ -2279,12 +3379,43 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                     fontWeight: 600,
                   }}
                 >
-                  {emergencyLoading ? "Preparing..." : "Download latest recording"}
+                  {emergencyLoading ? "Checking..." : latestVideoState === "ready" ? "Open download link" : "Get latest video"}
                 </button>
               </div>
-              <div style={{ marginTop: 6, fontSize: 12, color: "#9ca3af" }}>
-                Use this if your in-room download didn’t work. Downloads are available for a limited time.
+              <div style={{ marginTop: 8, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <div style={{ fontSize: 12, color: "#9ca3af" }}>Room</div>
+                <input
+                  value={emergencyRoomId}
+                  onChange={(e) => setEmergencyRoomId(e.target.value)}
+                  placeholder="e.g. my-room"
+                  style={{
+                    flex: 1,
+                    minWidth: 180,
+                    padding: "8px 10px",
+                    borderRadius: 8,
+                    border: "1px solid rgba(148,163,184,0.25)",
+                    background: "rgba(2,6,23,0.35)",
+                    color: "#e5e7eb",
+                    outline: "none",
+                    fontSize: 13,
+                  }}
+                />
               </div>
+
+              <div style={{ marginTop: 6, fontSize: 12, color: "#9ca3af" }}>
+                Status: {latestVideoState === "none" ? "—" : latestVideoState}
+                {latestVideoState === "ready" && emergencyCountdown ? ` · Expires in ${emergencyCountdown}` : ""}
+              </div>
+
+              <div style={{ marginTop: 6, fontSize: 12, color: "#9ca3af" }}>
+                Signed links expire in 1 hour. Reopen this panel to generate a fresh link.
+              </div>
+
+              {latestVideoState === "ready" && !latestVideoUrl && (
+                <div style={{ marginTop: 6, fontSize: 12, color: "#fca5a5" }}>
+                  Recording is ready, but the URL is unavailable (storage not configured).
+                </div>
+              )}
               {emergencyMessage && (
                 <div style={{ marginTop: 6, fontSize: 12, color: "#fca5a5" }}>{emergencyMessage}</div>
               )}
@@ -2295,9 +3426,113 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
         {/* ================================================================ */}
         {/* SECTION 4: DESTINATIONS / STREAM KEYS */}
         {/* ================================================================ */}
-        {activeTab === "destinations" && (
+        {activeTab === "destinations" && platformTranscodeEnabled !== false && (
           <div style={{ marginTop: 16 }}>
-            <SettingsDestinations />
+            <SettingsDestinations
+              locked={Number(entitlements.maxDestinations ?? 0) < 1}
+              lockReason="Stream Destinations are not included in your current plan."
+              onUpgrade={() => setActiveTab("plan")}
+            />
+          </div>
+        )}
+
+        {/* ================================================================ */}
+        {/* SECTION 5: CLOSE ACCOUNT */}
+        {/* ================================================================ */}
+        {activeTab === "close" && (
+          <div style={{ marginTop: 16, display: "grid", gap: 16 }}>
+            <div style={S.card}>
+              <div style={S.cardHeader}>
+                <h2 style={S.cardTitle}>Close Account</h2>
+              </div>
+              <div style={{ color: "#94a3b8", fontSize: 13, lineHeight: 1.5 }}>
+                Manage cancellation and account deletion. Cancellation keeps access until the end of the current billing period.
+              </div>
+
+              <div style={{ marginTop: 14, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  onClick={cancelSubscription}
+                  disabled={closeCancelLoading}
+                  style={{
+                    ...S.primaryBtn,
+                    opacity: closeCancelLoading ? 0.8 : 1,
+                  }}
+                >
+                  {closeCancelLoading ? "Cancelling..." : "Cancel subscription (period end)"}
+                </button>
+              </div>
+
+              <div style={{ marginTop: 10, fontSize: 12, color: "#64748b" }}>
+                If you don't have an active subscription, this will no-op.
+              </div>
+            </div>
+
+            <div
+              style={{
+                ...S.card,
+                border: "1px solid rgba(239, 68, 68, 0.35)",
+                background: "rgba(239, 68, 68, 0.05)",
+              }}
+            >
+              <div style={S.cardHeader}>
+                <h2 style={{ ...S.cardTitle, color: "#fecaca" }}>Delete Account</h2>
+              </div>
+              <div style={{ color: "#fca5a5", fontSize: 13, lineHeight: 1.5 }}>
+                This immediately locks you out. Your data is scheduled for purge after 7 days.
+              </div>
+
+              <div style={{ marginTop: 6, color: "#fecaca", fontSize: 12, fontWeight: 800 }}>
+                Deleting your account cancels billing and permanently removes your content after 7 days.
+              </div>
+
+              <div style={{ marginTop: 12, display: "grid", gap: 10, maxWidth: 520 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 10, color: "#fee2e2", fontSize: 13 }}>
+                  <input
+                    type="checkbox"
+                    checked={closeDeleteConfirmed}
+                    onChange={(e) => setCloseDeleteConfirmed(e.target.checked)}
+                  />
+                  I understand this will immediately lock me out
+                </label>
+
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontSize: 12, color: "#fecaca", fontWeight: 700 }}>Type DELETE to confirm</div>
+                  <input
+                    value={closeDeleteText}
+                    onChange={(e) => setCloseDeleteText(e.target.value)}
+                    placeholder="DELETE"
+                    style={{
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(239, 68, 68, 0.45)",
+                      background: "rgba(2,6,23,0.6)",
+                      color: "#fff",
+                      outline: "none",
+                      fontSize: 14,
+                    }}
+                  />
+                </div>
+
+                <button
+                  type="button"
+                  onClick={deleteAccount}
+                  disabled={closeDeleteLoading}
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(239, 68, 68, 0.7)",
+                    background: closeDeleteLoading ? "rgba(239, 68, 68, 0.18)" : "rgba(239, 68, 68, 0.12)",
+                    color: "#fecaca",
+                    cursor: closeDeleteLoading ? "not-allowed" : "pointer",
+                    fontWeight: 800,
+                    letterSpacing: 0.2,
+                  }}
+                >
+                  {closeDeleteLoading ? "Deleting..." : "Delete account"}
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>
@@ -2427,7 +3662,9 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                     }}
                     disabled={!!actionLoading}
                   >
-                    {actionLoading === "starter_paid" ? "⏳ Redirecting..." : `Starter — $${starterPlan?.price ?? 15}/mo`}
+                    {actionLoading === "starter_paid"
+                      ? "⏳ Redirecting..."
+                      : `Starter — $${(starterPlan as any)?.priceMonthly ?? starterPlan?.price ?? "—"}/mo`}
                   </button>
 
                   <button
@@ -2439,7 +3676,9 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                     }}
                     disabled={!!actionLoading}
                   >
-                    {actionLoading === "pro" ? "⏳ Redirecting..." : `Pro — $${proPlan?.price ?? 49}/mo`}
+                    {actionLoading === "pro"
+                      ? "⏳ Redirecting..."
+                      : `Pro — $${(proPlan as any)?.priceMonthly ?? proPlan?.price ?? "—"}/mo`}
                   </button>
 
                   <button
@@ -2520,8 +3759,21 @@ function UsageBar({ label, used, limit, unit }: { label: string; used: number; l
   );
 }
 
-function FeatureRow({ label, value, pill = false, subBullets }: { label: string; value: boolean | number | string | undefined; pill?: boolean; subBullets?: string[] }) {
+function FeatureRow({
+  label,
+  value,
+  pill = false,
+  subBullets,
+  lockedText,
+}: {
+  label: string;
+  value: boolean | number | string | undefined;
+  pill?: boolean;
+  subBullets?: string[];
+  lockedText?: string;
+}) {
   const isBoolean = typeof value === "boolean";
+  const isLocked = !pill && isBoolean && value === false && !!lockedText;
   const isIncluded = isBoolean
     ? value
     : typeof value === "string"
@@ -2533,11 +3785,12 @@ function FeatureRow({ label, value, pill = false, subBullets }: { label: string;
       : false;
   const displayValue = pill
     ? (isIncluded ? "✓" : "—")
-    : (isBoolean ? (value ? "✓" : "—") : value?.toString() || "—");
+    : (isBoolean ? (value ? "✓" : (isLocked ? "🔒" : "—")) : value?.toString() || "—");
   const isEnabled = pill ? isIncluded : (value === true || (typeof value === "number" && value > 0) || (typeof value === "string" && value !== "—"));
+  const effectiveSubBullets = isLocked ? [lockedText!] : subBullets;
 
   return (
-    <li style={{ ...S.featureItem, opacity: isEnabled ? 1 : 0.5 }}>
+    <li style={{ ...S.featureItem, opacity: isEnabled ? 1 : 0.5 }} title={isLocked ? lockedText : undefined}>
       <span style={S.featureLabel}>{label}</span>
       <span
         style={
@@ -2552,9 +3805,9 @@ function FeatureRow({ label, value, pill = false, subBullets }: { label: string;
       >
         {displayValue}
       </span>
-      {subBullets && subBullets.length > 0 && (
+      {effectiveSubBullets && effectiveSubBullets.length > 0 && (
         <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: "#94a3b8", fontSize: 12, lineHeight: 1.5 }}>
-          {subBullets.map((item) => (
+          {effectiveSubBullets.map((item) => (
             <li key={item}>{item}</li>
           ))}
         </ul>

@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 
 export type RoomAccessClaims = {
   roomId: string;
@@ -14,14 +15,28 @@ export type RoomAccessClaims = {
   // LiveKit identity for the caller inside the room. Used to
   // bind room-level permissions to per-participant controls docs.
   identity: string;
+  // True when the caller was elevated to host due to internal-admin override.
+  // Useful for client UX decisions (e.g., avoid ending the room when an admin leaves).
+  adminOverride?: boolean;
 };
 
 function getRoomAccessSecret(): string {
   const env = String(process.env.NODE_ENV || "development").toLowerCase();
-  const raw = process.env.ROOM_ACCESS_TOKEN_SECRET || process.env.JWT_SECRET || "";
-  if ((env === "production" || env === "staging") && (!process.env.ROOM_ACCESS_TOKEN_SECRET || raw === "dev-secret")) {
-    throw new Error("ROOM_ACCESS_TOKEN_SECRET must be set (no dev-secret in production)");
+  const explicit = process.env.ROOM_ACCESS_TOKEN_SECRET;
+  const fallback = process.env.JWT_SECRET;
+  const raw = String(explicit || fallback || "").trim();
+
+  // In production/staging we require a real secret, but we allow falling back to
+  // JWT_SECRET for backwards compatibility with older deployments.
+  if (env === "production" || env === "staging") {
+    if (!raw || raw === "dev-secret") {
+      throw new Error("ROOM_ACCESS_TOKEN_SECRET (or JWT_SECRET) must be set (no dev-secret in production)");
+    }
+    if (!explicit && process.env.AUTH_DEBUG === "1") {
+      console.warn("[roomAccessToken] Using JWT_SECRET fallback for ROOM_ACCESS_TOKEN_SECRET");
+    }
   }
+
   return raw || "dev-secret";
 }
 
@@ -33,17 +48,17 @@ export function verifyRoomAccessToken(rawToken: string): RoomAccessClaims {
 export function getRoomAccess(req: any): { access: RoomAccessClaims; roomId: string; livekitRoomName: string } {
   const access = (req as any)?.roomAccess as RoomAccessClaims | undefined;
   if (!access || !access.roomId) {
-    throw new Error("room_token_required");
+    throw new Error(PERMISSION_ERRORS.ROOM_TOKEN_REQUIRED);
   }
 
   const roomId = String(access.roomId || "").trim();
   const livekitRoomName = String(access.livekitRoomName || "").trim();
 
   if (!roomId) {
-    throw new Error("room_token_required");
+    throw new Error(PERMISSION_ERRORS.ROOM_TOKEN_REQUIRED);
   }
   if (!livekitRoomName) {
-    throw new Error("livekit_room_missing");
+    throw new Error(PERMISSION_ERRORS.LIVEKIT_ROOM_MISSING);
   }
 
   if (process.env.AUTH_DEBUG === "1") {
@@ -89,17 +104,17 @@ export function requireRoomAccessToken(req: Request, res: Response, next: NextFu
   try {
     const raw = extractRoomAccessToken(req);
     if (!raw) {
-      return res.status(401).json({ error: "room_token_required" });
+      return res.status(401).json({ error: PERMISSION_ERRORS.ROOM_TOKEN_REQUIRED });
     }
 
     const claims = verifyRoomAccessToken(raw);
     if (!claims || !claims.roomId) {
-      return res.status(401).json({ error: "invalid_room_token" });
+      return res.status(401).json({ error: PERMISSION_ERRORS.INVALID_ROOM_TOKEN });
     }
 
     (req as any).roomAccess = claims;
     return next();
   } catch (err) {
-    return res.status(401).json({ error: "invalid_room_token" });
+    return res.status(401).json({ error: PERMISSION_ERRORS.INVALID_ROOM_TOKEN });
   }
 }

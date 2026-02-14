@@ -44,7 +44,7 @@ export default function Privacy() {
               <li style={styles.listItem}>
                 Billing information (handled securely by Stripe; we do not store card numbers)
               </li>
-              <li style={styles.listItem}>Usage data (streaming minutes, feature usage, diagnostics)</li>
+              <li style={styles.listItem}>Usage data (in-room minutes, broadcast minutes, feature usage, diagnostics)</li>
               <li style={styles.listItem}>Device and browser information</li>
               <li style={styles.listItem}>Cookies and similar technologies for authentication and analytics</li>
             </ul>

@@ -6,6 +6,7 @@ import { clampPresetForPlan, getPresetById, getUserPlanId, MEDIA_PRESETS, MediaP
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import crypto from "crypto";
 import { CURRENT_TOS_VERSION } from "../lib/tos";
 import {
@@ -14,11 +15,17 @@ import {
   type RolePermissionMap,
 } from "../lib/permissions/defaultRoleProfiles";
 import { getPlatformTranscodeEnabled } from "../lib/platformFlags";
+import { stripe } from "../lib/stripe";
+import { computeAccountMeBillingFields } from "../lib/billingTruth";
+import { normalizeRoomLayout } from "../lib/roomLayout";
 
 const router = Router();
 
 const DEFAULT_MEDIA_PREFS = {
   defaultLayout: "speaker" as "speaker" | "grid",
+  // Viewer/participant room layout default (used to seed new rooms).
+  // Recordings still use defaultLayout (speaker/grid composite).
+  defaultRoomLayout: { mode: "speaker" as const },
   defaultRecordingMode: "cloud" as "cloud" | "dual",
   defaultPresetId: "standard_720p30" as MediaPresetId,
   warnOnHighQuality: true,
@@ -189,9 +196,23 @@ export const SIMPLE_ROLE_DEFAULTS: Record<"participant" | "moderator" | "cohost"
 function normalizeMediaPrefs(raw: any, planId: string) {
   const prefs = { ...DEFAULT_MEDIA_PREFS, ...(raw || {}) };
   const { preset } = clampPresetForPlan(planId, prefs.defaultPresetId);
+
+  const defaultRoomLayout =
+    normalizeRoomLayout((prefs as any).defaultRoomLayout) ||
+    normalizeRoomLayout({ mode: (prefs as any).defaultLayout }) ||
+    { mode: "speaker" as const };
+
+  const derivedDefaultLayout: "speaker" | "grid" =
+    defaultRoomLayout.mode === "grid" || defaultRoomLayout.mode === "carousel" ? "grid" : "speaker";
+
   return {
     ...prefs,
     defaultPresetId: preset.id,
+    // Single source of truth: defaultRoomLayout drives composite recording layout.
+    defaultLayout: derivedDefaultLayout,
+    defaultRoomLayout,
+    // Single rule: destinations always reuse last-used selection.
+    destinationsDefaultMode: "last_used" as const,
     autoClamp: true,
     permissionsMode: prefs.permissionsMode === "advanced" ? "advanced" : "simple",
   };
@@ -204,6 +225,38 @@ async function getNormalizedMediaPrefs(uid: string) {
   return { mediaPrefs: normalizeMediaPrefs((data as any).mediaPrefs, planId), planId };
 }
 
+async function getSegmentedUiFlags() {
+  const [
+    contentLibrarySnap,
+    projectsSnap,
+    editorSnap,
+    myContentSnap,
+    myContentRecordingsSnap,
+  ] = await Promise.all([
+    firestore.collection("featureFlags").doc("contentLibraryEnabled").get(),
+    firestore.collection("featureFlags").doc("projectsEnabled").get(),
+    firestore.collection("featureFlags").doc("editorEnabled").get(),
+    firestore.collection("featureFlags").doc("myContentEnabled").get(),
+    firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
+  ]);
+
+  const contentLibraryData = contentLibrarySnap.exists ? ((contentLibrarySnap.data() as any) || {}) : {};
+  const projectsData = projectsSnap.exists ? ((projectsSnap.data() as any) || {}) : {};
+  const editorData = editorSnap.exists ? ((editorSnap.data() as any) || {}) : {};
+  const myContentData = myContentSnap.exists ? ((myContentSnap.data() as any) || {}) : {};
+  const myContentRecordingsData = myContentRecordingsSnap.exists
+    ? ((myContentRecordingsSnap.data() as any) || {})
+    : {};
+
+  // New flags default to DISABLED when missing.
+  return {
+    contentLibraryEnabled: contentLibraryData.enabled === true,
+    projectsEnabled: projectsData.enabled === true,
+    editorEnabled: editorData.enabled === true,
+    myContentEnabled: myContentData.enabled === true,
+    myContentRecordingsEnabled: myContentRecordingsData.enabled === true,
+  };
+}
 // Advanced permissions have been fully removed in favor of a single,
 // simple permissions mode. Keep a minimal helper that always reports
 // advanced permissions as disabled so existing callers continue to
@@ -411,7 +464,7 @@ router.post("/init", async (req, res) => {
     const uid: string | undefined = user.uid;
 
     if (!uid) {
-      return res.status(401).json({ error: "unauthorized" });
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
     const accountsRef = firestore.collection("accounts").doc(uid);
@@ -465,7 +518,7 @@ router.post("/init", async (req, res) => {
 router.get("/me", async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
     const snap = await firestore.collection("users").doc(uid).get();
     if (!snap.exists) return res.status(404).json({ error: "user_not_found" });
@@ -504,6 +557,9 @@ router.get("/me", async (req, res) => {
     const recordingLifetime = toNumber(
       usageMinutes.recording?.lifetime ?? ytdMinutes.recording?.lifetime
     );
+
+    const transcodeCurrent = toNumber(usageMinutes.transcode?.currentPeriod ?? usage.transcodeMinutes);
+    const transcodeLifetime = toNumber(ytdMinutes.transcode?.lifetime ?? ytd.transcodeMinutes);
 
     const effectivePermissionsMode = "simple" as const;
     const permissionsModeLockReason = "plan" as const;
@@ -552,6 +608,8 @@ router.get("/me", async (req, res) => {
       // older callers can continue to function.
       const rtmpDestinationsMax = resolveMaxDestinations(limits);
 
+      const transcodeLimitRaw = (limits as any).transcodeMinutes;
+
       effectiveEntitlements = {
         planId: entitlements.planId,
         planName: plan.name || entitlements.planId,
@@ -568,6 +626,9 @@ router.get("/me", async (req, res) => {
           hlsEnabled: canHls,
           hlsCustomizationEnabled,
           canCustomizeHlsPage: hlsCustomizationEnabled,
+
+          // Optional: surface for client gating (e.g. Overages toggle).
+          overagesAllowed: !!(features as any).overagesAllowed,
         },
         limits: {
           // Canonical numeric usage/feature caps
@@ -576,7 +637,9 @@ router.get("/me", async (req, res) => {
           maxDestinations: rtmpDestinationsMax,
           maxGuests: Number(limits.maxGuests || 0),
           participantMinutes: Number(limits.monthlyMinutes || limits.monthlyMinutesIncluded || 0),
-          transcodeMinutes: Number(limits.transcodeMinutes || 0),
+          // IMPORTANT: omit this field entirely when the plan does not include broadcast/transcode.
+          // Client gating relies on presence (typeof === "number").
+          transcodeMinutes: typeof transcodeLimitRaw === "number" ? Number(transcodeLimitRaw) : undefined,
           maxRecordingMinutesPerClip: Number(limits.maxRecordingMinutesPerClip || 0),
         },
         caps: entitlements.caps || {},
@@ -587,10 +650,35 @@ router.get("/me", async (req, res) => {
 
     const platformTranscodeEnabled = getPlatformTranscodeEnabled();
 
-    return res.json({
+      const responsePlanId = effectiveEntitlements?.planId ?? entitlements.planId;
+      const { planId: normalizedPlanId, billingTruth } = computeAccountMeBillingFields(data, responsePlanId, Date.now());
+
+        // Lightweight backfill for legacy users that predate billingTruth.
+        // Only write when missing to avoid turning /me into a write-heavy endpoint.
+        try {
+          const planIdMissing = typeof (data as any).planId !== "string" || !String((data as any).planId).trim();
+          const billingTruthMissing = !(data as any).billingTruth;
+          if (planIdMissing || billingTruthMissing) {
+            const patch: any = { updatedAt: Date.now() };
+            if (planIdMissing) patch.planId = "free";
+            if (billingTruthMissing) patch.billingTruth = billingTruth;
+            firestore.collection("users").doc(uid).set(patch, { merge: true }).catch(() => {});
+          }
+        } catch {
+          // non-fatal
+        }
+
+    const payload = {
       id: uid,
       email: data.email || null,
       displayName: data.displayName || null,
+      billingTruth,
+      billingSettings: {
+        overagesEnabled:
+          ((data as any)?.billingSettings?.overagesEnabled ??
+            (data as any)?.billing?.overagesEnabled ??
+            (data as any)?.overagesEnabled) === true,
+      },
       permissionsMode: mediaPrefs.permissionsMode,
       advancedPermissions: {
         enabled: false,
@@ -617,11 +705,25 @@ router.get("/me", async (req, res) => {
         hlsSettingsTab: hlsUi.enabled,
         transcodeEnabled: platformTranscodeEnabled,
         recordingEnabled: recordingUi.enabled,
+          ...await getSegmentedUiFlags(),
       },
-      planId: effectiveEntitlements?.planId ?? entitlements.planId,
+            planId: normalizedPlanId,
       effectiveEntitlements,
       usage: {
         minutes: {
+          // Canonical / UX-safe names:
+          // - inRoom: participant minutes (per participant)
+          // - broadcast: transcode/egress minutes (HLS/RTMP broadcasting)
+          inRoom: {
+            currentPeriod: liveCurrentBase,
+            lifetime: liveLifetimeBase,
+          },
+          broadcast: {
+            currentPeriod: transcodeCurrent,
+            lifetime: transcodeLifetime,
+          },
+
+          // Backwards compatibility fields (legacy callers may still reference these)
           live: {
             currentPeriod: liveCurrent,
             lifetime: liveLifetime,
@@ -636,10 +738,101 @@ router.get("/me", async (req, res) => {
           },
         },
       },
-    });
+    } satisfies { planId: string; billingTruth: unknown; [k: string]: unknown };
+
+    return res.json(payload);
   } catch (err: any) {
     console.error("[account/me] error", err);
     return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Close Account
+// POST /api/account/close
+// Body: { mode: "cancel_only" | "delete" }
+// - cancel_only: cancel_at_period_end=true (stop future billing, keep access until period end)
+// - delete: cancel subscription (if any), revoke sessions, soft delete for 7 days, immediate lockout
+// ---------------------------------------------------------------------------
+
+router.post("/close", async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    const { mode } = (req.body || {}) as { mode?: "cancel_only" | "delete" };
+    if (mode !== "cancel_only" && mode !== "delete") {
+      return res.status(400).json({ error: "invalid_mode" });
+    }
+
+    const userRef = firestore.collection("users").doc(uid);
+    const snap = await userRef.get();
+    if (!snap.exists) return res.status(404).json({ error: "user_not_found" });
+    const user = (snap.data() as any) || {};
+
+    const subscriptionId: string | undefined = user?.billing?.subscriptionId || user?.stripeSubscriptionId;
+
+    const now = Date.now();
+    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
+
+    if (mode === "cancel_only") {
+      if (subscriptionId) {
+        try {
+          const updated = await stripe.subscriptions.update(subscriptionId, {
+            cancel_at_period_end: true,
+          } as any);
+
+          const currentPeriodEndSec = (updated as any).current_period_end as number | undefined;
+          const currentPeriodEnd = typeof currentPeriodEndSec === "number" ? currentPeriodEndSec * 1000 : null;
+
+          await userRef.set(
+            {
+              billing: {
+                ...(user?.billing || {}),
+                cancelAtPeriodEnd: true,
+                currentPeriodEnd,
+                updatedAt: now,
+              },
+              updatedAt: now,
+            },
+            { merge: true }
+          );
+        } catch (err: any) {
+          console.error("[account/close] cancel_only failed to update Stripe subscription", err?.message || err);
+          return res.status(500).json({ error: "cancel_subscription_failed" });
+        }
+      }
+
+      return res.json({ ok: true, mode: "cancel_only" });
+    }
+
+    // mode === "delete"
+    if (subscriptionId) {
+      try {
+        await stripe.subscriptions.cancel(subscriptionId);
+      } catch (err: any) {
+        console.error("[account/close] delete failed to cancel Stripe subscription", err?.message || err);
+        // Continue: user requested deletion should still lock out immediately.
+      }
+    }
+
+    await userRef.set(
+      {
+        accountStatus: "deleted",
+        deletedAtMs: now,
+        deleteAfterMs: now + SEVEN_DAYS_MS,
+        authRevokedAtMs: now,
+        deletionRequestedAtMs: now,
+        deletionReason: "user_requested",
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    return res.json({ ok: true, mode: "delete", deletedAtMs: now, deleteAfterMs: now + SEVEN_DAYS_MS });
+  } catch (err: any) {
+    console.error("POST /api/account/close failed", err?.message || err);
+    return res.status(500).json({ error: "close_account_failed" });
   }
 });
 
@@ -650,13 +843,16 @@ router.get("/presets", (_req, res) => {
 router.patch("/media-prefs", async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     const planId = await getUserPlanId(uid);
     const body = req.body || {};
     const updates: any = {};
 
-    if (body.defaultLayout === "speaker" || body.defaultLayout === "grid") {
-      updates.defaultLayout = body.defaultLayout;
+    if (body.defaultRoomLayout && typeof body.defaultRoomLayout === "object") {
+      const normalized = normalizeRoomLayout(body.defaultRoomLayout);
+      if (normalized) {
+        updates.defaultRoomLayout = normalized;
+      }
     }
     if (body.defaultRecordingMode === "cloud" || body.defaultRecordingMode === "dual") {
       updates.defaultRecordingMode = body.defaultRecordingMode;
@@ -664,9 +860,8 @@ router.patch("/media-prefs", async (req, res) => {
     if (typeof body.warnOnHighQuality === "boolean") {
       updates.warnOnHighQuality = body.warnOnHighQuality;
     }
-    if (body.destinationsDefaultMode === "last_used" || body.destinationsDefaultMode === "pick_each_time") {
-      updates.destinationsDefaultMode = body.destinationsDefaultMode;
-    }
+    // Destinations default is intentionally not user-configurable.
+    // Always reuse last used selection for a single cohesive behavior.
     if (body.defaultPresetId) {
       const preset = getPresetById(String(body.defaultPresetId));
       const { preset: effective, clamped } = clampPresetForPlan(planId, preset.id);
@@ -699,7 +894,7 @@ router.patch("/media-prefs", async (req, res) => {
 router.post("/accept-tos", async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
     const userRef = firestore.collection("users").doc(uid);
     const existing = await userRef.get();
@@ -733,7 +928,7 @@ router.post("/accept-tos", async (req, res) => {
 router.get("/cohost-profile", async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
     const { mediaPrefs } = await getNormalizedMediaPrefs(uid);
     const adv = await getAdvancedPermissionsEnabled(uid);
@@ -762,7 +957,7 @@ router.get("/cohost-profile", async (req, res) => {
 router.get("/role-presets", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
     // Role defaults are now locked to two templates: participant and cohost.
     // Any legacy moderator data is ignored for new writes and UI, but can
@@ -791,7 +986,7 @@ router.get("/role-presets", requireAuth, async (req, res) => {
 router.patch("/role-presets/:presetId", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
     const presetId = parseRolePresetId(req.params.presetId);
     if (!presetId) return res.status(400).json({ error: "invalid_presetId" });
@@ -847,7 +1042,7 @@ router.patch("/role-presets/:presetId", requireAuth, async (req, res) => {
 router.patch("/cohost-profile", async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
     const { mediaPrefs } = await getNormalizedMediaPrefs(uid);
     const adv = await getAdvancedPermissionsEnabled(uid);

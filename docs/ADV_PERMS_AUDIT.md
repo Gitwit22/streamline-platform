@@ -1,6 +1,8 @@
 # Advanced Permissions Audit
 
-> NOTE: This document is descriptive only. It does not change behavior. It summarizes how advanced permissions currently work across server guards, token minting, UI gating, and plan entitlements, and lists concrete patch suggestions.
+> NOTE: This document is descriptive only. It does not change behavior.
+>
+> Current reality (as of `x-sl-token-grants: v3-no-sources`): RTC token minting is centralized at `POST /api/rooms/:roomId/token` in `streamline-server/routes/roomGuestAccess.ts` and is intentionally minimal/stable. The legacy `streamline-server/routes/roomToken.ts` implementation is no longer mounted.
 
 ---
 
@@ -45,14 +47,13 @@ No extra keys appear in the UI beyond this set; and every key in the server `Rol
 
 ### 2) Simple vs Advanced mode resolution
 
-- Advanced flag behavior is documented in `docs/ADVANCED_PERMISSIONS_FLAG.md` and enforced in `routes/account.ts`:
-  - `getAdvancedPermissionsEnabled(uid)` in `routes/roomToken.ts` combines:
+- Advanced flag behavior is documented in `docs/ADVANCED_PERMISSIONS_FLAG.md` and enforced in `routes/account.ts`.
+  - NOTE: Advanced permissions currently apply primarily to server-side endpoint guards (e.g. `assertRoomPerm`) and UI gating. They are not fully reflected in the RTC token mint endpoint.
     - Plan feature `features.advancedPermissions`.
     - Per-user `advancedPermissionsOverride`.
     - Global lock via `featureFlags/forceSimpleMode`.
-- `getPermissionsMode(uid)` (server, `routes/roomToken.ts`):
-  - Reads `mediaPrefs.permissionsMode` from the user doc.
-  - Coerces to `"simple"` when Advanced is disabled.
+- `permissionsMode` (`mediaPrefs.permissionsMode`) is still used by account/roles UI and related logic.
+  - NOTE: The RTC token mint endpoint does not currently branch on permissionsMode.
 
 - Effective role profiles used at runtime are produced by `loadEffectiveRoles(uid, advancedEnabled)` in `routes/account.ts`:
   - When *simple mode* is active:
@@ -63,27 +64,16 @@ No extra keys appear in the UI beyond this set; and every key in the server `Rol
     - Loads user `roleProfiles` from the `users/{uid}` doc, runs them through `normalizeRoleProfiles`.
     - Filters `quickRoleIds` to only those present in the current role profiles; falls back to all default templates when empty.
 
-### 3) Role resolution at token-mint time (`/api/roomToken`)
+### 3) Role resolution at RTC token-mint time (`POST /api/rooms/:roomId/token`)
 
-- Implementation: `resolveRoleForInvite(opts)` and `getPermissionsMode()` in `streamline-server/routes/roomToken.ts`.
+- Implementation: `streamline-server/routes/roomGuestAccess.ts`.
 
-- In **simple mode**:
-  - Allowed requested roles: `viewer`, `participant`, `cohost`, `moderator`, `host` (via `allowedSimpleRoles`).
-  - `requestedRole` is normalized; unsupported roles fall back to `participant`.
-  - If an unsupported role is explicitly requested, the server returns an error `simple_mode_locked` (viewer tokens are disabled in simple mode).
-  - Role→permissions mapping:
-    - Effective role key (one of viewer/participant/cohost/moderator/host) is chosen.
-    - Base permissions come from `SIMPLE_ROLE_DEFAULTS[effectiveRoleKey]`.
-    - `intersectPermissionsWithEntitlements(basePerms, uid)` clamps permissions to plan entitlements (recording/multistream).
-
-- In **advanced mode**:
-  - Allowed `GrantRole` values: `host`, `participant`, `moderator`, `viewer`, `cohost`.
-  - `normalizedRole` is one of those; `grantRole` is derived by collapsing some roles:
-    - `moderator` → LiveKit `moderator` grant with moderation abilities.
-    - `cohost` → LiveKit `participant` grant (permissions still reflect cohost-level flags).
-  - `effectiveRoleKey` is the canonical label used in the roomAccess token for UI.
-  - Base permissions are currently hard-coded to all-true except `canModerate` and `canAnalytics` (for moderator).
-    - These are then intersected with entitlements via `intersectPermissionsWithEntitlements`.
+- Current behavior:
+  - **Owner (authed)**: `host` (LiveKit `roomAdmin: true`, publish/subscribe).
+  - **Authed non-owner**: `participant` (publish/subscribe).
+  - **Guest session**: `viewer` (subscribe-only), only allowed when `ALLOW_GUEST_RTC_JOIN=1` and a valid `sl_guest` cookie exists.
+  - The endpoint is **auth-only by default** (rooms default `requiresAuth: true`).
+  - Client-requested role values are not trusted for RTC grants.
 
 ### 4) Moderator permissions
 
@@ -99,13 +89,16 @@ Below, “perm key required” refers to `RoomPermissionKey` / `RolePermissions`
 
 ### 1) Room token minting
 
-- Endpoint: `POST /api/roomToken` in `streamline-server/routes/roomToken.ts`.
+- Endpoint: `POST /api/rooms/:roomId/token` in `streamline-server/routes/roomGuestAccess.ts`.
 - Intended permissions:
   - Determines what LiveKit can do (publish/subscribe, admin) and what the roomAccess token announces as `permissions`.
 - Actual checks:
-  - Auth via `requireAuthOrInvite` (host or invite token).
-  - Plan / Advanced entitlements via `getAdvancedPermissionsEnabled`, `getPermissionsMode`, `intersectPermissionsWithEntitlements`.
-  - No direct `assertRoomPerm` on an existing room, because room creation and first token mint are coupled.
+  - Auth required by default (`requiresAuth` defaults to true for older room docs).
+  - Room policy enforcement:
+    - `visibility` defaults to `unlisted`; `private` rooms are owner-only.
+    - `requiresPayment` triggers `402 payment_required` for non-owners.
+    - Guests can only join once the room is live (`409 room_not_live`).
+  - Adds response header `x-sl-token-grants: v3-no-sources` so deployments can be verified quickly.
 
 ### 2) Invites
 
@@ -196,7 +189,8 @@ Below, “perm key required” refers to `RoomPermissionKey` / `RolePermissions`
 
 ## D. Permissions in Tokens (LiveKit Grants)
 
-- File: `streamline-server/routes/roomToken.ts`.
+- Primary file: `streamline-server/routes/roomGuestAccess.ts`.
+- Legacy (not mounted): `streamline-server/routes/roomToken.ts`.
 
 ### 1) viewer tokens
 

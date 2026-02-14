@@ -1,5 +1,6 @@
 import { type CSSProperties, useEffect, useMemo, useState } from "react";
 import { API_BASE } from "../lib/apiBase";
+import { apiFetchAuth } from "../lib/api";
 
 export type RoomHlsConfig = {
   enabled: boolean;
@@ -63,10 +64,11 @@ export default function HlsSetupTab({
       setLoading(true);
       setError(null);
       try {
-        const res = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(safeRoomId)}/hls-config`, {
-          credentials: "include",
-          cache: "no-store",
-        });
+        const res = await apiFetchAuth(
+          `${API_BASE}/api/rooms/${encodeURIComponent(safeRoomId)}/hls-config`,
+          { cache: "no-store" },
+          { allowNonOk: true }
+        );
         const payload = await res.json().catch(() => null);
         if (!res.ok) {
           throw new Error(payload?.error || "Failed to load HLS setup.");
@@ -100,19 +102,22 @@ export default function HlsSetupTab({
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(safeRoomId)}/hls-config`, {
-        method: "PUT",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          enabled: !!config.enabled,
-          title: config.title ?? "",
-          subtitle: config.subtitle ?? "",
-          logoUrl: config.logoUrl ?? "",
-          offlineMessage: config.offlineMessage ?? "",
-          theme: config.theme === "light" ? "light" : "dark",
-        }),
-      });
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/rooms/${encodeURIComponent(safeRoomId)}/hls-config`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: !!config.enabled,
+            title: config.title ?? "",
+            subtitle: config.subtitle ?? "",
+            logoUrl: config.logoUrl ?? "",
+            offlineMessage: config.offlineMessage ?? "",
+            theme: config.theme === "light" ? "light" : "dark",
+          }),
+        },
+        { allowNonOk: true }
+      );
       const payload = await res.json().catch(() => null);
       if (!res.ok) {
         throw new Error(payload?.error || "Failed to save HLS setup.");

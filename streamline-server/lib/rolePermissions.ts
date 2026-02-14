@@ -1,4 +1,6 @@
+import { PERMISSION_ERRORS, type PermissionErrorCode } from "./permissionErrors";
 import type { Request } from "express";
+import type { LimitErrorCode } from "./limitErrors";
 import { getEffectiveEntitlements } from "./effectiveEntitlements";
 import type { InviteClaims } from "../middleware/requireAuth";
 import type { RoomAccessClaims } from "../middleware/roomAccessToken";
@@ -87,9 +89,9 @@ export type RoomGuardContext = {
 
 export class RoomPermissionError extends Error {
   status: number;
-  code: string;
+  code: PermissionErrorCode | LimitErrorCode;
 
-  constructor(status: number, code: string, message?: string) {
+  constructor(status: number, code: PermissionErrorCode | LimitErrorCode, message?: string) {
     super(message || code);
     this.status = status;
     this.code = code;
@@ -125,17 +127,27 @@ function ensureBooleanPerms(perms: Partial<RolePermissions> | undefined): RolePe
     canRemoveGuests: false,
   };
   const src = perms || {};
+  const canModerate = !!(src as any).canModerate;
+
+  // Backwards compatibility: older roomAccessToken payloads only carried
+  // canModerate; treat that as allowing basic moderation actions.
+  const canMuteGuests = Object.prototype.hasOwnProperty.call(src, "canMuteGuests")
+    ? !!(src as any).canMuteGuests
+    : canModerate;
+  const canRemoveGuests = Object.prototype.hasOwnProperty.call(src, "canRemoveGuests")
+    ? !!(src as any).canRemoveGuests
+    : canModerate;
   return {
     canStream: !!src.canStream,
     canRecord: !!src.canRecord,
     canDestinations: !!src.canDestinations,
-    canModerate: !!src.canModerate,
+    canModerate,
     canLayout: !!src.canLayout,
     canScreenShare: !!src.canScreenShare,
     canInvite: !!src.canInvite,
     canAnalytics: !!src.canAnalytics,
-    canMuteGuests: !!src.canMuteGuests,
-    canRemoveGuests: !!src.canRemoveGuests,
+    canMuteGuests,
+    canRemoveGuests,
   };
 }
 
@@ -148,7 +160,7 @@ export async function assertRoomPerm(
 ): Promise<RoomGuardContext> {
   const trimmedRoomId = String(roomId || "").trim();
   if (!trimmedRoomId) {
-    throw new RoomPermissionError(400, "invalid_room", "roomId is required");
+    throw new RoomPermissionError(400, PERMISSION_ERRORS.INVALID_ROOM, "roomId is required");
   }
 
   let roomData: RoomDoc;
@@ -156,8 +168,8 @@ export async function assertRoomPerm(
     const { data } = await getRoom(trimmedRoomId);
     roomData = data;
   } catch (err: any) {
-    if (err?.message === "room_not_found") {
-      throw new RoomPermissionError(404, "room_not_found");
+    if (err?.message === PERMISSION_ERRORS.ROOM_NOT_FOUND) {
+      throw new RoomPermissionError(404, PERMISSION_ERRORS.ROOM_NOT_FOUND);
     }
     throw err;
   }
@@ -175,7 +187,7 @@ export async function assertRoomPerm(
   const roomAccess = (req as any).roomAccess as RoomAccessClaims | undefined;
 
   if (!user && !invite && !roomAccess) {
-    throw new RoomPermissionError(401, "unauthorized");
+    throw new RoomPermissionError(401, PERMISSION_ERRORS.UNAUTHORIZED);
   }
 
   let actorType: RoomGuardContext["actorType"];
@@ -185,7 +197,7 @@ export async function assertRoomPerm(
 
   if (roomAccess && roomAccess.roomId) {
     if (roomAccess.roomId !== trimmedRoomId) {
-      throw new RoomPermissionError(403, "room_mismatch");
+      throw new RoomPermissionError(403, PERMISSION_ERRORS.ROOM_MISMATCH);
     }
     actorType = "roomAccess";
     role = (roomAccess.role as any) || "viewer";
@@ -237,7 +249,7 @@ export async function assertRoomPerm(
   }
 
   if (!permissions[perm]) {
-    throw new RoomPermissionError(403, "insufficient_permissions");
+    throw new RoomPermissionError(403, PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS);
   }
 
   return {
@@ -255,7 +267,7 @@ export async function assertRoomPerm(
 export async function assertRoomOwner(req: Request, roomId: string): Promise<RoomGuardContext> {
   const ctx = await assertRoomPerm(req, roomId, "canStream");
   if (ctx.role !== "owner") {
-    throw new RoomPermissionError(403, "not_room_owner");
+    throw new RoomPermissionError(403, PERMISSION_ERRORS.NOT_ROOM_OWNER);
   }
   return ctx;
 }
@@ -267,22 +279,22 @@ export async function assertRoomViewer(req: Request, roomId: string): Promise<Ro
     const { data } = await getRoom(trimmedRoomId);
     roomData = data;
   } catch (err: any) {
-    if (err?.message === "room_not_found") {
-      throw new RoomPermissionError(404, "room_not_found");
+    if (err?.message === PERMISSION_ERRORS.ROOM_NOT_FOUND) {
+      throw new RoomPermissionError(404, PERMISSION_ERRORS.ROOM_NOT_FOUND);
     }
     throw err;
   }
 
   const roomAccess = (req as any).roomAccess as RoomAccessClaims | undefined;
   if (roomAccess && roomAccess.roomId !== trimmedRoomId) {
-    throw new RoomPermissionError(403, "room_mismatch");
+    throw new RoomPermissionError(403, PERMISSION_ERRORS.ROOM_MISMATCH);
   }
 
   const user = (req as any).user as { uid: string } | undefined;
   const invite = (req as any).invite as InviteClaims | undefined;
 
   if (!roomAccess && !invite && !user) {
-    throw new RoomPermissionError(401, "unauthorized");
+    throw new RoomPermissionError(401, PERMISSION_ERRORS.UNAUTHORIZED);
   }
 
   return {

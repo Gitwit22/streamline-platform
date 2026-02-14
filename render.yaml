@@ -32,6 +32,10 @@ services:
       - key: JWT_SECRET
         sync: false
 
+      # Maintenance
+      - key: MAINTENANCE_KEY
+        sync: false
+
       # Firebase (if you use it server-side)
       - key: GOOGLE_APPLICATION_CREDENTIALS
         sync: false
@@ -77,3 +81,22 @@ services:
       - type: rewrite
         source: /*
         destination: /index.html
+
+  # -------------------------
+  # MAINTENANCE CRON (TEST)
+  # -------------------------
+  - type: cron
+    name: streamline-expire-emergency-recordings
+    runtime: node
+    plan: free
+    repo: https://github.com/Gitwit22/streamline-platform
+    branch: test
+    rootDir: streamline-server
+    buildCommand: npm install && npm run build
+    schedule: "*/10 * * * *"
+    command: npm run cron:expire-emergency
+    envVars:
+      - key: MAINTENANCE_EXPIRE_URL
+        sync: false
+      - key: MAINTENANCE_KEY
+        sync: false

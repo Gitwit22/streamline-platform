@@ -1,12 +1,22 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
+import { apiFetchAuth } from "../lib/api";
 
 interface UsageData {
   userId: string;
   email: string;
   displayName?: string;
   planId: "free" | "starter" | "pro" | "basic" | "enterprise" | "internal_unlimited";
+  billingTruthStatus?: "free" | "active" | "trialing" | "past_due" | "canceled" | string;
+  stripeConnected?: boolean;
+  stripeCustomerId?: string | null;
+  billingEnabled?: boolean;
+  platformBillingEnabled?: boolean;
+  effectiveBillingEnabled?: boolean;
   minutesUsed: number;
+  overageParticipantMinutes?: number;
+  overageTranscodeMinutes?: number;
+  overageMinutesTotal?: number;
   bonusMinutes: number;
   planLimit: number;
   effectiveLimit: number;
@@ -68,7 +78,7 @@ export default function AdminUsage() {
         usageUrl.searchParams.append("plan", selectedPlan);
       }
 
-      const usageRes = await fetch(usageUrl.toString());
+      const usageRes = await apiFetchAuth(usageUrl.toString(), {}, { allowNonOk: true });
       
       if (usageRes.status === 403) {
         setError("Access denied. Admin privileges required.");
@@ -87,7 +97,7 @@ export default function AdminUsage() {
       const statsUrl = new URL(`${API_BASE}/api/admin/stats`);
       statsUrl.searchParams.append("adminUserId", adminUserId);
 
-      const statsRes = await fetch(statsUrl.toString());
+      const statsRes = await apiFetchAuth(statsUrl.toString(), {}, { allowNonOk: true });
       if (statsRes.ok) {
         const statsJson = await statsRes.json();
         setStats(statsJson);
@@ -105,7 +115,7 @@ export default function AdminUsage() {
     if (!selectedUser || !minutesToGrant) return;
 
     try {
-      const res = await fetch(`${API_BASE}/api/admin/users/${selectedUser.userId}/grant-minutes`, {
+      const res = await apiFetchAuth(`${API_BASE}/api/admin/users/${selectedUser.userId}/grant-minutes`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -133,7 +143,7 @@ export default function AdminUsage() {
     if (!selectedUser) return;
 
     try {
-      const res = await fetch(`${API_BASE}/api/admin/users/${selectedUser.userId}/change-plan`, {
+      const res = await apiFetchAuth(`${API_BASE}/api/admin/users/${selectedUser.userId}/change-plan`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -157,10 +167,12 @@ export default function AdminUsage() {
   };
 
   const handleToggleBilling = async (user: UsageData) => {
-    const newState = !user.isBlocked; // Simplified for this example
+    // billingEnabled is tri-state in Firestore; missing => true.
+    const current = user.billingEnabled !== false;
+    const newState = !current;
 
     try {
-      const res = await fetch(`${API_BASE}/api/admin/users/${user.userId}/toggle-billing`, {
+      const res = await apiFetchAuth(`${API_BASE}/api/admin/users/${user.userId}/toggle-billing`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -208,10 +220,10 @@ export default function AdminUsage() {
         <div className="text-center">
           <div className="text-2xl text-red-500 mb-4">❌ {error}</div>
           <button
-            onClick={() => nav("/dashboard")}
+            onClick={() => nav("/admin/dashboard")}
             className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded"
           >
-            Back to Dashboard
+            Back to Admin Dashboard
           </button>
         </div>
       </div>
@@ -228,7 +240,7 @@ export default function AdminUsage() {
             <p className="text-gray-400">Manage users, plans, and feature flags</p>
           </div>
           <button
-            onClick={() => nav("/dashboard")}
+            onClick={() => nav("/admin/dashboard")}
             className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded transition"
           >
             ← Back
@@ -303,7 +315,14 @@ export default function AdminUsage() {
                 <tr>
                   <th className="px-4 py-3 text-left text-sm font-semibold">User</th>
                   <th className="px-4 py-3 text-left text-sm font-semibold">Plan</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold">Billing</th>
                   <th className="px-4 py-3 text-right text-sm font-semibold">Usage</th>
+                  <th className="px-4 py-3 text-right text-sm font-semibold">
+                    <div>Overage (this month)</div>
+                    <div className="text-xs font-normal text-gray-400">
+                      Minutes used beyond the plan’s included limits.
+                    </div>
+                  </th>
                   <th className="px-4 py-3 text-right text-sm font-semibold">Limit</th>
                   <th className="px-4 py-3 text-right text-sm font-semibold">Bonus</th>
                   <th className="px-4 py-3 text-center text-sm font-semibold">Status</th>
@@ -326,8 +345,26 @@ export default function AdminUsage() {
                         {user.planId.toUpperCase()}
                       </span>
                     </td>
+                    <td className="px-4 py-3">
+                      <div className="flex flex-col gap-1">
+                        <span className="text-sm font-semibold">
+                          {String(user.billingTruthStatus || "free").toLowerCase() === "free"
+                            ? "Free (ready)"
+                            : String(user.billingTruthStatus || "unknown")}
+                        </span>
+                        <span className="text-xs text-gray-400">
+                          Stripe: {user.stripeConnected ? "connected" : "not connected"}
+                        </span>
+                      </div>
+                    </td>
                     <td className="px-4 py-3 text-right font-mono">
                       {user.minutesUsed} min
+                    </td>
+                    <td className="px-4 py-3 text-right font-mono text-orange-300">
+                      {user.overageMinutesTotal ?? 0} min
+                      <div className="text-xs text-orange-200/80">
+                        P:{user.overageParticipantMinutes ?? 0} / T:{user.overageTranscodeMinutes ?? 0}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
                       {user.effectiveLimit} min
@@ -368,6 +405,21 @@ export default function AdminUsage() {
                           title="Change plan"
                         >
                           Change Plan
+                        </button>
+                        <button
+                          onClick={() => handleToggleBilling(user)}
+                          className={`px-3 py-1 rounded text-xs transition ${
+                            user.billingEnabled === false
+                              ? "bg-gray-700 hover:bg-gray-600"
+                              : "bg-purple-600 hover:bg-purple-500"
+                          }`}
+                          title={
+                            user.billingEnabled === false
+                              ? "Enable billing for this user (Stripe live)"
+                              : "Disable billing for this user (Test Mode)"
+                          }
+                        >
+                          {user.billingEnabled === false ? "Billing: OFF" : "Billing: ON"}
                         </button>
                       </div>
                     </td>
