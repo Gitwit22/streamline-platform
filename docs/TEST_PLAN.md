@@ -40,35 +40,32 @@
 **Expected:**
 - ✅ Button text changes to "⏳ Ending..." and becomes disabled
 - ✅ Recording stops
-- ✅ Auto-redirect to `/stream-summary/rec_xxx`
+- ✅ Canonical post-stream page is `/room-exit/rec_xxx`
+- ✅ Visiting `/stream-summary/rec_xxx` redirects to `/room-exit/rec_xxx` (legacy alias)
 - ✅ RecordingID matches the one from indicator
 
 ---
 
-### Step 4: Watch Stream Summary
+### Step 4: Post-Stream Exit
 ```
-On /stream-summary page:
-9. See the recording title
-10. Watch the progress bar fill up (8 seconds)
+On /room-exit page:
+9. If a recording exists, try Download MP4
+10. Confirm the signed link opens in a new tab
 ```
 
 **Expected:**
-- ✅ Page title matches your stream name
-- ✅ Status shows "⏳ Processing"
-- ✅ Progress bar at bottom-left animates from 0% → 100%
-- ✅ Percentage number updates (45%, 60%, etc.)
-- ✅ Duration/Viewers/Peak/Status stats visible
+- ✅ Download uses a signed link
+- ✅ If the signed link is expired, UI suggests Emergency Download
 
 ---
 
 ### Step 5: Status Changes to Ready
 ```
-11. Wait for progress to complete
+11. Wait for the recording to become ready
 ```
 
 **Expected:**
-- ✅ Progress bar fills completely
-- ✅ Status changes from "⏳ Processing" to "✅ Ready!"
+- ✅ Status changes from "⏳ Processing" to "✅ Ready!" (or similar)
 - ✅ Green success message appears
 - ✅ Three action buttons appear:
     - [ ] ✂️ Edit in StreamLine
@@ -137,8 +134,9 @@ On /stream-summary page:
 
 ### Access Asset Library
 ```
-1. Click "📚 View Asset Library" from stream summary
-   OR Navigate to /editing/assets
+1. Click "📚 View Asset Library" from the exit page
+   OR Navigate to /content
+   OR Navigate to /editing/assets (legacy redirect)
 ```
 
 **Expected:**
@@ -195,7 +193,8 @@ On /stream-summary page:
 ### Create New Project
 ```
 1. From Asset Library, click "View Projects"
-   OR Navigate to /editing/projects
+   OR Navigate to /projects
+   OR Navigate to /editing/projects (legacy redirect)
 ```
 
 **Expected:**
@@ -236,7 +235,7 @@ On /stream-summary page:
 
 ### Project Card Actions
 ```
-7. Back to /editing/projects
+7. Back to /projects
 8. See your new project card
 ```
 
@@ -254,34 +253,21 @@ On /stream-summary page:
 
 ## 🔄 Persistence Test (1 minute)
 
-### Data Survives Refresh
+### Recording Survives Refresh
 ```
-1. Open DevTools Console
-2. Paste: JSON.parse(localStorage.getItem('sl_recordings'))
-3. See your recording in the list
-4. Refresh the page (F5)
-5. Navigate back to Asset Library
+1. Complete a short recording (host joins, then ends the session)
+2. Navigate to the Asset Library
+3. Refresh the page (F5)
+4. Navigate back to the Asset Library
 ```
 
 **Expected:**
-- ✅ Recording still appears
+- ✅ Recording still appears after refresh
 - ✅ Same recording ID
-- ✅ Status is "ready"
-- ✅ All stats preserved
+- ✅ Status reflects backend state (e.g., ready/rendering/complete)
 
----
-
-### Clear Data (Optional)
-```
-6. To start fresh, paste in console:
-   localStorage.removeItem('sl_recordings')
-7. Refresh page
-```
-
-**Expected:**
-- ✅ All recordings gone
-- ✅ Asset Library is empty
-- ✅ Ready for next test
+Optional verification:
+- In DevTools Network tab, confirm the Asset Library loads recordings from the API (not localStorage)
 
 ---
 
@@ -291,9 +277,9 @@ On /stream-summary page:
 |------|--------|-----------------|
 | 1 | Join room | Recording starts automatically |
 | 2 | Wait 10s | "🔴 RECORDING" indicator visible |
-| 3 | End stream | Redirect to summary page |
-| 4 | Wait 8s | Progress bar fills up |
-| 5 | Status ready | ✅ Ready!, buttons appear |
+| 3 | End stream | Redirect to exit page (`/room-exit/:recordingId`) |
+| 4 | Wait | Exit page status becomes ready |
+| 5 | Status ready | Action buttons appear (Edit/Library/Download) |
 | 6 | Click Edit | Timeline editor opens with video |
 | 7 | Play video | Video plays in preview |
 | 8 | Click timeline | Playhead seeks to position |
@@ -301,7 +287,7 @@ On /stream-summary page:
 | 10 | Zoom in/out | Timeline scale adjusts |
 | 11 | Go to Assets | Recording shows in green |
 | 12 | Go to Projects | Can create new project |
-| 13 | Refresh page | Data persists in localStorage |
+| 13 | Refresh page | Recording still appears (backend persistence) |
 
 ---
 
@@ -312,10 +298,9 @@ All of the following should work:
 - [ ] Recording auto-starts when user enters room
 - [ ] Recording indicator shows with ID
 - [ ] Recording stops when user leaves
-- [ ] Auto-redirect to stream summary page
-- [ ] Progress bar animates from 0-100%
-- [ ] Status transitions from Processing → Ready
-- [ ] Action buttons appear when ready
+- [ ] Auto-redirect to the exit page (`/room-exit/:recordingId`)
+- [ ] Exit page shows a clear status (e.g., rendering/ready)
+- [ ] Download actions work when recording is ready (when storage is configured)
 - [ ] Edit button redirects to editor with video loaded
 - [ ] Video player controls work (play, pause, seek)
 - [ ] Timeline shows clip with correct duration
@@ -327,8 +312,7 @@ All of the following should work:
 - [ ] Projects Dashboard shows projects
 - [ ] New Project modal works
 - [ ] Projects can be created and edited
-- [ ] Data persists in localStorage
-- [ ] Data survives page refresh
+- [ ] Recording data persists via backend (refresh-safe)
 - [ ] No console errors
 
 ---
@@ -339,13 +323,13 @@ All of the following should work:
 
 **Recording doesn't start:**
 - Check browser console for errors
-- Verify Room.tsx imports mockRecordingApi
-- Check localStorage: `localStorage.getItem('sl_recordings')`
+- Verify the server is running and `/api/*` calls succeed
+- Verify entitlements/permissions allow recording for the current role
 
-**Progress bar doesn't fill:**
-- Check useRecordingProgress hook is imported
-- Verify event listener is working
-- Check DevTools Network tab for any failed requests
+**Recording not ready / download fails:**
+- Check DevTools Network tab for failed requests
+- Confirm the signed download link endpoint returns `200` (or a clear `402/410`)
+- If the signed link is expired, use Emergency Download in Settings → Usage
 
 **Editor doesn't open:**
 - Check routing: App.tsx has `/editing/editor/:projectId` route
@@ -358,19 +342,15 @@ All of the following should work:
 - Check browser console for CORS errors
 
 **Data not persisting:**
-- localStorage might be cleared
-- Check browser privacy settings
-- Try incognito window
-- Use DevTools: Application → LocalStorage
+- Check Firestore permissions and server logs
+- Confirm the recording document is being created/updated
 
 ---
 
 ## 📊 Performance Notes
 
-- Recording simulation: 500ms latency
-- Processing simulation: 8 seconds (0-100%)
-- localStorage: ~1KB per recording
-- No network calls (all mock)
+- Performance depends on LiveKit + storage + backend processing
+- Expect normal API network calls to `/api/*`
 - Should be instant on modern browsers
 
 ---
@@ -379,24 +359,19 @@ All of the following should work:
 
 After completing all tests, you should see:
 
-1. **In browser localStorage:**
-   - At least 1 recording object
-   - Recording status = "ready"
-   - Recording has duration, viewers, thumbnail
-
-2. **In Asset Library:**
+1. **In Asset Library:**
    - Recording visible in green card
    - Can see recording title and duration
 
-3. **In Timeline Editor:**
+2. **In Timeline Editor:**
    - Video playing in preview
    - Working playhead
    - Working timeline scrubber
    - Working split tool
 
-4. **Browser console:**
+3. **Browser console:**
    - No errors
-   - Can see recording object when queried
+   - No repeated failing `/api/*` requests
 
 ---
 

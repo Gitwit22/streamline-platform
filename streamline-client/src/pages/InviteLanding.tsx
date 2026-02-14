@@ -48,31 +48,19 @@ export default function InviteLanding() {
       }
 
       try {
-        const resolved = await postJson<ResolveResponse>(`${API_BASE}/api/invites/resolve`, { inviteToken }, false);
+        // Canonicalize legacy JWT invites into the Firestore-backed invite flow.
+        // This makes guest joins resilient to link rewriting and removes query-token reliance.
+        const legacy = await postJson<{ inviteId: string; url?: string; role?: string }>(
+          `${API_BASE}/api/invites/legacy/resolve`,
+          { inviteToken },
+          false,
+        );
         if (cancelled) return;
 
-        // Invites are currently guest/participant-only; no auth gate.
+        const inviteId = String((legacy as any)?.inviteId || "").trim();
+        if (!inviteId) throw new Error("invalid_invite");
 
-        const accepted = await postJson<AcceptResponse>(`${API_BASE}/api/invites/accept`, { inviteToken }, true);
-        if (cancelled) return;
-
-        const targetRoomId = String(resolved.roomId || accepted.roomId || "").trim();
-
-        try {
-          sessionStorage.removeItem("sl_pending_invite");
-          localStorage.setItem("sl_invite_token", inviteToken);
-          // Use the resolved role from the server
-          localStorage.setItem("sl_current_role", String(resolved.role || "guest"));
-        } catch {
-          // ignore storage errors
-        }
-
-        if (targetRoomId) {
-          nav(`/room/${encodeURIComponent(targetRoomId)}?t=${encodeURIComponent(inviteToken)}`, { replace: true });
-        } else {
-          // Fallback: token-only route if roomId missing for some reason
-          nav(`/room?t=${encodeURIComponent(inviteToken)}`, { replace: true });
-        }
+        nav(`/invite/${encodeURIComponent(inviteId)}`, { replace: true });
       } catch (e: any) {
         if (cancelled) return;
         setStatus("error");

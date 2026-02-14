@@ -1,6 +1,6 @@
 import PricingExplainerPage from "./pages/PricingExplainerPage";
 import { useEffect, useState } from "react";
-import { Routes, Route, Navigate, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { Routes, Route, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
 import AdminUsage from './pages/AdminUsage';
 import AdminDashboard from './pages/AdminDashboard';
 
@@ -10,6 +10,7 @@ import { SignupPage } from "./pages/SignupPage";
 import Join from "./pages/Join";
 import Room from "./pages/Room";
 import InviteLanding from "./pages/InviteLanding";
+import InviteRedeem from "./pages/InviteRedeem";
 import Live from "./pages/Live";
 import SettingsDestinations from "./pages/SettingsDestinations";
 import RoomExitPage from "./pages/RoomExitPage";
@@ -26,6 +27,7 @@ import Support from "./pages/Support";
 import BillingCanceled from "./pages/BillingCanceled";
 import BillingSuccess from "./pages/BillingSuccess";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import PostStreamSummary from "./pages/PostStreamSummary";
 
 import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
@@ -146,6 +148,8 @@ function App() {
 
       {/* Invite landing */}
       <Route path="/i/:inviteToken" element={<InviteLanding />} />
+      {/* New guest invite flow (Firestore-backed) */}
+      <Route path="/invite/:inviteId" element={<InviteRedeem />} />
       {/* Policy & Support */}
       <Route path="/privacy" element={<Privacy />} />
       <Route path="/terms" element={<Terms />} />
@@ -165,14 +169,16 @@ function App() {
       <Route path="/live" element={<Live />} />
       {/* New stable viewer URL: /live/:savedEmbedId */}
       <Route path="/live/:savedEmbedId" element={<Live />} />
+      {/* Instagram-only viewer URL (fullscreen, minimal UI): /ig/:savedEmbedId */}
+      <Route path="/ig/:savedEmbedId" element={<Live />} />
       <Route path="/settings/destinations" element={<SettingsDestinations />} />
       <Route path="/room-exit/:recordingId" element={<RoomExitPage />} />
 
-      {/* Stream Summary */}
+      {/* Legacy: /stream-summary -> canonical /room-exit */}
       <Route path="/stream-summary/:recordingId" element={<LegacyStreamSummaryRedirect />} />
       <Route
         path="/editing/post-stream"
-        element={<LegacyPostStreamRedirect />}
+        element={<PostStreamSummary />}
       />
       
       {/* Thank You / Post-Stream */}
@@ -220,14 +226,6 @@ function App() {
     </>
   );
 }
-
-function LegacyPostStreamRedirect() {
-  const [sp] = useSearchParams();
-  const recordingId = (sp.get('recordingId') || '').trim();
-  const target = recordingId ? `/room-exit/${encodeURIComponent(recordingId)}` : '/room-exit/unknown';
-  return <Navigate to={target} replace state={{ exitRole: 'host' }} />;
-}
-
 function LegacyStreamSummaryRedirect() {
   const { recordingId } = useParams<{ recordingId: string }>();
   const target = recordingId ? `/room-exit/${encodeURIComponent(recordingId)}` : '/room-exit/unknown';

@@ -1,5 +1,6 @@
 import type { ParticipantPermission } from "livekit-server-sdk";
-import { TrackSource } from "livekit-server-sdk";
+
+type PublishSource = "microphone" | "camera" | "screen_share" | "screen_share_audio";
 
 // Narrow type: just the realtime flags that matter for LiveKit permissions
 export type RealtimePreset = {
@@ -30,7 +31,7 @@ export function roleToParticipantPermission(
   const canSubscribe = true;
   let canPublish = false;
   let canPublishData = false;
-  let canPublishSources: TrackSource[] = [];
+  let canPublishSources: PublishSource[] = [];
 
   switch (role) {
     case "viewer": {
@@ -42,7 +43,7 @@ export function roleToParticipantPermission(
     case "participant": {
       canPublish = true;
       canPublishData = true;
-      canPublishSources = [TrackSource.MICROPHONE, TrackSource.CAMERA];
+      canPublishSources = ["microphone", "camera"];
       break;
     }
     case "cohost":
@@ -51,10 +52,10 @@ export function roleToParticipantPermission(
       canPublish = true;
       canPublishData = true;
       canPublishSources = [
-        TrackSource.MICROPHONE,
-        TrackSource.CAMERA,
-        TrackSource.SCREEN_SHARE,
-        TrackSource.SCREEN_SHARE_AUDIO,
+        "microphone",
+        "camera",
+        "screen_share",
+        "screen_share_audio",
       ];
       break;
     }
@@ -64,6 +65,7 @@ export function roleToParticipantPermission(
     canSubscribe,
     canPublish,
     canPublishData,
-    canPublishSources,
+    // LiveKit expects string source names for permissions/grants.
+    canPublishSources: canPublishSources as any,
   } as ParticipantPermission;
 }

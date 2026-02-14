@@ -470,7 +470,10 @@ async function getHostRoomAccessToken(hostJwt: string): Promise<{ ok: boolean; t
   if (!HOST_ROOM_ID) {
     return { ok: false, resp: null };
   }
-  const resp = await postJson("/api/roomToken", hostJwt, { roomId: HOST_ROOM_ID });
+  const resp = await postJson(`/api/rooms/${encodeURIComponent(HOST_ROOM_ID)}/token`, hostJwt, {
+    identity: "Host",
+    displayName: "Host",
+  });
   const token = resp.json?.roomAccessToken as string | undefined;
   return { ok: !!token, token, resp };
 }

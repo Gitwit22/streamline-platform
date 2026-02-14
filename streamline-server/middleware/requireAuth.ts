@@ -174,8 +174,42 @@ export function verifyInviteToken(rawInviteToken: string): InviteClaims {
   if (!secret) {
     throw new Error("Invite token secret not configured");
   }
-  const decoded = jwt.verify(rawInviteToken, secret) as InviteClaims;
-  return decoded;
+
+  // Strict verification:
+  // - Reject alg=none
+  // - Restrict algorithms (default: HS256)
+  // - Enforce exp presence + expiry check
+  // - Optional issuer/audience checks when configured
+  const complete = jwt.decode(rawInviteToken, { complete: true }) as any;
+  const alg = String(complete?.header?.alg || "").trim();
+  if (!alg || alg.toLowerCase() === "none") {
+    throw new Error("invalid_invite");
+  }
+
+  const allowedAlgs = String(process.env.INVITE_TOKEN_ALGS || "HS256")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (allowedAlgs.length && !allowedAlgs.includes(alg)) {
+    throw new Error("invalid_invite");
+  }
+
+  const verifyOptions: jwt.VerifyOptions = {
+    algorithms: allowedAlgs.length ? (allowedAlgs as any) : undefined,
+  };
+
+  const iss = String(process.env.INVITE_TOKEN_ISS || "").trim();
+  const aud = String(process.env.INVITE_TOKEN_AUD || "").trim();
+  if (iss) verifyOptions.issuer = iss;
+  if (aud) verifyOptions.audience = aud;
+
+  const decoded = jwt.verify(rawInviteToken, secret, verifyOptions) as any;
+  if (typeof decoded?.exp !== "number" || !Number.isFinite(decoded.exp) || decoded.exp <= 0) {
+    // We require exp for invite tokens so they can't be perpetual.
+    throw new Error("invalid_invite");
+  }
+
+  return decoded as InviteClaims;
 }
 
 export function requireAuthOrInvite(req: Request, res: Response, next: NextFunction) {

@@ -8,6 +8,7 @@ import express from "express";
 
 import { firestore } from "../firebaseAdmin";
 import { requireAdmin, logAdminAction } from "../middleware/adminAuth";
+import { computeUsageSummaryResult } from "./usageRoutes";
 import { invalidatePlatformBillingCache } from "../lib/userAccount";
 
 import type { UserUsageSummary } from "../types/admin.types";
@@ -806,6 +807,30 @@ router.get("/usage", async (req, res) => {
   } catch (error: any) {
     console.error("Failed to fetch usage stats:", error);
     res.status(500).json({ error: "Failed to fetch usage stats", details: error.message });
+  }
+});
+
+/**
+ * GET /api/admin/usage/summary?uid=...
+ * Admin-only usage summary lookup for any user.
+ * Uses the same payload shape as GET /api/usage/summary.
+ */
+router.get("/usage/summary", async (req, res) => {
+  try {
+    const uid = String(req.query.uid || "").trim();
+    if (!uid) {
+      return res.status(400).json({ success: false, error: "uid query param is required" });
+    }
+
+    const result = await computeUsageSummaryResult(uid);
+    return res.status(result.status).json(result.body);
+  } catch (error: any) {
+    console.error("Admin usage summary lookup failed:", error);
+    return res.status(500).json({
+      success: false,
+      error: "Failed to fetch usage summary",
+      details: error?.message,
+    });
   }
 });
 

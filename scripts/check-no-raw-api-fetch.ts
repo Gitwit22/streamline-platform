@@ -22,6 +22,7 @@ const allowedApiPrefixes: RegExp[] = [
   /^\/api\/public\//,
   /^\/api\/saved-embeds\/public\//,
   /^\/api\/invites\/resolve\b/,
+  /^\/api\/invites\/legacy\/resolve\b/,
   /^\/api\/invites\/track-landing\b/,
   /^\/api\/rooms\/resolve\b/,
   /^\/api\/stats\/public\b/,

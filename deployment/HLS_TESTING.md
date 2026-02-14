@@ -16,10 +16,12 @@
 
 ## Get tokens
 
-From the host Room UI (or your flow), confirm `/api/roomToken` returns:
+From the host Room UI (or your flow), confirm `POST /api/rooms/{roomId}/token` returns:
 - `roomAccessToken` (non-empty)
 - `roomId` (Firestore doc id)
 - `roomName` (LiveKit room name)
+
+Also confirm the response header `x-sl-token-grants: v3-no-sources`.
 
 You’ll use `roomAccessToken` as the bearer token in the steps below.
 

@@ -10,14 +10,62 @@ import fetch from 'node-fetch';
 import jwt from 'jsonwebtoken';
 
 const API_BASE = process.env.API_BASE || 'http://localhost:5137';
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+const JWT_SECRET = process.env.JWT_SECRET || '';
+
+// Prefer explicitly provided auth for running in shared dev/staging.
+const ADMIN_JWT = process.env.TEST_ADMIN_JWT || '';
+const ATTACKER_JWT = process.env.TEST_ATTACKER_JWT || '';
+const ADMIN_EMAIL = process.env.TEST_ADMIN_EMAIL || '';
+const ADMIN_PASSWORD = process.env.TEST_ADMIN_PASSWORD || '';
+const ATTACKER_EMAIL = process.env.TEST_ATTACKER_EMAIL || '';
+const ATTACKER_PASSWORD = process.env.TEST_ATTACKER_PASSWORD || '';
 
 // Allow a dedicated env var for tests; fall back to existing ADMIN_USER_ID usage.
 const ADMIN_USER_ID = process.env.TEST_ADMIN_UID || process.env.ADMIN_USER_ID || 'test-admin-uid';
 const TEST_USER_ID = process.env.TEST_USER_ID || 'test-user-456';
 
 function makeJwt(uid: string) {
+  if (!JWT_SECRET) {
+    throw new Error('Missing JWT_SECRET for signing. Provide TEST_ADMIN_JWT/TEST_ATTACKER_JWT or TEST_*_EMAIL/TEST_*_PASSWORD instead.');
+  }
   return jwt.sign({ uid }, JWT_SECRET, { expiresIn: '1h' });
+}
+
+async function loginAndGetJwt(email: string, password: string): Promise<string> {
+  const url = `${API_BASE}/api/auth/login`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  const text = await res.text();
+  if (res.status < 200 || res.status >= 300) {
+    throw new Error(`Login failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  const token = json?.token;
+  if (!token || typeof token !== 'string') {
+    throw new Error('Login response missing token');
+  }
+  return token;
+}
+
+async function getJwtForUser(kind: 'admin' | 'attacker'): Promise<string> {
+  if (kind === 'admin') {
+    if (ADMIN_JWT) return ADMIN_JWT;
+    if (ADMIN_EMAIL && ADMIN_PASSWORD) return loginAndGetJwt(ADMIN_EMAIL, ADMIN_PASSWORD);
+    if (JWT_SECRET && JWT_SECRET !== 'dev-secret') return makeJwt(ADMIN_USER_ID);
+    return '';
+  }
+  if (ATTACKER_JWT) return ATTACKER_JWT;
+  if (ATTACKER_EMAIL && ATTACKER_PASSWORD) return loginAndGetJwt(ATTACKER_EMAIL, ATTACKER_PASSWORD);
+  if (JWT_SECRET && JWT_SECRET !== 'dev-secret') return makeJwt('non-admin-user-999');
+  return '';
 }
 
 async function ensureAdminUser(uid: string) {
@@ -48,8 +96,7 @@ async function ensureAdminUser(uid: string) {
   await firestore.doc(`admins/${uid}`).set({ isAdmin: true }, { merge: true });
 }
 
-function authHeaders(uid: string) {
-  const token = makeJwt(uid);
+function authHeadersFromJwt(token: string) {
   return {
     Authorization: `Bearer ${token}`,
   };
@@ -62,11 +109,17 @@ async function adminRequest(
   body?: any
 ) {
   const url = `${API_BASE}${endpoint}`;
+
+  const adminJwt = await getJwtForUser('admin');
+  if (!adminJwt) {
+    throw new Error('Admin auth not configured. Provide TEST_ADMIN_JWT or TEST_ADMIN_EMAIL/TEST_ADMIN_PASSWORD (or set a real JWT_SECRET for local signing).');
+  }
+
   const options: any = {
     method,
     headers: {
       'Content-Type': 'application/json',
-      ...authHeaders(ADMIN_USER_ID),
+      ...authHeadersFromJwt(adminJwt),
     },
   };
 
@@ -94,11 +147,17 @@ async function testNonAdminBlocked() {
   console.log('─'.repeat(60));
 
   try {
+    const attackerJwt = await getJwtForUser('attacker');
+    if (!attackerJwt) {
+      console.log('⚠️  SKIP: Non-admin test requires TEST_ATTACKER_JWT or TEST_ATTACKER_EMAIL/TEST_ATTACKER_PASSWORD (or a real JWT_SECRET for local signing).');
+      return true;
+    }
+
     const url = new URL(`${API_BASE}/api/admin/users`);
     url.searchParams.set('adminUserId', 'non-admin-user-999');
     const response = await fetch(url.toString(), {
       headers: {
-        ...authHeaders('non-admin-user-999'),
+        ...authHeadersFromJwt(attackerJwt),
       },
     });
     

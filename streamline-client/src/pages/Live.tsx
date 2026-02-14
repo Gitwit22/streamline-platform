@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useLocation, useParams } from "react-router-dom";
 import Hls from "hls.js";
 import { API_BASE } from "../lib/apiBase";
 import { getPublicHls } from "../services/hls";
@@ -80,8 +80,10 @@ function snapToLiveEdge(video: HTMLVideoElement) {
 
 export default function Live() {
   const params = useParams<{ savedEmbedId?: string }>();
+  const location = useLocation();
 
   const savedEmbedId = (params.savedEmbedId || "").trim();
+  const isIgMode = location.pathname.startsWith("/ig/");
 
   const [roomId, setRoomId] = useState<string>("");
   const [roomName, setRoomName] = useState<string>("");
@@ -274,6 +276,81 @@ export default function Live() {
       }
     }
   }, [reloadViewerConfig, fetchHlsStatus]);
+
+  if (isIgMode) {
+    return (
+      <div className="fixed inset-0 bg-black">
+        {playlistUrl && status === "live" ? (
+          <>
+            <video
+              ref={videoRef}
+              className="w-full h-full object-cover"
+              autoPlay
+              muted={isMuted}
+              playsInline
+              controls={false}
+              onClick={() => {
+                // Minimal UX: tap to unmute/mute
+                setIsMuted((m) => !m);
+              }}
+            />
+
+            <div className="absolute top-4 right-4 flex items-center gap-2">
+              <button
+                onClick={handleRefreshGoLive}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-sm transition-colors border border-white/10 text-xs font-medium text-white"
+                aria-label="Refresh"
+              >
+                <RefreshCw className={`w-4 h-4 ${isRetrying ? "animate-spin" : ""}`} />
+                <span>Refresh</span>
+              </button>
+            </div>
+
+            <div className="absolute top-4 left-4">
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-red-600/95 backdrop-blur-sm shadow-lg shadow-red-500/30">
+                <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
+                <span className="text-xs font-bold text-white tracking-wider">LIVE</span>
+              </div>
+            </div>
+
+            <div className="absolute bottom-4 right-4">
+              <button
+                onClick={toggleMute}
+                className="p-3 rounded-full bg-black/50 hover:bg-black/70 backdrop-blur-sm transition-colors border border-white/10"
+                aria-label="Toggle mute"
+              >
+                {isMuted ? <VolumeX className="w-5 h-5 text-white" /> : <Volume2 className="w-5 h-5 text-white" />}
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-6">
+            <div className="text-lg font-semibold text-white mb-2">
+              {status === "loading" && "Connecting..."}
+              {status === "starting" && "Starting..."}
+              {status === "offline" && (ended ? "Stream ended" : "Offline")}
+              {status === "error" && "Connection Error"}
+            </div>
+
+            {error && <div className="text-sm text-red-300 mb-4 max-w-md">{error}</div>}
+
+            <button
+              onClick={() => {
+                void fetchHlsStatus();
+                const v = videoRef.current;
+                if (v) snapToLiveEdge(v);
+              }}
+              disabled={isRetrying}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white font-medium text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed border border-white/10"
+            >
+              <RefreshCw className={`w-4 h-4 ${isRetrying ? "animate-spin" : ""}`} />
+              {isRetrying ? "Retrying..." : "Retry"}
+            </button>
+          </div>
+        )}
+      </div>
+    );
+  }
 
   // Attach HLS playback (source + player wiring) once per playlist URL.
   // Mute/volume are applied in a separate effect so toggling audio does

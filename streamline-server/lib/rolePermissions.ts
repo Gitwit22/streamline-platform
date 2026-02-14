@@ -127,17 +127,27 @@ function ensureBooleanPerms(perms: Partial<RolePermissions> | undefined): RolePe
     canRemoveGuests: false,
   };
   const src = perms || {};
+  const canModerate = !!(src as any).canModerate;
+
+  // Backwards compatibility: older roomAccessToken payloads only carried
+  // canModerate; treat that as allowing basic moderation actions.
+  const canMuteGuests = Object.prototype.hasOwnProperty.call(src, "canMuteGuests")
+    ? !!(src as any).canMuteGuests
+    : canModerate;
+  const canRemoveGuests = Object.prototype.hasOwnProperty.call(src, "canRemoveGuests")
+    ? !!(src as any).canRemoveGuests
+    : canModerate;
   return {
     canStream: !!src.canStream,
     canRecord: !!src.canRecord,
     canDestinations: !!src.canDestinations,
-    canModerate: !!src.canModerate,
+    canModerate,
     canLayout: !!src.canLayout,
     canScreenShare: !!src.canScreenShare,
     canInvite: !!src.canInvite,
     canAnalytics: !!src.canAnalytics,
-    canMuteGuests: !!src.canMuteGuests,
-    canRemoveGuests: !!src.canRemoveGuests,
+    canMuteGuests,
+    canRemoveGuests,
   };
 }
 

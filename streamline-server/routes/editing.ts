@@ -3,6 +3,7 @@ import { Router, Request, Response } from "express";
 import { firestore as db } from "../firebaseAdmin";
 import multer from "multer";
 import { uploadVideo, getSignedDownloadUrl } from "../lib/storageClient";
+import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { checkStorageLimit, updateStorageUsage } from "../usageHelper";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
@@ -387,10 +388,12 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
+    const storage = await deleteRecordingStorage(data);
+
     // Delete from Firestore
     await db.collection("recordings").doc(id).delete();
 
-    res.json({ ok: true, message: "Asset deleted" });
+    res.json({ ok: true, message: "Asset deleted", storage });
   } catch (err: any) {
     console.error("delete asset error:", err);
     res.status(500).json({ error: err.message || "Internal server error" });

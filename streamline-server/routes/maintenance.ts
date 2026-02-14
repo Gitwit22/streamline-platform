@@ -2,6 +2,7 @@ import { Router } from "express";
 import { firestore } from "../firebaseAdmin";
 import { requireAdmin } from "../middleware/adminAuth";
 import { deleteFiles, deletePrefix } from "../lib/storageClient";
+import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { stopEgress } from "../services/livekitEgress";
 import { setHlsIdle } from "../services/rooms";
 
@@ -232,22 +233,11 @@ async function purgeExpiredRecordings(now: Date, opts?: { limit?: number }): Pro
     const status = String(data.status || "").toLowerCase();
     if (status === "deleted") continue;
 
-    const objectKey: string | null = (data.objectKey as string | undefined) || (data.downloadPath as string | undefined) || null;
-    if (!objectKey) {
-      // If we can't find the object, still mark the doc deleted so we don't churn.
-      try {
-        await doc.ref.set({ status: "deleted", deleteReason: "expired_retention", deletedAt: now, updatedAt: now }, { merge: true });
-        deletedCount += 1;
-      } catch (e: any) {
-        console.warn("[maintenance/purge-expired-recordings] failed to mark deleted", { recordingId: doc.id, error: e?.message || e });
-      }
-      continue;
-    }
 
     try {
-      await deleteFiles([objectKey]);
+      await deleteRecordingStorage(data);
     } catch (e: any) {
-      console.warn("[maintenance/purge-expired-recordings] deleteFiles failed", { recordingId: doc.id, objectKey, error: e?.message || e });
+      console.warn("[maintenance/purge-expired-recordings] deleteRecordingStorage failed", { recordingId: doc.id, error: e?.message || e });
     }
 
     try {

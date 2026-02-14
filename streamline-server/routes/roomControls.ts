@@ -566,9 +566,13 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
         livekitApplied = true;
         livekitReason = null;
 
-        const lostScreenShare =
-          Array.isArray((permission as any).canPublishSources) &&
-          !(permission as any).canPublishSources.includes(TrackSource.SCREEN_SHARE);
+        const sources: any[] = Array.isArray((permission as any).canPublishSources)
+          ? (permission as any).canPublishSources
+          : [];
+        const hasScreenShare = sources.some(
+          (s) => s === TrackSource.SCREEN_SHARE || String(s).toLowerCase() === "screen_share",
+        );
+        const lostScreenShare = sources.length > 0 && !hasScreenShare;
 
         if (lostScreenShare) {
           try {

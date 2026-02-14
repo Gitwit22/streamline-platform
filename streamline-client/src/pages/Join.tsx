@@ -11,6 +11,7 @@ import { useEffectiveEntitlements } from "../hooks/useEffectiveEntitlements";
 type SavedEmbedSummary = {
   embedId: string;
   label: string;
+  roomId: string;
   activeRoomId?: string | null;
 };
 
@@ -58,17 +59,15 @@ function applyIncrementingSuffix(baseName: string, lastRoom: string | null): str
 
 function formatDefaultRoomName(displayName: string) {
   const now = new Date();
-  const dateFmt = new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-  }).format(now);
-  const timeFmt = new Intl.DateTimeFormat("en-US", {
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(now);
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, "0");
+  const dd = String(now.getDate()).padStart(2, "0");
+  const hh = String(now.getHours()).padStart(2, "0");
+  const min = String(now.getMinutes()).padStart(2, "0");
+  const stamp = `${yyyy}${mm}${dd}-${hh}${min}`;
 
-  if (displayName) return `${displayName} – Live Session`;
-  return `StreamLine Live – ${dateFmt}, ${timeFmt}`;
+  const prefix = displayName ? `${displayName} – Live` : "StreamLine Live";
+  return `${prefix} – ${stamp}`;
 }
 
 export default function Join() {
@@ -189,41 +188,22 @@ export default function Join() {
       // Preferred: inviteToken resolves room+role server-side
       if (inviteTokenParam) {
         try {
-          const res = await fetch(`${API_BASE}/api/invites/resolve`, {
+          // Canonicalize legacy JWT invite links into the Firestore-backed invite flow.
+          // This reduces query-param token brittleness and ensures a server-issued guest session.
+          const res = await fetch(`${API_BASE}/api/invites/legacy/resolve`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ inviteToken: inviteTokenParam }),
           });
 
           if (!res.ok) return;
-          const data = await res.json().catch(() => null);
+          const data = await res.json().catch(() => null as any);
           if (!data || cancelled) return;
 
-          const decodedRoomId = String(data.roomId || "");
-          const decodedRoom = String(data.roomName || "");
-          // Use the resolved role from the server
-          const resolvedRole = String(data.role || "guest");
-          if (decodedRoomId) setInviteRoomId(decodedRoomId);
-          if (decodedRoom) setRoomName(decodedRoom);
+          const inviteId = String(data?.inviteId || "").trim();
+          if (!inviteId) return;
 
-          try {
-            localStorage.setItem("sl_invite_token", inviteTokenParam);
-            localStorage.setItem("sl_current_role", resolvedRole);
-          } catch {
-            // ignore
-          }
-
-          // Let the host know that someone has opened the invite link
-          // and is viewing the join page.
-          try {
-            await fetch(`${API_BASE}/api/invites/track-landing`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ inviteToken: inviteTokenParam, stage: "join_page" }),
-            });
-          } catch {
-            // best-effort only
-          }
+          nav(`/invite/${encodeURIComponent(inviteId)}`, { replace: true });
           return;
         } catch {
           return;
@@ -318,9 +298,10 @@ export default function Join() {
           .map((e: any) => ({
             embedId: String(e?.embedId || "").trim(),
             label: String(e?.label || "").trim(),
+            roomId: String(e?.roomId || "").trim(),
             activeRoomId: typeof e?.activeRoomId === "string" ? e.activeRoomId : null,
           }))
-          .filter((e) => !!e.embedId);
+          .filter((e) => !!e.embedId && !!e.roomId);
         setSavedEmbeds(next);
       } catch (e: any) {
         if (!cancelled) {
@@ -441,6 +422,36 @@ export default function Join() {
     // Host flow: create a Firestore room first, then navigate to /room/:roomId
     if (!isParticipant) {
       try {
+        // Saved Room flow (HLS): reuse the existing canonical roomId so
+        // HLS config + viewer page stay stable across sessions.
+        if (isUsingSaved) {
+          const selected = savedEmbeds.find((e) => e.embedId === selectedSavedEmbedId);
+          const savedRoomId = String(selected?.roomId || "").trim();
+          if (!savedRoomId) {
+            alert("Select a Saved Room or switch to Create New Room.");
+            return;
+          }
+
+          // Ensure this room is treated as host-created on this device so
+          // the Room page can mint host tokens even when the room is idle.
+          try {
+            const createdRooms = JSON.parse(localStorage.getItem("sl_created_rooms") || "[]");
+            if (!createdRooms.includes(savedRoomId)) {
+              createdRooms.push(savedRoomId);
+              localStorage.setItem("sl_created_rooms", JSON.stringify(createdRooms));
+            }
+          } catch {
+            // ignore
+          }
+
+          localStorage.setItem("sl_last_room", selected?.label || roomLabel || savedRoomId);
+          localStorage.setItem("sl_last_room_ts", String(Date.now()));
+          localStorage.setItem("sl_current_role", "host");
+
+          nav(`/room/${encodeURIComponent(savedRoomId)}`);
+          return;
+        }
+
         if (!roomLabel) {
           alert("Please enter a room name.");
           return;
@@ -452,7 +463,7 @@ export default function Join() {
           body: JSON.stringify({
             livekitRoomName: roomLabel,
             roomType: "rtc",
-            savedEmbedId: isUsingSaved ? selectedSavedEmbedId : undefined,
+            savedEmbedId: undefined,
           }),
         }, { allowNonOk: true });
 

@@ -1,4 +1,5 @@
 import type Stripe from "stripe";
+import { PERMISSION_ERRORS } from "./permissionErrors";
 
 export type OveragesEndpointDeps = {
   getAccount: (uid: string) => Promise<any>;
@@ -59,7 +60,7 @@ export function createOveragesEndpointHandler(deps: OveragesEndpointDeps) {
     try {
       const uid = (req as any).user?.uid;
       if (!uid) {
-        return res.status(401).json({ success: false, error: "unauthorized" });
+        return res.status(401).json({ success: false, error: PERMISSION_ERRORS.UNAUTHORIZED });
       }
 
       const { enabled } = (req.body || {}) as { enabled?: unknown };
