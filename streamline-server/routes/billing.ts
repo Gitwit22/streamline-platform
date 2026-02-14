@@ -43,6 +43,89 @@ function getUserRef(uid: string) {
   return db.collection("users").doc(uid);
 }
 
+/**
+ * Get or create a Stripe customer for a user, handling stale customer IDs.
+ * 
+ * If Firestore has a stripeCustomerId but Stripe says "no such customer" (404),
+ * this function will:
+ * 1. Clear the stale ID from Firestore
+ * 2. Create a new Stripe customer
+ * 3. Persist the new ID to Firestore
+ * 
+ * This ensures we never get stuck with orphaned customer references.
+ * 
+ * @param uid - User ID from Firebase Auth
+ * @param email - User's email address
+ * @param displayName - User's display name (optional)
+ * @returns Valid Stripe customer ID
+ */
+async function getOrCreateStripeCustomer(
+  uid: string,
+  email: string,
+  displayName?: string
+): Promise<string> {
+  const userRef = getUserRef(uid);
+  const snap = await userRef.get();
+  
+  if (!snap.exists) {
+    throw Object.assign(new Error("User not found"), { code: "USER_NOT_FOUND" });
+  }
+
+  const user = snap.data() as any;
+  const existingId = user?.stripeCustomerId || user?.billing?.customerId;
+
+  // If we have an existing customer ID, verify it's still valid in Stripe
+  if (existingId) {
+    try {
+      const customer = await stripe.customers.retrieve(existingId);
+      
+      // Customer exists and is not deleted
+      if (!('deleted' in customer) || !customer.deleted) {
+        return existingId;
+      }
+      
+      // Customer was explicitly deleted in Stripe - fall through to create new
+      console.warn(`[getOrCreateStripeCustomer] Stripe customer ${existingId} for uid=${uid} is deleted`);
+    } catch (err: any) {
+      // Stripe throws error with type "StripeInvalidRequestError" for "No such customer"
+      const isNotFound = err?.type === "StripeInvalidRequestError" && 
+                         (err?.statusCode === 404 || err?.code === "resource_missing");
+      
+      if (isNotFound) {
+        console.warn(`[getOrCreateStripeCustomer] Stale customer ID ${existingId} for uid=${uid} - will create new`);
+        // Fall through to create new customer
+      } else {
+        // Other Stripe error (network, auth, etc.) - rethrow
+        throw err;
+      }
+    }
+  }
+
+  // Create a new Stripe customer
+  console.log(`[getOrCreateStripeCustomer] Creating new Stripe customer for uid=${uid}, email=${email}`);
+  
+  const newCustomer = await stripe.customers.create({
+    email,
+    name: displayName,
+    metadata: { userId: uid },
+  });
+
+  // Persist the new customer ID to Firestore (overwrites stale ID if present)
+  await userRef.set(
+    {
+      stripeCustomerId: newCustomer.id,
+      billing: {
+        provider: "stripe",
+        customerId: newCustomer.id,
+        updatedAt: Date.now(),
+      },
+    },
+    { merge: true }
+  );
+
+  return newCustomer.id;
+}
+
 function sanitizeHistory(history: any): PlanChangeHistoryEntry[] {
   if (!Array.isArray(history)) return [];
   return history
@@ -686,29 +769,17 @@ router.post("/checkout", requireAuth, async (req, res) => {
     }
 
     // Ensure Stripe customer exists (needed for first-time checkout)
-    let customerId: string | undefined = userAtLock?.stripeCustomerId || userAtLock?.billing?.customerId;
+    // Use robust customer resolution that handles stale/deleted customer IDs
+    const email = userAtLock?.email;
+    const displayName = userAtLock?.displayName;
 
-    if (!customerId) {
-      const customer = await stripe.customers.create({
-        email: userAtLock?.email,
-        name: userAtLock?.displayName,
-        metadata: { userId: uid },
-      });
-
-      customerId = customer.id;
-
-      await userRef.set(
-        {
-          stripeCustomerId: customerId,
-          billing: {
-            provider: "stripe",
-            customerId,
-            updatedAt: Date.now(),
-          },
-        },
-        { merge: true }
-      );
+    if (!email) {
+      // Release lock before returning error
+      await userRef.set({ planChangeLock: null }, { merge: true });
+      return res.status(400).json({ success: false, error: "missing_email" });
     }
+
+    const customerId = await getOrCreateStripeCustomer(uid, email, displayName);
 
     const checkoutPriceId: string = preflightPriceId;
 
@@ -820,9 +891,15 @@ router.post("/portal", requireAuth, async (req, res) => {
     if (!snap.exists) return res.status(404).json({ success: false, error: "User not found" });
 
     const user = snap.data() as any;
+    const email = user?.email;
+    const displayName = user?.displayName;
 
-    const customerId = user?.stripeCustomerId || user?.billing?.customerId;
-    if (!customerId) return res.status(400).json({ success: false, error: "missing_customer" });
+    if (!email) {
+      return res.status(400).json({ success: false, error: "missing_email" });
+    }
+
+    // Use robust customer ID resolution that handles stale/deleted customers
+    const customerId = await getOrCreateStripeCustomer(uid, email, displayName);
 
     const CLIENT_URL = process.env.CLIENT_URL;
     if (!CLIENT_URL) throw new Error("Missing env var: CLIENT_URL");
@@ -1030,14 +1107,50 @@ router.post("/refresh", requireAuth, async (req, res) => {
 
     let sub: any = null;
     if (subscriptionId) {
-      sub = await stripe.subscriptions.retrieve(subscriptionId);
-    } else if (customerId) {
-      const list = await stripe.subscriptions.list({ customer: customerId, status: "all", limit: 10 });
-      const data = Array.isArray((list as any)?.data) ? (list as any).data : [];
-      sub =
-        data.find((s: any) => s?.status === "active" || s?.status === "trialing") ||
-        data[0] ||
-        null;
+      try {
+        sub = await stripe.subscriptions.retrieve(subscriptionId);
+      } catch (err: any) {
+        // Subscription ID might be stale/deleted - try customer lookup below
+        console.warn(`[/refresh] Failed to retrieve subscription ${subscriptionId}:`, err?.message);
+      }
+    }
+    
+    if (!sub && customerId) {
+      try {
+        const list = await stripe.subscriptions.list({ customer: customerId, status: "all", limit: 10 });
+        const data = Array.isArray((list as any)?.data) ? (list as any).data : [];
+        sub =
+          data.find((s: any) => s?.status === "active" || s?.status === "trialing") ||
+          data[0] ||
+          null;
+      } catch (err: any) {
+        // Customer ID might be stale/deleted
+        const isNotFound = err?.type === "StripeInvalidRequestError" && 
+                          (err?.statusCode === 404 || err?.code === "resource_missing");
+        
+        if (isNotFound) {
+          console.warn(`[/refresh] Stale customer ID ${customerId} for uid=${uid}`);
+          // Clear the stale customer ID from Firestore
+          await userRef.set(
+            {
+              stripeCustomerId: null,
+              billing: {
+                ...(user?.billing || {}),
+                customerId: null,
+                updatedAt: Date.now(),
+              },
+            },
+            { merge: true }
+          );
+          return res.status(404).json({ 
+            success: false, 
+            error: "no_subscription",
+            staleCustomerCleared: true 
+          });
+        }
+        // Other errors - rethrow
+        throw err;
+      }
     }
 
     if (!sub) {
