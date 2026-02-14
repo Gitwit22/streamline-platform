@@ -407,12 +407,40 @@ router.get("/:roomId/chat/stream", requireRoomAccessToken as any, async (req: an
     let initialized = false;
     const unsubscribe = query.onSnapshot(
       (snap) => {
+        const changes = snap.docChanges();
+
         if (!initialized) {
           initialized = true;
-          // Do NOT return — initial snapshot may include messages created during handoff.
+          // Initial snapshot: re-sort "added" docs oldest → newest to preserve message order.
+          // Query is orderBy(createdAt, "desc"), so initial changes arrive newest → oldest.
+          const added = changes
+            .filter((c) => c.type === "added")
+            .map((c) => c.doc)
+            .sort((a, b) => {
+              const at = (a.get("createdAt") as any)?.toMillis?.() ?? 0;
+              const bt = (b.get("createdAt") as any)?.toMillis?.() ?? 0;
+              return at - bt; // oldest → newest
+            });
+
+          for (const d of added) {
+            const data = (d.data() as any) || {};
+            send("message", {
+              id: d.id,
+              text: typeof data.text === "string" ? data.text : "",
+              createdAtMs: timestampToMillis(data.createdAt),
+              sender: {
+                identity: typeof data.senderIdentity === "string" ? data.senderIdentity : null,
+                uid: typeof data.senderUid === "string" ? data.senderUid : null,
+                role: typeof data.senderRole === "string" ? data.senderRole : null,
+                name: typeof data.senderName === "string" ? data.senderName : null,
+              },
+            });
+          }
+          return; // After emitting ordered initial replay, exit this callback
         }
 
-        for (const change of snap.docChanges()) {
+        // Non-initial: emit changes normally
+        for (const change of changes) {
           if (change.type !== "added") continue;
           const d = change.doc;
           const data = (d.data() as any) || {};
