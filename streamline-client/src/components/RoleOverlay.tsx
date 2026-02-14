@@ -938,7 +938,7 @@ function ChatPanel({
     if (!allowEndSession) return;
     setError(null);
     try {
-      await apiFetchAuth(
+      const res = await apiFetchAuth(
         `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/session/end`,
         {
           method: "POST",
@@ -951,6 +951,15 @@ function ChatPanel({
         { allowNonOk: true }
       );
 
+      // Only clear local state if server successfully ended the session
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        const errorMsg = `Couldn't end chat session. ${res.status} ${text}`;
+        setError(errorMsg);
+        console.error("[RoleOverlay] endSession failed:", errorMsg);
+        return;
+      }
+
       setSessionId(null);
       setMessages([]);
       if (eventSourceRef.current) {
@@ -958,7 +967,9 @@ function ChatPanel({
         eventSourceRef.current = null;
       }
     } catch (e: any) {
-      setError(e?.message || "Failed to end session");
+      const errorMsg = e?.message || "Failed to end session";
+      setError(errorMsg);
+      console.error("[RoleOverlay] endSession error:", e);
     }
   }, [allowEndSession, roomId, roomAccessToken]);
 

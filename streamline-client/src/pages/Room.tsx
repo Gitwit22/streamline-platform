@@ -1425,9 +1425,18 @@ function RoomPage() {
                   return;
                 }
               }
-            } catch {
-              // fall through to legacy behavior
+            } catch (e) {
+              console.warn("[Room] legacy invite resolve failed; keeping as inviteToken", e);
             }
+            // Fallback: if legacy resolve failed, keep it as inviteToken (not roomAccessToken)
+            // to avoid 401 loops on HLS/status APIs. User will need to redeem via invite flow.
+            setInviteToken(t);
+            try {
+              localStorage.setItem("sl_invite_token", t);
+            } catch {
+              // ignore
+            }
+            return;
           }
 
           if (tokenType !== "invite") {
