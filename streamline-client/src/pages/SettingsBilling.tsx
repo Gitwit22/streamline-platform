@@ -2742,16 +2742,21 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                             </button>
                           )
                         ) : isCurrent ? (
-                          <button
-                            onClick={openPortal}
-                            style={{
-                              ...S.planUpgradeBtn,
-                              background: `linear-gradient(135deg, ${color}, ${color}dd)`,
-                            }}
-                            disabled={!!actionLoading}
-                          >
-                            {actionLoading === "portal" ? "⏳ Loading..." : "⚙️ Manage billing"}
-                          </button>
+                          // Current plan: show manage billing button ONLY for paid plans (not free)
+                          planId === "free" ? (
+                            <span style={S.currentLabel}>✅ Current Plan</span>
+                          ) : (
+                            <button
+                              onClick={openPortal}
+                              style={{
+                                ...S.planUpgradeBtn,
+                                background: `linear-gradient(135deg, ${color}, ${color}dd)`,
+                              }}
+                              disabled={!!actionLoading}
+                            >
+                              {actionLoading === "portal" ? "⏳ Loading..." : "⚙️ Manage billing"}
+                            </button>
+                          )
                         ) : planId === "basic" && (userPlan === "free" || userPlan === "starter") ? (
                           <button
                             onClick={() => startCheckout("basic")}
