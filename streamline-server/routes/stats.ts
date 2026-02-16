@@ -26,11 +26,26 @@ router.get("/public", async (_req, res) => {
 
     // Total registered users (streamers)
     const streamers = usersSnap.size;
+    const knownUserIds = new Set<string>();
+    usersSnap.docs.forEach((d) => {
+      if (d?.id) knownUserIds.add(String(d.id));
+    });
+
+    const extractUid = (docId: string, data: any): string | null => {
+      const id = String(docId || "").trim();
+      if (id) {
+        // Expected usageMonthly doc id shape: `${uid}_${YYYY-MM}`
+        const idx = id.indexOf("_");
+        if (idx > 0) return id.slice(0, idx);
+      }
+      const uid = String(data?.uid || data?.userId || "").trim();
+      return uid || null;
+    };
 
     // Sum participant minutes from usageMonthly
     let totalMinutes = 0;
     const activeCutoffMs = Date.now() - 60 * 60 * 1000; // last 60 minutes
-    let streamersActive = 0;
+    const activeUids = new Set<string>();
     usageSnap.docs.forEach((doc) => {
       const data = doc.data() as any;
       const usage = data?.usage || data?.totals || {};
@@ -56,10 +71,16 @@ router.get("/public", async (_req, res) => {
         }
       };
       const updatedMs = toMs(updatedAt) ?? toMs(createdAt);
-      if (updatedMs && updatedMs >= activeCutoffMs) {
-        streamersActive += 1;
-      }
+      if (!updatedMs || updatedMs < activeCutoffMs) return;
+
+      const uid = extractUid(doc.id, data);
+      if (!uid) return;
+      // Avoid the landing page showing more "Active Now" than total users.
+      if (knownUserIds.size && !knownUserIds.has(uid)) return;
+      activeUids.add(uid);
     });
+
+    const streamersActive = activeUids.size;
 
     const hoursStreamed = Math.floor(totalMinutes / 60);
 

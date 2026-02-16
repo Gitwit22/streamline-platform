@@ -1,6 +1,6 @@
 import PricingExplainerPage from "./pages/PricingExplainerPage";
 import { useEffect, useState } from "react";
-import { Routes, Route, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
+import { Routes, Route, Navigate, Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
 import AdminUsage from './pages/AdminUsage';
 import AdminDashboard from './pages/AdminDashboard';
 
@@ -28,6 +28,21 @@ import BillingCanceled from "./pages/BillingCanceled";
 import BillingSuccess from "./pages/BillingSuccess";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import PostStreamSummary from "./pages/PostStreamSummary";
+
+import EduLanding from "./edu/entry/EduLanding";
+import EduLogin from "./edu/entry/EduLogin";
+import EduProtectedRoute from "./edu/layout/EduProtectedRoute";
+import EduRoleGuard from "./edu/layout/EduRoleGuard";
+import EduShell from "./edu/layout/EduShell";
+import EduDashboard from "./edu/pages/Dashboard";
+import EduBroadcast from "./edu/pages/Broadcast";
+import EduEvents from "./edu/pages/Events";
+import EduArchive from "./edu/pages/Archive";
+import EduPeople from "./edu/pages/People";
+import EduEmbed from "./edu/pages/Embed";
+import EduEmbedEventPlayer from "./edu/pages/EmbedEventPlayer";
+import EduSettings from "./edu/pages/Settings";
+import EduOnboarding from "./edu/pages/Onboarding";
 
 import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
@@ -69,6 +84,15 @@ function App() {
 
       const path = window.location.pathname || "";
       if (path.startsWith("/login") || path.startsWith("/signup")) {
+        return;
+      }
+
+      // EDU lane should stay within EDU login.
+      if (path.startsWith("/streamline/edu")) {
+        const next = `${window.location.pathname}${window.location.search}`;
+        const sp = new URLSearchParams();
+        sp.set("returnTo", next);
+        nav(`/streamline/edu/login?${sp.toString()}`);
         return;
       }
 
@@ -137,6 +161,48 @@ function App() {
       )}
 
       <Routes>
+      {/* EDU lane */}
+      <Route path="/streamline/edu" element={<Outlet />}>
+        <Route index element={<EduLanding />} />
+        <Route path="login" element={<EduLogin />} />
+        <Route path="onboarding" element={<EduOnboarding />} />
+
+        {/* Public EDU embed players (no auth) */}
+        <Route path="embed/event" element={<EduEmbedEventPlayer />} />
+
+        <Route
+          element={
+            <EduProtectedRoute>
+              <EduShell />
+            </EduProtectedRoute>
+          }
+        >
+          <Route path="dashboard" element={<EduDashboard />} />
+          <Route path="broadcast" element={<EduBroadcast />} />
+          <Route path="events" element={<EduEvents />} />
+          <Route path="archive" element={<EduArchive />} />
+          <Route
+            path="people"
+            element={
+              <EduRoleGuard allow={["faculty_admin", "student_producer", "student_producer_assigned"]}>
+                <EduPeople />
+              </EduRoleGuard>
+            }
+          />
+          <Route path="embed" element={<EduEmbed />} />
+          <Route
+            path="settings"
+            element={
+              <EduRoleGuard allow={["faculty_admin"]}>
+                <EduSettings />
+              </EduRoleGuard>
+            }
+          />
+
+          <Route path="*" element={<Navigate to="/streamline/edu/dashboard" replace />} />
+        </Route>
+      </Route>
+
       <Route path="/learnmore" element={<LearnMore />} />
 
       <Route path="/admin/usage" element={<AdminUsage />} />

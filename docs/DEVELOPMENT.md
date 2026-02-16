@@ -66,6 +66,35 @@ See the `deployment/` folder:
 - `deployment/get-ngrok-urls.ps1` — prints current ngrok URLs
 - `deployment/update-env-ngrok.ps1` — updates env with the current ngrok URL
 
+## EDU org bootstrap (no manual Firestore edits)
+
+To make a real user a Faculty Admin for an EDU org, use one of these:
+
+### Option A: One-time script (local)
+
+1) Sign up normally in the app (creates `users/{uid}`).
+2) Run:
+
+```powershell
+cd streamline-server
+npx tsx scripts/edu-bootstrap.ts --orgName "Your School" --adminEmail "you@school.edu"
+```
+
+This creates/updates:
+- `orgs/{orgId}` with `orgType: "edu"`
+- `users/{uid}.orgId/orgType/orgName`
+- `orgMembers/{orgId}_{uid}` with `role: "faculty_admin"`
+
+### Option B: Internal endpoint (admin/maintenance)
+
+Mounted at `POST /api/maintenance/edu/bootstrap` and `POST /api/maintenance/edu/members/promote`.
+
+Auth:
+- If `MAINTENANCE_KEY` is set, send `x-maintenance-key: <key>` (or `Authorization: Bearer <key>`)
+- Otherwise it falls back to `requireAdmin`
+
+Note: In `production`/`staging`, `JWT_SECRET` must be set (no `dev-secret` fallback).
+
 ## Troubleshooting
 
 ### Backend fails to start

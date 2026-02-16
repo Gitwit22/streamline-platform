@@ -18,7 +18,12 @@ export type InviteClaims = {
 };
 
 function getJwtSecret() {
-  return process.env.JWT_SECRET || "dev-secret";
+  const raw = String(process.env.JWT_SECRET || "").trim();
+  const env = String(process.env.NODE_ENV || "development").toLowerCase();
+  if ((env === "production" || env === "staging") && (!raw || raw === "dev-secret")) {
+    throw new Error("Missing JWT_SECRET (no dev-secret in production)");
+  }
+  return raw || "dev-secret";
 }
 
 // Server-side auth debug gate.

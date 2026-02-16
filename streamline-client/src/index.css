@@ -51,6 +51,20 @@ body {
   font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
 }
 
+/* ======================================
+   EDU lane typography + baseline styles
+   ====================================== */
+
+body.sl-edu {
+  background-color: #0f172a;
+  color: #ffffff;
+  font-family: "Outfit", system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+}
+
+body.sl-edu .font-mono {
+  font-family: "Space Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
 /* Links */
 a {
   font-weight: 500;
@@ -61,8 +75,8 @@ a:hover {
   color: #535bf2;
 }
 
-/* Buttons (global baseline – can be overridden per-component) */
-button {
+/* Buttons (legacy global baseline – excluded from EDU lane) */
+body:not(.sl-edu) button {
   border-radius: 8px;
   border: 1px solid transparent;
   padding: 0.6em 1.2em;
@@ -77,11 +91,11 @@ button {
   
   
 }
-button:hover {
+body:not(.sl-edu) button:hover {
   border-color: #646cff;
 }
-button:focus,
-button:focus-visible {
+body:not(.sl-edu) button:focus,
+body:not(.sl-edu) button:focus-visible {
   outline: 3px solid #646cff;
 }
 

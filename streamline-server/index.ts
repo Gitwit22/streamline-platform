@@ -33,6 +33,13 @@ import telemetryRoutes from "./routes/telemetry";
 import savedEmbedsRoutes from "./routes/savedEmbeds";
 import editingRoutes from "./routes/editing";
 import maintenanceRoutes from "./routes/maintenance";
+import eduEventsRoutes from "./routes/eduEvents";
+import eduPeopleRoutes from "./routes/eduPeople";
+import eduSettingsRoutes from "./routes/eduSettings";
+import eduEmbedsRoutes from "./routes/eduEmbeds";
+import eduPublicRoutes from "./routes/eduPublic";
+import eduBootstrapRoutes from "./routes/eduBootstrap";
+import onboardingRoutes from "./routes/onboarding";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
 import { getLiveKitSdk } from "./lib/livekit"; // adjust path
@@ -121,6 +128,9 @@ const corsOptions: CorsOptions = {
     "Authorization",
     "X-Requested-With",
     "Cache-Control",
+    // Optional onboarding key for controlled self-serve onboarding
+    "x-onboarding-key",
+    "X-Onboarding-Key",
     // Room-level access token used by in-room APIs (HLS, multistream, controls, etc.).
     // Explicitly allow both typical header casings to satisfy browser preflight checks.
     "x-room-access-token",
@@ -181,6 +191,14 @@ app.use("/api/hls", hlsRoutes);
 app.use("/api/public/hls", publicHlsRoutes);
 // Public viewer-safe HLS config (no auth)
 app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
+// Public EDU embed data (no auth)
+app.use("/api/public/edu", eduPublicRoutes);
+
+// Internal maintenance/admin utilities
+app.use("/api/maintenance/edu", eduBootstrapRoutes);
+
+// Onboarding/reset endpoints (guarded; demo-safe)
+app.use("/api/onboarding", onboardingRoutes);
 // Recordings API - This handles GET /:id and POST /start, /stop
 app.use("/api/recordings", recordingsRoutes);
 
@@ -234,6 +252,15 @@ app.use("/api/live", liveRoutes);
 
 // Saved embeds (user-owned) -> stable Firestore rooms
 app.use("/api/saved-embeds", savedEmbedsRoutes);
+
+// EDU events (authenticated admin UI)
+app.use("/api/edu", eduEventsRoutes);
+// EDU people (authenticated admin UI)
+app.use("/api/edu", eduPeopleRoutes);
+// EDU org settings + audit (authenticated admin UI)
+app.use("/api/edu", eduSettingsRoutes);
+// EDU embed docs (authenticated admin UI)
+app.use("/api/edu", eduEmbedsRoutes);
 
 // Billing routes
 app.use("/api/billing", billingRoutes);

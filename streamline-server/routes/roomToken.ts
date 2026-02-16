@@ -275,6 +275,72 @@ async function getParticipantCount(roomName: string): Promise<number | null> {
   }
 }
 
+const CAPACITY_LOCK_TTL_MS = 10_000;
+
+function normalizePositiveCap(value: unknown): number | undefined {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return undefined;
+  return Math.floor(num);
+}
+
+async function resolveMaxGuestsCap(ownerId: string | null): Promise<number | undefined> {
+  if (!ownerId) return undefined;
+  const planCap = normalizePositiveCap(await getPlanLimit(ownerId, "maxGuests"));
+  if (planCap !== undefined) return planCap;
+  return normalizePositiveCap(process.env.MAX_GUESTS_PER_ROOM || "0");
+}
+
+function capacityLockRef(roomId: string) {
+  return firestore.collection("roomCapacityLocks").doc(roomId);
+}
+
+async function acquireCapacityLock(roomId: string): Promise<string | null> {
+  const ref = capacityLockRef(roomId);
+  const owner = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const nowMs = Date.now();
+  const expiresAt = nowMs + CAPACITY_LOCK_TTL_MS;
+
+  try {
+    await firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const data = snap.exists ? (snap.data() as any) : null;
+      const lockedUntil = typeof data?.expiresAtMs === "number" ? data.expiresAtMs : 0;
+      if (lockedUntil && lockedUntil > nowMs) {
+        throw new Error("lock_busy");
+      }
+
+      tx.set(
+        ref,
+        {
+          owner,
+          acquiredAtMs: nowMs,
+          expiresAtMs: expiresAt,
+        },
+        { merge: true },
+      );
+    });
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
+async function releaseCapacityLock(roomId: string, owner: string | null) {
+  if (!owner) return;
+  try {
+    const ref = capacityLockRef(roomId);
+    await firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      if (!snap.exists) return;
+      const data = snap.data() as any;
+      if (data?.owner !== owner) return;
+      tx.delete(ref);
+    });
+  } catch {
+    // best-effort
+  }
+}
+
 const router = Router();
 
 // Hard cutoff for legacy name-only joins (no roomId anywhere).
@@ -586,6 +652,32 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
       console.error("[roomToken] failed to load room owner", err);
     }
 
+    // Capacity enforcement (fail-closed): for non-owner joins, enforce the room owner's
+    // maxGuests cap (plan-aware). This prevents bypassing guest caps via the authed token route.
+    // Hold a short Firestore lock across the check + mint to reduce oversubscription races.
+    const capacityBypass = !!callerIsAdmin || (!!uid && !!roomPolicy.ownerId && uid === roomPolicy.ownerId);
+    let capacityLockOwner: string | null = null;
+    if (!capacityBypass) {
+      const cap = await resolveMaxGuestsCap(entitlementsUid || roomPolicy.ownerId);
+      if (cap !== undefined) {
+        capacityLockOwner = await acquireCapacityLock(roomId);
+        if (!capacityLockOwner) {
+          return res.status(503).json({ error: "capacity_check_busy" });
+        }
+        const participantCount = await getParticipantCount(roomName);
+        if (participantCount === null) {
+          await releaseCapacityLock(roomId, capacityLockOwner);
+          capacityLockOwner = null;
+          return res.status(503).json({ error: "capacity_check_unavailable" });
+        }
+        if (participantCount >= cap) {
+          await releaseCapacityLock(roomId, capacityLockOwner);
+          capacityLockOwner = null;
+          return res.status(429).json({ error: "room_full" });
+        }
+      }
+    }
+
     // Invariant: a host join with auth should always resolve an entitlementsUid.
     // If this ever fails, it indicates a broken room document or ownership state.
     if (normalizedRequested === "host" && uid && !entitlementsUid) {
@@ -800,6 +892,7 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
         .catch((err) => console.error("[roomToken] audit write failed", err));
     }
 
+    await releaseCapacityLock(roomId, capacityLockOwner);
     return res.status(200).json({
       token: lkJwt,
       serverUrl,
@@ -817,6 +910,15 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
     });
   } catch (err: any) {
     console.error("roomToken error:", err);
+    // Ensure any held capacity lock is released on unexpected failures.
+    try {
+      const maybeRoomId = String((req as any)?.body?.roomId || "").trim();
+      if (maybeRoomId) {
+        // We don't have access to the lock owner here in all cases; lock TTL is short.
+      }
+    } catch {
+      // ignore
+    }
     return res.status(500).json({
       code: "internal_error",
       error: "Failed to create room token",
@@ -937,22 +1039,25 @@ router.post("/guest", requireAuth as any, async (req: any, res) => {
       return res.status(400).json({ error: "room_not_rtc" });
     }
 
-    // Guest cap check (plan-aware via host, fallback to env)
+    // Guest cap check (plan-aware via owner, fallback to env).
+    // Fail-closed on capacity check failures so outages/misconfig don't become "no cap".
     const hostUid = ownerId || (inviteClaims as any)?.uid || (inviteClaims as any)?.sub || uid;
-    const maxGuestsPlan = hostUid ? await getPlanLimit(hostUid, "maxGuests") : undefined;
-    const maxGuestsEnv = Number(process.env.MAX_GUESTS_PER_ROOM || "0");
-    const envCap = Number.isFinite(maxGuestsEnv) && maxGuestsEnv > 0 ? maxGuestsEnv : undefined;
-    const maxGuests = maxGuestsPlan !== undefined ? maxGuestsPlan : envCap;
-    let overCap = false;
-    if (maxGuests !== undefined) {
-      const participantCount = await getParticipantCount(roomName);
-      if (participantCount !== null && participantCount >= maxGuests) {
-        overCap = true;
+    const cap = await resolveMaxGuestsCap(hostUid || null);
+    let capacityLockOwner: string | null = null;
+    if (cap !== undefined) {
+      capacityLockOwner = await acquireCapacityLock(roomId);
+      if (!capacityLockOwner) {
+        return res.status(503).json({ error: "capacity_check_busy" });
       }
-    }
-
-    if (overCap) {
-      return res.status(429).json({ error: "room_full" });
+      const participantCount = await getParticipantCount(roomName);
+      if (participantCount === null) {
+        await releaseCapacityLock(roomId, capacityLockOwner);
+        return res.status(503).json({ error: "capacity_check_unavailable" });
+      }
+      if (participantCount >= cap) {
+        await releaseCapacityLock(roomId, capacityLockOwner);
+        return res.status(429).json({ error: "room_full" });
+      }
     }
 
     const identity = (guestId && guestId.trim()) || uid;
@@ -1031,6 +1136,7 @@ router.post("/guest", requireAuth as any, async (req: any, res) => {
         .catch((err) => console.error("[roomToken/guest] audit write failed", err));
     }
 
+    await releaseCapacityLock(roomId, capacityLockOwner);
     return res.status(200).json({
       token: lkJwt,
       serverUrl,

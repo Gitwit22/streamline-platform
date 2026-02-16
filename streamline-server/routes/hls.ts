@@ -15,6 +15,8 @@ import { evaluateUsageGate } from "../lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { deletePrefix } from "../lib/storageClient";
+import { loadEduOrgSettingsForUid, isEduOrgType } from "../lib/eduOrgContext";
+import { writeEduAudit } from "../lib/eduAudit";
 
 const router = Router();
 
@@ -129,6 +131,8 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
     if (!uid) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
+
+    const eduCtx = await loadEduOrgSettingsForUid(uid).catch(() => null);
     const featureAccess = await canAccessFeature((req as any).account || uid, "hls");
     if (!featureAccess.allowed) {
       if (featureAccess.code === LIMIT_ERRORS.FEATURE_DISABLED) {
@@ -150,6 +154,23 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
         return res.status(err.status).json({ error: err.code });
       }
       throw err;
+    }
+
+    // EDU org policy enforcement (server-side): who can start broadcasts.
+    if (eduCtx?.org && isEduOrgType(eduCtx.org.orgType)) {
+      if (!eduCtx.orgRole) {
+        return res.status(403).json({ error: "edu_membership_required" });
+      }
+      const isAdmin = eduCtx.orgRole === "faculty_admin";
+      if (!isAdmin) {
+        const defaults = eduCtx.org.defaults;
+        if (!defaults.studentProducersCanStart) {
+          return res.status(403).json({ error: "edu_policy_start_disabled" });
+        }
+        if (defaults.requireAssignmentToStart && eduCtx.orgRole === "student_producer") {
+          return res.status(403).json({ error: "edu_policy_assignment_required" });
+        }
+      }
     }
 
     // Monthly usage gate (HLS consumes transcode):
@@ -237,6 +258,16 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
 
     // 1) Mark starting first (crash-safe)
     await setHlsStarting(roomRef, { presetId, prefix, stopAt, capMinutes });
+
+    if (eduCtx?.orgId && eduCtx?.org && isEduOrgType(eduCtx.org.orgType)) {
+      await writeEduAudit({
+        orgId: eduCtx.orgId,
+        action: "hls.start_requested",
+        actorUid: uid,
+        actorName: eduCtx.userName || "User",
+        targetId: roomId,
+      }).catch(() => void 0);
+    }
 
     try {
       // 2) Start egress
@@ -430,6 +461,7 @@ router.post("/stop/:roomId", requireAuth as any, requireRoomAccessToken as any, 
   try {
     const uid = (req as any).user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    const eduCtx = await loadEduOrgSettingsForUid(uid).catch(() => null);
     const featureAccess = await canAccessFeature((req as any).account || uid, "hls");
     if (!featureAccess.allowed) {
       if (featureAccess.code === LIMIT_ERRORS.FEATURE_DISABLED) {
@@ -491,6 +523,16 @@ router.post("/stop/:roomId", requireAuth as any, requireRoomAccessToken as any, 
     }
 
     await setHlsIdle(roomRef);
+
+    if (eduCtx?.orgId && eduCtx?.org && isEduOrgType(eduCtx.org.orgType)) {
+      await writeEduAudit({
+        orgId: eduCtx.orgId,
+        action: "hls.stopped",
+        actorUid: uid,
+        actorName: eduCtx.userName || "User",
+        targetId: roomId,
+      }).catch(() => void 0);
+    }
 
     const usageUid = (room as any).ownerId || uid;
     if (durationMinutes > 0 && usageUid) {

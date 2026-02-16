@@ -380,19 +380,32 @@ function getAuthUserId(req: any): string | null {
   return req.user?.uid || req.user?.id || null;
 }
 
+function normalizeRootPrefix(raw: unknown): string {
+  const v = String(raw ?? "").trim();
+  const noLeadingSlash = v.replace(/^\/+/, "");
+  if (!noLeadingSlash) return "";
+  return noLeadingSlash.endsWith("/") ? noLeadingSlash : `${noLeadingSlash}/`;
+}
+
 /**
  * Generate recording path for R2
  * CRITICAL: No leading slash - use "recordings/..." not "/recordings/..."
  */
-function generateRecordingPrefix(userId: string, roomKey: string, recordingId: string): string {
+function generateRecordingPrefix(userId: string, roomKey: string, recordingId: string, rootPrefix: string = ""): string {
+  const root = normalizeRootPrefix(rootPrefix);
   const safeRoom = roomKey.replace(/[^a-zA-Z0-9_-]/g, "_");
   const safeRecordingId = String(recordingId || "").trim() || "unknown";
   // Ensure no leading slash - R2/S3 keys should not start with /
-  return `recordings/${userId}/${safeRoom}/${safeRecordingId}/`;
+  return `${root}recordings/${userId}/${safeRoom}/${safeRecordingId}/`;
 }
 
-function generateRecordingPath(userId: string, roomKey: string, recordingId: string): { objectKey: string; prefix: string } {
-  const prefix = generateRecordingPrefix(userId, roomKey, recordingId);
+function generateRecordingPath(
+  userId: string,
+  roomKey: string,
+  recordingId: string,
+  rootPrefix: string = ""
+): { objectKey: string; prefix: string } {
+  const prefix = generateRecordingPrefix(userId, roomKey, recordingId, rootPrefix);
   return { prefix, objectKey: `${prefix}recording.mp4` };
 }
 
@@ -911,10 +924,50 @@ router.post(
       return res.status(500).json({ error: "R2 storage not configured" });
     }
 
-    // Generate recording ID and storage paths
+    // Generate recording ID, then decide storage root prefix.
     const now = new Date();
     const recordingId = firestore.collection("recordings").doc().id;
-    const { objectKey, prefix: r2Prefix } = generateRecordingPath(uid, roomId, recordingId);
+
+    // Best-effort: detect EDU context for storage routing + attach orgId for EDU reporting.
+    // This is intentionally non-fatal and remains compatible with legacy datasets.
+    let orgId: string | null = null;
+    let orgType: string | null = null;
+    let orgRole: string | null = null;
+    try {
+      const uSnap = await firestore.collection("users").doc(uid).get();
+      if (uSnap.exists) {
+        const u = (uSnap.data() as any) || {};
+        const rawOrgId = u?.orgId ?? u?.org?.id ?? u?.org?.orgId;
+        orgId = typeof rawOrgId === "string" && rawOrgId.trim() ? rawOrgId.trim() : null;
+
+        const rawOrgType = u?.orgType ?? u?.org?.orgType;
+        orgType = typeof rawOrgType === "string" && rawOrgType.trim() ? rawOrgType.trim() : null;
+      }
+
+      if (orgId) {
+        const memberId = `${orgId}_${uid}`;
+        const memberSnap = await firestore.collection("orgMembers").doc(memberId).get().catch(() => null as any);
+        const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
+        orgRole = member && typeof member.role === "string" && String(member.role).trim() ? String(member.role).trim() : null;
+      }
+    } catch {
+      // non-fatal
+    }
+
+    const roleLower = String(orgRole || "").toLowerCase();
+    const isEduByRole =
+      roleLower === "faculty_admin" ||
+      roleLower === "student_producer" ||
+      roleLower === "student_producer_assigned" ||
+      roleLower === "talent" ||
+      roleLower === "viewer";
+    const typeLower = String(orgType || "").toLowerCase();
+    const isEduByType = typeLower.includes("edu");
+    const useEduPrefix = isEduByType || isEduByRole;
+
+    const eduRootPrefix = useEduPrefix ? normalizeRootPrefix(process.env.R2_EDU_RECORDINGS_PREFIX ?? "edu/") : "";
+
+    const { objectKey, prefix: r2Prefix } = generateRecordingPath(uid, roomId, recordingId, eduRootPrefix);
     const recordingRef = firestore.collection("recordings").doc(recordingId);
 
     const isEmergency = recordingClass === "emergency";
@@ -942,6 +995,7 @@ router.post(
     const initialDoc: Record<string, any> = {
       id: recordingId,
       userId: uid,
+      ...(orgId ? { orgId } : {}),
       roomId,
       roomName: roomAccess.roomName || roomId,
       livekitRoomName,

@@ -3,6 +3,7 @@ import { useLocation, useParams } from "react-router-dom";
 import Hls from "hls.js";
 import { API_BASE } from "../lib/apiBase";
 import { getPublicHls } from "../services/hls";
+import { useHlsReadiness } from "../hooks/useHlsReadiness";
 import {
   Radio,
   RefreshCw,
@@ -12,9 +13,10 @@ import {
   Users,
   Signal,
   AlertCircle,
+  Loader2,
 } from "lucide-react";
 
-const DEFAULT_LOGO_URL = "/logosmaller.png";
+const DEFAULT_LOGO_URL = "/logo.png";
 
 type PublicHlsResponse = {
   status?: "idle" | "starting" | "live" | "error";
@@ -103,9 +105,12 @@ export default function Live() {
   const [volume, setVolume] = useState(0.6);
   const [isRetrying, setIsRetrying] = useState(false);
   const [viewerCount, setViewerCount] = useState<number>(0);
+  const [playerNonce, setPlayerNonce] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
+
+  const manifestReadiness = useHlsReadiness(playlistUrl, playerNonce);
 
   // Resolve savedEmbedId -> activeRoomId and basic viewer metadata
   useEffect(() => {
@@ -235,6 +240,13 @@ export default function Live() {
     }
   }, [roomId, playlistUrl]);
 
+  const refreshStream = useCallback(() => {
+    // Remount the player + restart readiness polling without reloading the page.
+    setPlayerNonce((n) => n + 1);
+    void reloadViewerConfig();
+    void fetchHlsStatus();
+  }, [reloadViewerConfig, fetchHlsStatus]);
+
   // Poll loop
   useEffect(() => {
     const currentRoomId = (roomId || "").trim();
@@ -280,9 +292,10 @@ export default function Live() {
   if (isIgMode) {
     return (
       <div className="fixed inset-0 bg-black">
-        {playlistUrl && status === "live" ? (
+        {playlistUrl && status === "live" && manifestReadiness === "ready" ? (
           <>
             <video
+              key={playerNonce}
               ref={videoRef}
               className="w-full h-full object-cover"
               autoPlay
@@ -297,12 +310,12 @@ export default function Live() {
 
             <div className="absolute top-4 right-4 flex items-center gap-2">
               <button
-                onClick={handleRefreshGoLive}
+                onClick={refreshStream}
                 className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-sm transition-colors border border-white/10 text-xs font-medium text-white"
-                aria-label="Refresh"
+                aria-label="Refresh stream"
               >
                 <RefreshCw className={`w-4 h-4 ${isRetrying ? "animate-spin" : ""}`} />
-                <span>Refresh</span>
+                <span>Refresh stream</span>
               </button>
             </div>
 
@@ -325,27 +338,42 @@ export default function Live() {
           </>
         ) : (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-6">
-            <div className="text-lg font-semibold text-white mb-2">
-              {status === "loading" && "Connecting..."}
-              {status === "starting" && "Starting..."}
-              {status === "offline" && (ended ? "Stream ended" : "Offline")}
-              {status === "error" && "Connection Error"}
+            <img
+              src={(viewerConfig?.logoUrl || DEFAULT_LOGO_URL) as string}
+              alt="StreamLine"
+              className="h-12 w-auto opacity-95"
+            />
+
+            <div className="mt-4 text-lg font-semibold text-white">
+              {status === "offline" ? (ended ? "Stream is offline" : "Stream is offline") : "Stream will begin soon…"}
             </div>
 
-            {error && <div className="text-sm text-red-300 mb-4 max-w-md">{error}</div>}
+            <div className="mt-2 text-sm text-slate-300 max-w-md">
+              {status === "offline" ? "When the host goes live, playback will start automatically." : "Preparing video feed (this can take a few seconds)."}
+            </div>
 
-            <button
-              onClick={() => {
-                void fetchHlsStatus();
-                const v = videoRef.current;
-                if (v) snapToLiveEdge(v);
-              }}
-              disabled={isRetrying}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 text-white font-medium text-sm transition-all disabled:opacity-50 disabled:cursor-not-allowed border border-white/10"
-            >
-              <RefreshCw className={`w-4 h-4 ${isRetrying ? "animate-spin" : ""}`} />
-              {isRetrying ? "Retrying..." : "Retry"}
-            </button>
+            {(status === "starting" || (status === "live" && manifestReadiness !== "ready") || status === "loading") ? (
+              <div className="mt-4 flex items-center gap-2 text-sm text-slate-300">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                <span>Stand by…</span>
+              </div>
+            ) : null}
+
+            {status === "error" ? (
+              <div className="mt-4 text-sm text-red-300 max-w-md">{error || "Connection error"}</div>
+            ) : null}
+
+            <div className="absolute top-4 right-4">
+              <button
+                onClick={refreshStream}
+                disabled={isRetrying}
+                className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-sm transition-colors border border-white/10 text-xs font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                aria-label="Refresh stream"
+              >
+                <RefreshCw className={`w-4 h-4 ${isRetrying ? "animate-spin" : ""}`} />
+                <span>Refresh stream</span>
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -360,6 +388,7 @@ export default function Live() {
   useEffect(() => {
     const video = videoRef.current;
     if (!playlistUrl || !video) return;
+    if (manifestReadiness !== "ready") return;
 
     // reset state for a fresh attach
     setError(null);
@@ -377,7 +406,19 @@ export default function Live() {
       };
 
       video.addEventListener("loadedmetadata", onMeta, { once: true });
-      return;
+      return () => {
+        try {
+          video.pause();
+        } catch {
+          // ignore
+        }
+        try {
+          video.removeAttribute("src");
+          video.load();
+        } catch {
+          // ignore
+        }
+      };
     }
 
     if (Hls.isSupported()) {
@@ -483,12 +524,24 @@ export default function Live() {
         if (hlsRef.current === hls) {
           hlsRef.current = null;
         }
+
+        try {
+          video.pause();
+        } catch {
+          // ignore
+        }
+        try {
+          video.removeAttribute("src");
+          video.load();
+        } catch {
+          // ignore
+        }
       };
     } else {
       setStatus("error");
       setError("HLS not supported in this browser.");
     }
-  }, [playlistUrl]);
+  }, [playlistUrl, manifestReadiness, playerNonce]);
 
   // Apply audio settings ONLY (no src/hls work here). This ensures mute/volume
   // changes never recreate the player or reload the stream.
@@ -623,9 +676,17 @@ export default function Live() {
               </div>
 
               <div className="relative aspect-video bg-black/80 rounded-2xl overflow-hidden border border-neutral-800/50">
-                {playlistUrl && status === "live" ? (
+                {playlistUrl && status === "live" && manifestReadiness === "ready" ? (
                   <>
-                    <video ref={videoRef} className="w-full h-full object-contain" autoPlay muted={isMuted} playsInline controls={false} />
+                    <video
+                      key={playerNonce}
+                      ref={videoRef}
+                      className="w-full h-full object-contain"
+                      autoPlay
+                      muted={isMuted}
+                      playsInline
+                      controls={false}
+                    />
 
                     {/* overlay controls */}
                     <div className="absolute bottom-0 left-0 right-0 p-4 bg-gradient-to-t from-black/90 via-black/50 to-transparent opacity-100 md:opacity-0 md:hover:opacity-100 transition-opacity duration-300">
@@ -666,6 +727,15 @@ export default function Live() {
 
                           <div className="flex items-center gap-2">
                             <button
+                              onClick={refreshStream}
+                              className="flex items-center gap-1 px-3 py-2 rounded-lg bg-white/10 hover:bg-red-500/30 backdrop-blur-sm transition-colors border border-white/10 hover:border-red-500/50 text-xs font-medium text-white"
+                              aria-label="Refresh stream"
+                            >
+                              <RefreshCw className="w-3 h-3" />
+                              <span>Refresh stream</span>
+                            </button>
+
+                            <button
                               onClick={handleRefreshGoLive}
                               className="flex items-center gap-1 px-3 py-2 rounded-lg bg-white/10 hover:bg-red-500/30 backdrop-blur-sm transition-colors border border-white/10 hover:border-red-500/50 text-xs font-medium text-white"
                             >
@@ -696,60 +766,47 @@ export default function Live() {
                   </>
                 ) : (
                   <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-6">
-                    <div className="relative mb-5">
-                      <div
-                        className={[
-                          "w-20 h-20 rounded-2xl flex items-center justify-center border",
-                          status === "loading" || status === "starting"
-                            ? "bg-gradient-to-br from-red-600/30 to-red-900/30 border-red-500/40"
-                            : status === "error"
-                            ? "bg-gradient-to-br from-red-900/40 to-red-950/40 border-red-700/40"
-                            : "bg-gradient-to-br from-neutral-800/50 to-neutral-900/50 border-neutral-700/30",
-                        ].join(" ")}
+                    <img
+                      src={(viewerConfig?.logoUrl || DEFAULT_LOGO_URL) as string}
+                      alt="StreamLine"
+                      className="h-12 w-auto opacity-95"
+                    />
+
+                    {status === "offline" || !playlistUrl ? (
+                      <>
+                        <div className="mt-4 text-xl font-semibold text-white">Stream is offline</div>
+                        <div className="mt-2 text-sm text-neutral-500 max-w-md">
+                          When the host goes live, playback will start automatically.
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <div className="mt-4 text-xl font-semibold text-white">Stream will begin soon…</div>
+                        <div className="mt-2 text-sm text-neutral-500 max-w-md">
+                          Preparing video feed (this can take a few seconds).
+                        </div>
+                        <div className="mt-4 flex items-center gap-2 text-sm text-neutral-300">
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                          <span>Stand by…</span>
+                        </div>
+                      </>
+                    )}
+
+                    {status === "error" ? (
+                      <div className="mt-4 text-sm text-red-300 max-w-md">{error || "Unable to connect to the stream."}</div>
+                    ) : null}
+
+                    <div className="absolute top-4 right-4">
+                      <button
+                        onClick={refreshStream}
+                        disabled={isRetrying}
+                        className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 hover:bg-white/20 backdrop-blur-sm transition-colors border border-white/10 text-xs font-medium text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                        aria-label="Refresh stream"
                       >
-                        {status === "loading" || status === "starting" ? (
-                          <Signal className={`w-8 h-8 text-red-400 ${isRetrying ? "animate-pulse" : ""}`} />
-                        ) : status === "error" ? (
-                          <AlertCircle className="w-8 h-8 text-red-500" />
-                        ) : (
-                          <Radio className="w-8 h-8 text-neutral-500" />
-                        )}
-                      </div>
-
-                      {(status === "loading" || status === "starting") && (
-                        <div className="absolute -inset-2 rounded-2xl border-2 border-red-500/30 animate-ping" />
-                      )}
+                        <RefreshCw className={`w-4 h-4 ${isRetrying ? "animate-spin" : ""}`} />
+                        <span>Refresh stream</span>
+                      </button>
                     </div>
-
-                    <div className="text-xl font-semibold text-white mb-2">
-                      {status === "loading" && "Connecting to stream..."}
-                      {status === "starting" && "Stream is starting..."}
-                      {status === "offline" && (ended ? "Stream ended" : "Stream is offline")}
-                      {status === "error" && "Connection Error"}
-                    </div>
-
-                    <div className="text-sm text-neutral-500 mb-6 max-w-md">
-                      {status === "loading" && "Please wait while we establish a connection."}
-                      {status === "starting" && "The broadcaster is preparing to go live."}
-                      {status === "offline" &&
-                        (ended
-                          ? "This broadcast has ended."
-                          : (viewerConfig?.offlineMessage || "").trim() || "This stream isn’t live yet. Check back in a moment.")}
-                      {status === "error" && (error || "Unable to connect to the stream.")}
-                    </div>
-
-                    <button
-                      onClick={() => {
-                        void fetchHlsStatus();
-                        const v = videoRef.current;
-                        if (v) snapToLiveEdge(v);
-                      }}
-                      disabled={isRetrying}
-                      className="group flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white font-medium text-sm transition-all duration-300 shadow-lg shadow-red-500/30 hover:shadow-red-500/50 disabled:opacity-50 disabled:cursor-not-allowed border border-red-500/30"
-                    >
-                      <RefreshCw className={`w-4 h-4 ${isRetrying ? "animate-spin" : "group-hover:rotate-180 transition-transform duration-500"}`} />
-                      {isRetrying ? "Retrying..." : "Retry Connection"}
-                    </button>
                   </div>
                 )}
               </div>

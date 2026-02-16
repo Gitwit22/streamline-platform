@@ -1,5 +1,6 @@
 import { Router } from "express";
 import admin from "firebase-admin";
+import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { firestore } from "../firebaseAdmin";
 import { tryGetAuthUser, verifyInviteToken } from "../middleware/requireAuth";
@@ -64,6 +65,151 @@ export function tryGetLegacyInviteGuest(req: any, roomId: string): { inviteId: s
 async function getAccessTokenCtor() {
   const mod = await import("livekit-server-sdk");
   return mod.AccessToken;
+}
+
+async function getRoomServiceClient() {
+  const mod = await import("livekit-server-sdk");
+  return mod.RoomServiceClient;
+}
+
+function deriveServiceUrl(): string | null {
+  const raw = process.env.LIVEKIT_URL || "";
+  if (!raw) return null;
+  // Convert wss://host to https://host for RoomServiceClient
+  return raw.replace(/^wss?:\/\//i, (m) => (m.toLowerCase() === "ws://" ? "http://" : "https://"));
+}
+
+async function getParticipantCount(livekitRoomName: string): Promise<number | null> {
+  const serviceUrl = deriveServiceUrl();
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+  if (!serviceUrl || !apiKey || !apiSecret) return null;
+  try {
+    const RoomServiceClient = await getRoomServiceClient();
+    const client = new RoomServiceClient(serviceUrl, apiKey, apiSecret);
+    const participants = await client.listParticipants(livekitRoomName);
+    return participants?.length ?? 0;
+  } catch (err) {
+    console.warn("[roomGuestAccess] participant count failed", (err as any)?.message || err);
+    return null;
+  }
+}
+
+async function getPlanLimit(uid: string, field: string): Promise<number | undefined> {
+  const userSnap = await firestore.collection("users").doc(uid).get();
+  const planId = String((userSnap.data() || {}).planId || "free");
+  const planSnap = await firestore.collection("plans").doc(planId).get();
+  if (!planSnap.exists) return undefined;
+  const limits = (planSnap.data() || {}).limits || {};
+  const raw = (limits as any)[field];
+  if (raw === undefined || raw === null) return undefined;
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : undefined;
+}
+
+function normalizePositiveCap(raw: number | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return Math.floor(n);
+}
+
+async function resolveMaxGuestsCap(ownerId: string | null): Promise<number | undefined> {
+  const planCapRaw = ownerId ? await getPlanLimit(ownerId, "maxGuests") : undefined;
+  const planCap = normalizePositiveCap(planCapRaw);
+
+  const envRaw = Number(process.env.MAX_GUESTS_PER_ROOM || "0");
+  const envCap = Number.isFinite(envRaw) && envRaw > 0 ? Math.floor(envRaw) : undefined;
+
+  return planCap !== undefined ? planCap : envCap;
+}
+
+const CAPACITY_LOCK_TTL_MS = 10_000;
+
+async function acquireCapacityLock(roomId: string): Promise<string | null> {
+  const owner = crypto.randomUUID();
+  const ref = firestore.collection("roomCapacityLocks").doc(roomId);
+  const now = Date.now();
+  try {
+    await firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const data = snap.exists ? ((snap.data() as any) || {}) : {};
+      const existingOwner = typeof data.owner === "string" ? data.owner : "";
+      const expiresAtMs = typeof data.expiresAtMs === "number" ? data.expiresAtMs : 0;
+      if (expiresAtMs > now && existingOwner && existingOwner !== owner) {
+        throw new Error("capacity_lock_busy");
+      }
+      tx.set(
+        ref,
+        {
+          owner,
+          expiresAtMs: now + CAPACITY_LOCK_TTL_MS,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    });
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
+async function releaseCapacityLock(roomId: string, owner: string): Promise<void> {
+  const ref = firestore.collection("roomCapacityLocks").doc(roomId);
+  try {
+    await firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const data = snap.exists ? ((snap.data() as any) || {}) : {};
+      const existingOwner = typeof data.owner === "string" ? data.owner : "";
+      if (existingOwner && existingOwner === owner) {
+        tx.set(
+          ref,
+          {
+            expiresAtMs: 0,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+      }
+    });
+  } catch {
+    // best-effort
+  }
+}
+
+async function enforceCapacityOrRespond(params: {
+  roomId: string;
+  livekitRoomName: string;
+  ownerId: string | null;
+  bypass: boolean;
+  res: any;
+}): Promise<{ ok: true; lockOwner: string | null } | { ok: false }> {
+  const { roomId, livekitRoomName, ownerId, bypass, res } = params;
+  if (bypass) return { ok: true, lockOwner: null };
+
+  const cap = await resolveMaxGuestsCap(ownerId);
+  if (cap === undefined) return { ok: true, lockOwner: null };
+
+  const lockOwner = await acquireCapacityLock(roomId);
+  if (!lockOwner) {
+    res.status(503).json({ error: "capacity_check_busy" });
+    return { ok: false };
+  }
+
+  const participantCount = await getParticipantCount(livekitRoomName);
+  if (participantCount === null) {
+    await releaseCapacityLock(roomId, lockOwner);
+    res.status(503).json({ error: "capacity_check_unavailable" });
+    return { ok: false };
+  }
+  if (participantCount >= cap) {
+    await releaseCapacityLock(roomId, lockOwner);
+    res.status(429).json({ error: "room_full" });
+    return { ok: false };
+  }
+
+  return { ok: true, lockOwner };
 }
 
 function getLiveKitServerUrlForClient(): string | null {
@@ -426,6 +572,7 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     const livekitRoomName = String(room.livekitRoomName || roomId).trim();
     const roomName = String(room.roomName || room.name || livekitRoomName || roomId);
     const allowGuestsPolicy = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
+    const ownerId = typeof room.ownerId === "string" && room.ownerId.trim() ? room.ownerId.trim() : null;
 
     // Optional per-room guest policy
     if (allowGuestsPolicy === false) {
@@ -435,6 +582,26 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       console.log("[join-now]", logPayload);
       return res.status(401).json({ error: "login_required" });
     }
+
+    // Enforce room capacity (plan maxGuests) for unauthenticated guest join.
+    // Fail-closed if we cannot determine occupancy.
+    const capDecision = await enforceCapacityOrRespond({
+      roomId,
+      livekitRoomName,
+      ownerId,
+      bypass: false,
+      res,
+    });
+    if (!capDecision.ok) {
+      logPayload.event = "join_now_fail";
+      logPayload.reason = "room_full_or_capacity_unavailable";
+      logPayload.latencyMs = Date.now() - startTime;
+      console.log("[join-now]", logPayload);
+      return;
+    }
+
+    const capLockOwner = capDecision.lockOwner;
+    try {
 
     // Step 3: Mint LiveKit token
     const apiKey = process.env.LIVEKIT_API_KEY;
@@ -473,7 +640,9 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       ttl: livekitTtl,
     });
 
-    const grant = roleGrant(inviteRole);
+    // SECURITY: join-now is unauthenticated; never mint host-level tokens.
+    const mintedRole: "guest" | "participant" | "host" = inviteRole === "host" ? "guest" : inviteRole;
+    const grant = roleGrant(mintedRole);
     at.addGrant({ room: livekitRoomName, ...grant } as any);
 
     const livekitToken = await at.toJwt();
@@ -521,7 +690,7 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       roomId,
       roomName,
       livekitRoomName,
-      role: inviteRole,
+      role: mintedRole,
       permissions: basePerms,
       identity,
     } as const;
@@ -572,9 +741,14 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       guestSessionToken,
       roomAccessToken,
       isViewer: false, // All invite-based guests are RTC participants with mic+cam (guest role)
-      role: inviteRole,
+      role: mintedRole,
       roomName,
     });
+    } finally {
+      if (capLockOwner) {
+        await releaseCapacityLock(roomId, capLockOwner);
+      }
+    }
   } catch (err: any) {
     logPayload.event = "join_now_fail";
     logPayload.reason = "exception";
@@ -760,6 +934,20 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       : guest?.role === "participant"
         ? "participant"
         : "guest";
+
+    // Enforce room capacity (plan maxGuests) for non-owner joins.
+    // Fail-closed if we cannot determine occupancy.
+    const capacity = await enforceCapacityOrRespond({
+      roomId,
+      livekitRoomName,
+      ownerId: ownerId || null,
+      bypass: !!(user && isOwner),
+      res,
+    });
+    if (!capacity.ok) return;
+
+    const capLockOwner = capacity.lockOwner;
+    try {
     const identity = user ? user.uid : `invite:${guest!.inviteId}:${Math.random().toString(16).slice(2)}`;
     if (!identity || !String(identity).trim()) {
       return res.status(500).json({ code: "internal_error", error: "invalid_identity" });
@@ -862,6 +1050,11 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       role: lkRole,
       effectiveRoleKey,
     });
+    } finally {
+      if (capLockOwner) {
+        await releaseCapacityLock(roomId, capLockOwner);
+      }
+    }
   } catch (err: any) {
     console.error("/api/rooms/:roomId/token error", err?.message || err);
     res.setHeader("x-sl-token-grants", "v4-with-sources");
