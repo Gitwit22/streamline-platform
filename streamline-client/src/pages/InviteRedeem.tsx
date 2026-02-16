@@ -38,14 +38,24 @@ export default function InviteRedeem() {
 
         const guestSessionToken = typeof (data as any)?.guestSessionToken === "string" ? (data as any).guestSessionToken : "";
         if (guestSessionToken && guestSessionToken.trim()) {
+          const token = guestSessionToken.trim();
+          // Store in BOTH sessionStorage (preferred) AND localStorage (fallback for in-app browsers)
           try {
-            sessionStorage.setItem(`sl_guest_session:${roomId}`, guestSessionToken.trim());
+            sessionStorage.setItem(`sl_guest_session:${roomId}`, token);
           } catch {
-            // ignore
+            // sessionStorage may fail in private browsing or strict contexts
+          }
+          try {
+            localStorage.setItem("sl_guestSessionToken", token);
+            localStorage.setItem("sl_guestSessionRoomId", roomId);
+          } catch {
+            // localStorage may fail in private browsing
           }
         }
 
-        nav(`/room/${encodeURIComponent(roomId)}`, { replace: true });
+        // Pass token via query param so it works even if cookies/storage fail (FB/IG in-app browsers)
+        const urlToken = guestSessionToken && guestSessionToken.trim() ? `?gst=${encodeURIComponent(guestSessionToken.trim())}` : "";
+        nav(`/room/${encodeURIComponent(roomId)}${urlToken}`, { replace: true });
       } catch (err: any) {
         setError(err?.message || "Failed to redeem invite.");
       }

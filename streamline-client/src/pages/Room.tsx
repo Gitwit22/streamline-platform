@@ -1,3 +1,4 @@
+import React from "react";
 import { getFeatureErrorMessage } from "../lib/featureErrors";
 import { useEffect, useState, useRef, useMemo } from "react";
 import { logAuthDebugContext } from "../lib/logAuthDebug";
@@ -8,8 +9,9 @@ import {
   LiveKitRoom,
   useRoomContext,
   useLocalParticipant,
+  useParticipants,
 } from "@livekit/components-react";
-import { RoomEvent } from "livekit-client";
+import { RoomEvent, Track, ConnectionState } from "livekit-client";
 import {
   apiStartRecording,
   apiStopRecording,
@@ -19,6 +21,7 @@ import {
   apiGetRoomPolicy,
   apiUpdateRoomPolicy,
 } from "../lib/api";
+import { logTelemetry, markTiming, measureTiming } from "../lib/telemetry";
 import RoleOverlay from "../components/RoleOverlay";
 import StreamSetupModalV2 from "../components/StreamSetupModal";
 import { ErrorBoundary } from "../components/ErrorBoundary";
@@ -27,6 +30,7 @@ import SafeVideoConference from "../components/SafeVideoConference";
 import { useEffectiveEntitlements } from "../hooks/useEffectiveEntitlements";
 import { useFeatureAccess } from "../hooks/useFeatureAccess";
 import { useHlsStatus } from "../hooks/useHlsStatus";
+import { normalizeStartLivePayloadFromDestinationsKeys } from "../hooks/useDestinationsStartPayload";
 import {
   RECONNECT_MEDIA_MESSAGE_TYPE,
   reconnectMedia,
@@ -36,6 +40,564 @@ import { setPlatformFlagsValue } from "../lib/platformFlagsStore";
 import { fetchDestinations, preflight, type DestinationItem } from "../services/destinations";
 
 const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
+
+// Telemetry tracker for measuring guest invite flow performance
+function GuestTelemetryTracker({ roomId, isViewer }: { roomId: string | null; isViewer: boolean }) {
+  const room = useRoomContext();
+  const [guestSessionToken] = useState(() => getGuestSessionToken(roomId));
+  const [hasLoggedJoinSuccess, setHasLoggedJoinSuccess] = useState(false);
+  const [hasLoggedFirstVideo, setHasLoggedFirstVideo] = useState(false);
+
+  // Track when viewer lands in room (mark timing start)
+  useEffect(() => {
+    if (!isViewer || !roomId || !guestSessionToken) return;
+    
+    const timingKey = `viewer_first_video:${roomId}`;
+    markTiming(timingKey);
+    console.log('[Telemetry] Marking timing start for viewer join:', roomId);
+
+    return () => {
+      // Cleanup timing mark if component unmounts without video
+      measureTiming(timingKey);
+    };
+  }, [isViewer, roomId, guestSessionToken]);
+
+  // Track viewer_join_success when connected to LiveKit
+  useEffect(() => {
+    if (!room || !isViewer || !roomId || !guestSessionToken || hasLoggedJoinSuccess) return;
+
+    const onConnected = () => {
+      console.log('[Telemetry] Viewer connected successfully');
+      logTelemetry({
+        event: "viewer_join_success",
+        roomId,
+        guestSessionToken,
+      });
+      setHasLoggedJoinSuccess(true);
+    };
+
+    if (room.state === 'connected') {
+      onConnected();
+    }
+
+    room.on(RoomEvent.Connected, onConnected);
+
+    return () => {
+      room.off(RoomEvent.Connected, onConnected);
+    };
+  }, [room, isViewer, roomId, guestSessionToken, hasLoggedJoinSuccess]);
+
+  // Track viewer_first_video_track_ms when first video track is subscribed
+  useEffect(() => {
+    if (!room || !isViewer || !roomId || !guestSessionToken || hasLoggedFirstVideo) return;
+
+    const timingKey = `viewer_first_video:${roomId}`;
+
+    const onTrackSubscribed = (track: any, publication: any, participant: any) => {
+      // Only care about video tracks
+      if (track.kind !== 'video') return;
+
+      const durationMs = measureTiming(timingKey);
+      if (durationMs === null) {
+        console.warn('[Telemetry] No timing mark found for first video track');
+        return;
+      }
+
+      console.log('[Telemetry] First video track subscribed', {
+        durationMs,
+        participantIdentity: participant.identity,
+      });
+
+      logTelemetry({
+        event: "viewer_first_video_track_ms",
+        roomId,
+        durationMs,
+        guestSessionToken,
+      });
+
+      setHasLoggedFirstVideo(true);
+    };
+
+    room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
+
+    return () => {
+      room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
+    };
+  }, [room, isViewer, roomId, guestSessionToken, hasLoggedFirstVideo]);
+
+  return null;
+}
+
+// Comprehensive LiveKit video debugging logger
+function LiveKitDebugLogger() {
+  const room = useRoomContext();
+  const { localParticipant } = useLocalParticipant();
+
+  useEffect(() => {
+    if (!room) return;
+
+    console.log('[LiveKit] Room context initialized', {
+      roomName: room.name,
+      state: room.state,
+      numParticipants: room.remoteParticipants.size,
+    });
+
+    const onStateChanged = (state: ConnectionState) => {
+      console.log('[LiveKit] Room state changed:', state, {
+        roomName: room.name,
+        localIdentity: localParticipant?.identity,
+        numRemoteParticipants: room.remoteParticipants.size,
+      });
+    };
+
+    const onConnected = () => {
+      console.log('[LiveKit] ✅ Room connected successfully', {
+        roomName: room.name,
+        serverUrl: room.engine?.client?.url,
+        localIdentity: localParticipant?.identity,
+      });
+    };
+
+    const onDisconnected = () => {
+      console.log('[LiveKit] ❌ Room disconnected', {
+        roomName: room.name,
+      });
+    };
+
+    const onLocalTrackPublished = (publication: any) => {
+      console.log('[LiveKit] 🎥 Local track published', {
+        kind: publication.kind,
+        source: publication.source,
+        trackSid: publication.trackSid,
+        muted: publication.isMuted,
+        enabled: publication.track?.isEnabled,
+      });
+    };
+
+    const onLocalTrackUnpublished = (publication: any) => {
+      console.log('[LiveKit] Local track unpublished', {
+        kind: publication.kind,
+        source: publication.source,
+      });
+    };
+
+    const onParticipantConnected = (participant: any) => {
+      console.log('[LiveKit] 👤 Remote participant connected', {
+        identity: participant.identity,
+        sid: participant.sid,
+        totalRemote: room.remoteParticipants.size,
+      });
+    };
+
+    const onParticipantDisconnected = (participant: any) => {
+      console.log('[LiveKit] 👤 Remote participant disconnected', {
+        identity: participant.identity,
+        totalRemote: room.remoteParticipants.size,
+      });
+    };
+
+    const onTrackSubscribed = (track: any, publication: any, participant: any) => {
+      console.log('[LiveKit] 📹 Track subscribed', {
+        kind: track.kind,
+        source: publication.source,
+        trackSid: track.sid,
+        participantIdentity: participant.identity,
+        muted: track.isMuted,
+        enabled: track.isEnabled,
+      });
+    };
+
+    const onTrackUnsubscribed = (track: any, publication: any, participant: any) => {
+      console.log('[LiveKit] Track unsubscribed', {
+        kind: track.kind,
+        participantIdentity: participant.identity,
+      });
+    };
+
+    const onTrackMuted = (publication: any, participant: any) => {
+      console.log('[LiveKit] Track muted', {
+        kind: publication.kind,
+        participantIdentity: participant.identity,
+      });
+    };
+
+    const onTrackUnmuted = (publication: any, participant: any) => {
+      console.log('[LiveKit] Track unmuted', {
+        kind: publication.kind,
+        participantIdentity: participant.identity,
+      });
+    };
+
+    room.on(RoomEvent.Connected, onConnected);
+    room.on(RoomEvent.Disconnected, onDisconnected);
+    room.on(RoomEvent.ConnectionStateChanged, onStateChanged);
+    room.on(RoomEvent.LocalTrackPublished, onLocalTrackPublished);
+    room.on(RoomEvent.LocalTrackUnpublished, onLocalTrackUnpublished);
+    room.on(RoomEvent.ParticipantConnected, onParticipantConnected);
+    room.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+    room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
+    room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
+    room.on(RoomEvent.TrackMuted, onTrackMuted);
+    room.on(RoomEvent.TrackUnmuted, onTrackUnmuted);
+
+    // Periodic state summary (every 5 seconds)
+    const summaryInterval = setInterval(() => {
+      const localTracks = Array.from(localParticipant?.trackPublications?.values() || []);
+      const remoteParts = Array.from(room.remoteParticipants.values());
+      
+      console.log('[LiveKit] 📊 State Summary:', {
+        roomState: room.state,
+        localIdentity: localParticipant?.identity,
+        localPublishedTracks: localTracks.length,
+        localVideoPublished: localTracks.some((t: any) => t.kind === 'video'),
+        localAudioPublished: localTracks.some((t: any) => t.kind === 'audio'),
+        remoteParticipants: remoteParts.length,
+        remoteParticipantsWithVideo: remoteParts.filter(p => 
+          Array.from(p.videoTracks.values()).some((t: any) => t.isSubscribed)
+        ).length,
+        videoElementsInDOM: document.querySelectorAll('video').length,
+      });
+    }, 5000);
+
+    return () => {
+      clearInterval(summaryInterval);
+      room.off(RoomEvent.Connected, onConnected);
+      room.off(RoomEvent.Disconnected, onDisconnected);
+      room.off(RoomEvent.ConnectionStateChanged, onStateChanged);
+      room.off(RoomEvent.LocalTrackPublished, onLocalTrackPublished);
+      room.off(RoomEvent.LocalTrackUnpublished, onLocalTrackUnpublished);
+      room.off(RoomEvent.ParticipantConnected, onParticipantConnected);
+      room.off(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+      room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
+      room.off(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
+      room.off(RoomEvent.TrackMuted, onTrackMuted);
+      room.off(RoomEvent.TrackUnmuted, onTrackUnmuted);
+    };
+  }, [room, localParticipant]);
+
+  return null;
+}
+
+// Monitor video elements to track when they're attached and playing
+function VideoElementMonitor() {
+  const room = useRoomContext();
+
+  useEffect(() => {
+    if (!room) return;
+
+    const observer = new MutationObserver(() => {
+      const videoElements = document.querySelectorAll('video');
+      
+      if (videoElements.length > 0) {
+        console.log('[Video] 📺 Video elements found:', videoElements.length);
+        
+        videoElements.forEach((video, idx) => {
+          const hasStream = !!video.srcObject;
+          const isPlaying = !video.paused && video.currentTime > 0 && !video.ended && video.readyState > 2;
+          
+          console.log(`[Video] Element ${idx}:`, {
+            hasStream,
+            paused: video.paused,
+            muted: video.muted,
+            playsInline: video.playsInline,
+            readyState: video.readyState, // 0=nothing, 1=metadata, 2=current, 3=future, 4=enough
+            networkState: video.networkState, // 0=empty, 1=idle, 2=loading, 3=no_source
+            width: video.videoWidth,
+            height: video.videoHeight,
+            isPlaying,
+          });
+
+          // Add event listeners to track playback
+          if (!video.hasAttribute('data-monitored')) {
+            video.setAttribute('data-monitored', 'true');
+            
+            video.addEventListener('loadedmetadata', () => {
+              console.log(`[Video] ${idx} metadata loaded:`, {
+                width: video.videoWidth,
+                height: video.videoHeight,
+                duration: video.duration,
+              });
+            });
+
+            video.addEventListener('play', () => {
+              console.log(`[Video] ${idx} ▶️ started playing`);
+            });
+
+            video.addEventListener('pause', () => {
+              console.log(`[Video] ${idx} ⏸️ paused`);
+            });
+
+            video.addEventListener('error', (e) => {
+              console.error(`[Video] ${idx} ❌ error:`, {
+                error: video.error,
+                code: video.error?.code,
+                message: video.error?.message,
+              });
+            });
+          }
+        });
+      }
+    });
+
+    observer.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+
+    // Initial check
+    setTimeout(() => {
+      const videos = document.querySelectorAll('video');
+      if (videos.length > 0) {
+        console.log('[Video] Initial scan found', videos.length, 'video elements');
+      } else {
+        console.log('[Video] ⚠️ No video elements found yet');
+      }
+    }, 1000);
+
+    return () => {
+      observer.disconnect();
+    };
+  }, [room]);
+
+  return null;
+}
+
+// Shows banner when guest is connected to LiveKit but waiting for host to join
+function WaitingForHostBanner({ isViewer }: { isViewer: boolean }) {
+  const room = useRoomContext();
+  const participants = useParticipants();
+  const [isConnected, setIsConnected] = useState(false);
+  const [hasRemoteVideoTrack, setHasRemoteVideoTrack] = useState(false);
+
+  useEffect(() => {
+    if (!room) return;
+
+    const onConnected = () => setIsConnected(true);
+    const onDisconnected = () => setIsConnected(false);
+
+    if (room.state === 'connected') {
+      setIsConnected(true);
+    }
+
+    room.on(RoomEvent.Connected, onConnected);
+    room.on(RoomEvent.Disconnected, onDisconnected);
+
+    return () => {
+      room.off(RoomEvent.Connected, onConnected);
+      room.off(RoomEvent.Disconnected, onDisconnected);
+    };
+  }, [room]);
+
+  // Track-driven: Check for actual video/screen tracks, not just participants
+  useEffect(() => {
+    if (!room) return;
+
+    const checkRemoteTracks = () => {
+      const remoteParticipants = Array.from(room.remoteParticipants.values());
+      const hasVideo = remoteParticipants.some(p => {
+        // Check for camera video tracks
+        const videoTracks = Array.from(p.videoTrackPublications.values());
+        const hasVideoTrack = videoTracks.some(pub => pub.isSubscribed && pub.track);
+        
+        // Check for screen share tracks
+        const screenTracks = Array.from(p.videoTrackPublications.values());
+        const hasScreenTrack = screenTracks.some(pub => 
+          pub.isSubscribed && pub.track && pub.source === 'screen_share'
+        );
+        
+        return hasVideoTrack || hasScreenTrack;
+      });
+      
+      setHasRemoteVideoTrack(hasVideo);
+    };
+
+    // Initial check
+    checkRemoteTracks();
+
+    // Listen for track subscriptions
+    const onTrackSubscribed = () => checkRemoteTracks();
+    const onTrackUnsubscribed = () => checkRemoteTracks();
+    const onParticipantConnected = () => checkRemoteTracks();
+    const onParticipantDisconnected = () => checkRemoteTracks();
+
+    room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
+    room.on(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
+    room.on(RoomEvent.ParticipantConnected, onParticipantConnected);
+    room.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+
+    return () => {
+      room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
+      room.off(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
+      room.off(RoomEvent.ParticipantConnected, onParticipantConnected);
+      room.off(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
+    };
+  }, [room]);
+
+  // Show banner when:
+  // 1. User is a viewer
+  // 2. Connected to LiveKit
+  // 3. No remote video tracks (host not sharing video yet)
+  const shouldShow = isViewer && isConnected && !hasRemoteVideoTrack;
+
+  if (!shouldShow) return null;
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: 10,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        padding: '10px 20px',
+        borderRadius: 999,
+        background: 'rgba(15,23,42,0.95)',
+        border: '1px solid rgba(251,191,36,0.6)',
+        fontSize: 14,
+        color: '#fbbf24',
+        zIndex: 20,
+        pointerEvents: 'none',
+        boxShadow: '0 4px 12px rgba(0,0,0,0.3)',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+      }}
+    >
+      <span style={{ fontSize: 16 }}>⏳</span>
+      <span>Connected — waiting for host to join...</span>
+    </div>
+  );
+}
+
+function MediaPermissionErrorBanner({ 
+  error,
+  onDismiss
+}: { 
+  error: { type: 'denied' | 'notFound' | 'notReadable' | 'notSupported' | 'inAppBrowser' | null; message: string } | null;
+  onDismiss: () => void;
+}) {
+  if (!error) return null;
+
+  const handleOpenInBrowser = () => {
+    const currentUrl = window.location.href;
+    // For Android: try to open in Chrome via intent
+    if (/Android/i.test(navigator.userAgent)) {
+      // Try Chrome intent URL
+      window.location.href = `googlechrome://navigate?url=${encodeURIComponent(currentUrl)}`;
+      // Fallback after delay if Chrome not installed
+      setTimeout(() => {
+        window.open(currentUrl, '_blank');
+      }, 1500);
+    } else {
+      // For iOS: copy URL and show instructions (can't force open in Safari)
+      navigator.clipboard.writeText(currentUrl).then(() => {
+        alert('Link copied! Open Safari and paste this link to continue.');
+      }).catch(() => {
+        alert(`Copy this link and open in Safari:\n\n${currentUrl}`);
+      });
+    }
+  };
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: 60,
+        left: '50%',
+        transform: 'translateX(-50%)',
+        maxWidth: '90%',
+        width: 420,
+        padding: '14px 18px',
+        borderRadius: 12,
+        background: error.type === 'denied' ? 'rgba(220, 38, 38, 0.95)' : 'rgba(245, 158, 11, 0.95)',
+        border: `1px solid ${error.type === 'denied' ? 'rgba(220, 38, 38, 0.8)' : 'rgba(245, 158, 11, 0.8)'}`,
+        color: '#fff',
+        zIndex: 999,
+        boxShadow: '0 4px 16px rgba(0,0,0,0.4)',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 10,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+        <div style={{ flex: 1, fontSize: 13, lineHeight: 1.5 }}>
+          {error.message}
+        </div>
+        <button
+          onClick={onDismiss}
+          style={{
+            background: 'rgba(255,255,255,0.2)',
+            border: 'none',
+            borderRadius: 4,
+            color: '#fff',
+            cursor: 'pointer',
+            padding: '4px 8px',
+            fontSize: 12,
+            fontWeight: 600,
+          }}
+        >
+          ✕
+        </button>
+      </div>
+      {error.type === 'inAppBrowser' && (
+        <button
+          onClick={handleOpenInBrowser}
+          style={{
+            background: '#fff',
+            border: 'none',
+            borderRadius: 8,
+            color: error.type === 'denied' ? '#dc2626' : '#d97706',
+            cursor: 'pointer',
+            padding: '8px 16px',
+            fontSize: 13,
+            fontWeight: 600,
+            width: '100%',
+          }}
+        >
+          Open in Browser
+        </button>
+      )}
+      {error.type === 'denied' && (
+        <button
+          onClick={() => window.location.reload()}
+          style={{
+            background: 'rgba(255,255,255,0.9)',
+            border: 'none',
+            borderRadius: 8,
+            color: '#dc2626',
+            cursor: 'pointer',
+            padding: '8px 16px',
+            fontSize: 13,
+            fontWeight: 600,
+            width: '100%',
+          }}
+        >
+          Reload Page
+        </button>
+      )}
+    </div>
+  );
+}
+
+function MediaDeviceErrorHandler({ onError }: { onError: (error: any) => void }) {
+  const room = useRoomContext();
+
+  useEffect(() => {
+    if (!room) return;
+
+    const handleError = (error: any) => {
+      console.error('[MediaDeviceError]', error);
+      onError(error);
+    };
+
+    room.on(RoomEvent.MediaDevicesError, handleError);
+
+    return () => {
+      room.off(RoomEvent.MediaDevicesError, handleError);
+    };
+  }, [room, onError]);
+
+  return null;
+}
 
 function ReconnectCommandListener() {
   const room = useRoomContext();
@@ -107,11 +669,36 @@ function mapJoinErrorMessage(code: string | null): string | null {
 
 function getGuestSessionToken(roomId: string | null): string | null {
   if (!roomId) return null;
+
+  // 1. Try query param (highest priority, works in FB/IG in-app browsers)
   try {
-    return sessionStorage.getItem(`sl_guest_session:${roomId}`) || null;
+    const params = new URLSearchParams(window.location.search);
+    const fromQuery = params.get("gst");
+    if (fromQuery) return fromQuery.trim();
   } catch {
-    return null;
+    // ignore
   }
+
+  // 2. Try sessionStorage (preferred, per-room)
+  try {
+    const fromSession = sessionStorage.getItem(`sl_guest_session:${roomId}`);
+    if (fromSession) return fromSession.trim();
+  } catch {
+    // sessionStorage may fail in private browsing
+  }
+
+  // 3. Try localStorage (fallback, check if token matches roomId)
+  try {
+    const storedRoomId = localStorage.getItem("sl_guestSessionRoomId");
+    if (storedRoomId === roomId) {
+      const fromLocal = localStorage.getItem("sl_guestSessionToken");
+      if (fromLocal) return fromLocal.trim();
+    }
+  } catch {
+    // localStorage may fail in private browsing
+  }
+
+  return null;
 }
 
 type RoomPermissions = {
@@ -594,6 +1181,64 @@ function LiveKitShell({
   const statusRef = useRef<GuestStatus>(null);
   const mediaRootRef = useRef<HTMLDivElement | null>(null);
 
+  // Media permission error state and handlers
+  const [mediaPermissionError, setMediaPermissionError] = useState<{
+    type: 'denied' | 'notFound' | 'notReadable' | 'notSupported' | 'inAppBrowser' | null;
+    message: string;
+  } | null>(null);
+
+  // Detect in-app browsers that may block camera/mic access
+  const detectInAppBrowser = (): boolean => {
+    const ua = navigator.userAgent || "";
+    // Facebook, Instagram, TikTok, Twitter, LinkedIn in-app browsers
+    const patterns = /FBAN|FBAV|Instagram|TikTok|Twitter|LinkedInApp/i;
+    return patterns.test(ua);
+  };
+
+  // Handle media device errors and show appropriate messaging
+  const handleMediaDeviceError = (error: any) => {
+    console.error('[Room] MediaDevicesError:', error);
+
+    const errorName = error?.name || String(error);
+    
+    if (errorName === 'NotAllowedError' || errorName === 'PermissionDeniedError') {
+      setMediaPermissionError({
+        type: 'denied',
+        message: '🔒 Camera/mic blocked. Tap the lock icon → allow → reload.',
+      });
+    } else if (errorName === 'NotFoundError') {
+      setMediaPermissionError({
+        type: 'notFound',
+        message: '⚠️ No camera/mic found. Check if devices are connected.',
+      });
+    } else if (errorName === 'NotReadableError') {
+      setMediaPermissionError({
+        type: 'notReadable',
+        message: '⚠️ Camera/mic in use by another app. Close other apps and reload.',
+      });
+    } else if (errorName === 'NotSupportedError' || errorName === 'OverconstrainedError') {
+      setMediaPermissionError({
+        type: 'notSupported',
+        message: '⚠️ Browser or device limitation. Try a different browser.',
+      });
+    } else {
+      setMediaPermissionError({
+        type: 'notSupported',
+        message: `⚠️ Unable to access camera/mic: ${errorName}`,
+      });
+    }
+  };
+
+  // Check for in-app browser on mount
+  React.useEffect(() => {
+    if (detectInAppBrowser()) {
+      setMediaPermissionError({
+        type: 'inAppBrowser',
+        message: '⚠️ This in-app browser may block camera/mic. Open in Chrome/Safari.',
+      });
+    }
+  }, []);
+
   useEffect(() => {
     if (!isHost || !roomId) return;
 
@@ -674,10 +1319,27 @@ function LiveKitShell({
       token={token}
       serverUrl={serverUrl}
       connect={true}
-      audio={!isViewer}
-      video={!isViewer}
-      connectOptions={isViewer ? { autoSubscribe: true } : undefined}
+      audio={true}
+      video={true}
+      connectOptions={undefined}
+      onConnected={() => {
+        console.log('[Room] 🔗 LiveKit onConnected callback fired', { 
+          isViewer, 
+          isHost,
+          roomId,
+          wantsAudio: true,
+          wantsVideo: true,
+        });
+      }}
       onDisconnected={onDisconnected}
+      onError={(error) => {
+        console.error('[Room] ❌ LiveKit error:', {
+          error,
+          message: error?.message,
+          isViewer,
+          isHost,
+        });
+      }}
       style={{
         width: "100%",
         height: "calc(100vh - 60px)",
@@ -685,6 +1347,15 @@ function LiveKitShell({
       }}
     >
       <div ref={mediaRootRef} style={{ width: "100%", height: "100%", position: "relative" }}>
+        <LiveKitDebugLogger />
+        <VideoElementMonitor />
+        <GuestTelemetryTracker roomId={roomId} isViewer={isViewer} />
+        <MediaDeviceErrorHandler onError={handleMediaDeviceError} />
+        <WaitingForHostBanner isViewer={isViewer} />
+        <MediaPermissionErrorBanner 
+          error={mediaPermissionError} 
+          onDismiss={() => setMediaPermissionError(null)}
+        />
         <ReconnectCommandListener />
         {isHost && !isViewer && (
           <div
@@ -709,6 +1380,27 @@ function LiveKitShell({
             }}
           >
             Guest is viewing the join page.
+          </div>
+        )}
+        {isViewer && (
+          <div
+            style={{
+              position: "absolute",
+              top: 10,
+              left: "50%",
+              transform: "translateX(-50%)",
+              padding: "8px 16px",
+              borderRadius: 999,
+              background: "rgba(15,23,42,0.95)",
+              border: "1px solid rgba(59,130,246,0.6)",
+              fontSize: 13,
+              color: "#93c5fd",
+              zIndex: 20,
+              pointerEvents: "none",
+              boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
+            }}
+          >
+            🎥 Connected as guest — you can enable mic/cam below
           </div>
         )}
         <div
@@ -834,7 +1526,28 @@ function RoomPage() {
     } catch {
       // ignore parse errors and fall back
     }
-    return localStorage.getItem("sl_displayName") ?? "";
+    const cachedName = localStorage.getItem("sl_displayName") ?? "";
+    
+    // Auto-generate name for guests to bypass name form and speed up join
+    if (!cachedName) {
+      // Check if this is a guest invite (has guest session token)
+      const roomId = new URLSearchParams(window.location.search).get('roomId') || 
+                     decodeURIComponent(window.location.pathname.split('/room/')[1] || '');
+      const guestToken = getGuestSessionToken(roomId);
+      
+      if (guestToken) {
+        const autoName = `Guest-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+        console.log('[Room] Auto-generated guest name:', autoName);
+        try {
+          localStorage.setItem("sl_displayName", autoName);
+        } catch {
+          // ignore localStorage errors
+        }
+        return autoName;
+      }
+    }
+    
+    return cachedName;
   });
   const [pendingName, setPendingName] = useState(displayName);
   const [token, setToken] = useState<string | null>(null);
@@ -1666,8 +2379,10 @@ function RoomPage() {
     if (!hostCheckReady) return;
     if (!displayName) return;
     if (!roomId) return;
-    // Guests should only request RTC tokens once the room is live.
-    if (!isHost && roomGateStatus !== "live") return;
+    // REMOVED GATE: Guests can now fetch tokens immediately, even when room is idle.
+    // This eliminates polling delay - LiveKit's participant events will drive UX.
+    // Old logic: if (!isHost && roomGateStatus !== "live") return;
+    
     // If we already have a valid token+serverUrl for this mount, avoid
     // refetching room tokens on every minor state change. This prevents
     // duplicate /api/roomToken calls that can cause spurious 401s and
@@ -1682,12 +2397,51 @@ function RoomPage() {
     const fetchToken = async () => {
       try {
         roomTokenMintInFlightRef.current = true;
+        
+        // Check for pre-fetched token data from consolidated join-now endpoint
+        // This eliminates token fetch delay for guest invites
+        try {
+          const cachedTokenData = sessionStorage.getItem(`sl_lk_token:${roomId}`);
+          if (cachedTokenData) {
+            const parsed = JSON.parse(cachedTokenData);
+            const age = Date.now() - (parsed.fetchedAt || 0);
+            // Use cached token if less than 5 minutes old
+            if (age < 5 * 60 * 1000 && parsed.serverUrl && parsed.token) {
+              console.log('[Room] Using pre-fetched LiveKit token (age:', Math.round(age / 1000), 'seconds)');
+              setToken(parsed.token);
+              setServerUrl(parsed.serverUrl);
+              if (parsed.identity) setParticipantIdentity(parsed.identity);
+              if (parsed.displayName) setDisplayName(parsed.displayName);
+              
+              // Guests are RTC participants with mic+cam (not view-only)
+              // isViewer stays false (invite guests can publish)
+              
+              // Clear the cached token after use to prevent stale data
+              sessionStorage.removeItem(`sl_lk_token:${roomId}`);
+              return;
+            } else {
+              console.log('[Room] Pre-fetched token expired or incomplete, fetching fresh token');
+              sessionStorage.removeItem(`sl_lk_token:${roomId}`);
+            }
+          }
+        } catch (err) {
+          console.warn('[Room] Failed to load pre-fetched token, falling back to fetch:', err);
+        }
+        
         console.log(`[Room] Fetching room token (role=${role || "host"})...`);
         const bearerToken = getAuthToken();
         // Force invite mode when a token is present in the URL and we are not authed.
         // This matches the legacy participant join flow: /room/<roomId>?t=<inviteToken>
         // Also fall back to any locally-stored invite token for backward compatibility.
         const guestSessionToken = getGuestSessionToken(roomId);
+        console.log('[Room] Token fetch context:', {
+          hasAuth: !!bearerToken,
+          hasGuestToken: !!guestSessionToken,
+          roomId,
+          role,
+          isHost,
+          isViewer
+        });
         const inviteTokenFromUrl = new URLSearchParams(window.location.search).get("t");
         const inviteTokenForJoin = (!guestSessionToken ? (inviteTokenFromUrl || inviteToken || null) : null)?.trim?.() || null;
         const buildRoomTokenRequest = () => {
@@ -1743,6 +2497,8 @@ function RoomPage() {
                   "Content-Type": "application/json",
                   ...(inviteTokenForJoin ? { "x-invite-token": inviteTokenForJoin } : {}),
                   ...(guestSessionToken ? { "x-guest-session": guestSessionToken } : {}),
+                  // Also send as Authorization Bearer for maximum compatibility
+                  ...(guestSessionToken ? { "Authorization": `Bearer ${guestSessionToken}` } : {}),
                 },
                 body: JSON.stringify(payload),
               },
@@ -1831,9 +2587,19 @@ function RoomPage() {
           return;
         }
 
-        console.log("[roomToken] raw response:", data);
+        // SECURITY: Never log tokens in production - they're like passwords
+        if (process.env.NODE_ENV === 'development') {
+          console.log("[roomToken] response received:", {
+            hasToken: !!data.token,
+            hasServerUrl: !!data.serverUrl,
+            roomId: data.roomId,
+            role: data.role,
+            isViewer: data.isViewer,
+          });
+        }
+        
         if (typeof data?.token !== "string" || !data.token) {
-          console.error("[Room] Invalid token returned:", data);
+          console.error("[Room] Invalid token returned (no token string)");
           return;
         }
 
@@ -1892,12 +2658,9 @@ function RoomPage() {
         console.log("[Room] token received:", !!lkToken, "serverUrl:", finalServerUrl);
         setToken(typeof lkToken === "string" && lkToken.trim() ? lkToken : null);
         setServerUrl(finalServerUrl || null);
+        // isViewer should always be false for /room (invite guests are RTC participants)
         if (typeof data?.isViewer === "boolean") {
-          setIsViewer(data.isViewer);
-          if (data.isViewer) {
-            setIsHost(false);
-            setUserRole("viewer");
-          }
+          setIsViewer(data.isViewer); // Will be false from server for invite guests
         }
         if (typeof data?.effectiveRoleKey === "string") {
           setUserRole(data.effectiveRoleKey);
@@ -1919,7 +2682,8 @@ function RoomPage() {
     };
 
     fetchToken();
-  }, [displayName, roomId, effectiveRoomName, inviteToken, userRole, isHost, hostCheckReady, token, serverUrl, roomGateStatus]);
+  }, [displayName, roomId, effectiveRoomName, inviteToken, userRole, isHost, hostCheckReady, token, serverUrl]);
+  // REMOVED: roomGateStatus dependency - guests no longer wait for "live" status
 
   
 
@@ -1929,8 +2693,9 @@ function RoomPage() {
     }
   }, [isViewer, showStreamSetup]);
 
-  // Guest flow: poll idle/live and auto-join when live.
-  // Hosts can join anytime (they flip the room live on join).
+  // Guest flow: Poll room status for INFORMATIONAL purposes only (not auth gating).
+  // This updates UI hints but does NOT block token fetching or LiveKit connection.
+  // Guests connect to LiveKit immediately; LiveKit's participant events drive the real UX.
   useEffect(() => {
     if (!roomId) return;
 
@@ -1945,12 +2710,19 @@ function RoomPage() {
     const poll = async () => {
       try {
         const guestSessionToken = getGuestSessionToken(roomId);
+        console.log('[Room] Guest polling room status (informational only, non-blocking)', { 
+          roomId, 
+          hasGuestToken: !!guestSessionToken, 
+          hasInviteToken: !!inviteToken 
+        });
         const res = await apiFetch(
           `/api/rooms/${encodeURIComponent(roomId)}/status`,
           {
             headers: {
               ...(!guestSessionToken && inviteToken ? { "x-invite-token": inviteToken } : {}),
               ...(guestSessionToken ? { "x-guest-session": guestSessionToken } : {}),
+              // Also send as Authorization Bearer for maximum compatibility
+              ...(guestSessionToken ? { "Authorization": `Bearer ${guestSessionToken}` } : {}),
             },
           },
           { allowNonOk: true }
@@ -1976,14 +2748,18 @@ function RoomPage() {
 
         const data = await res.json().catch(() => null);
         const status = data?.status === "live" ? "live" : "idle";
+        console.log('[Room] Guest room status (informational):', status);
         setRoomGateStatus(status);
 
         if (status === "idle") {
-          roomGatePollRef.current = setTimeout(poll, 4000);
+          // Continue polling for informational UI updates
+          roomGatePollRef.current = setTimeout(poll, 1500);
+        } else {
+          console.log('[Room] Room status is live (guest already connected via LiveKit)');
         }
       } catch {
         if (!cancelled) {
-          roomGatePollRef.current = setTimeout(poll, 5000);
+          roomGatePollRef.current = setTimeout(poll, 2000);
         }
       }
     };
@@ -2729,68 +3505,16 @@ function RoomPage() {
       return;
     }
     console.log("🎬 Room.tsx - handleStartMultistream called");
-    const destinationInputs = Array.isArray(keys.destinations) ? keys.destinations : [];
-    let youtubeKey = keys.youtubeKey;
-    let facebookKey = keys.facebookKey;
-    let twitchKey = keys.twitchKey;
-    let enabledTargetIds = Array.isArray(keys.enabledTargetIds) ? keys.enabledTargetIds.filter((id) => !!id) : [];
-    let sessionKeyMap: Record<string, { rtmpUrlBase?: string; streamKey?: string }> = keys.sessionKeys ? { ...keys.sessionKeys } : {};
-    const extraDestinations = Array.isArray(keys.extraDestinations) ? keys.extraDestinations : [];
-
-    if (destinationInputs.length) {
-      const fromDestinations: string[] = [];
-      destinationInputs.forEach((item) => {
-        const trimmed = (item.streamKey || "").trim();
-        if (item.source === "main" && item.destinationId) {
-          fromDestinations.push(item.destinationId);
-        }
-        if (item.source === "session" && trimmed) {
-          if (item.destinationId || item.targetId) {
-            const keyId = item.targetId || item.destinationId!;
-            sessionKeyMap[keyId] = { rtmpUrlBase: item.rtmpUrlBase, streamKey: trimmed };
-          } else {
-            if (item.platform === "youtube") youtubeKey = trimmed;
-            if (item.platform === "facebook") facebookKey = trimmed;
-            if (item.platform === "twitch") twitchKey = trimmed;
-            if (item.platform === "custom") {
-              let base = item.rtmpUrlBase;
-              let key = trimmed;
-              if (!base && trimmed.startsWith("rtmp")) {
-                const idx = trimmed.lastIndexOf("/");
-                if (idx > 8) {
-                  const maybeBase = trimmed.slice(0, idx);
-                  const maybeKey = trimmed.slice(idx + 1);
-                  if (maybeBase && maybeKey) {
-                    base = maybeBase;
-                    key = maybeKey;
-                  }
-                }
-              }
-              const keyId = `custom-${Object.keys(sessionKeyMap).length + 1}`;
-              sessionKeyMap[keyId] = { rtmpUrlBase: base, streamKey: key };
-            }
-          }
-        }
-      });
-      if (fromDestinations.length) {
-        const merged = [...enabledTargetIds];
-        fromDestinations.forEach((id) => {
-          if (!merged.includes(id)) merged.push(id);
-        });
-        enabledTargetIds = merged;
-      }
-    }
-
-    const destIds = Array.isArray(enabledTargetIds)
-      ? enabledTargetIds.filter((id) => !!id)
-      : [];
+    const startLivePayload = normalizeStartLivePayloadFromDestinationsKeys({ ...keys, presetId: selectedPresetId });
+    const destIds = Array.isArray(startLivePayload.enabledTargetIds) ? startLivePayload.enabledTargetIds : [];
+    const sessionKeyMap = startLivePayload.sessionKeys ? { ...startLivePayload.sessionKeys } : {};
     const hasSessionKeys = Object.values(sessionKeyMap || {}).some((entry) => !!entry?.streamKey);
+    const youtubeKey = startLivePayload.youtubeStreamKey;
+    const facebookKey = startLivePayload.facebookStreamKey;
+    const twitchKey = startLivePayload.twitchStreamKey;
     const hasDirectKeys = !!(youtubeKey || facebookKey || twitchKey);
-    const hasExtraDestinations = (extraDestinations || []).some((d) => {
-      const rtmpUrl = typeof (d as any)?.rtmpUrl === "string" ? (d as any).rtmpUrl.trim() : "";
-      const streamKey = typeof (d as any)?.streamKey === "string" ? (d as any).streamKey.trim() : "";
-      return !!(rtmpUrl && streamKey);
-    });
+    const extraDestinations = Array.isArray(startLivePayload.extraDestinations) ? startLivePayload.extraDestinations : [];
+    const hasExtraDestinations = extraDestinations.length > 0;
 
     if (!hasDirectKeys && !hasSessionKeys && destIds.length === 0 && !hasExtraDestinations) {
       alert("Select at least one stream destination or enter a stream key.");
@@ -2813,14 +3537,8 @@ function RoomPage() {
       try {
         setStreamStatus("starting");
         const requestBody = {
-          youtubeStreamKey: youtubeKey,
-          facebookStreamKey: facebookKey,
-          twitchStreamKey: twitchKey,
-          enabledTargetIds: destIds.length ? destIds : undefined,
-          sessionKeys: hasSessionKeys ? sessionKeyMap : undefined,
+          ...startLivePayload,
           userId: getOrCreateUid(),
-          presetId: selectedPresetId,
-          extraDestinations: extraDestinations.length ? extraDestinations : undefined,
         };
         const res = await apiFetchAuth(
           `${API_BASE}/api/multistream/${encodeURIComponent(roomId)}/start-multistream`,
@@ -3265,14 +3983,8 @@ function RoomPage() {
           👀 View-only mode — publishing controls are disabled.
         </div>
       )}
-      {!isHost && roomGateStatus === "idle" && !token && (
-        <div className="w-full bg-slate-900 text-white text-sm font-semibold px-4 py-2 flex items-center justify-between gap-3">
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span>Not started yet — waiting for the host to start.</span>
-          </div>
-          <div style={{ fontSize: 12, opacity: 0.85 }}>This page will auto-join when live.</div>
-        </div>
-      )}
+      {/* REMOVED: Old "Not started yet" banner - guests now connect immediately to LiveKit.
+          WaitingForHostBanner (inside LiveKitRoom) shows real-time participant status instead. */}
       {!isViewer && needsReauth && (
         <div className="w-full bg-red-600 text-white text-sm font-semibold px-4 py-2 flex items-center justify-between gap-3">
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -4024,21 +4736,7 @@ function RoomPage() {
           min-height: 0 !important;
         }
 
-        ${isViewer ? `
-        .sl-layout.sl-viewer .lk-control-bar .lk-button-microphone,
-        .sl-layout.sl-viewer .lk-control-bar .lk-button-camera,
-        .sl-layout.sl-viewer .lk-control-bar .lk-button-screen-share,
-        .sl-layout.sl-viewer .lk-control-bar .lk-button-start-audio,
-        .sl-layout.sl-viewer .lk-control-bar [data-lk-button="toggle_mic"],
-        .sl-layout.sl-viewer .lk-control-bar [data-lk-button="toggle_camera"],
-        .sl-layout.sl-viewer .lk-control-bar [data-lk-button="toggle_screen_share"],
-        .sl-layout.sl-viewer .lk-control-bar [data-lk-button="start_audio"],
-        .sl-layout.sl-viewer .lk-control-bar button[aria-label*="Microphone"],
-        .sl-layout.sl-viewer .lk-control-bar button[aria-label*="Camera"],
-        .sl-layout.sl-viewer .lk-control-bar button[aria-label*="Screen"] {
-          display: none !important;
-        }
-        ` : ""}
+        ${/* Removed sl-viewer CSS - invite guests are now RTC participants with mic+cam */ ""}
 
         /* Realtime room controls: disable screen share for roles
            whose effective controls do not allow it. */

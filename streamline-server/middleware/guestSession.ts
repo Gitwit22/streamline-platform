@@ -4,7 +4,7 @@ import jwt from "jsonwebtoken";
 export type GuestSessionClaims = {
   inviteId: string;
   roomId: string;
-  role: "viewer" | "participant";
+  role: "guest" | "participant"; // guest = invite-based, participant = authenticated
   iat?: number;
   exp?: number;
 };
@@ -21,14 +21,24 @@ export function signGuestSession(
 }
 
 function extractGuestSessionToken(req: Request): string | null {
+  // 1. Check Authorization: Bearer header first (most secure, works everywhere)
+  const authHeader = req.headers.authorization || (req.headers as any).Authorization;
+  if (typeof authHeader === "string") {
+    const match = authHeader.match(/^Bearer\s+(.+)$/i);
+    if (match?.[1]) return match[1].trim();
+  }
+
+  // 2. Check custom headers
   const hdr = (req.headers as any) || {};
   const fromHeader = hdr["x-guest-session"] ?? hdr["x-guest-session-token"];
   if (typeof fromHeader === "string" && fromHeader.trim()) return fromHeader.trim();
 
+  // 3. Check request body
   const fromBody = (req as any)?.body?.guestSessionToken;
   if (typeof fromBody === "string" && fromBody.trim()) return fromBody.trim();
 
-  const fromQuery = (req as any)?.query?.guestSessionToken;
+  // 4. Check query params (including 'gst' shorthand for invite links)
+  const fromQuery = (req as any)?.query?.guestSessionToken || (req as any)?.query?.gst;
   if (typeof fromQuery === "string" && fromQuery.trim()) return fromQuery.trim();
 
   return null;
@@ -45,7 +55,15 @@ export function tryGetGuestSession(req: Request): GuestSessionClaims | null {
     const decoded = jwt.verify(token, getGuestSessionSecret()) as any;
     const inviteId = typeof decoded?.inviteId === "string" ? decoded.inviteId : "";
     const roomId = typeof decoded?.roomId === "string" ? decoded.roomId : "";
-    const role = decoded?.role === "viewer" || decoded?.role === "participant" ? (decoded.role as any) : null;
+    // Backward compatibility: treat old "viewer" role as "guest" for /room flows
+    // Normalize role: defensive parse, trim whitespace, lowercase
+    const decodedRole = String(decoded?.role ?? "").trim().toLowerCase();
+    let role: "guest" | "participant" | null = null;
+    if (decodedRole === "guest" || decodedRole === "participant") {
+      role = decodedRole as any;
+    } else if (decodedRole === "viewer") {
+      role = "guest"; // Map legacy "viewer" to "guest" for RTC participants
+    }
     if (!inviteId || !roomId || !role) return null;
     return {
       inviteId,

@@ -7,7 +7,7 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 type RoomInviteDoc = {
   roomId: string;
   mode: "guest";
-  role: "viewer";
+  role: "guest"; // RTC guest with mic+cam (invite-based join)
   expiresAt: FirebaseFirestore.Timestamp | null;
   maxUses: number | null;
   useCount: number;
@@ -60,7 +60,7 @@ router.post("/:roomId/invites", requireAuth as any, async (req: any, res) => {
     const doc: RoomInviteDoc = {
       roomId,
       mode: "guest",
-      role: "viewer",
+      role: "guest", // RTC guest with mic+cam (invite-based join)
       expiresAt: expiresAt && Number.isFinite(expiresAt.toMillis()) ? expiresAt : null,
       maxUses,
       useCount: 0,

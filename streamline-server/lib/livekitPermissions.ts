@@ -1,6 +1,12 @@
-import type { ParticipantPermission } from "livekit-server-sdk";
+import { TrackSource } from "livekit-server-sdk";
 
-type PublishSource = "microphone" | "camera" | "screen_share" | "screen_share_audio";
+// VideoGrant-compatible return type (used for LiveKit token grants)
+export type LiveKitGrant = {
+  canSubscribe: boolean;
+  canPublish: boolean;
+  canPublishData: boolean;
+  canPublishSources: TrackSource[];
+};
 
 // Narrow type: just the realtime flags that matter for LiveKit permissions
 export type RealtimePreset = {
@@ -11,39 +17,49 @@ export type RealtimePreset = {
   canSendData?: boolean; // chat/data
 };
 
-// Convert preset-style flags into LiveKit ParticipantPermission
-export function presetToParticipantPermission(p: RealtimePreset): ParticipantPermission {
+// Convert preset-style flags into LiveKit grant format
+export function presetToLiveKitGrant(p: RealtimePreset): LiveKitGrant {
   const canPublish = !!p.canPublishAudio || !!p.canPublishVideo || !!p.canScreenShare;
 
-  const base = {
+  const sources: TrackSource[] = [];
+  if (p.canPublishAudio) sources.push(TrackSource.MICROPHONE);
+  if (p.canPublishVideo) sources.push(TrackSource.CAMERA);
+  if (p.canScreenShare) {
+    sources.push(TrackSource.SCREEN_SHARE);
+    sources.push(TrackSource.SCREEN_SHARE_AUDIO);
+  }
+
+  return {
     canSubscribe: p.canSubscribe ?? true,
     canPublish,
     canPublishData: p.canSendData ?? true,
-  } as ParticipantPermission;
-
-  return base;
+    canPublishSources: sources,
+  };
 }
 
 // Optional coarse role mapping so role-based grants can share the same truth
 export function roleToParticipantPermission(
-  role: "viewer" | "participant" | "cohost" | "host",
-): ParticipantPermission {
+  role: "viewer" | "guest" | "participant" | "cohost" | "host",
+): LiveKitGrant {
   const canSubscribe = true;
   let canPublish = false;
   let canPublishData = false;
-  let canPublishSources: PublishSource[] = [];
+  let canPublishSources: TrackSource[] = [];
 
   switch (role) {
     case "viewer": {
+      // Reserved for HLS watch-only (future)
       canPublish = false;
       canPublishData = false;
       canPublishSources = [];
       break;
     }
+    case "guest":
     case "participant": {
+      // Invite-based guests and authenticated participants both get mic+cam
       canPublish = true;
       canPublishData = true;
-      canPublishSources = ["microphone", "camera"];
+      canPublishSources = [TrackSource.MICROPHONE, TrackSource.CAMERA];
       break;
     }
     case "cohost":
@@ -52,10 +68,10 @@ export function roleToParticipantPermission(
       canPublish = true;
       canPublishData = true;
       canPublishSources = [
-        "microphone",
-        "camera",
-        "screen_share",
-        "screen_share_audio",
+        TrackSource.MICROPHONE,
+        TrackSource.CAMERA,
+        TrackSource.SCREEN_SHARE,
+        TrackSource.SCREEN_SHARE_AUDIO,
       ];
       break;
     }
@@ -65,7 +81,6 @@ export function roleToParticipantPermission(
     canSubscribe,
     canPublish,
     canPublishData,
-    // LiveKit expects string source names for permissions/grants.
-    canPublishSources: canPublishSources as any,
-  } as ParticipantPermission;
+    canPublishSources,
+  };
 }

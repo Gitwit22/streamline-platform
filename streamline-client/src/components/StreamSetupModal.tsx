@@ -5,6 +5,7 @@ import { API_BASE } from "../lib/apiBase";
 import { apiFetchAuth } from "../lib/api";
 import { APP_BASE } from "../lib/appBase";
 import { getHlsStatus, startHls, stopHls } from "../services/hls";
+import { useDestinationsStartPayload } from "../hooks/useDestinationsStartPayload";
 import CollapsibleSection from "./CollapsibleSection";
 import { getFeatureErrorMessage } from "../lib/featureErrors";
 
@@ -598,6 +599,13 @@ export default function StreamSetupModalV2({
     }
   }, [streamStatus, warmupActive, warmupStartedAt, warmupPlatforms, warmupLogged, roomName]);
 
+  const { compute: computeDestinationsStartPayload } = useDestinationsStartPayload({
+    platformState,
+    platformOrder,
+    mainByPlatform,
+    selectedPresetId,
+  });
+
   if (!open) return null;
 
   const isEntitlementsLoading = !entitlementsReady;
@@ -746,144 +754,11 @@ export default function StreamSetupModalV2({
       alert("You don't have permission to start streaming in this room.");
       return;
     }
-    const sessionKeyPayload: Record<string, { rtmpUrlBase?: string; streamKey?: string }> = {};
-    const instagramDestinations: SessionRtmpDestination[] = [];
-    const enabledTargetIds: string[] = [];
-    const effectiveDestinations: EffectiveDestinationPayload[] = [];
-    let youtubeKey: string | undefined;
-    let facebookKey: string | undefined;
-    let twitchKey: string | undefined;
-
-    let hasSelection = false;
-    let hasErrors = false;
     setStartError(null);
-
-    const nextPlatformState = { ...platformState };
-
-    platformOrder.forEach((platform) => {
-      const state = platformState[platform];
-      nextPlatformState[platform] = { ...state, error: null, info: state.info };
-
-      if (platform === "instagram") {
-        const main = mainByPlatform[platform];
-        const hasMain = !!main;
-        const firstManual = state.manualFields.find((f) => (f.value && f.value.trim()) || (f.base && f.base.trim()));
-        const treatedAsSelected = state.selected || !!firstManual;
-        if (!treatedAsSelected) return;
-        hasSelection = true;
-
-        const rtmpUrl = (firstManual?.base || "").trim();
-        const streamKey = (firstManual?.value || "").trim();
-
-        if (!rtmpUrl || !streamKey) {
-          nextPlatformState[platform].error = !rtmpUrl ? "RTMP URL required." : "Stream key required.";
-          hasErrors = true;
-          return;
-        }
-
-        const hasValidScheme = rtmpUrl.startsWith("rtmp://") || rtmpUrl.startsWith("rtmps://");
-        if (!hasValidScheme) {
-          nextPlatformState[platform].error = "RTMP URL must start with rtmp:// or rtmps://.";
-          hasErrors = true;
-          return;
-        }
-
-        instagramDestinations.push({
-          type: "instagram",
-          protocol: "rtmp",
-          rtmpUrl,
-          streamKey,
-          label: "Instagram",
-          layoutPreset: "instagram_reels_9x16",
-          videoFit: "cover",
-        });
-
-        if (!hasMain && !state.manualFields.length) {
-          nextPlatformState[platform].info = "Session-only. Not saved for reuse.";
-        }
-        return;
-      }
-
-      const main = mainByPlatform[platform];
-      const mainUsable = !!(main && main.hasKey && main.mode !== "connected");
-      const manualField = state.manualFields.find((f) => f.value.trim());
-      const treatedAsSelected = state.selected || (platform === "custom" && !!manualField);
-      if (!treatedAsSelected) return;
-      hasSelection = true;
-      let sessionKey = manualField?.value.trim() || "";
-      const customBase = manualField?.base?.trim();
-      const hasKey = mainUsable || !!sessionKey;
-      const targetId = main?.targetId || main?.id;
-      let rtmpBase = customBase || main?.rtmpUrlBase || getDefaultRtmpBase(platform);
-
-      // Allow a full RTMP URL in the key box (base optional for custom)
-      if (platform === "custom" && !rtmpBase && sessionKey) {
-        const idx = sessionKey.lastIndexOf("/");
-        const maybeProto = sessionKey.slice(0, idx);
-        if (idx > 8 && maybeProto.startsWith("rtmp")) {
-          const fullBase = sessionKey.slice(0, idx);
-          const tailKey = sessionKey.slice(idx + 1);
-          if (fullBase && tailKey) {
-            rtmpBase = fullBase;
-            sessionKey = tailKey;
-          }
-        }
-      }
-
-      if (platform === "custom") {
-        if (!sessionKey) {
-          nextPlatformState[platform].error = "Add a stream key (or full RTMP URL).";
-          hasErrors = true;
-          return;
-        }
-        // Base URL is optional; will be parsed from full RTMP if provided, otherwise handled server-side.
-      }
-
-      if (platform === "custom" && !rtmpBase) {
-        nextPlatformState[platform].error = "RTMP ingest URL required.";
-        hasErrors = true;
-        return;
-      }
-
-      if (!hasKey) {
-        nextPlatformState[platform].error = "No stream key set.";
-        hasErrors = true;
-        return;
-      }
-
-      effectiveDestinations.push({
-        platform,
-        source: sessionKey ? "session" : "main",
-        streamKey: sessionKey || undefined,
-        destinationId: main?.id,
-        targetId,
-        rtmpUrlBase: rtmpBase,
-      });
-
-      if (mainUsable && main) {
-        enabledTargetIds.push(main.id);
-        if (sessionKey) {
-          sessionKeyPayload[targetId || main.id] = {
-            rtmpUrlBase: rtmpBase,
-            streamKey: sessionKey,
-          };
-        }
-      } else if (sessionKey) {
-        if (platform === "youtube") youtubeKey = sessionKey;
-        if (platform === "facebook") facebookKey = sessionKey;
-        if (platform === "twitch") twitchKey = sessionKey;
-      }
-    });
-
-    setPlatformState(nextPlatformState);
-
-    if (!hasSelection) {
-      setStartError("Add at least one stream destination or custom RTMP key.");
-      return;
-    }
-
-    if (hasErrors) {
-      setStartError("Fix the highlighted destinations before starting.");
+    const computed = computeDestinationsStartPayload();
+    setPlatformState(computed.nextPlatformState);
+    if (!computed.isValid || !computed.payload) {
+      if (computed.startError) setStartError(computed.startError);
       return;
     }
 
@@ -896,16 +771,7 @@ export default function StreamSetupModalV2({
       setWarmupReadyMap({ youtube: false, facebook: false, twitch: false, instagram: false, custom: false });
       setWarmupLogged(false);
 
-      await onStartStream({
-        youtubeKey,
-        facebookKey,
-        twitchKey,
-        enabledTargetIds: enabledTargetIds.length ? enabledTargetIds : undefined,
-        sessionKeys: Object.keys(sessionKeyPayload).length ? sessionKeyPayload : undefined,
-        destinations: effectiveDestinations,
-        extraDestinations: instagramDestinations.length ? instagramDestinations : undefined,
-        presetId: selectedPresetId,
-      });
+      await onStartStream(computed.payload);
     } catch (err: any) {
       setStartError(err?.message || String(err));
       setWarmupActive(false);
