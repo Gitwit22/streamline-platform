@@ -55,7 +55,6 @@ function addMinutesIso(iso: string, minutes: number): string {
 
 export function randomId(prefix: string) {
   try {
-    // @ts-expect-error crypto may be missing
     const id = crypto?.randomUUID?.();
     if (id) return `${prefix}_${id.slice(0, 12)}`;
   } catch {

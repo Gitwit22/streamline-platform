@@ -1,9 +1,13 @@
 // NOTE: LiveKit's JS client (`livekit-client`) represents Track.Source as
 // string literals like "camera" and "microphone".
 //
-// The server SDK exposes protobuf numeric enums (e.g. TrackSource.CAMERA === 1).
-// We intentionally emit *string* sources here so UI code (and LiveKit Components)
-// can reliably compare `canPublishSources` against `Track.Source.*`.
+// The server SDK (v2.x) exposes protobuf numeric enums (e.g. TrackSource.CAMERA === 1).
+// `AccessToken.toJwt()` calls an internal `trackSourceToString()` that only
+// accepts ***numeric*** TrackSource values — passing plain strings like "camera"
+// throws: "Cannot convert TrackSource camera to string".
+//
+// We keep string literals as the canonical type for UI-facing code, and provide
+// `toSdkSources()` to convert them to SDK enums right before `addGrant()`.
 
 export type LiveKitTrackSource =
   | "camera"
@@ -94,4 +98,24 @@ export function roleToParticipantPermission(
     canPublishData,
     canPublishSources,
   };
+}
+
+/**
+ * Map our string-literal track sources to the livekit-server-sdk TrackSource
+ * enum values.  `AccessToken.toJwt()` (v2.x) requires numeric enum values;
+ * passing plain strings throws at runtime.
+ *
+ * Usage:
+ *   import { toSdkSources } from "../lib/livekitPermissions";
+ *   at.addGrant({ room, ...grant, canPublishSources: toSdkSources(grant.canPublishSources) });
+ */
+const SDK_SOURCE_MAP: Record<LiveKitTrackSource, number> = {
+  camera: 1,          // TrackSource.CAMERA
+  microphone: 2,      // TrackSource.MICROPHONE
+  screen_share: 3,    // TrackSource.SCREEN_SHARE
+  screen_share_audio: 4, // TrackSource.SCREEN_SHARE_AUDIO
+};
+
+export function toSdkSources(sources: LiveKitTrackSource[]): number[] {
+  return sources.map((s) => SDK_SOURCE_MAP[s]);
 }

@@ -49,7 +49,7 @@ function validateEmail(email: string): boolean {
 export default function EduLogin() {
   const nav = useNavigate();
   const location = useLocation();
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState("itstheplugllc@gmail.com");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState(false);

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { getPlatformFlagsCached, type PlatformFlags } from "../lib/platformFlagsCache";
-import { getPlatformFlagsValue, subscribePlatformFlags } from "../lib/platformFlagsStore";
+import { getPlatformFlagsCached } from "../lib/platformFlagsCache";
+import { getPlatformFlagsValue, subscribePlatformFlags, type PlatformFlags } from "../lib/platformFlagsStore";
 
 export function usePlatformFlags() {
   const [flags, setFlags] = useState<PlatformFlags | null>(() => {

@@ -13,6 +13,7 @@ import {
   useParticipants,
 } from "@livekit/components-react";
 import { RoomEvent, Track, ConnectionState } from "livekit-client";
+import { normalizeUiRolePresetId } from "../../lib/roles";
 import {
   apiStartRecording,
   apiStopRecording,
@@ -152,7 +153,7 @@ function LiveKitDebugLogger() {
     const onConnected = () => {
       console.log('[LiveKit] ✅ Room connected successfully', {
         roomName: room.name,
-        serverUrl: room.engine?.client?.url,
+        serverUrl: (room.engine?.client as any)?.url,
         localIdentity: localParticipant?.identity,
       });
     };
@@ -252,7 +253,7 @@ function LiveKitDebugLogger() {
         localAudioPublished: localTracks.some((t: any) => t.kind === 'audio'),
         remoteParticipants: remoteParts.length,
         remoteParticipantsWithVideo: remoteParts.filter(p => 
-          Array.from(p.videoTracks.values()).some((t: any) => t.isSubscribed)
+          Array.from((p as any).videoTracks?.values?.() ?? []).some((t: any) => t.isSubscribed)
         ).length,
         videoElementsInDOM: document.querySelectorAll('video').length,
       });
@@ -544,7 +545,7 @@ function MediaPermissionErrorBanner({
             background: '#fff',
             border: 'none',
             borderRadius: 8,
-            color: error.type === 'denied' ? '#dc2626' : '#d97706',
+            color: (error as any).type === 'denied' ? '#dc2626' : '#d97706',
             cursor: 'pointer',
             padding: '8px 16px',
             fontSize: 13,
@@ -1572,7 +1573,7 @@ function RoomPage() {
   const [reauthBannerText, setReauthBannerText] = useState<string>(
     "Session expired — re-auth to enable host tools."
   );
-  const [roomTokenMode, setRoomTokenMode] = useState<"unknown" | "auth" | "guest">("unknown");
+  const [roomTokenMode, setRoomTokenMode] = useState<"unknown" | "auth" | "guest" | "invite">("unknown");
   const roomTokenMintInFlightRef = useRef(false);
   const [roomGateStatus, setRoomGateStatus] = useState<"unknown" | "idle" | "live" | "blocked">("unknown");
   const roomGatePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -3270,7 +3271,7 @@ function RoomPage() {
     layout = "grid",
     mode = "cloud",
     presetId,
-  }: { mode: "cloud" | "dual"; presetId?: string }) => {
+  }: { layout?: string; mode: "cloud" | "dual"; presetId?: string }) => {
     if (isViewer) {
       console.warn("startRecording blocked for viewer role");
       return;

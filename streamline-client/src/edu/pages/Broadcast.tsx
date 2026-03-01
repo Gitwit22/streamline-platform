@@ -18,7 +18,6 @@ type Talent = {
 
 function randomId(prefix: string) {
   try {
-    // @ts-expect-error crypto may be missing in some environments
     const id = crypto?.randomUUID?.();
     if (id) return `${prefix}_${id.slice(0, 8)}`;
   } catch {

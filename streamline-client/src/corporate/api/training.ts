@@ -3,22 +3,23 @@ import { apiFetchAuth } from "@/lib/api";
 export interface TrainingModule {
   id: string;
   title: string;
-  description: string;
+  description?: string;
   department: string;
-  type: string;
+  type?: string;
   status: string;
   durationMinutes: number;
-  deadline: number | null;
-  assignedTo: string;
-  completionRate: number;
-  totalAssigned: number;
-  totalCompleted: number;
+  deadline?: number | null;
+  assignedTo?: string | string[];
+  completionRate?: number;
+  totalAssigned?: number;
+  totalCompleted?: number;
   icon: string;
   createdAt: number | null;
   createdBy: string;
-  userProgress: number;
-  userStatus: string;
-  userCompletedAt: number | null;
+  progress?: number;
+  userProgress?: number;
+  userStatus?: string;
+  userCompletedAt?: number | null;
 }
 
 export async function fetchTraining(params?: {

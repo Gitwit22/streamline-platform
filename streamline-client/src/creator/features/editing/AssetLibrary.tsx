@@ -261,7 +261,7 @@ export default function AssetLibrary() {
                 tabs.push(['all', 'All']);
               }
               return tabs;
-            })() as const
+            })()
           ).map(([f, label]) => (
             <button
               key={f}

@@ -23,7 +23,7 @@ function validateEmail(email: string): boolean {
 export const LoginPage: React.FC = () => {
   const nav = useNavigate();
   const location = useLocation();
-  const [email, setEmail] = useState<string>("");
+  const [email, setEmail] = useState<string>("itstheplugllc@gmail.com");
   const [password, setPassword] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);

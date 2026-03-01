@@ -5,7 +5,7 @@ import { setCorporateBypassEnabled, setCorporateLane } from '../state/corporateM
 
 export default function CorporateLogin() {
   const nav = useNavigate();
-  const [email, setEmail] = useState('');
+  const [email, setEmail] = useState('itstheplugllc@gmail.com');
   const [password, setPassword] = useState('');
 
   const canShowBypass = useMemo(() => {
