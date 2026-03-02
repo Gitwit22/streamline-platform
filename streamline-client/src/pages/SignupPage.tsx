@@ -124,6 +124,25 @@ export const SignupPage = () => {
         console.warn("[Signup] account init failed", initErr);
       }
 
+      // Hydrate /api/account/me so lane guards have orgType.
+      let orgType: string | null = null;
+      try {
+        const meRes = await apiFetchAuth("/api/account/me");
+        const me = await meRes.json();
+        try { localStorage.setItem("sl_user", JSON.stringify(me)); } catch {}
+        orgType = typeof me?.orgType === "string" && me.orgType.trim() ? me.orgType.trim() : null;
+      } catch { /* non-fatal */ }
+
+      // ── Lane router: send EDU / Corporate users to their own dashboard ──
+      if (orgType === "edu") {
+        nav("/streamline/edu/dashboard", { replace: true });
+        return;
+      }
+      if (orgType === "corporate") {
+        nav("/streamline/corporate/dashboard", { replace: true });
+        return;
+      }
+
       // Redirect to next URL or dashboard
       nav(nextUrl || "/");
     } catch (err) {

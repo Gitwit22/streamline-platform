@@ -37,7 +37,7 @@ export default function CorporateLanding() {
               StreamLine provides a unified platform for internal broadcasts, secure meetings, and compliance-ready media management.
             </p>
             <div className="hero-ctas">
-              <a href="mailto:nxtlvl@gmail.com?subject=StreamLine%20Corporate%20Demo%20Request&body=Hi%20StreamLine%20team%2C%0A%0AI'd%20like%20to%20request%20a%20demo%20of%20StreamLine%20Corporate.%0A%0AOrganization%3A%0AName%3A%0ARole%3A%0A" className="btn btn-primary btn-xl">Request a Demo</a>
+              <Link to="/streamline/corporate/login" className="btn btn-primary btn-xl">Get Started</Link>
               <a href="#features" className="btn btn-outline btn-xl">Explore Features</a>
             </div>
             <div className="hero-trust">
@@ -144,6 +144,98 @@ export default function CorporateLanding() {
                 <h3 className="fc-title">Compliance & Archiving</h3>
                 <p className="fc-desc">Automated recording, transcription, and archiving for legal holds and regulatory requirements.</p>
               </div>
+            </div>
+          </div>
+        </section>
+
+        {/* How It Works */}
+        <section className="section">
+          <div className="section-inner">
+            <div className="section-tag">How It Works</div>
+            <h2 className="section-title">From login to <em>live broadcast</em> in three steps.</h2>
+            <p className="section-sub">
+              No complex setup. No hardware purchases. Just open a browser and go.
+            </p>
+            <div className="feature-grid">
+              <div className="feature-card" style={{ position: 'relative' }}>
+                <span style={{ position: 'absolute', top: '-12px', left: '20px', background: 'var(--blue)', color: '#04090f', borderRadius: '20px', padding: '2px 12px', fontSize: '12px', fontWeight: 700 }}>01</span>
+                <h3 className="fc-title">Create a Room</h3>
+                <p className="fc-desc">An admin opens a broadcast room, sets the title, and invites presenters. Rooms are provisioned in seconds with scoped permissions.</p>
+              </div>
+              <div className="feature-card" style={{ position: 'relative' }}>
+                <span style={{ position: 'absolute', top: '-12px', left: '20px', background: 'var(--blue)', color: '#04090f', borderRadius: '20px', padding: '2px 12px', fontSize: '12px', fontWeight: 700 }}>02</span>
+                <h3 className="fc-title">Go Live</h3>
+                <p className="fc-desc">Presenters join the greenroom from any browser—no downloads. Add cameras, screen-shares, and overlays, then push the stream live.</p>
+              </div>
+              <div className="feature-card" style={{ position: 'relative' }}>
+                <span style={{ position: 'absolute', top: '-12px', left: '20px', background: 'var(--blue)', color: '#04090f', borderRadius: '20px', padding: '2px 12px', fontSize: '12px', fontWeight: 700 }}>03</span>
+                <h3 className="fc-title">Watch &amp; Archive</h3>
+                <p className="fc-desc">Employees watch via an internal link or embedded player. The recording is auto-archived and available for on-demand playback instantly.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Role-Based Access */}
+        <section className="section">
+          <div className="section-inner">
+            <div className="section-tag">Access Control</div>
+            <h2 className="section-title">Granular, <em>role-based</em> permissions.</h2>
+            <p className="section-sub">
+              Every participant receives exactly the access they need—nothing more.
+            </p>
+            <div className="feature-grid">
+              <div className="feature-card">
+                <h3 className="fc-title">Org Admin</h3>
+                <p className="fc-desc">Full control over rooms, users, billing, and compliance settings. Manage your entire organization from one dashboard.</p>
+              </div>
+              <div className="feature-card">
+                <h3 className="fc-title">Host / Presenter</h3>
+                <p className="fc-desc">Start broadcasts, invite co-hosts, manage cameras and screen-shares, and control who speaks during a live session.</p>
+              </div>
+              <div className="feature-card">
+                <h3 className="fc-title">Viewer</h3>
+                <p className="fc-desc">Watch the live HLS stream via a secure link—no account required. Works on every device and network.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Security & Compliance */}
+        <section className="section">
+          <div className="section-inner">
+            <div className="section-tag">Security</div>
+            <h2 className="section-title">Enterprise-grade <em>security</em> at every layer.</h2>
+            <p className="section-sub">
+              Built for organizations that can't afford to compromise on data protection or regulatory compliance.
+            </p>
+            <div className="feature-grid">
+              <div className="feature-card">
+                <h3 className="fc-title">Token-Gated Rooms</h3>
+                <p className="fc-desc">Every participant authenticates with a scoped, time-limited JWT. Unauthorized access is impossible.</p>
+              </div>
+              <div className="feature-card">
+                <h3 className="fc-title">Audit Logging</h3>
+                <p className="fc-desc">Timestamped records of every room creation, join, publish, and recording event for full traceability.</p>
+              </div>
+              <div className="feature-card">
+                <h3 className="fc-title">Cloud Storage &amp; Retention</h3>
+                <p className="fc-desc">Recordings stored in compliant cloud infrastructure with configurable retention policies and access controls.</p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* CTA */}
+        <section className="section" style={{ textAlign: 'center', paddingBottom: '80px' }}>
+          <div className="section-inner">
+            <h2 className="section-title">Ready to modernize your <em>internal&nbsp;communications</em>?</h2>
+            <p className="section-sub" style={{ margin: '0 auto 32px' }}>
+              Join organizations that trust StreamLine for secure, reliable enterprise broadcasting.
+            </p>
+            <div className="hero-ctas" style={{ justifyContent: 'center' }}>
+              <Link to="/streamline/corporate/login" className="btn btn-primary btn-xl">Get Started</Link>
+              <a href="#features" className="btn btn-outline btn-xl">Explore Features</a>
             </div>
           </div>
         </section>

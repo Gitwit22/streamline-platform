@@ -289,6 +289,10 @@ export default function Live() {
     }
   }, [reloadViewerConfig, fetchHlsStatus]);
 
+  const toggleMute = () => {
+    setIsMuted((prev) => !prev);
+  };
+
   if (isIgMode) {
     return (
       <div className="fixed inset-0 bg-black">
@@ -551,10 +555,6 @@ export default function Live() {
     v.muted = isMuted;
     v.volume = Math.min(1, Math.max(0, volume));
   }, [isMuted, volume]);
-
-  const toggleMute = () => {
-    setIsMuted((prev) => !prev);
-  };
 
   const toggleFullscreen = () => {
     const v = videoRef.current;

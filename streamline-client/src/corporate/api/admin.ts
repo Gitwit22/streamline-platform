@@ -1,42 +1,49 @@
 import { apiFetchAuth } from "@/lib/api";
 
 export interface OrgUser {
-  id: string;
+  id?: string;
   uid: string;
-  name: string;
+  name?: string;
+  displayName?: string;
   email: string;
   role: string;
-  status: string;
+  status?: string;
   department: string;
-  lastActiveAt: number | null;
+  lastActiveAt?: number | null;
   joinedAt: number | null;
 }
 
 export interface AuditEntry {
   id: string;
   action: string;
-  actorUid: string;
-  actorName: string;
-  targetId: string;
-  meta: any;
-  createdAt: number | null;
+  actorUid?: string;
+  actorName?: string;
+  targetId?: string;
+  meta?: any;
+  createdAt?: number | null;
+  actor?: string;
+  target?: string;
+  detail?: string;
+  timestamp?: number | null;
 }
 
 export interface OrgSettings {
-  orgId: string;
-  name: string;
-  orgType: string;
-  timezone: string;
-  branding: any;
+  orgId?: string;
+  name?: string;
+  orgName?: string;
+  orgType?: string;
+  timezone?: string;
+  branding?: any;
   retentionDays: number;
   ssoEnabled: boolean;
-  ssoProvider: string;
-  mfaRequired: boolean;
+  ssoProvider?: string;
+  mfaRequired?: boolean;
   defaultRole: string;
+  allowGuestAccess?: boolean;
 }
 
 export interface AnalyticsOverview {
-  overview: {
+  overview?: {
     totalBroadcasts: number;
     liveBroadcasts: number;
     scheduledBroadcasts: number;
@@ -49,7 +56,19 @@ export interface AnalyticsOverview {
     activeMembers: number;
     totalMessages: number;
   };
-  departments: Array<{ name: string; complianceRate: number; totalModules: number }>;
+  totalUsers?: number;
+  totalBroadcasts?: number;
+  totalCalls?: number;
+  totalTraining?: number;
+  complianceRate?: number;
+  departments: Array<{
+    name: string;
+    complianceRate?: number;
+    totalModules?: number;
+    meetings?: number;
+    compliance?: number;
+    chatActivity?: number;
+  }>;
 }
 
 export async function fetchUsers(params?: {
@@ -122,7 +141,7 @@ export async function fetchSettings(): Promise<OrgSettings> {
 }
 
 export async function updateSettings(
-  body: Partial<Pick<OrgSettings, "name" | "timezone" | "retentionDays" | "ssoEnabled" | "ssoProvider" | "mfaRequired" | "defaultRole">>
+  body: Partial<Pick<OrgSettings, "name" | "orgName" | "timezone" | "retentionDays" | "ssoEnabled" | "ssoProvider" | "mfaRequired" | "defaultRole" | "allowGuestAccess">>
 ): Promise<void> {
   const res = await apiFetchAuth("/api/corp/admin/settings", {
     method: "PATCH",

@@ -39,6 +39,7 @@ import eduSettingsRoutes from "./routes/eduSettings";
 import eduEmbedsRoutes from "./routes/eduEmbeds";
 import eduPublicRoutes from "./routes/eduPublic";
 import eduBootstrapRoutes from "./routes/eduBootstrap";
+import eduBroadcastsRoutes from "./routes/eduBroadcasts";
 import corpMeRoutes from "./routes/corpMe";
 import corpBroadcastsRoutes from "./routes/corpBroadcasts";
 import corpCallsRoutes from "./routes/corpCalls";
@@ -267,29 +268,24 @@ app.use("/api/live", liveRoutes);
 app.use("/api/saved-embeds", savedEmbedsRoutes);
 
 // EDU events (authenticated admin UI)
-if (LANES_ENABLED) {
-  app.use("/api/edu", eduEventsRoutes);
-  // EDU people (authenticated admin UI)
-  app.use("/api/edu", eduPeopleRoutes);
-  // EDU org settings + audit (authenticated admin UI)
-  app.use("/api/edu", eduSettingsRoutes);
-  // EDU embed docs (authenticated admin UI)
-  app.use("/api/edu", eduEmbedsRoutes);
+app.use("/api/edu", eduEventsRoutes);
+// EDU people (authenticated admin UI)
+app.use("/api/edu", eduPeopleRoutes);
+// EDU org settings + audit (authenticated admin UI)
+app.use("/api/edu", eduSettingsRoutes);
+// EDU embed docs (authenticated admin UI)
+app.use("/api/edu", eduEmbedsRoutes);
+// EDU broadcasts (go-live, stop, watch)
+app.use("/api/edu", eduBroadcastsRoutes);
 
-  // Corporate lane routes
-  app.use("/api/corp", corpMeRoutes);
-  app.use("/api/corp", corpBroadcastsRoutes);
-  app.use("/api/corp", corpCallsRoutes);
-  app.use("/api/corp", corpTrainingRoutes);
-  app.use("/api/corp", corpDocumentsRoutes);
-  app.use("/api/corp", corpChatRoutes);
-  app.use("/api/corp", corpAdminRoutes);
-} else {
-  // Lanes disabled — reject any requests that slip through.
-  app.use("/api/edu", (_req, res) => res.status(404).json({ error: "lane_disabled" }));
-  app.use("/api/corp", (_req, res) => res.status(404).json({ error: "lane_disabled" }));
-  console.log("[lanes] EDU and Corporate API lanes are DISABLED");
-}
+// Corporate lane routes
+app.use("/api/corp", corpMeRoutes);
+app.use("/api/corp", corpBroadcastsRoutes);
+app.use("/api/corp", corpCallsRoutes);
+app.use("/api/corp", corpTrainingRoutes);
+app.use("/api/corp", corpDocumentsRoutes);
+app.use("/api/corp", corpChatRoutes);
+app.use("/api/corp", corpAdminRoutes);
 
 // Billing routes
 app.use("/api/billing", billingRoutes);

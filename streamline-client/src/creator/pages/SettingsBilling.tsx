@@ -344,7 +344,7 @@ export default function SettingsBilling() {
   const latestVideoPollIntervalRef = useRef<number | null>(null);
   const latestVideoPollCountRef = useRef(0);
 
-  const [actionLoading, setActionLoading] = useState<CheckoutPlanVariant | "portal" | null>(null);
+  const [actionLoading, setActionLoading] = useState<CheckoutPlanVariant | "portal" | "cancel-plan-change" | null>(null);
 
   const [checkoutTosAccepted, setCheckoutTosAccepted] = useState(false);
   const [checkoutTosError, setCheckoutTosError] = useState<string | null>(null);

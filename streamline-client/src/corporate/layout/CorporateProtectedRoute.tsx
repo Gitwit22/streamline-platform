@@ -98,5 +98,14 @@ export default function CorporateProtectedRoute({ children }: { children: ReactN
     return <Navigate to={`/streamline/corporate/login?${sp.toString()}`} replace />;
   }
 
+  // Prevent non-corporate users from accessing Corporate routes.
+  if (me.orgType !== "corporate") {
+    if ((me as any).orgType === "edu") {
+      return <Navigate to="/streamline/edu/dashboard" replace />;
+    }
+    // Fallback: Corporate login page (not Creator /join)
+    return <Navigate to="/streamline/corporate/login" replace />;
+  }
+
   return <CorporateAuthContext.Provider value={{ me }}>{children}</CorporateAuthContext.Provider>;
 }

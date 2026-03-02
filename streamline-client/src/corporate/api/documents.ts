@@ -5,14 +5,18 @@ export interface Document {
   title: string;
   category: string;
   version: string;
-  description: string;
-  fileUrl: string;
-  fileSize: number;
-  mimeType: string;
-  requiresAcknowledgment: boolean;
-  totalAcknowledged: number;
-  totalRequired: number;
-  updatedAt: number | null;
+  description?: string;
+  fileUrl?: string;
+  fileSize?: number;
+  mimeType?: string;
+  requiresAcknowledgment?: boolean;
+  requiresAck?: boolean;
+  totalAcknowledged?: number;
+  totalRequired?: number;
+  ackCount?: number;
+  totalEmployees?: number;
+  url?: string;
+  updatedAt?: number | null;
   createdAt: number | null;
   createdBy: string;
 }

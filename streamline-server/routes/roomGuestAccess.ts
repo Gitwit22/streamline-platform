@@ -9,7 +9,7 @@ import { verifyRoomAccessToken } from "../middleware/roomAccessToken";
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { signGuestSession } from "../middleware/guestSession";
-import { roleToParticipantPermission } from "../lib/livekitPermissions";
+import { roleToParticipantPermission, toSdkSources } from "../lib/livekitPermissions";
 
 export function extractInviteToken(req: any): string | null {
   const hdr = (req?.headers as any) || {};
@@ -262,6 +262,8 @@ function roleGrant(role: "guest" | "participant" | "host") {
     canSubscribe: participantPerm.canSubscribe,
     canPublish: participantPerm.canPublish,
     canPublishData: participantPerm.canPublishData,
+    // livekit-server-sdk v2.x requires numeric TrackSource enums, not strings.
+    canPublishSources: toSdkSources(participantPerm.canPublishSources),
     roomAdmin: isHost,
   } as const;
 }

@@ -75,7 +75,7 @@ export function StatCard({ label, value, sub, trend, color, progress }: StatCard
 
 interface PanelProps {
   title: string;
-  action?: string;
+  action?: ReactNode;
   onAction?: () => void;
   children: ReactNode;
 }
@@ -86,12 +86,18 @@ export function Panel({ title, action, onAction, children }: PanelProps) {
       <div className="flex items-center justify-between px-[18px] py-3 border-b border-border">
         <h3 className="text-[13px] font-semibold text-foreground">{title}</h3>
         {action && (
-          <button
-            onClick={onAction}
-            className="text-[11px] font-medium text-primary hover:text-primary/80 transition-colors cursor-pointer"
-          >
-            {action}
-          </button>
+          typeof action === "string" ? (
+            <button
+              onClick={onAction}
+              className="text-[11px] font-medium text-primary hover:text-primary/80 transition-colors cursor-pointer"
+            >
+              {action}
+            </button>
+          ) : (
+            <span className="text-[11px] font-medium text-primary hover:text-primary/80 transition-colors">
+              {action}
+            </span>
+          )
         )}
       </div>
       {children}

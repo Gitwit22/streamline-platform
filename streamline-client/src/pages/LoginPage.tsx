@@ -24,7 +24,7 @@ function validateEmail(email: string): boolean {
 export const LoginPage: React.FC = () => {
   const nav = useNavigate();
   const location = useLocation();
-  const [email, setEmail] = useState<string>("");
+  const [email, setEmail] = useState<string>("itstheplugllc@gmail.com");
   const [password, setPassword] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
@@ -184,17 +184,18 @@ export const LoginPage: React.FC = () => {
 
       setLoading(false);
 
-      // EDU router: if the user belongs to an EDU org (or came through the EDU lane),
-      // always send them to the EDU dashboard.
-      if (LANES_ENABLED) {
-        try {
-          const lane = localStorage.getItem("sl_entry_lane");
-          if (me?.orgType === "edu" || (lane === "edu" && isEduBypassEnabled())) {
-            nav("/streamline/edu/dashboard", { replace: true });
-            return;
-          }
-        } catch {}
-      }
+      // ── Lane router: send EDU / Corporate users to their own dashboard ──
+      try {
+        const lane = localStorage.getItem("sl_entry_lane");
+        if (me?.orgType === "edu" || (lane === "edu" && isEduBypassEnabled())) {
+          nav("/streamline/edu/dashboard", { replace: true });
+          return;
+        }
+        if (me?.orgType === "corporate" || lane === "corporate") {
+          nav("/streamline/corporate/dashboard", { replace: true });
+          return;
+        }
+      } catch {}
 
       nav(nextUrl || "/join");
       return;

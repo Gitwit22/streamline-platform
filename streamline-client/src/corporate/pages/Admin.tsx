@@ -57,11 +57,11 @@ export default function Admin() {
     try {
       if (tab === "Users" || tab === "Roles") {
         if (bypass) setUsers(demoUsers);
-        else setUsers(await fetchUsers());
+        else { const res = await fetchUsers(); setUsers(res.users); }
       }
       if (tab === "Audit Logs") {
         if (bypass) setAudit(demoAudit);
-        else setAudit(await fetchAuditLog({ limit: 50 }));
+        else { const res = await fetchAuditLog({ limit: 50 }); setAudit(res.entries); }
       }
       if (tab === "Settings" || tab === "Security") {
         if (bypass) setSettings(demoSettings);
@@ -82,7 +82,7 @@ export default function Admin() {
     if (!inviteEmail.trim()) return;
     setInviting(true);
     try {
-      if (!bypass) await inviteUser(inviteEmail.trim());
+      if (!bypass) await inviteUser({ email: inviteEmail.trim() });
       setInviteEmail("");
     } finally { setInviting(false); }
   };

@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useLocation } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import { getEduEventById, setEduEventLive } from "../state/eduEvents";
 import { fetchEduOrg, postEduAudit, type EduOrgSettings } from "../api/settings";
+import { goLiveEduBroadcast, stopEduBroadcast, watchEduBroadcast, type GoLiveResponse } from "../api/broadcasts";
 
 type BroadcastTemplateId = "announcements" | "event" | "principal";
 type LayoutMode = "grid" | "speaker" | "single";
@@ -18,7 +19,6 @@ type Talent = {
 
 function randomId(prefix: string) {
   try {
-    // @ts-expect-error crypto may be missing in some environments
     const id = crypto?.randomUUID?.();
     if (id) return `${prefix}_${id.slice(0, 8)}`;
   } catch {
@@ -298,6 +298,12 @@ export default function Broadcast() {
   const liveVideoRef = useRef<HTMLVideoElement | null>(null);
   const streamsRef = useRef<{ cam?: MediaStream; mic?: MediaStream; audioCtx?: AudioContext } | null>(null);
 
+  // LiveKit room + go-live state
+  const lkRoomRef = useRef<any>(null);
+  const [goLiveData, setGoLiveData] = useState<GoLiveResponse | null>(null);
+  const [goLiveError, setGoLiveError] = useState<string | null>(null);
+  const [viewerCount, setViewerCount] = useState(0);
+
   async function refreshDevices() {
     if (!navigator.mediaDevices?.enumerateDevices) return;
     const list = await navigator.mediaDevices.enumerateDevices();
@@ -448,42 +454,87 @@ export default function Broadcast() {
   const canMute = isFacultyAdmin || isStudentProducer;
   const canChangeLayout = isFacultyAdmin || isStudentProducer;
 
-  function startBroadcast() {
+  async function startBroadcast() {
     if (!canStartStop) return;
+    setGoLiveError(null);
 
-    void ensureCameraStream();
-    const id = broadcastId || randomId("broadcast");
-    setBroadcastId(id);
-    setIsLive(true);
-    setStartedAt(Date.now());
-
-    // Outputs: optimistic state
+    // Show optimistic loading states
     setWebsiteStatus(publishHls ? "starting" : "off");
     setRecordingStatus(recordMp4 ? "starting" : "off");
     setYoutubeStatus(alsoYoutube ? "starting" : "off");
 
-    window.setTimeout(() => setWebsiteStatus(publishHls ? "active" : "off"), 600);
-    window.setTimeout(() => setRecordingStatus(recordMp4 ? "active" : "off"), 900);
-    window.setTimeout(() => setYoutubeStatus(alsoYoutube ? "active" : "off"), 1100);
+    try {
+      // 1) Call go-live API → creates room, starts HLS, returns LiveKit token
+      const data = await goLiveEduBroadcast({
+        title: boundEvent?.title || template.title,
+        templateId,
+        layout,
+        publishHls,
+        recordMp4,
+        eventId,
+      });
+      setGoLiveData(data);
+      setBroadcastId(data.broadcast.id);
 
-    if (eventId) setEduEventLive(eventId, true);
+      // 2) Connect to LiveKit room and publish camera/mic
+      const { Room, RoomEvent, Track } = await import("livekit-client");
+      const room = new Room({ adaptiveStream: true, dynacast: true });
+      lkRoomRef.current = room;
 
-    void (async () => {
-      try {
-        await postEduAudit({
-          action: "broadcast.started",
-          eventId,
-          eventTitle: boundEvent?.title || null,
-          targetId: id,
-        });
-      } catch {
-        // ignore
+      room.on(RoomEvent.ParticipantConnected, () => setViewerCount(room.remoteParticipants.size));
+      room.on(RoomEvent.ParticipantDisconnected, () => setViewerCount(room.remoteParticipants.size));
+
+      await room.connect(data.livekitUrl, data.lkToken);
+
+      // Publish local camera + mic
+      const camOpts = cameraId ? { deviceId: cameraId } : {};
+      const micOpts = micId ? { deviceId: micId } : {};
+      await room.localParticipant.setCameraEnabled(true, camOpts);
+      await room.localParticipant.setMicrophoneEnabled(true, micOpts);
+
+      // Attach local camera to the live preview
+      const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+      if (camPub?.track && liveVideoRef.current) {
+        camPub.track.attach(liveVideoRef.current);
       }
-    })();
+
+      // Stop device-check streams since LiveKit owns them now
+      void stopDeviceStreams();
+
+      setIsLive(true);
+      setStartedAt(Date.now());
+
+      // Update output statuses
+      setWebsiteStatus(publishHls ? "active" : "off");
+      setRecordingStatus(recordMp4 ? "active" : "off");
+      setYoutubeStatus(alsoYoutube ? "active" : "off");
+
+      if (eventId) setEduEventLive(eventId, true);
+    } catch (err: any) {
+      console.error("[EduBroadcast] go-live error:", err);
+      setGoLiveError(err?.message || "Failed to go live");
+      setWebsiteStatus(publishHls ? "error" : "off");
+      setRecordingStatus(recordMp4 ? "error" : "off");
+      setYoutubeStatus("off");
+    }
   }
 
-  function endBroadcast() {
+  async function endBroadcast() {
     if (!canStartStop) return;
+
+    // Disconnect LiveKit
+    if (lkRoomRef.current) {
+      try { lkRoomRef.current.disconnect(); } catch {}
+      lkRoomRef.current = null;
+    }
+
+    // Stop server-side
+    if (broadcastId) {
+      try { await stopEduBroadcast(broadcastId); } catch (e: any) {
+        console.warn("[EduBroadcast] stop error:", e?.message || e);
+      }
+    }
+
     setIsLive(false);
     setStartedAt(null);
     setWebsiteStatus("off");
@@ -491,23 +542,24 @@ export default function Broadcast() {
     setYoutubeStatus("off");
 
     if (eventId) setEduEventLive(eventId, false);
-
-    void (async () => {
-      try {
-        await postEduAudit({
-          action: "broadcast.ended",
-          eventId,
-          eventTitle: boundEvent?.title || null,
-          targetId: broadcastId,
-        });
-      } catch {
-        // ignore
-      }
-    })();
   }
 
-  function emergencyCut() {
+  async function emergencyCut() {
     if (!isFacultyAdmin) return;
+
+    // Disconnect LiveKit immediately
+    if (lkRoomRef.current) {
+      try { lkRoomRef.current.disconnect(); } catch {}
+      lkRoomRef.current = null;
+    }
+
+    // Stop server-side
+    if (broadcastId) {
+      try { await stopEduBroadcast(broadcastId); } catch (e: any) {
+        console.warn("[EduBroadcast] emergency stop error:", e?.message || e);
+      }
+    }
+
     setIsLive(false);
     setStartedAt(null);
     setWebsiteStatus(publishHls ? "error" : "off");
@@ -529,6 +581,27 @@ export default function Broadcast() {
       }
     })();
   }
+
+  // Poll viewer count while live
+  useEffect(() => {
+    if (!isLive || !broadcastId) return;
+    const interval = setInterval(async () => {
+      try {
+        const w = await watchEduBroadcast(broadcastId);
+        setViewerCount(w.viewerCount);
+      } catch {}
+    }, 10_000);
+    return () => clearInterval(interval);
+  }, [isLive, broadcastId]);
+
+  // Cleanup LiveKit on unmount
+  useEffect(() => {
+    return () => {
+      if (lkRoomRef.current) {
+        try { lkRoomRef.current.disconnect(); } catch {}
+      }
+    };
+  }, []);
 
   const plannedActions = useMemo(() => {
     const list: string[] = [];
@@ -938,6 +1011,12 @@ export default function Broadcast() {
               ))}
             </ul>
           </div>
+
+          {goLiveError ? (
+            <div className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-300">
+              <span className="font-semibold">Go-live failed:</span> {goLiveError}
+            </div>
+          ) : null}
         </div>
       </div>
     );
@@ -955,6 +1034,7 @@ export default function Broadcast() {
               LIVE
             </div>
             <div className="text-sm text-slate-300">Elapsed: {elapsed}</div>
+            {viewerCount > 0 ? <div className="text-xs text-slate-400">{viewerCount} viewer{viewerCount !== 1 ? "s" : ""}</div> : null}
             {broadcastId ? <div className="text-xs text-slate-500">ID: {broadcastId}</div> : null}
           </div>
 

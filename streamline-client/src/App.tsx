@@ -8,6 +8,7 @@ import Support from "./pages/Support";
 import BillingCanceled from "./pages/BillingCanceled";
 import BillingSuccess from "./pages/BillingSuccess";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import LaneEnforcer from "./components/LaneEnforcer";
 import Demo from "./pages/Demo";
 import { DEMO_LANDING_ENABLED } from "./config/demoLanding";
 import { LANES_ENABLED } from "./config/lanes";
@@ -92,13 +93,22 @@ function App() {
         return;
       }
 
-      // ── Room / live / join pages: show banner but do NOT redirect ──
+      // ── HLS viewer / embed pages: fully public, suppress everything ─
+      // These are public viewer pages that never require auth.  A 401
+      // from a stale cookie or background probe should be silently
+      // swallowed — no banner, no redirect, no token clearing.
+      if (
+        path.startsWith("/live") || path.startsWith("/ig/")
+      ) {
+        return;
+      }
+
+      // ── Room / join pages: show banner but do NOT redirect ─────────
       // The Room page manages its own `needsReauth` state and shows an
       // in-room re-auth prompt.  Clearing storage here would destroy
       // the room-access-token and force-boot the user.
       if (
-        path.startsWith("/room") || path.startsWith("/join") ||
-        path.startsWith("/live") || path.startsWith("/ig/")
+        path.startsWith("/room") || path.startsWith("/join")
       ) {
         setShowUnauthorized(true);
         return;
@@ -139,15 +149,20 @@ function App() {
     };
   }, [nav]);
 
-  // Hide the banner once the user is on an auth route.
+  // Hide the banner once the user is on an auth route or public viewer pages.
   useEffect(() => {
-    if (location.pathname.startsWith("/login") || location.pathname.startsWith("/signup")) {
+    if (
+      location.pathname.startsWith("/login") ||
+      location.pathname.startsWith("/signup") ||
+      location.pathname.startsWith("/live") ||
+      location.pathname.startsWith("/ig/")
+    ) {
       setShowUnauthorized(false);
     }
   }, [location.pathname]);
 
   return (
-    <>
+    <LaneEnforcer>
       {showUnauthorized && (
         <div
           style={{
@@ -286,7 +301,7 @@ function App() {
       {creatorRoutes({ canContentLibrary, canMyContentRecordings, canProjects, canEditor, canMyContent, myContentTarget })}
 
       </Routes>
-    </>
+    </LaneEnforcer>
   );
 }
 

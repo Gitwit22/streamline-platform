@@ -56,7 +56,7 @@ export type DestinationsStartComputeResult = {
 export type UseDestinationsStartPayloadArgs = {
   platformState: Record<PlatformKey, PlatformState>;
   platformOrder: PlatformKey[];
-  mainByPlatform: Record<PlatformKey, any>;
+  mainByPlatform: Partial<Record<PlatformKey, any>>;
   selectedPresetId?: string;
 };
 
