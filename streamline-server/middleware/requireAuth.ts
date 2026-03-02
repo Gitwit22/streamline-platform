@@ -160,6 +160,23 @@ export function tryGetAuthUser(req: Request): AuthUser | null {
 
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   try {
+    /* ── Demo / bypass mode ───────────────────────────────────────────────── */
+    const demoHeader = String(req.headers["x-sl-demo"] || "").trim().toLowerCase();
+    if (demoHeader === "edu" || demoHeader === "corporate") {
+      const env = String(process.env.NODE_ENV || "development").toLowerCase();
+      if (env !== "production" || process.env.ALLOW_DEMO_BYPASS === "1") {
+        const demoUid = demoHeader === "edu" ? "edu-demo" : "corp-demo";
+        (req as any).user = { uid: demoUid };
+        (req as any).account = {
+          uid: demoUid,
+          displayName: "Demo User",
+          email: demoHeader === "edu" ? "demo@school.edu" : "demo@streamline.corp",
+          rawUser: {},
+        };
+        return next();
+      }
+    }
+
     const user = await tryGetAuthUserAny(req);
 
     if (!user) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });

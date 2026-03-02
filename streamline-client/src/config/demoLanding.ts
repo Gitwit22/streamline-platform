@@ -6,4 +6,4 @@
  *
  * Flip this single flag to enable or disable the demo landing.
  */
-export const DEMO_LANDING_ENABLED = true;
+export const DEMO_LANDING_ENABLED = false;

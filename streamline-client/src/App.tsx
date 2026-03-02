@@ -11,6 +11,7 @@ import { ProtectedRoute } from "./components/ProtectedRoute";
 import LaneEnforcer from "./components/LaneEnforcer";
 import Demo from "./pages/Demo";
 import { DEMO_LANDING_ENABLED } from "./config/demoLanding";
+import { LANES_ENABLED } from "./config/lanes";
 
 import { creatorRoutes } from "./creator/routes";
 
@@ -207,9 +208,10 @@ function App() {
 
       <Routes>
       {/* Demo Switchboard */}
-      <Route path="/demo" element={<Demo />} />
+      {LANES_ENABLED && <Route path="/demo" element={<Demo />} />}
 
-      {/* Corporate lane */}
+      {/* Corporate lane — only when LANES_ENABLED */}
+      {LANES_ENABLED ? (
       <Route path="/streamline/corporate" element={<Outlet />}>
         <Route index element={<CorporateLanding />} />
         <Route path="landing" element={<CorporateLanding />} />
@@ -235,8 +237,12 @@ function App() {
           <Route path="*" element={<Navigate to="/streamline/corporate/dashboard" replace />} />
         </Route>
       </Route>
+      ) : (
+        <Route path="/streamline/corporate/*" element={<Navigate to="/welcome" replace />} />
+      )}
 
-      {/* EDU lane */}
+      {/* EDU lane — only when LANES_ENABLED */}
+      {LANES_ENABLED ? (
       <Route path="/streamline/edu" element={<Outlet />}>
         <Route index element={<EduLanding />} />
         <Route path="login" element={<EduLogin />} />
@@ -277,6 +283,9 @@ function App() {
           <Route path="*" element={<Navigate to="/streamline/edu/dashboard" replace />} />
         </Route>
       </Route>
+      ) : (
+        <Route path="/streamline/edu/*" element={<Navigate to="/welcome" replace />} />
+      )}
 
       {/* Public / auth flow */}
       <Route path="/" element={DEMO_LANDING_ENABLED ? <Demo /> : <Navigate to="/welcome" replace />} />

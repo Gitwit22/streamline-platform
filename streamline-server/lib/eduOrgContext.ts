@@ -46,6 +46,28 @@ export async function loadEduOrgSettingsForUid(uid: string): Promise<
     }
   | null
 > {
+  /* ── Demo bypass ──────────────────────────────────────────────────── */
+  if (uid === "edu-demo") {
+    return {
+      orgId: "edu-demo-org",
+      orgRole: "faculty_admin",
+      org: {
+        id: "edu-demo-org",
+        orgType: "edu",
+        name: "EDU Demo School",
+        defaults: {
+          publishToWebsite: true,
+          recordToArchive: true,
+          defaultLayout: "speaker",
+          studentProducersCanStart: true,
+          requireAssignmentToStart: false,
+        },
+        accessPolicy: { embedVisibility: "public" },
+      },
+      userName: "Demo Faculty",
+    };
+  }
+
   const userSnap = await firestore.collection("users").doc(uid).get().catch(() => null as any);
   const user = userSnap && userSnap.exists ? ((userSnap.data() as any) || {}) : null;
   if (!user) return null;

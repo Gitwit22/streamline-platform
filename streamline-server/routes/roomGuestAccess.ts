@@ -252,6 +252,11 @@ function roleGrant(role: "guest" | "participant" | "host") {
   const participantPerm = roleToParticipantPermission(role);
   const isHost = role === "host";
 
+  // NOTE: canPublishSources is intentionally omitted from the LiveKit grant.
+  // livekit-server-sdk v2.x expects TrackSource enum (protobuf int) values, not
+  // the string literals our permission layer uses. Omitting it is safe because
+  // canPublish: true already allows all sources at the LiveKit level; fine-grained
+  // source control is enforced at the application layer via our own permissions.
   return {
     roomJoin: true,
     canSubscribe: participantPerm.canSubscribe,

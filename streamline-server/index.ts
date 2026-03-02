@@ -47,6 +47,7 @@ import corpTrainingRoutes from "./routes/corpTraining";
 import corpDocumentsRoutes from "./routes/corpDocuments";
 import corpChatRoutes from "./routes/corpChat";
 import corpAdminRoutes from "./routes/corpAdmin";
+import { LANES_ENABLED } from "./config/lanes";
 import onboardingRoutes from "./routes/onboarding";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
@@ -200,10 +201,15 @@ app.use("/api/public/hls", publicHlsRoutes);
 // Public viewer-safe HLS config (no auth)
 app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
 // Public EDU embed data (no auth)
-app.use("/api/public/edu", eduPublicRoutes);
+// Public EDU embed data (no auth) — only when lanes enabled
+if (LANES_ENABLED) {
+  app.use("/api/public/edu", eduPublicRoutes);
+}
 
 // Internal maintenance/admin utilities
-app.use("/api/maintenance/edu", eduBootstrapRoutes);
+if (LANES_ENABLED) {
+  app.use("/api/maintenance/edu", eduBootstrapRoutes);
+}
 
 // Onboarding/reset endpoints (guarded; demo-safe)
 app.use("/api/onboarding", onboardingRoutes);

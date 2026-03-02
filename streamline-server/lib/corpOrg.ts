@@ -53,6 +53,15 @@ export type CorpOrgContext = {
  * Validates that the org is of type "corporate".
  */
 export async function getCorpOrgContext(uid: string): Promise<CorpOrgContext | null> {
+  /* ── Demo bypass ──────────────────────────────────────────────────── */
+  if (uid === "corp-demo") {
+    return {
+      orgId: "corp-demo-org",
+      orgRole: "admin",
+      orgName: "StreamLine Corporate Demo",
+    };
+  }
+
   const userSnap = await db.collection("users").doc(uid).get().catch(() => null as any);
   const user = userSnap && userSnap.exists ? (userSnap.data() as any) : null;
   if (!user) return null;
