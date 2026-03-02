@@ -107,6 +107,11 @@ export const SignupPage = () => {
       localStorage.setItem("sl_userId", data.user.id || data.user.uid);
       localStorage.setItem("sl_displayName", data.user.displayName);
 
+      // Notify hooks (useEffectiveEntitlements) that auth state changed
+      try {
+        window.dispatchEvent(new CustomEvent("sl:auth-changed"));
+      } catch {}
+
       // Fallback: Set JWT as a non-httpOnly cookie for backend auth (for local dev)
       if (typeof document !== "undefined" && data.token) {
         document.cookie = `token=${data.token}; path=/; max-age=${60 * 60 * 24 * 7}`;

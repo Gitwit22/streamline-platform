@@ -784,4 +784,159 @@ router.get("/:roomId/controls/stream", requireRoomAccessToken as any, async (req
   });
 });
 
+/**
+ * POST /api/rooms/:roomId/participants/:identity/promote
+ * 
+ * Promotes a viewer guest to speaker (enables mic+cam).
+ * 
+ * Auth: Requires host role + valid roomAccessToken
+ * 
+ * Updates LiveKit ParticipantPermission:
+ * - canPublish: true
+ * - canPublishData: true  
+ * - canPublishSources: ["microphone", "camera"]
+ * 
+ * Also updates Firestore controls doc so the promotion persists if they rejoin.
+ */
+router.post(
+  "/:roomId/participants/:identity/promote",
+  requireAuth as any,
+  requireRoomAccessToken as any,
+  async (req: any, res) => {
+    const roomId = String(req.params.roomId || "").trim();
+    const targetIdentity = String(req.params.identity || "").trim();
+
+    if (!roomId) return res.status(400).json({ error: "roomId_required" });
+    if (!targetIdentity) return res.status(400).json({ error: "identity_required" });
+
+    const access = (req as any).roomAccess as RoomAccessClaims | undefined;
+    if (!access || !access.roomId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+    if (access.roomId !== roomId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
+    }
+
+    // Only hosts can promote guests to speakers
+    if (!isHostOrCohost(access.role)) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    const uid = (req as any).user?.uid as string | undefined;
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    try {
+      // Get LiveKit SDK
+      const roomService = await getLiveKitSdk();
+
+      if (!roomService) {
+        return res.status(500).json({ error: "livekit_not_configured" });
+      }
+
+      const { livekitRoomName } = getRoomAccess(req as any);
+
+      // Get participant permission for "participant" role (mic + cam)
+      const participantPermission = roleToParticipantPermission("participant");
+
+      console.log("[promote] Promoting guest to speaker", {
+        roomId,
+        livekitRoomName,
+        targetIdentity,
+        promoterUid: uid,
+        newPermissions: participantPermission,
+      });
+
+      // Fetch existing metadata to preserve it
+      let nextMetadata: string | undefined;
+      try {
+        const listResp = await (roomService as any).listParticipants(livekitRoomName);
+        const participants: any[] = Array.isArray((listResp as any)?.participants)
+          ? (listResp as any).participants
+          : Array.isArray(listResp)
+          ? (listResp as any)
+          : [];
+        const target = participants.find((p: any) => p && p.identity === targetIdentity);
+        const existingMetaRaw = target?.metadata as string | undefined;
+        let existingMeta: any = {};
+        if (existingMetaRaw && typeof existingMetaRaw === "string") {
+          try {
+            existingMeta = JSON.parse(existingMetaRaw) || {};
+          } catch {
+            existingMeta = {};
+          }
+        }
+        // Mark as promoted speaker in metadata
+        const mergedMeta = {
+          ...existingMeta,
+          rolePresetId: "participant",
+          promotedToSpeaker: true,
+          promotedAt: Date.now(),
+          promotedBy: uid,
+        };
+        nextMetadata = JSON.stringify(mergedMeta);
+      } catch {
+        nextMetadata = JSON.stringify({
+          rolePresetId: "participant",
+          promotedToSpeaker: true,
+          promotedAt: Date.now(),
+          promotedBy: uid,
+        });
+      }
+
+      // Update LiveKit participant permissions in real-time
+      await roomService.updateParticipant(livekitRoomName, targetIdentity, {
+        permission: participantPermission,
+        metadata: nextMetadata,
+      });
+
+      // Update Firestore controls doc so promotion persists
+      const identityDocId = normalizeControlsDocId(targetIdentity);
+      const ref = controlsDocRef(roomId, identityDocId);
+      await ref.set(
+        {
+          role: "participant",
+          canPublishAudio: true,
+          canPublishVideo: true,
+          canScreenShare: false, // Participants can't screen share by default
+          promotedToSpeaker: true,
+          promotedAt: admin.firestore.FieldValue.serverTimestamp(),
+          promotedBy: uid,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+
+      console.log("[promote] Successfully promoted guest to speaker", {
+        roomId,
+        targetIdentity,
+      });
+
+      return res.json({
+        ok: true,
+        identity: targetIdentity,
+        role: "participant",
+        permissions: {
+          canPublish: true,
+          canPublishData: true,
+          canPublishSources: ["microphone", "camera"],
+        },
+      });
+    } catch (err) {
+      const message = (err as any)?.message || String(err);
+      console.error("[promote] Failed to promote guest", {
+        roomId,
+        targetIdentity,
+        error: message,
+      });
+
+      // If the room/participant no longer exists in LiveKit (404), return specific error
+      if (message.includes("status 404")) {
+        return res.status(404).json({ error: "participant_not_found" });
+      }
+
+      return res.status(500).json({ error: "promotion_failed", message });
+    }
+  }
+);
+
 export default router;

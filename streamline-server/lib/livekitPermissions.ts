@@ -1,6 +1,23 @@
-import type { ParticipantPermission } from "livekit-server-sdk";
+// NOTE: LiveKit's JS client (`livekit-client`) represents Track.Source as
+// string literals like "camera" and "microphone".
+//
+// The server SDK exposes protobuf numeric enums (e.g. TrackSource.CAMERA === 1).
+// We intentionally emit *string* sources here so UI code (and LiveKit Components)
+// can reliably compare `canPublishSources` against `Track.Source.*`.
 
-type PublishSource = "microphone" | "camera" | "screen_share" | "screen_share_audio";
+export type LiveKitTrackSource =
+  | "camera"
+  | "microphone"
+  | "screen_share"
+  | "screen_share_audio";
+
+// VideoGrant-compatible return type (used for LiveKit token grants)
+export type LiveKitGrant = {
+  canSubscribe: boolean;
+  canPublish: boolean;
+  canPublishData: boolean;
+  canPublishSources: LiveKitTrackSource[];
+};
 
 // Narrow type: just the realtime flags that matter for LiveKit permissions
 export type RealtimePreset = {
@@ -11,36 +28,46 @@ export type RealtimePreset = {
   canSendData?: boolean; // chat/data
 };
 
-// Convert preset-style flags into LiveKit ParticipantPermission
-export function presetToParticipantPermission(p: RealtimePreset): ParticipantPermission {
+// Convert preset-style flags into LiveKit grant format
+export function presetToLiveKitGrant(p: RealtimePreset): LiveKitGrant {
   const canPublish = !!p.canPublishAudio || !!p.canPublishVideo || !!p.canScreenShare;
 
-  const base = {
+  const sources: LiveKitTrackSource[] = [];
+  if (p.canPublishAudio) sources.push("microphone");
+  if (p.canPublishVideo) sources.push("camera");
+  if (p.canScreenShare) {
+    sources.push("screen_share");
+    sources.push("screen_share_audio");
+  }
+
+  return {
     canSubscribe: p.canSubscribe ?? true,
     canPublish,
     canPublishData: p.canSendData ?? true,
-  } as ParticipantPermission;
-
-  return base;
+    canPublishSources: sources,
+  };
 }
 
 // Optional coarse role mapping so role-based grants can share the same truth
 export function roleToParticipantPermission(
-  role: "viewer" | "participant" | "cohost" | "host",
-): ParticipantPermission {
+  role: "viewer" | "guest" | "participant" | "cohost" | "host",
+): LiveKitGrant {
   const canSubscribe = true;
   let canPublish = false;
   let canPublishData = false;
-  let canPublishSources: PublishSource[] = [];
+  let canPublishSources: LiveKitTrackSource[] = [];
 
   switch (role) {
     case "viewer": {
+      // Reserved for HLS watch-only (future)
       canPublish = false;
       canPublishData = false;
       canPublishSources = [];
       break;
     }
+    case "guest":
     case "participant": {
+      // Invite-based guests and authenticated participants both get mic+cam
       canPublish = true;
       canPublishData = true;
       canPublishSources = ["microphone", "camera"];
@@ -65,7 +92,6 @@ export function roleToParticipantPermission(
     canSubscribe,
     canPublish,
     canPublishData,
-    // LiveKit expects string source names for permissions/grants.
-    canPublishSources: canPublishSources as any,
-  } as ParticipantPermission;
+    canPublishSources,
+  };
 }

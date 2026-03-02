@@ -6,6 +6,7 @@
 // Use Vite proxy by default (routes /api/* to localhost:5137)
 import { API_BASE } from "./apiBase";
 import { apiFetchAuth, ApiUnauthorizedError } from "./api";
+import { getFirebaseIdToken } from "./firebaseClient";
 
 // ============================================================================
 // TYPES
@@ -163,47 +164,63 @@ export const assetsApi = {
     formData.append('video', file);
 
     return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-
-      const token = (() => {
+      const getLegacyToken = (): string | null => {
         try {
           return localStorage.getItem("authToken");
         } catch {
           return null;
         }
-      })();
+      };
 
-      if (!token) {
-        emitUnauthorizedEventOnce("missing_or_invalid_token");
-        reject(new ApiUnauthorizedError());
-        return;
-      }
+      const getBestBearerToken = async (opts?: { forceRefresh?: boolean }): Promise<{ token: string; usedFirebase: boolean } | null> => {
+        const firebaseIdToken = await getFirebaseIdToken({ forceRefresh: !!opts?.forceRefresh });
+        if (firebaseIdToken) return { token: firebaseIdToken, usedFirebase: true };
+        const legacy = getLegacyToken();
+        if (legacy) return { token: legacy, usedFirebase: false };
+        return null;
+      };
 
-      xhr.upload.addEventListener('progress', (e) => {
-        if (e.lengthComputable && onProgress) {
-          onProgress(Math.round((e.loaded / e.total) * 100));
+      const doUpload = async (opts?: { retry401?: boolean; forceRefresh?: boolean }) => {
+        const bearer = await getBestBearerToken({ forceRefresh: !!opts?.forceRefresh });
+        if (!bearer?.token) {
+          emitUnauthorizedEventOnce("missing_or_invalid_token");
+          reject(new ApiUnauthorizedError());
+          return;
         }
-      });
 
-      xhr.addEventListener('load', () => {
-        if (xhr.status >= 200 && xhr.status < 300) {
-          try {
-            resolve(JSON.parse(xhr.responseText));
-          } catch {
-            reject(new Error('Invalid response'));
+        const xhr = new XMLHttpRequest();
+
+        xhr.upload.addEventListener('progress', (e) => {
+          if (e.lengthComputable && onProgress) {
+            onProgress(Math.round((e.loaded / e.total) * 100));
           }
-        } else {
-          reject(new Error(`Upload failed: ${xhr.status}`));
-        }
-      });
+        });
 
-      xhr.addEventListener('error', () => reject(new Error('Upload failed')));
+        xhr.addEventListener('load', async () => {
+          if (xhr.status === 401 && bearer.usedFirebase && opts?.retry401) {
+            await doUpload({ retry401: false, forceRefresh: true });
+            return;
+          }
 
-      xhr.open('POST', `${API_BASE}/editing/assets/upload`);
+          if (xhr.status >= 200 && xhr.status < 300) {
+            try {
+              resolve(JSON.parse(xhr.responseText));
+            } catch {
+              reject(new Error('Invalid response'));
+            }
+          } else {
+            reject(new Error(`Upload failed: ${xhr.status}`));
+          }
+        });
 
-      xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+        xhr.addEventListener('error', () => reject(new Error('Upload failed')));
 
-      xhr.send(formData);
+        xhr.open('POST', `${API_BASE}/editing/assets/upload`);
+        xhr.setRequestHeader('Authorization', `Bearer ${bearer.token}`);
+        xhr.send(formData);
+      };
+
+      void doUpload({ retry401: true, forceRefresh: false });
     });
   },
 

@@ -395,7 +395,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         const response = await egressClient.startRoomCompositeEgress(
           roomName,
           { stream: streamOutput },
-          { layout: "grid", encodingOptions }
+          { layout: "grid-dark", encodingOptions }
         );
 
         console.log("[multistream:start] Egress response (normal):", {
@@ -424,7 +424,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
 
         // Layout preset: keep it predictable; defaults to speaker for a portrait feed.
         // Note: videoFit is best-effort; LiveKit composite layouts are template-driven.
-        const instagramLayout = instagramLayoutPreset === "instagram_reels_9x16" ? "speaker" : "speaker";
+        const instagramLayout = instagramLayoutPreset === "instagram_reels_9x16" ? "speaker-dark" : "speaker-dark";
 
         if (process.env.AUTH_DEBUG === "1") {
           console.log("[livekit-debug] startRoomCompositeEgress (instagram)", {

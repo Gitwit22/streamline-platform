@@ -88,13 +88,23 @@ export function extractRoomAccessToken(req: Request): string | null {
     return fromQuery.trim();
   }
 
-  // 3) Legacy Authorization: Bearer <token> fallback. Only used when
-  // neither the explicit header nor query param are present so that
-  // user auth headers never override a dedicated room access header.
+  // 3) Legacy Authorization: Bearer <token> fallback.
+  // This is deprecated because Authorization is reserved for *user* auth
+  // (Firebase ID token) during migration. Keep temporarily for backwards
+  // compatibility with older clients, but warn loudly.
+  const allowDeprecated = process.env.ALLOW_DEPRECATED_AUTHZ_TOKENS !== "0";
   const auth = (req.headers as any).authorization as string | undefined;
-  if (typeof auth === "string") {
+  if (allowDeprecated && typeof auth === "string") {
     const m = auth.match(/^Bearer\s+(.+)$/i);
-    if (m?.[1]) return m[1].trim();
+    if (m?.[1]) {
+      const raw = m[1].trim();
+      if (raw) {
+        console.warn(
+          "[deprecation] roomAccessToken provided via Authorization header; send x-room-access-token instead"
+        );
+        return raw;
+      }
+    }
   }
 
   return null;

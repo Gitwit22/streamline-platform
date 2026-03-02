@@ -610,6 +610,10 @@ router.get("/me", async (req, res) => {
 
       const transcodeLimitRaw = (limits as any).transcodeMinutes;
 
+      // Editing access comes from the Firestore plan doc's `editing` object.
+      // This is intentionally separate from the legacy `features` map.
+      const planEditingAccess = Boolean((plan.raw as any)?.editing?.access === true);
+
       effectiveEntitlements = {
         planId: entitlements.planId,
         planName: plan.name || entitlements.planId,
@@ -629,6 +633,13 @@ router.get("/me", async (req, res) => {
 
           // Optional: surface for client gating (e.g. Overages toggle).
           overagesAllowed: !!(features as any).overagesAllowed,
+
+          // Editing (plans are truth)
+          editing: planEditingAccess,
+          // Segmented editing surfaces (until a separate segmented plan matrix exists)
+          contentLibrary: planEditingAccess,
+          projects: planEditingAccess,
+          editor: planEditingAccess,
         },
         limits: {
           // Canonical numeric usage/feature caps
@@ -641,6 +652,10 @@ router.get("/me", async (req, res) => {
           // Client gating relies on presence (typeof === "number").
           transcodeMinutes: typeof transcodeLimitRaw === "number" ? Number(transcodeLimitRaw) : undefined,
           maxRecordingMinutesPerClip: Number(limits.maxRecordingMinutesPerClip || 0),
+
+          // Editing limits (optional client UX)
+          editingMaxProjects: Number((plan.raw as any)?.editing?.maxProjects ?? 0),
+          editingMaxTracks: Number((plan.raw as any)?.editing?.maxTracks ?? 0),
         },
         caps: entitlements.caps || {},
       };
@@ -668,10 +683,44 @@ router.get("/me", async (req, res) => {
           // non-fatal
         }
 
+    // Optional EDU/org context for client-side EDU lane routing + guards.
+    // This is intentionally best-effort and non-fatal if org collections
+    // aren't populated yet.
+    let orgId: string | null = null;
+    let orgType: string | null = null;
+    let orgName: string | null = null;
+    let orgRole: string | null = null;
+
+    try {
+      const rawOrgId = (data as any)?.orgId ?? (data as any)?.org?.id ?? (data as any)?.org?.orgId;
+      orgId = typeof rawOrgId === "string" && rawOrgId.trim() ? rawOrgId.trim() : null;
+
+      const rawOrgType = (data as any)?.orgType ?? (data as any)?.org?.orgType;
+      orgType = typeof rawOrgType === "string" && rawOrgType.trim() ? rawOrgType.trim() : null;
+
+      if (orgId) {
+        const orgSnap = await firestore.collection("orgs").doc(orgId).get().catch(() => null as any);
+        const org = orgSnap && orgSnap.exists ? (orgSnap.data() as any) : null;
+        if (org && typeof org.orgType === "string" && String(org.orgType).trim()) orgType = String(org.orgType).trim();
+        if (org && typeof org.name === "string" && String(org.name).trim()) orgName = String(org.name).trim();
+
+        const memberId = `${orgId}_${uid}`;
+        const memberSnap = await firestore.collection("orgMembers").doc(memberId).get().catch(() => null as any);
+        const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
+        if (member && typeof member.role === "string" && String(member.role).trim()) orgRole = String(member.role).trim();
+      }
+    } catch {
+      // non-fatal
+    }
+
     const payload = {
       id: uid,
       email: data.email || null,
       displayName: data.displayName || null,
+      orgId,
+      orgType,
+      orgName,
+      orgRole,
       billingTruth,
       billingSettings: {
         overagesEnabled:

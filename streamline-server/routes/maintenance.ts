@@ -38,20 +38,25 @@ function toDate(value: any): Date | null {
 //
 // Supports two auth mechanisms:
 // 1) Standard admin auth via requireAdmin (JWT/cookie/body)
-// 2) Static maintenance key for cron jobs: header x-maintenance-key or Authorization: Bearer <key>
+// 2) Static maintenance key for cron jobs: header x-maintenance-key
+//    (Authorization: Bearer <key> is deprecated; use only for legacy clients)
 router.use((req, res, next) => {
   const key = process.env.MAINTENANCE_KEY;
   if (!key) return requireAdmin(req, res, next);
 
   const headerKey = String(req.headers["x-maintenance-key"] || "").trim();
+  const allowDeprecated = process.env.ALLOW_DEPRECATED_AUTHZ_TOKENS !== "0";
   const authHeader = req.headers["authorization"] || req.headers["Authorization"];
   const bearer =
-    typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+    allowDeprecated && typeof authHeader === "string" && authHeader.startsWith("Bearer ")
       ? authHeader.slice("Bearer ".length).trim()
       : "";
 
   if (headerKey && headerKey === key) return next();
-  if (bearer && bearer === key) return next();
+  if (bearer && bearer === key) {
+    console.warn("[deprecation] maintenance key provided via Authorization header; send x-maintenance-key instead");
+    return next();
+  }
 
   return requireAdmin(req, res, next);
 });

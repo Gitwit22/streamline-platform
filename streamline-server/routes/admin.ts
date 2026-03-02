@@ -20,6 +20,22 @@ import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 
 const router = express.Router();
 
+function getDeletedAtMs(raw: any): number | null {
+  if (!raw) return null;
+  const deletedAtMs =
+    typeof raw.deletedAtMs === "number"
+      ? raw.deletedAtMs
+      : typeof raw.deletedAt === "number"
+        ? raw.deletedAt
+        : null;
+  return deletedAtMs && deletedAtMs > 0 ? deletedAtMs : null;
+}
+
+function isDeletedUserRecord(raw: any): boolean {
+  const status = typeof raw?.accountStatus === "string" ? String(raw.accountStatus).toLowerCase() : "";
+  return status === "deleted" || Boolean(getDeletedAtMs(raw));
+}
+
 // All routes require admin authentication
 router.use(requireAdmin);
 // In routes/admin.ts
@@ -198,11 +214,7 @@ router.get("/users", async (req, res) => {
           }
           return u;
         })
-      : users.filter((u: any) => {
-          const status = typeof u?.accountStatus === "string" ? String(u.accountStatus).toLowerCase() : "";
-          const deletedAtMs = typeof u?.deletedAtMs === "number" ? u.deletedAtMs : null;
-          return status !== "deleted" && !(deletedAtMs && deletedAtMs > 0);
-        });
+      : users.filter((u: any) => !isDeletedUserRecord(u));
 
     res.json({
       users: filteredUsers,
@@ -708,6 +720,10 @@ router.get("/usage", async (req, res) => {
   try {
     const limit = parseInt(req.query.limit as string) || 100;
     const planFilter = req.query.plan as PlanId | undefined;
+    const includeDeleted = (() => {
+      const raw = String(req.query.includeDeleted || "").trim().toLowerCase();
+      return raw === "1" || raw === "true" || raw === "yes";
+    })();
     const monthKey = getCurrentMonthKey();
 
     // Load platform billing flag once so the admin UI can accurately show
@@ -731,12 +747,16 @@ router.get("/usage", async (req, res) => {
 
     const usersSnapshot = await usersQuery.limit(limit).get();
 
+    const userDocs = includeDeleted
+      ? usersSnapshot.docs
+      : usersSnapshot.docs.filter((doc) => !isDeletedUserRecord(doc.data()));
+
     // Fetch all plans once for efficiency
     const plansSnap = await firestore.collection("plans").get();
     const plansMap = Object.fromEntries(plansSnap.docs.map(d => [d.id, d.data()]));
 
     const usageData = await Promise.all(
-      usersSnapshot.docs.map(async (doc) => {
+      userDocs.map(async (doc) => {
         const userData = doc.data();
         const userId = doc.id;
         // usageMonthly doc id shape: `${uid}_${YYYY-MM}`
@@ -841,6 +861,10 @@ router.get("/usage/summary", async (req, res) => {
 router.get("/stats", async (req, res) => {
   try {
     const usersSnapshot = await firestore.collection("users").get();
+    const includeDeleted = (() => {
+      const raw = String(req.query.includeDeleted || "").trim().toLowerCase();
+      return raw === "1" || raw === "true" || raw === "yes";
+    })();
     
     const now = new Date();
     const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -858,6 +882,11 @@ router.get("/stats", async (req, res) => {
 
     usersSnapshot.docs.forEach((doc) => {
       const data = doc.data();
+
+      if (!includeDeleted && isDeletedUserRecord(data)) {
+        return;
+      }
+
       totalUsers++;
       
       const plan = (data.planId || "free");

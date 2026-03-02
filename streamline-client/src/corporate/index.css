@@ -1,0 +1,107 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+
+/*
+  Corporate theme — CSS custom properties scoped to .corporate-root
+  so they don't bleed into the rest of the app.
+  Tailwind is loaded from the CDN in index.html; the theme extension
+  there maps utility classes like bg-background → hsl(var(--background)).
+*/
+
+.corporate-root {
+  --background: 218 50% 6%;
+  --foreground: 216 40% 93%;
+
+  --card: 218 40% 9%;
+  --card-foreground: 216 40% 93%;
+
+  --popover: 218 40% 9%;
+  --popover-foreground: 216 40% 93%;
+
+  --primary: 197 89% 66%;
+  --primary-foreground: 218 60% 6%;
+
+  --secondary: 216 30% 15%;
+  --secondary-foreground: 216 40% 93%;
+
+  --muted: 216 25% 18%;
+  --muted-foreground: 214 25% 55%;
+
+  --accent: 197 89% 66%;
+  --accent-foreground: 218 60% 6%;
+
+  --destructive: 355 75% 65%;
+  --destructive-foreground: 210 40% 98%;
+
+  --border: 215 35% 20%;
+  --input: 215 35% 20%;
+  --ring: 197 89% 66%;
+
+  --radius: 0.5rem;
+
+  /* StreamLine extended palette */
+  --surface: 218 35% 11%;
+  --surface-2: 216 30% 15%;
+  --surface-3: 215 28% 18%;
+  --surface-4: 214 26% 22%;
+  --border-2: 215 28% 25%;
+
+  --sl-green: 155 75% 58%;
+  --sl-green-dim: 155 75% 58%;
+  --sl-amber: 44 90% 61%;
+  --sl-amber-dim: 44 90% 61%;
+  --sl-red: 355 82% 65%;
+  --sl-red-dim: 355 82% 65%;
+  --sl-navy: 217 60% 27%;
+
+  --accent-soft: 197 89% 66%;
+  --accent-glow: 197 89% 66%;
+
+  --sidebar-background: 218 35% 11%;
+  --sidebar-foreground: 214 25% 55%;
+  --sidebar-primary: 197 89% 66%;
+  --sidebar-primary-foreground: 218 60% 6%;
+  --sidebar-accent: 216 30% 15%;
+  --sidebar-accent-foreground: 216 40% 93%;
+  --sidebar-border: 215 35% 20%;
+  --sidebar-ring: 197 89% 66%;
+
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: 'Plus Jakarta Sans', sans-serif;
+}
+
+.corporate-root .font-mono,
+.corporate-root [class*="font-mono"] {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+/* Scrollbar — scoped to corporate */
+.corporate-root ::-webkit-scrollbar {
+  width: 4px;
+}
+.corporate-root ::-webkit-scrollbar-track {
+  background: transparent;
+}
+.corporate-root ::-webkit-scrollbar-thumb {
+  background: hsl(var(--border-2));
+  border-radius: 2px;
+}
+
+/* Animations */
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+.animate-pulse-live {
+  animation: pulse-live 1.4s infinite;
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.4s ease-out;
+}

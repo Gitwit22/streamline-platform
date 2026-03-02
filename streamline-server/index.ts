@@ -33,6 +33,21 @@ import telemetryRoutes from "./routes/telemetry";
 import savedEmbedsRoutes from "./routes/savedEmbeds";
 import editingRoutes from "./routes/editing";
 import maintenanceRoutes from "./routes/maintenance";
+import eduEventsRoutes from "./routes/eduEvents";
+import eduPeopleRoutes from "./routes/eduPeople";
+import eduSettingsRoutes from "./routes/eduSettings";
+import eduEmbedsRoutes from "./routes/eduEmbeds";
+import eduPublicRoutes from "./routes/eduPublic";
+import eduBootstrapRoutes from "./routes/eduBootstrap";
+import corpMeRoutes from "./routes/corpMe";
+import corpBroadcastsRoutes from "./routes/corpBroadcasts";
+import corpCallsRoutes from "./routes/corpCalls";
+import corpTrainingRoutes from "./routes/corpTraining";
+import corpDocumentsRoutes from "./routes/corpDocuments";
+import corpChatRoutes from "./routes/corpChat";
+import corpAdminRoutes from "./routes/corpAdmin";
+import { LANES_ENABLED } from "./config/lanes";
+import onboardingRoutes from "./routes/onboarding";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
 import { getLiveKitSdk } from "./lib/livekit"; // adjust path
@@ -121,6 +136,9 @@ const corsOptions: CorsOptions = {
     "Authorization",
     "X-Requested-With",
     "Cache-Control",
+    // Optional onboarding key for controlled self-serve onboarding
+    "x-onboarding-key",
+    "X-Onboarding-Key",
     // Room-level access token used by in-room APIs (HLS, multistream, controls, etc.).
     // Explicitly allow both typical header casings to satisfy browser preflight checks.
     "x-room-access-token",
@@ -181,6 +199,19 @@ app.use("/api/hls", hlsRoutes);
 app.use("/api/public/hls", publicHlsRoutes);
 // Public viewer-safe HLS config (no auth)
 app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
+// Public EDU embed data (no auth)
+// Public EDU embed data (no auth) — only when lanes enabled
+if (LANES_ENABLED) {
+  app.use("/api/public/edu", eduPublicRoutes);
+}
+
+// Internal maintenance/admin utilities
+if (LANES_ENABLED) {
+  app.use("/api/maintenance/edu", eduBootstrapRoutes);
+}
+
+// Onboarding/reset endpoints (guarded; demo-safe)
+app.use("/api/onboarding", onboardingRoutes);
 // Recordings API - This handles GET /:id and POST /start, /stop
 app.use("/api/recordings", recordingsRoutes);
 
@@ -234,6 +265,31 @@ app.use("/api/live", liveRoutes);
 
 // Saved embeds (user-owned) -> stable Firestore rooms
 app.use("/api/saved-embeds", savedEmbedsRoutes);
+
+// EDU events (authenticated admin UI)
+if (LANES_ENABLED) {
+  app.use("/api/edu", eduEventsRoutes);
+  // EDU people (authenticated admin UI)
+  app.use("/api/edu", eduPeopleRoutes);
+  // EDU org settings + audit (authenticated admin UI)
+  app.use("/api/edu", eduSettingsRoutes);
+  // EDU embed docs (authenticated admin UI)
+  app.use("/api/edu", eduEmbedsRoutes);
+
+  // Corporate lane routes
+  app.use("/api/corp", corpMeRoutes);
+  app.use("/api/corp", corpBroadcastsRoutes);
+  app.use("/api/corp", corpCallsRoutes);
+  app.use("/api/corp", corpTrainingRoutes);
+  app.use("/api/corp", corpDocumentsRoutes);
+  app.use("/api/corp", corpChatRoutes);
+  app.use("/api/corp", corpAdminRoutes);
+} else {
+  // Lanes disabled — reject any requests that slip through.
+  app.use("/api/edu", (_req, res) => res.status(404).json({ error: "lane_disabled" }));
+  app.use("/api/corp", (_req, res) => res.status(404).json({ error: "lane_disabled" }));
+  console.log("[lanes] EDU and Corporate API lanes are DISABLED");
+}
 
 // Billing routes
 app.use("/api/billing", billingRoutes);

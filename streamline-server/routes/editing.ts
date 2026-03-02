@@ -2,7 +2,7 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { Router, Request, Response } from "express";
 import { firestore as db } from "../firebaseAdmin";
 import multer from "multer";
-import { uploadVideo, getSignedDownloadUrl } from "../lib/storageClient";
+import { uploadVideo, getSignedDownloadUrl, deleteFile } from "../lib/storageClient";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { checkStorageLimit, updateStorageUsage } from "../usageHelper";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
@@ -102,6 +102,70 @@ function getAuthedUid(req: Request): string | null {
   const user = (req as any).user;
   const uid = typeof user?.uid === "string" ? user.uid : null;
   return uid;
+}
+
+type EditingPlanInfo = {
+  planId: string;
+  access: boolean;
+  maxProjects: number; // 0 => unlimited when access=true
+  maxStorageGB: number;
+  maxTracks?: number;
+  maxResolution?: string | null;
+};
+
+async function getEditingPlanInfo(uid: string): Promise<EditingPlanInfo> {
+  const userSnap = await db.collection("users").doc(uid).get();
+  const userData = userSnap.exists ? ((userSnap.data() as any) || {}) : {};
+  const planId = String(userData.planId || userData.plan || "free");
+
+  const planSnap = await db.collection("plans").doc(planId).get();
+  const planData = planSnap.exists ? ((planSnap.data() as any) || {}) : {};
+
+  const editing = (planData.editing || {}) as any;
+  const access = editing.access === true;
+  const maxProjects = Number(editing.maxProjects ?? 0);
+  const maxStorageGB = (() => {
+    const gb = editing.maxStorageGB;
+    const bytes = editing.maxStorageBytes;
+    if (gb !== undefined && gb !== null) {
+      const n = Number(gb);
+      return Number.isFinite(n) ? Math.max(0, n) : 0;
+    }
+    if (bytes !== undefined && bytes !== null) {
+      const n = Number(bytes);
+      return Number.isFinite(n) ? Math.max(0, Math.round(n / (1024 * 1024 * 1024))) : 0;
+    }
+    return 0;
+  })();
+
+  return {
+    planId,
+    access,
+    maxProjects: Number.isFinite(maxProjects) ? Math.max(0, Math.round(maxProjects)) : 0,
+    maxStorageGB,
+    maxTracks: typeof editing.maxTracks === "number" ? Math.max(0, Math.round(editing.maxTracks)) : undefined,
+    maxResolution: typeof editing.maxResolution === "string" ? editing.maxResolution : (editing.maxResolution ?? null),
+  };
+}
+
+async function assertEditingAccess(req: Request, res: Response): Promise<{ uid: string; plan: EditingPlanInfo } | null> {
+  const uid = getAuthedUid(req);
+  if (!uid) {
+    res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    return null;
+  }
+
+  const plan = await getEditingPlanInfo(uid);
+  if (!plan.access) {
+    res.status(403).json({
+      error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
+      reason: "Editing not available on your plan",
+      planId: plan.planId,
+    });
+    return null;
+  }
+
+  return { uid, plan };
 }
 
 // Configure multer for memory storage (files stored in RAM temporarily)
@@ -329,32 +393,55 @@ router.get("/assets/:id", async (req: Request, res: Response) => {
       return;
     }
 
+    // 1) Recordings-backed assets
     const recordingSnap = await db.collection("recordings").doc(id).get();
+    if (recordingSnap.exists) {
+      const data = recordingSnap.data();
 
-    if (!recordingSnap.exists) {
+      // Verify ownership
+      if (data?.userId !== userId) {
+        return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+      }
+
+      const asset = {
+        id: data?.id || recordingSnap.id,
+        name: data?.title || "Untitled",
+        duration: data?.duration || 0,
+        source: "stream" as const,
+        thumbnail: data?.thumbnailUrl || "",
+        thumbnailUrl: data?.thumbnailUrl || null,
+        videoUrl: data?.videoUrl || data?.publicExportUrl,
+        fileSize: data?.fileSize,
+        createdAt: data?.createdAt?.toDate?.()?.toISOString?.() || new Date().toISOString(),
+        userId: data?.userId,
+      };
+
+      return res.json(asset);
+    }
+
+    // 2) Uploaded assets
+    const uploadSnap = await db.collection("editing_assets").doc(id).get();
+    if (!uploadSnap.exists) {
       return res.status(404).json({ error: "Asset not found" });
     }
 
-    const data = recordingSnap.data();
-
-    // Verify ownership
+    const data = uploadSnap.data() as any;
     if (data?.userId !== userId) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    const asset = {
-      id: data?.id || recordingSnap.id,
-      name: data?.title || "Untitled",
+    return res.json({
+      id: uploadSnap.id,
+      name: data?.name || "Untitled",
       duration: data?.duration || 0,
-      source: "stream" as const,
+      source: data?.source || "upload",
       thumbnail: data?.thumbnailUrl || "",
-      videoUrl: data?.videoUrl || data?.publicExportUrl,
-      fileSize: data?.fileSize,
+      thumbnailUrl: data?.thumbnailUrl || null,
+      videoUrl: data?.videoUrl || "",
+      fileSize: data?.fileSize || 0,
       createdAt: data?.createdAt?.toDate?.()?.toISOString?.() || new Date().toISOString(),
       userId: data?.userId,
-    };
-
-    res.json(asset);
+    });
   } catch (err: any) {
     console.error("get asset error:", err);
     res.status(500).json({ error: err.message || "Internal server error" });
@@ -375,25 +462,48 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
       return;
     }
 
+    // 1) Try recordings-backed assets
     const recordingSnap = await db.collection("recordings").doc(id).get();
+    if (recordingSnap.exists) {
+      const data = recordingSnap.data();
 
-    if (!recordingSnap.exists) {
+      // Verify ownership
+      if (data?.userId !== userId) {
+        return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+      }
+
+      const storage = await deleteRecordingStorage(data);
+
+      // Delete from Firestore
+      await db.collection("recordings").doc(id).delete();
+
+      return res.json({ ok: true, message: "Asset deleted", storage });
+    }
+
+    // 2) Try uploaded editing_assets
+    const uploadSnap = await db.collection("editing_assets").doc(id).get();
+    if (!uploadSnap.exists) {
       return res.status(404).json({ error: "Asset not found" });
     }
 
-    const data = recordingSnap.data();
+    const uploadData = uploadSnap.data() as any;
 
     // Verify ownership
-    if (data?.userId !== userId) {
+    if (uploadData?.userId !== userId) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    const storage = await deleteRecordingStorage(data);
+    const storagePath = typeof uploadData?.storagePath === "string" ? uploadData.storagePath : null;
+    if (storagePath) {
+      try {
+        await deleteFile(storagePath);
+      } catch (e: any) {
+        console.warn("[editing] failed to delete asset storage", e?.message || e);
+      }
+    }
 
-    // Delete from Firestore
-    await db.collection("recordings").doc(id).delete();
-
-    res.json({ ok: true, message: "Asset deleted", storage });
+    await db.collection("editing_assets").doc(id).delete();
+    return res.json({ ok: true, message: "Asset deleted" });
   } catch (err: any) {
     console.error("delete asset error:", err);
     res.status(500).json({ error: err.message || "Internal server error" });
@@ -465,6 +575,10 @@ router.get("/projects", async (req: Request, res: Response) => {
     if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
       return;
     }
+
+    // Plan-based gating: projects are part of editing.
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
     
     const projectsSnap = await db
       .collection("editing_projects")
@@ -479,9 +593,14 @@ router.get("/projects", async (req: Request, res: Response) => {
         assetId: data.assetId,
         createdAt: data.createdAt?.toDate?.()?.toISOString(),
         updatedAt: data.updatedAt?.toDate?.()?.toISOString(),
+        lastModified:
+          data.updatedAt?.toDate?.()?.toISOString() ||
+          data.createdAt?.toDate?.()?.toISOString() ||
+          new Date().toISOString(),
         duration: data.duration || 0,
         status: data.status || 'draft',
-        userId: data.userId
+        userId: data.userId,
+        timeline: data.timeline || null,
       };
     });
 
@@ -510,15 +629,43 @@ router.post("/projects", async (req: Request, res: Response) => {
       return;
     }
 
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    // Enforce max projects (0 means unlimited when access=true)
+    if (access.plan.maxProjects > 0) {
+      const existingSnap = await db
+        .collection("editing_projects")
+        .where("userId", "==", userId)
+        .get();
+      if (existingSnap.size >= access.plan.maxProjects) {
+        return res.status(409).json({
+          error: LIMIT_ERRORS.LIMIT_EXCEEDED,
+          reason: "Max projects limit reached",
+          limit: access.plan.maxProjects,
+        });
+      }
+    }
+
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return res.status(400).json({ error: "name is required" });
+    }
+    if (!assetId || typeof assetId !== "string" || !assetId.trim()) {
+      return res.status(400).json({ error: "assetId is required" });
+    }
+
     const newProject = {
       userId,
-      name,
-      assetId,
+      name: String(name).trim(),
+      assetId: String(assetId).trim(),
       createdAt: new Date(),
       updatedAt: new Date(),
       duration: 0,
       status: 'draft',
-      timeline: []
+      timeline: {
+        clips: [],
+        tracks: 2,
+      }
     };
 
     const projectRef = await db.collection("editing_projects").add(newProject);
@@ -527,11 +674,335 @@ router.post("/projects", async (req: Request, res: Response) => {
       id: projectRef.id,
       ...newProject,
       createdAt: newProject.createdAt.toISOString(),
-      updatedAt: newProject.updatedAt.toISOString()
+      updatedAt: newProject.updatedAt.toISOString(),
+      lastModified: newProject.updatedAt.toISOString(),
     });
   } catch (err: any) {
     console.error("Create project error:", err);
     res.status(500).json({ error: "Failed to create project" });
+  }
+});
+
+// GET /api/editing/projects/:id - Get a single project
+router.get("/projects/:id", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    const { id } = req.params;
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
+      return;
+    }
+
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    const snap = await db.collection("editing_projects").doc(id).get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    const data = snap.data() as any;
+    if (data?.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    return res.json({
+      id: snap.id,
+      name: data?.name || "Untitled Project",
+      assetId: data?.assetId,
+      status: data?.status || "draft",
+      lastModified:
+        data?.updatedAt?.toDate?.()?.toISOString?.() ||
+        data?.createdAt?.toDate?.()?.toISOString?.() ||
+        new Date().toISOString(),
+      duration: data?.duration || 0,
+      thumbnail: data?.thumbnail || data?.thumbnailUrl || null,
+      userId: data?.userId,
+      timeline: data?.timeline || null,
+    });
+  } catch (err: any) {
+    console.error("Get project error:", err);
+    res.status(500).json({ error: "Failed to fetch project" });
+  }
+});
+
+// PATCH /api/editing/projects/:id - Update project metadata
+router.patch("/projects/:id", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    const { id } = req.params;
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
+      return;
+    }
+
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    const ref = db.collection("editing_projects").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    const existing = snap.data() as any;
+    if (existing?.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    const patch: any = { updatedAt: new Date() };
+    if (typeof req.body?.name === "string" && req.body.name.trim()) {
+      patch.name = req.body.name.trim();
+    }
+    if (typeof req.body?.status === "string") {
+      patch.status = req.body.status;
+    }
+
+    await ref.set(patch, { merge: true });
+    const merged = { ...(existing || {}), ...patch };
+
+    return res.json({
+      id,
+      name: merged.name,
+      assetId: merged.assetId,
+      status: merged.status || "draft",
+      lastModified: patch.updatedAt.toISOString(),
+      duration: merged.duration || 0,
+      thumbnail: merged.thumbnail || merged.thumbnailUrl || null,
+      userId: merged.userId,
+      timeline: merged.timeline || null,
+    });
+  } catch (err: any) {
+    console.error("Update project error:", err);
+    res.status(500).json({ error: "Failed to update project" });
+  }
+});
+
+// DELETE /api/editing/projects/:id - Delete a project
+router.delete("/projects/:id", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    const { id } = req.params;
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
+      return;
+    }
+
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    const ref = db.collection("editing_projects").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    const data = snap.data() as any;
+    if (data?.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    await ref.delete();
+    return res.json({ ok: true });
+  } catch (err: any) {
+    console.error("Delete project error:", err);
+    res.status(500).json({ error: "Failed to delete project" });
+  }
+});
+
+// PUT /api/editing/projects/:id/timeline - Persist timeline clips
+router.put("/projects/:id/timeline", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    const { id } = req.params;
+    const { clips } = req.body as any;
+
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+    if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
+      return;
+    }
+
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    const ref = db.collection("editing_projects").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    const data = snap.data() as any;
+    if (data?.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    if (!Array.isArray(clips)) {
+      return res.status(400).json({ error: "clips must be an array" });
+    }
+
+    const sanitized = clips
+      .map((c: any) => ({
+        id: String(c?.id || ""),
+        assetId: String(c?.assetId || ""),
+        trackId: typeof c?.trackId === "string" ? c.trackId : "video_1",
+        startTime: Math.max(0, Number(c?.startTime || 0)),
+        duration: Math.max(0, Number(c?.duration || 0)),
+        inPoint: Math.max(0, Number(c?.inPoint || 0)),
+        outPoint: Math.max(0, Number(c?.outPoint || 0)),
+        name: typeof c?.name === "string" ? c.name : "Clip",
+        videoUrl: typeof c?.videoUrl === "string" ? c.videoUrl : "",
+      }))
+      .filter((c: any) => c.id && c.assetId);
+
+    const timeline = {
+      clips: sanitized,
+      tracks: 2,
+    };
+
+    await ref.set(
+      {
+        timeline,
+        updatedAt: new Date(),
+      },
+      { merge: true }
+    );
+
+    return res.json({ saved: true });
+  } catch (err: any) {
+    console.error("Save timeline error:", err);
+    res.status(500).json({ error: "Failed to save timeline" });
+  }
+});
+
+// POST /api/editing/export - Create an export job for a project
+router.post("/export", async (req: Request, res: Response) => {
+  try {
+    if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
+      return;
+    }
+    if (!assertPlatformTranscodeEnabled(res)) {
+      return;
+    }
+
+    const userId = getAuthedUid(req);
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    const { projectId, settings } = (req.body || {}) as any;
+    if (!projectId || typeof projectId !== "string") {
+      return res.status(400).json({ error: "projectId is required" });
+    }
+
+    const projectSnap = await db.collection("editing_projects").doc(projectId).get();
+    if (!projectSnap.exists) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    const project = projectSnap.data() as any;
+    if (project?.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    const jobRef = db.collection("editing_exports").doc();
+    const createdAt = new Date();
+
+    // MVP: return the source asset's videoUrl as the downloadable output.
+    let downloadUrl: string | undefined;
+    try {
+      const assetId = String(project.assetId || "");
+      if (assetId) {
+        const recordingSnap = await db.collection("recordings").doc(assetId).get();
+        if (recordingSnap.exists) {
+          const d = recordingSnap.data() as any;
+          if (d?.userId === userId) downloadUrl = d?.videoUrl || d?.publicExportUrl;
+        } else {
+          const uploadSnap = await db.collection("editing_assets").doc(assetId).get();
+          if (uploadSnap.exists) {
+            const d = uploadSnap.data() as any;
+            if (d?.userId === userId) downloadUrl = d?.videoUrl;
+          }
+        }
+      }
+    } catch {}
+
+    const jobDoc: any = {
+      id: jobRef.id,
+      userId,
+      projectId,
+      settings: settings || null,
+      status: downloadUrl ? "complete" : "failed",
+      progress: downloadUrl ? 100 : 0,
+      downloadUrl: downloadUrl || null,
+      error: downloadUrl ? null : "No source video URL available",
+      createdAt,
+      completedAt: downloadUrl ? new Date() : null,
+    };
+
+    await jobRef.set(jobDoc);
+
+    return res.json({
+      id: jobDoc.id,
+      projectId: jobDoc.projectId,
+      status: jobDoc.status,
+      progress: jobDoc.progress,
+      downloadUrl: jobDoc.downloadUrl || undefined,
+      error: jobDoc.error || undefined,
+      createdAt: createdAt.toISOString(),
+      completedAt: jobDoc.completedAt ? jobDoc.completedAt.toISOString() : undefined,
+    });
+  } catch (err: any) {
+    console.error("Export error:", err);
+    res.status(500).json({ error: err.message || "Failed to start export" });
+  }
+});
+
+// GET /api/editing/exports/:exportId - Get export job status
+router.get("/exports/:exportId", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    const { exportId } = req.params;
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    const snap = await db.collection("editing_exports").doc(exportId).get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Export job not found" });
+    }
+
+    const data = snap.data() as any;
+    if (data?.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    return res.json({
+      id: snap.id,
+      projectId: data?.projectId,
+      status: data?.status,
+      progress: Number(data?.progress || 0),
+      downloadUrl: data?.downloadUrl || undefined,
+      error: data?.error || undefined,
+      createdAt: data?.createdAt?.toDate?.()?.toISOString?.() || new Date().toISOString(),
+      completedAt: data?.completedAt?.toDate?.()?.toISOString?.() || undefined,
+    });
+  } catch (err: any) {
+    console.error("Get export status error:", err);
+    res.status(500).json({ error: "Failed to fetch export status" });
   }
 });
 

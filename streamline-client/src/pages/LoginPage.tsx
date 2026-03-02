@@ -1,6 +1,9 @@
 import React, { FormEvent, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { apiFetchAuth, clearAuthStorage } from "../lib/api";
+import { apiFetch, apiFetchAuth, clearAuthStorage } from "../lib/api";
+import { isEduBypassEnabled } from "../edu/state/eduMode";
+import { LANES_ENABLED } from "../config/lanes";
+import { firebaseSendPasswordReset, firebaseSignInWithCustomToken, isFirebaseWebConfigured } from "../lib/firebaseClient";
 
 // Email validation function
 function validateEmail(email: string): boolean {
@@ -25,7 +28,6 @@ export const LoginPage: React.FC = () => {
   const [password, setPassword] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
-  const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 
   const accountDeleted = useMemo(() => {
     try {
@@ -71,56 +73,106 @@ export const LoginPage: React.FC = () => {
     }
 
     try {
-      const res = await fetch(`${API_BASE}/api/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ email, password }),
-      });
+      // Prefer Firebase lazy-migration login when Firebase is configured.
+      // Keep legacy /api/auth/login as fallback so dev envs without Firebase config don't brick.
+      if (!isFirebaseWebConfigured()) {
+        const res = await apiFetch(
+          "/api/auth/login",
+          {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+          },
+          { allowNonOk: true }
+        );
 
-      if (!res.ok) {
-        if (res.status === 401 || res.status === 403) {
-          clearAuthStorage();
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403) {
+            clearAuthStorage();
+          }
+          const ct = res.headers.get("content-type") || "";
+          const err = ct.includes("application/json")
+            ? await res.json().catch(() => ({}))
+            : { error: "Login failed: backend returned non-JSON (check API base / server)" };
+          setError((err as any)?.error || "Invalid credentials");
+          setLoading(false);
+          return;
         }
-        const ct = res.headers.get("content-type") || "";
-        const err = ct.includes("application/json")
-          ? await res.json().catch(() => ({}))
-          : { error: "Login failed: backend returned non-JSON (check API base / server)" };
-        setError((err as any)?.error || "Invalid credentials");
-        setLoading(false);
-        return;
-      }
 
-      // LOGIN SUCCEEDED — capture JWT from the response body so we
-      // can fall back to header-based auth when cookies are blocked.
-      let loginBody: any = null;
-      try {
-        const ctLogin = res.headers.get("content-type") || "";
-        loginBody = ctLogin.includes("application/json") ? await res.json() : null;
-      } catch {
-        loginBody = null;
-      }
+        let loginBody: any = null;
+        try {
+          const ctLogin = res.headers.get("content-type") || "";
+          loginBody = ctLogin.includes("application/json") ? await res.json() : null;
+        } catch {
+          loginBody = null;
+        }
 
-      const token = (loginBody as any)?.token as string | undefined;
-      if (!token) {
-        clearAuthStorage();
-        setError("Login failed: missing token from server");
-        setLoading(false);
-        return;
-      }
+        const token = (loginBody as any)?.token as string | undefined;
+        if (!token) {
+          clearAuthStorage();
+          setError("Login failed: missing token from server");
+          setLoading(false);
+          return;
+        }
 
-      try {
-        localStorage.setItem("authToken", token);
-      } catch {}
+        try {
+          localStorage.setItem("authToken", token);
+        } catch {}
+
+      } else {
+        const res = await apiFetch(
+          "/api/auth/legacy-login",
+          {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email, password }),
+          },
+          { allowNonOk: true }
+        );
+
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403) {
+            clearAuthStorage();
+          }
+          const ct = res.headers.get("content-type") || "";
+          const errBody = ct.includes("application/json") ? await res.json().catch(() => ({})) : {};
+          const msg = (errBody as any)?.error || (res.status === 409 ? "Email conflict. Contact support." : "Invalid credentials");
+          setError(msg);
+          setLoading(false);
+          return;
+        }
+
+        const payload = await res.json().catch(() => null as any);
+        const customToken = String(payload?.customToken || "").trim();
+        if (!customToken) {
+          setError("Login failed: missing customToken");
+          setLoading(false);
+          return;
+        }
+
+        // Clear legacy header token so we don't send stale Authorization values.
+        try {
+          localStorage.removeItem("authToken");
+        } catch {}
+
+        await firebaseSignInWithCustomToken(customToken);
+      }
 
       // Hydrate user from canonical /api/account/me. If this fails,
       // treat it as a hard error instead of redirecting into a
       // half-authed state that causes room join "blink".
+      let me: any = null;
       try {
         const meRes = await apiFetchAuth("/api/account/me");
-        const me = await meRes.json();
+        me = await meRes.json();
         try {
           localStorage.setItem("sl_user", JSON.stringify(me));
+        } catch {}
+
+        // Notify hooks (useEffectiveEntitlements) that auth state changed
+        // so they re-fetch entitlements with the new token.
+        try {
+          window.dispatchEvent(new CustomEvent("sl:auth-changed"));
         } catch {}
       } catch (err) {
         console.warn("[Login] /account/me after login failed", err);
@@ -131,11 +183,46 @@ export const LoginPage: React.FC = () => {
       }
 
       setLoading(false);
+
+      // EDU router: if the user belongs to an EDU org (or came through the EDU lane),
+      // always send them to the EDU dashboard.
+      if (LANES_ENABLED) {
+        try {
+          const lane = localStorage.getItem("sl_entry_lane");
+          if (me?.orgType === "edu" || (lane === "edu" && isEduBypassEnabled())) {
+            nav("/streamline/edu/dashboard", { replace: true });
+            return;
+          }
+        } catch {}
+      }
+
       nav(nextUrl || "/join");
+      return;
     } catch (err) {
       console.error(err);
       setError("Something went wrong. Try again.");
       setLoading(false);
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    setError("");
+    const emailNorm = String(email || "").trim().toLowerCase();
+    if (!validateEmail(emailNorm)) {
+      setError("Enter your email above, then click Forgot password.");
+      return;
+    }
+
+    try {
+      const continueUrl = String(import.meta.env.VITE_FIREBASE_CONTINUE_URL || "").trim();
+      const actionCodeSettings = continueUrl
+        ? { url: continueUrl, handleCodeInApp: false }
+        : { url: window.location.origin + "/login", handleCodeInApp: false };
+      await firebaseSendPasswordReset(emailNorm, actionCodeSettings as any);
+      setError("Password reset email sent (check your inbox).");
+    } catch (err: any) {
+      const msg = String(err?.code || err?.message || "reset_failed");
+      setError(msg);
     }
   };
 
@@ -423,6 +510,10 @@ export const LoginPage: React.FC = () => {
                 color: "#9ca3af",
                 textDecoration: "none",
                 transition: "color 0.3s ease",
+              }}
+              onClick={(e) => {
+                e.preventDefault();
+                void handleForgotPassword();
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.color = "#ef4444";

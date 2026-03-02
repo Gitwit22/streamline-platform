@@ -70,10 +70,12 @@ export async function startHlsEgress(params: {
     });
   }
 
+  const layoutWithNames = `${params.layout}-dark`;
+
   const info = await client.startRoomCompositeEgress(
     params.roomName,
     { segments: output },
-    { layout: params.layout }
+    { layout: layoutWithNames }
   );
 
   // mapPreset(params.presetId) reserved for future encoding options usage

@@ -13,7 +13,9 @@
     "start": "node dist/index.js",
     "security:probes": "tsx scripts/security-probes.ts",
     "smoke:deploy": "tsx scripts/deploy-smoke.ts",
-    "cron:expire-emergency": "node dist/scripts/expireEmergencyCron.js"
+    "cron:expire-emergency": "node dist/scripts/expireEmergencyCron.js",
+    "auth:audit-duplicate-emails": "tsx scripts/auditDuplicateEmails.ts",
+    "auth:backfill-firebase-users": "tsx scripts/backfillFirebaseAuthUsers.ts"
   },
   "keywords": [],
   "author": "",

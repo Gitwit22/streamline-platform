@@ -43,12 +43,10 @@ function resolveEntitlementBoolean(features: Record<string, unknown> | null | un
 
 function resolveEditingAccess(features: Record<string, unknown> | null | undefined): boolean {
   const f: any = features || {};
-  // Default: enabled unless explicitly disabled by plan.
-  // (Server does not currently send a dedicated editing entitlement, but this
-  // keeps the door open for future plan-based gating.)
+  // Safety-first: editing must be explicitly enabled by plan.
   const explicit = f.editing ?? f.editingEnabled ?? f.postProduction;
   if (typeof explicit === "boolean") return explicit;
-  return true;
+  return false;
 }
 
 function resolveLegacyEditingPlatformEnabled(platformFlags: Record<string, unknown> | null | undefined): boolean {

@@ -1,5 +1,7 @@
 
 import { API_BASE } from "./apiBase";
+import { getFirebaseIdToken } from "./firebaseClient";
+import { LANES_ENABLED } from "../config/lanes";
 
 /**
  * Read the auth token from localStorage for header-based auth fallback.
@@ -46,6 +48,20 @@ export class ApiUnauthorizedError extends Error {
   constructor() {
     super("unauthorized");
   }
+}
+
+/**
+ * Returns "edu" | "corporate" when the current session is a demo / bypass
+ * session (set via localStorage flags on the EDU or Corporate login pages).
+ * Returns null when the user is in a normal authenticated session.
+ */
+export function getDemoBypassLane(): "edu" | "corporate" | null {
+  try {
+    if (typeof window === "undefined") return null;
+    if (window.localStorage.getItem("sl_edu_bypass") === "true") return "edu";
+    if (window.localStorage.getItem("sl_corporate_bypass") === "true") return "corporate";
+  } catch { /* private browsing */ }
+  return null;
 }
 
 function emitUnauthorizedEventOnce(detail?: string) {
@@ -117,26 +133,59 @@ export async function apiFetch(path: string, init: RequestInit = {}, options?: {
 export async function apiFetchAuth(
   path: string,
   init: RequestInit = {},
-  options?: { allowNonOk?: boolean }
+  options?: { allowNonOk?: boolean; suppressAuthSideEffects?: boolean }
 ) {
   if (typeof window === "undefined") {
     throw new ApiUnauthorizedError();
   }
 
-  let token: string | null = null;
-  try {
-    token = window.localStorage.getItem("authToken");
-  } catch {}
-
-  if (!token || !looksLikeJwt(token)) {
-    clearAuthToken();
-    emitUnauthorizedEventOnce("missing_or_invalid_token");
-    throw new ApiUnauthorizedError();
-  }
+  const suppressAuthSideEffects = !!options?.suppressAuthSideEffects;
 
   const headers = new Headers(init.headers || {});
   const hadExplicitAuthHeader = headers.has("Authorization");
-  if (!hadExplicitAuthHeader) {
+
+  /* ── Demo / bypass mode (only when lanes are active) ─────────────────── */
+  if (LANES_ENABLED) {
+    const demoLane = getDemoBypassLane();
+    if (demoLane) {
+      headers.set("x-sl-demo", demoLane);
+      return apiFetch(path, { ...init, headers }, { allowNonOk: options?.allowNonOk });
+    }
+  }
+
+  let token: string | null = null;
+  let tokenSource: "firebase" | "legacy" | "explicit" | null = null;
+
+  if (hadExplicitAuthHeader) {
+    tokenSource = "explicit";
+  } else {
+    // 1) Firebase ID token (preferred)
+    token = await getFirebaseIdToken();
+    if (token && looksLikeJwt(token)) {
+      tokenSource = "firebase";
+    } else {
+      token = null;
+    }
+
+    // 2) Legacy header JWT fallback (localStorage)
+    if (!token) {
+      try {
+        const legacy = window.localStorage.getItem("authToken");
+        if (legacy && looksLikeJwt(legacy)) {
+          token = legacy;
+          tokenSource = "legacy";
+        }
+      } catch {}
+    }
+
+    if (!token) {
+      if (!suppressAuthSideEffects) {
+        clearAuthToken();
+        emitUnauthorizedEventOnce("missing_token");
+      }
+      throw new ApiUnauthorizedError();
+    }
+
     headers.set("Authorization", `Bearer ${token}`);
   }
 
@@ -144,7 +193,46 @@ export async function apiFetchAuth(
   // the same thrown error shape as apiFetch for other non-ok responses.
   const res = await apiFetch(path, { ...init, headers }, { allowNonOk: true });
 
+  // If the server indicates our legacy header token was stale and it used a cookie
+  // session instead, clear the cached legacy token so we don't keep sending it.
+  try {
+    const headerInvalid = String(res.headers.get("x-sl-auth-header-invalid") || "").trim();
+    if (headerInvalid === "1" || headerInvalid.toLowerCase() === "true") {
+      clearAuthToken();
+      logClearedStaleHeaderTokenOnce();
+    }
+  } catch {
+    // ignore
+  }
+
   if (res.status === 401) {
+    // Firebase tokens can expire; attempt a single force-refresh retry.
+    if (!hadExplicitAuthHeader && tokenSource === "firebase") {
+      try {
+        const refreshed = await getFirebaseIdToken({ forceRefresh: true });
+        if (refreshed && looksLikeJwt(refreshed)) {
+          const retryHeaders = new Headers(init.headers || {});
+          retryHeaders.set("Authorization", `Bearer ${refreshed}`);
+          const retryRes = await apiFetch(path, { ...init, headers: retryHeaders }, { allowNonOk: true });
+          if (retryRes.status !== 401) {
+            if (!options?.allowNonOk && !retryRes.ok) {
+              let errBody: any = null;
+              try {
+                errBody = await retryRes.json();
+              } catch {}
+              throw Object.assign(new Error(`HTTP ${retryRes.status}`), {
+                status: retryRes.status,
+                body: errBody,
+              });
+            }
+            return retryRes;
+          }
+        }
+      } catch {
+        // ignore refresh failures; fall through to unauthorized handling
+      }
+    }
+
     // Tiny but high ROI: a single retry can recover from multi-tab token updates
     // or very small races where authToken was updated after this request began.
     if (!hadExplicitAuthHeader) {
@@ -173,8 +261,10 @@ export async function apiFetchAuth(
       }
     }
 
-    clearAuthToken();
-    emitUnauthorizedEventOnce("401");
+    if (!suppressAuthSideEffects) {
+      clearAuthToken();
+      emitUnauthorizedEventOnce("401");
+    }
     throw new ApiUnauthorizedError();
   }
 

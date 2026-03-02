@@ -3,7 +3,7 @@ import admin from "firebase-admin";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { firestore } from "../firebaseAdmin";
-import { requireAuth, tryGetAuthUser, verifyInviteToken } from "../middleware/requireAuth";
+import { requireAuth, tryGetAuthUserAny, verifyInviteToken } from "../middleware/requireAuth";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
@@ -343,7 +343,7 @@ router.post("/accept", async (req, res) => {
     const resolved = await resolveRoomIdentity({ roomId, roomName });
     if (!resolved) return res.status(400).json({ error: "invite_room_missing" });
 
-    const user = tryGetAuthUser(req);
+    const user = await tryGetAuthUserAny(req);
 
     if (user) {
       const docId = `${user.uid}_${Buffer.from(inviteToken).toString("base64url").slice(0, 40)}`;

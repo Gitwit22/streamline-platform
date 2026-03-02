@@ -61,6 +61,15 @@ export async function isAdmin(uid: string): Promise<boolean> {
  */
 import jwt from "jsonwebtoken";
 
+function getJwtSecret(): string {
+  const raw = String(process.env.JWT_SECRET || "").trim();
+  const env = String(process.env.NODE_ENV || "development").toLowerCase();
+  if ((env === "production" || env === "staging") && (!raw || raw === "dev-secret")) {
+    throw new Error("Missing JWT_SECRET (no dev-secret in production)");
+  }
+  return raw || "dev-secret";
+}
+
 export async function requireAdmin(
   req: Request,
   res: Response,
@@ -73,7 +82,7 @@ export async function requireAdmin(
     // 1. Try JWT in httpOnly cookie ('token')
     if (req.cookies && req.cookies.token) {
       try {
-        const user = jwt.verify(req.cookies.token, process.env.JWT_SECRET || "dev-secret") as any;
+        const user = jwt.verify(req.cookies.token, getJwtSecret()) as any;
         userId = user.uid || user.id || null;
         jwtSource = 'cookie';
       } catch (err) {
@@ -87,7 +96,7 @@ export async function requireAdmin(
       if (authHeader && typeof authHeader === "string" && authHeader.startsWith("Bearer ")) {
         const token = authHeader.substring(7);
         try {
-          const user = jwt.verify(token, process.env.JWT_SECRET || "dev-secret") as any;
+          const user = jwt.verify(token, getJwtSecret()) as any;
           userId = user.uid || user.id || null;
           jwtSource = 'header';
         } catch (err) {

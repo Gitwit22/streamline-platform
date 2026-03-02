@@ -176,7 +176,31 @@ export async function checkStorageLimit(userId: string, fileSizeBytes: number): 
     // Get plan limits
     const planSnap = await firestore.collection("plans").doc(planId).get();
     const planData = planSnap.data() || {};
-    const maxStorageGB = planData.maxStorageGB || 0;
+    const maxStorageGB = (() => {
+      const editing = (planData as any).editing || {};
+      const fromEditingGb = editing.maxStorageGB;
+      const fromEditingBytes = editing.maxStorageBytes;
+      const fromTopGb = (planData as any).maxStorageGB;
+      const fromTopBytes = (planData as any).maxStorageBytes;
+
+      if (fromEditingGb !== undefined && fromEditingGb !== null) {
+        const n = Number(fromEditingGb);
+        return Number.isFinite(n) ? Math.max(0, n) : 0;
+      }
+      if (fromEditingBytes !== undefined && fromEditingBytes !== null) {
+        const n = Number(fromEditingBytes);
+        return Number.isFinite(n) ? Math.max(0, Math.round(n / (1024 * 1024 * 1024))) : 0;
+      }
+      if (fromTopGb !== undefined && fromTopGb !== null) {
+        const n = Number(fromTopGb);
+        return Number.isFinite(n) ? Math.max(0, n) : 0;
+      }
+      if (fromTopBytes !== undefined && fromTopBytes !== null) {
+        const n = Number(fromTopBytes);
+        return Number.isFinite(n) ? Math.max(0, Math.round(n / (1024 * 1024 * 1024))) : 0;
+      }
+      return 0;
+    })();
 
     // Get current usage
     const usage = (userData.usage || {}) as any;
