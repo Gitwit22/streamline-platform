@@ -10,7 +10,6 @@ import BillingSuccess from "./pages/BillingSuccess";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import LaneEnforcer from "./components/LaneEnforcer";
 import Demo from "./pages/Demo";
-import { DEMO_LANDING_ENABLED } from "./config/demoLanding";
 
 import { creatorRoutes } from "./creator/routes";
 
@@ -84,11 +83,9 @@ function App() {
         path.startsWith("/privacy") || path.startsWith("/terms") ||
         path.startsWith("/support") || path.startsWith("/learnmore") ||
         path.startsWith("/i/") || path.startsWith("/invite/") ||
-        path.startsWith("/billing/")
+        path.startsWith("/billing/") ||
+        path === "/"
       ) {
-        return;
-      }
-      if (DEMO_LANDING_ENABLED && path === "/") {
         return;
       }
 
@@ -279,7 +276,7 @@ function App() {
       </Route>
 
       {/* Public / auth flow */}
-      <Route path="/" element={DEMO_LANDING_ENABLED ? <Demo /> : <Navigate to="/welcome" replace />} />
+      <Route path="/" element={<Demo />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/signup" element={<SignupPage />} />
       <Route path="/privacy" element={<Privacy />} />
