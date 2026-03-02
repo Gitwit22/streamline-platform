@@ -39,6 +39,7 @@ import eduSettingsRoutes from "./routes/eduSettings";
 import eduEmbedsRoutes from "./routes/eduEmbeds";
 import eduPublicRoutes from "./routes/eduPublic";
 import eduBootstrapRoutes from "./routes/eduBootstrap";
+import eduBroadcastsRoutes from "./routes/eduBroadcasts";
 import corpMeRoutes from "./routes/corpMe";
 import corpBroadcastsRoutes from "./routes/corpBroadcasts";
 import corpCallsRoutes from "./routes/corpCalls";
@@ -268,6 +269,8 @@ app.use("/api/edu", eduPeopleRoutes);
 app.use("/api/edu", eduSettingsRoutes);
 // EDU embed docs (authenticated admin UI)
 app.use("/api/edu", eduEmbedsRoutes);
+// EDU broadcasts (go-live, stop, watch)
+app.use("/api/edu", eduBroadcastsRoutes);
 
 // Corporate lane routes
 app.use("/api/corp", corpMeRoutes);

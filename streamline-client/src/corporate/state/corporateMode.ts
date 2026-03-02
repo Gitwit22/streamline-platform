@@ -39,16 +39,6 @@ export const clearCorporateLane = () => {
 };
 
 export const isCorporateBypassEnabled = () => {
-  const isLocalHost = (() => {
-    try {
-      const host = String(window.location.hostname || "").toLowerCase();
-      return host === "localhost" || host === "127.0.0.1";
-    } catch {
-      return false;
-    }
-  })();
-
-  if (!import.meta.env.DEV && !isLocalHost) return false;
   try {
     return localStorage.getItem("sl_corporate_bypass") === "1";
   } catch {
@@ -57,15 +47,6 @@ export const isCorporateBypassEnabled = () => {
 };
 
 export const setCorporateBypassEnabled = () => {
-  const isLocalHost = (() => {
-    try {
-      const host = String(window.location.hostname || "").toLowerCase();
-      return host === "localhost" || host === "127.0.0.1";
-    } catch {
-      return false;
-    }
-  })();
-  if (!import.meta.env.DEV && !isLocalHost) return;
   try {
     localStorage.setItem("sl_corporate_bypass", "1");
   } catch {}

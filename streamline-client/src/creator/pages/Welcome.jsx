@@ -324,37 +324,6 @@ const Welcome = () => {
           </button>
 
           <button
-            onClick={() => {
-              window.location.href = "mailto:nxtlvl@gmail.com?subject=StreamLine%20Demo%20Request&body=Hi%20StreamLine%20team%2C%0A%0AI'd%20like%20to%20request%20a%20demo.%0A%0AName%3A%0AUse%20case%3A%0A";
-            }}
-            style={{
-              width: window.innerWidth < 640 ? '100%' : 'auto',
-              background: 'rgba(255, 255, 255, 0.05)',
-              backdropFilter: 'blur(15px)',
-              border: '1px solid rgba(220, 38, 38, 0.4)',
-              color: '#ffffff',
-              padding: '16px 40px',
-              borderRadius: '16px',
-              fontWeight: 600,
-              fontSize: '18px',
-              cursor: 'pointer',
-              transition: 'all 0.3s ease'
-            }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.background = 'rgba(220, 38, 38, 0.15)';
-              e.currentTarget.style.borderColor = 'rgba(220, 38, 38, 0.6)';
-              e.currentTarget.style.transform = 'translateY(-2px)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.background = 'rgba(255, 255, 255, 0.05)';
-              e.currentTarget.style.borderColor = 'rgba(220, 38, 38, 0.4)';
-              e.currentTarget.style.transform = 'translateY(0)';
-            }}
-          >
-            Request a Demo
-          </button>
-          
-          <button
             onClick={() => nav("/learnmore")}
             style={{
               width: window.innerWidth < 640 ? '100%' : 'auto',

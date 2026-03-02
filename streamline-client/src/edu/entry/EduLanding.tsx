@@ -181,16 +181,7 @@ export default function EduLanding() {
               </svg>
             </Link>
 
-            <a
-              href="#features"
-              className="inline-flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-800 px-8 py-4 text-base font-semibold text-white hover:bg-slate-700"
-            >
-              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="12" cy="12" r="10" />
-                <polygon points="10 8 16 12 10 16 10 8" fill="currentColor" />
-              </svg>
-              <span>Watch Demo</span>
-            </a>
+
           </div>
         </section>
 
@@ -248,6 +239,162 @@ export default function EduLanding() {
                 Archive broadcasts and share with your community. Build a library of school memories.
               </p>
             </div>
+          </div>
+        </section>
+
+        {/* How It Works */}
+        <section className="py-16">
+          <div className="mb-12 text-center">
+            <div className="mx-auto inline-flex items-center gap-2 rounded-full border border-orange-500/20 bg-orange-500/5 px-4 py-2 font-mono text-xs text-orange-300">
+              HOW IT WORKS
+            </div>
+            <h2 className="mt-6 text-3xl font-extrabold md:text-4xl">
+              From set-up to <span className="bg-gradient-to-r from-orange-500 to-red-600 bg-clip-text text-transparent">go-live</span> in minutes.
+            </h2>
+            <p className="mx-auto mt-4 max-w-2xl text-slate-400">
+              StreamLine EDU is designed so any staff member can start a broadcast—no AV background required.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 gap-8 md:grid-cols-3">
+            {[
+              { step: "01", title: "Create a Room", desc: "A faculty admin opens a new room, sets a title, and chooses who can produce (teachers, staff, student AV club)." },
+              { step: "02", title: "Go Live", desc: "Producers join from any browser—no app install. Add cameras, screen-shares, or overlays with one click." },
+              { step: "03", title: "Watch Anywhere", desc: "Viewers tune in via an embed on your school site or a direct link. HLS streaming means it works on every device." },
+            ].map((item) => (
+              <div key={item.step} className="relative rounded-2xl border border-slate-700 bg-slate-800/60 p-8">
+                <span className="absolute -top-4 left-6 rounded-full bg-gradient-to-r from-orange-500 to-red-600 px-3 py-1 text-xs font-bold">{item.step}</span>
+                <h3 className="mt-2 text-lg font-bold">{item.title}</h3>
+                <p className="mt-3 text-sm leading-relaxed text-slate-400">{item.desc}</p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Role-Based Access */}
+        <section className="py-16">
+          <div className="grid items-center gap-12 md:grid-cols-2">
+            <div>
+              <div className="inline-flex items-center gap-2 rounded-full border border-orange-500/20 bg-orange-500/5 px-4 py-2 font-mono text-xs text-orange-300">
+                PERMISSIONS
+              </div>
+              <h2 className="mt-6 text-3xl font-extrabold md:text-4xl">
+                Role-based access built for schools.
+              </h2>
+              <p className="mt-4 text-slate-400 leading-relaxed">
+                Assign roles that mirror your school structure. Hosts control the broadcast, producers manage cameras and overlays, and viewers watch the stream—each with exactly the permissions they need.
+              </p>
+              <ul className="mt-6 space-y-3 text-sm text-slate-300">
+                <li className="flex items-start gap-3">
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-orange-500/20 text-orange-300 text-xs">✓</span>
+                  <span><strong className="text-white">Faculty Admin</strong> — create rooms, invite staff, manage recordings</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-orange-500/20 text-orange-300 text-xs">✓</span>
+                  <span><strong className="text-white">Student Producer</strong> — join the greenroom, control camera &amp; mic, switch scenes</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-orange-500/20 text-orange-300 text-xs">✓</span>
+                  <span><strong className="text-white">Viewer</strong> — watch the live HLS stream, no login required</span>
+                </li>
+              </ul>
+            </div>
+            <div className="rounded-2xl border border-slate-700 bg-slate-800/40 p-8">
+              <div className="space-y-4">
+                {[
+                  { role: "Faculty Admin", color: "bg-violet-500", perms: "Full control · Create rooms · Manage users" },
+                  { role: "Student Producer", color: "bg-orange-500", perms: "Go live · Share screen · Manage overlays" },
+                  { role: "Viewer", color: "bg-slate-500", perms: "Watch stream · No sign-in needed" },
+                ].map((r) => (
+                  <div key={r.role} className="flex items-center gap-4 rounded-xl border border-slate-700 bg-slate-800 p-4">
+                    <div className={`h-3 w-3 rounded-full ${r.color}`} />
+                    <div>
+                      <div className="text-sm font-semibold">{r.role}</div>
+                      <div className="text-xs text-slate-400">{r.perms}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Embed & Archive */}
+        <section className="py-16">
+          <div className="grid items-center gap-12 md:grid-cols-2">
+            <div className="order-2 md:order-1 rounded-2xl border border-slate-700 bg-slate-800/40 p-8">
+              <div className="rounded-lg border border-slate-600 bg-slate-900 p-4 font-mono text-xs text-slate-400">
+                <span className="text-slate-500">{'<!-- Embed on your school website -->'}</span>
+                <br />
+                <span className="text-orange-300">{'<iframe'}</span>
+                <br />
+                <span className="pl-4 text-slate-300">{'src="https://streamline.app/live/abc123"'}</span>
+                <br />
+                <span className="pl-4 text-slate-300">{'width="100%" height="480"'}</span>
+                <br />
+                <span className="pl-4 text-slate-300">{'allow="autoplay; fullscreen"'}</span>
+                <br />
+                <span className="text-orange-300">{'></iframe>'}</span>
+              </div>
+              <p className="mt-4 text-center text-xs text-slate-500">Copy &amp; paste — one line to embed on any page.</p>
+            </div>
+            <div className="order-1 md:order-2">
+              <div className="inline-flex items-center gap-2 rounded-full border border-orange-500/20 bg-orange-500/5 px-4 py-2 font-mono text-xs text-orange-300">
+                EMBED &amp; ARCHIVE
+              </div>
+              <h2 className="mt-6 text-3xl font-extrabold md:text-4xl">
+                Stream on your site. <span className="bg-gradient-to-r from-orange-500 to-red-600 bg-clip-text text-transparent">Archive everything.</span>
+              </h2>
+              <p className="mt-4 leading-relaxed text-slate-400">
+                Drop a one-line embed on your school website so parents and community members can watch live. Every broadcast is automatically recorded and saved to your media library for on-demand playback.
+              </p>
+              <ul className="mt-6 space-y-3 text-sm text-slate-300">
+                <li className="flex items-start gap-3">
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-orange-500/20 text-orange-300 text-xs">✓</span>
+                  <span>HLS adaptive bitrate — works on phones, tablets, and desktops</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-orange-500/20 text-orange-300 text-xs">✓</span>
+                  <span>Recordings auto-saved to cloud storage</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-orange-500/20 text-orange-300 text-xs">✓</span>
+                  <span>Searchable archive of every past broadcast</span>
+                </li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        {/* Security */}
+        <section className="py-16">
+          <div className="mb-12 text-center">
+            <div className="mx-auto inline-flex items-center gap-2 rounded-full border border-orange-500/20 bg-orange-500/5 px-4 py-2 font-mono text-xs text-orange-300">
+              SECURITY
+            </div>
+            <h2 className="mt-6 text-3xl font-extrabold md:text-4xl">
+              Safe by default.
+            </h2>
+            <p className="mx-auto mt-4 max-w-2xl text-slate-400">
+              Every layer of StreamLine EDU is built with student safety and data privacy in mind.
+            </p>
+          </div>
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
+            {[
+              { title: "Token-Gated Access", desc: "Every participant receives a scoped, time-limited JWT. No valid token, no entry." },
+              { title: "No Student Data Stored", desc: "Viewer access requires no account and collects no PII. Fully COPPA/FERPA-friendly." },
+              { title: "Admin Audit Logs", desc: "See who started, joined, and recorded every broadcast with timestamped logs." },
+            ].map((s) => (
+              <div key={s.title} className="rounded-2xl border border-slate-700 bg-slate-800/60 p-8">
+                <div className="mb-4 flex h-10 w-10 items-center justify-center rounded-xl bg-orange-500/10 text-orange-300">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-5 w-5">
+                    <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
+                    <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                  </svg>
+                </div>
+                <h3 className="text-lg font-bold">{s.title}</h3>
+                <p className="mt-2 text-sm leading-relaxed text-slate-400">{s.desc}</p>
+              </div>
+            ))}
           </div>
         </section>
 

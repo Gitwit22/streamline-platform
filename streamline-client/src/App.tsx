@@ -8,6 +8,7 @@ import Support from "./pages/Support";
 import BillingCanceled from "./pages/BillingCanceled";
 import BillingSuccess from "./pages/BillingSuccess";
 import { ProtectedRoute } from "./components/ProtectedRoute";
+import LaneEnforcer from "./components/LaneEnforcer";
 import Demo from "./pages/Demo";
 import { DEMO_LANDING_ENABLED } from "./config/demoLanding";
 
@@ -160,7 +161,7 @@ function App() {
   }, [location.pathname]);
 
   return (
-    <>
+    <LaneEnforcer>
       {showUnauthorized && (
         <div
           style={{
@@ -291,7 +292,7 @@ function App() {
       {creatorRoutes({ canContentLibrary, canMyContentRecordings, canProjects, canEditor, canMyContent, myContentTarget })}
 
       </Routes>
-    </>
+    </LaneEnforcer>
   );
 }
 

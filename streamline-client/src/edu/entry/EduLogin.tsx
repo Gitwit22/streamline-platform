@@ -49,22 +49,19 @@ function validateEmail(email: string): boolean {
 export default function EduLogin() {
   const nav = useNavigate();
   const location = useLocation();
-  const [email, setEmail] = useState("itstheplugllc@gmail.com");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [showOnboardingWarn, setShowOnboardingWarn] = useState(false);
   const [canSelfServeOnboarding, setCanSelfServeOnboarding] = useState(false);
+  const [showCredentials, setShowCredentials] = useState(false);
 
-  const canShowBypass = useMemo(() => {
-    if (import.meta.env.DEV) return true;
-    try {
-      const host = String(window.location.hostname || "").toLowerCase();
-      return host === "localhost" || host === "127.0.0.1";
-    } catch {
-      return false;
-    }
-  }, []);
+  const handleDemo = () => {
+    setEduLane();
+    setEduBypassEnabled();
+    nav("/streamline/edu/dashboard", { replace: true });
+  };
 
   const returnTo = useMemo(() => {
     try {
@@ -338,15 +335,15 @@ export default function EduLogin() {
               </Link>
 
               <span className="rounded-full border border-orange-500/20 bg-orange-500/10 px-3 py-1.5 font-mono text-[11px] tracking-[0.2em] text-orange-300">
-                EDU LOGIN
+                EDU
               </span>
             </div>
 
             <div className="relative overflow-hidden rounded-3xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/60 p-10">
               <div aria-hidden className="absolute left-0 right-0 top-0 h-[3px] bg-gradient-to-r from-orange-500 via-red-600 to-violet-600" />
 
-              <h1 className="text-3xl font-bold tracking-tight text-white">Sign in</h1>
-              <div className="mt-1 text-sm text-slate-400">Faculty / Student access</div>
+              <h1 className="text-3xl font-bold tracking-tight text-white">StreamLine EDU</h1>
+              <div className="mt-1 text-sm text-slate-400">Explore the platform or sign in with your school credentials.</div>
 
               {error && (
                 <div className="mt-6 rounded-2xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
@@ -354,7 +351,48 @@ export default function EduLogin() {
                 </div>
               )}
 
-              <form onSubmit={handleSubmit} className="mt-8">
+              {/* ── Demo button (primary CTA) ──────────────────────── */}
+              <button
+                type="button"
+                onClick={handleDemo}
+                className="group relative mt-8 w-full overflow-hidden rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-4 text-base font-semibold text-white shadow-none transition-transform hover:-translate-y-0.5 hover:shadow-[0_15px_30px_-10px_rgba(245,158,11,0.4)]"
+              >
+                <span
+                  aria-hidden
+                  className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent transition-transform duration-500 group-hover:translate-x-full"
+                />
+                <span className="relative flex items-center justify-center gap-2">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-5 w-5">
+                    <polygon points="5 3 19 12 5 21 5 3" />
+                  </svg>
+                  Explore Demo
+                </span>
+              </button>
+              <p className="mt-2 text-center text-xs text-slate-500">
+                No account needed — browse with sample data, go live, and test every feature.
+              </p>
+
+              {/* ── Credentials toggle ─────────────────────────────── */}
+              <div className="mt-8">
+                <button
+                  type="button"
+                  onClick={() => setShowCredentials(!showCredentials)}
+                  className="flex w-full items-center justify-center gap-2 text-sm text-slate-400 hover:text-white"
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    className={`h-4 w-4 transition-transform ${showCredentials ? "rotate-90" : ""}`}
+                  >
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                  Sign in with school credentials
+                </button>
+              </div>
+
+              {showCredentials && <form onSubmit={handleSubmit} className="mt-6">
                 <div className="space-y-6">
                   <div>
                     <label className="block text-sm font-medium text-slate-300" htmlFor="edu-email">
@@ -400,20 +438,16 @@ export default function EduLogin() {
                   <button
                     type="submit"
                     disabled={loading}
-                    className="group relative w-full overflow-hidden rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-4 text-base font-semibold text-white shadow-none transition-transform hover:-translate-y-0.5 hover:shadow-[0_15px_30px_-10px_rgba(245,158,11,0.4)] disabled:opacity-60"
+                    className="w-full rounded-xl border border-slate-600 bg-slate-800 px-4 py-4 text-base font-semibold text-white transition hover:bg-slate-700 disabled:opacity-60"
                   >
-                    <span
-                      aria-hidden
-                      className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent transition-transform duration-500 group-hover:translate-x-full"
-                    />
-                    <span className="relative">{loading ? "Signing in…" : "Sign In"}</span>
+                    {loading ? "Signing in\u2026" : "Sign In"}
                   </button>
                 </div>
 
                 <p className="mt-6 border-t border-slate-700 pt-6 text-center text-xs text-slate-500">
                   Tip: If you don’t have a school EDU role yet, ask your Faculty Admin.
                 </p>
-              </form>
+              </form>}
 
               {canSelfServeOnboarding ? (
                 <div className="mt-6">
@@ -430,31 +464,7 @@ export default function EduLogin() {
                 </div>
               ) : null}
 
-              {canShowBypass ? (
-                <>
-                  <div className="my-6 flex items-center gap-4">
-                    <div className="h-px flex-1 bg-slate-700" />
-                    <div className="text-[11px] font-semibold tracking-[0.2em] text-slate-500">OR</div>
-                    <div className="h-px flex-1 bg-slate-700" />
-                  </div>
 
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setEduBypassEnabled();
-                      nav("/streamline/edu/dashboard", { replace: true });
-                    }}
-                    className="flex w-full items-center justify-center gap-2 rounded-xl border border-slate-600 bg-transparent px-4 py-3.5 text-sm font-medium text-slate-300 hover:border-slate-500 hover:bg-slate-800 hover:text-white"
-                  >
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-[18px] w-[18px]">
-                      <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-                      <polyline points="10 17 15 12 10 7" />
-                      <line x1="15" y1="12" x2="3" y2="12" />
-                    </svg>
-                    Bypass login (demo admin)
-                  </button>
-                </>
-              ) : null}
             </div>
           </div>
         </div>
