@@ -1,33 +1,10 @@
 import { useEffect, useState } from "react";
 import { Routes, Route, Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { LoginPage } from "./pages/LoginPage";
-import { SignupPage } from "./pages/SignupPage";
+
 import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
 import Support from "./pages/Support";
-import BillingCanceled from "./pages/BillingCanceled";
-import BillingSuccess from "./pages/BillingSuccess";
-import { ProtectedRoute } from "./components/ProtectedRoute";
 import LaneEnforcer from "./components/LaneEnforcer";
-import Demo from "./pages/Demo";
-import { DEMO_LANDING_ENABLED } from "./config/demoLanding";
-
-import { creatorRoutes } from "./creator/routes";
-
-import EduLanding from "./edu/entry/EduLanding";
-import EduLogin from "./edu/entry/EduLogin";
-import EduProtectedRoute from "./edu/layout/EduProtectedRoute";
-import EduRoleGuard from "./edu/layout/EduRoleGuard";
-import EduShell from "./edu/layout/EduShell";
-import EduDashboard from "./edu/pages/Dashboard";
-import EduBroadcast from "./edu/pages/Broadcast";
-import EduEvents from "./edu/pages/Events";
-import EduArchive from "./edu/pages/Archive";
-import EduPeople from "./edu/pages/People";
-import EduEmbed from "./edu/pages/Embed";
-import EduEmbedEventPlayer from "./edu/pages/EmbedEventPlayer";
-import EduSettings from "./edu/pages/Settings";
-import EduOnboarding from "./edu/pages/Onboarding";
 
 import CorporateLanding from "./corporate/entry/CorporateLanding";
 import CorporateLogin from "./corporate/entry/CorporateLogin";
@@ -47,69 +24,32 @@ import CorporateBroadcastViewer from "./corporate/pages/BroadcastViewer";
 import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
 import { clearPlatformFlagsCache } from "./lib/platformFlagsCache";
-import { useFeatureAccess } from "./hooks/useFeatureAccess";
-import { useEffectiveEntitlements } from "./hooks/useEffectiveEntitlements";
 
 
 function App() {
   const nav = useNavigate();
   const location = useLocation();
   const [showUnauthorized, setShowUnauthorized] = useState(false);
-  const { effectiveEntitlements } = useEffectiveEntitlements();
-  const { access } = useFeatureAccess(effectiveEntitlements);
-
-  const canContentLibrary = access.contentLibrary.allowed;
-  const canProjects = access.projects.allowed;
-  const canEditor = access.editor.allowed;
-  const canMyContentRecordings = !!access?.myContentRecordings?.allowed;
-  const canMyContent = !!access?.myContent?.allowed;
-
-  const myContentTarget = canProjects
-    ? "/projects"
-    : (canContentLibrary || canMyContentRecordings)
-      ? "/content"
-      : null;
 
   useEffect(() => {
     const onUnauthorized = () => {
       const path = window.location.pathname || "";
 
       // ── Public / auth pages: suppress ALL side-effects ──────────────
-      // These pages don't require auth, so a 401 is expected and
-      // must NOT clear tokens or flash the "Session expired" banner —
-      // otherwise we race with a freshly-stored login token.
       if (
-        path.startsWith("/login") || path.startsWith("/signup") ||
-        path.startsWith("/demo") || path === "/welcome" ||
         path.startsWith("/privacy") || path.startsWith("/terms") ||
-        path.startsWith("/support") || path.startsWith("/learnmore") ||
-        path.startsWith("/i/") || path.startsWith("/invite/") ||
-        path.startsWith("/billing/")
-      ) {
-        return;
-      }
-      if (DEMO_LANDING_ENABLED && path === "/") {
-        return;
-      }
-
-      // ── HLS viewer / embed pages: fully public, suppress everything ─
-      // These are public viewer pages that never require auth.  A 401
-      // from a stale cookie or background probe should be silently
-      // swallowed — no banner, no redirect, no token clearing.
-      if (
-        path.startsWith("/live") || path.startsWith("/ig/")
+        path.startsWith("/support")
       ) {
         return;
       }
 
-      // ── Room / join pages: show banner but do NOT redirect ─────────
-      // The Room page manages its own `needsReauth` state and shows an
-      // in-room re-auth prompt.  Clearing storage here would destroy
-      // the room-access-token and force-boot the user.
+      // ── Corporate landing / login: suppress ─────────────────────────
       if (
-        path.startsWith("/room") || path.startsWith("/join")
+        path === "/streamline/corporate" ||
+        path === "/streamline/corporate/" ||
+        path.startsWith("/streamline/corporate/landing") ||
+        path.startsWith("/streamline/corporate/login")
       ) {
-        setShowUnauthorized(true);
         return;
       }
 
@@ -119,27 +59,10 @@ function App() {
       clearPlatformFlagsCache();
       setShowUnauthorized(true);
 
-      // EDU lane should stay within EDU login.
-      if (path.startsWith("/streamline/edu")) {
-        const next = `${window.location.pathname}${window.location.search}`;
-        const sp = new URLSearchParams();
-        sp.set("returnTo", next);
-        nav(`/streamline/edu/login?${sp.toString()}`);
-        return;
-      }
-
-      if (path.startsWith("/streamline/corporate")) {
-        const next = `${window.location.pathname}${window.location.search}`;
-        const sp = new URLSearchParams();
-        sp.set("returnTo", next);
-        nav(`/streamline/corporate/login?${sp.toString()}`);
-        return;
-      }
-
       const next = `${window.location.pathname}${window.location.search}`;
       const sp = new URLSearchParams();
-      sp.set("next", next);
-      nav(`/login?${sp.toString()}`);
+      sp.set("returnTo", next);
+      nav(`/streamline/corporate/login?${sp.toString()}`);
     };
 
     window.addEventListener("sl:unauthorized", onUnauthorized as any);
@@ -148,13 +71,13 @@ function App() {
     };
   }, [nav]);
 
-  // Hide the banner once the user is on an auth route or public viewer pages.
+  // Hide the banner once the user is on the corporate login/landing.
   useEffect(() => {
     if (
-      location.pathname.startsWith("/login") ||
-      location.pathname.startsWith("/signup") ||
-      location.pathname.startsWith("/live") ||
-      location.pathname.startsWith("/ig/")
+      location.pathname.startsWith("/streamline/corporate/login") ||
+      location.pathname.startsWith("/streamline/corporate/landing") ||
+      location.pathname === "/streamline/corporate" ||
+      location.pathname === "/streamline/corporate/"
     ) {
       setShowUnauthorized(false);
     }
@@ -187,8 +110,8 @@ function App() {
             onClick={() => {
               const next = `${window.location.pathname}${window.location.search}`;
               const sp = new URLSearchParams();
-              sp.set("next", next);
-              nav(`/login?${sp.toString()}`);
+              sp.set("returnTo", next);
+              nav(`/streamline/corporate/login?${sp.toString()}`);
             }}
             style={{
               fontSize: 12,
@@ -206,9 +129,6 @@ function App() {
       )}
 
       <Routes>
-      {/* Demo Switchboard */}
-      <Route path="/demo" element={<Demo />} />
-
       {/* Corporate lane */}
       <Route path="/streamline/corporate" element={<Outlet />}>
         <Route index element={<CorporateLanding />} />
@@ -236,60 +156,13 @@ function App() {
         </Route>
       </Route>
 
-      {/* EDU lane */}
-      <Route path="/streamline/edu" element={<Outlet />}>
-        <Route index element={<EduLanding />} />
-        <Route path="login" element={<EduLogin />} />
-        <Route path="onboarding" element={<EduOnboarding />} />
-
-        {/* Public EDU embed players (no auth) */}
-        <Route path="embed/event" element={<EduEmbedEventPlayer />} />
-
-        <Route
-          element={
-            <EduProtectedRoute>
-              <EduShell />
-            </EduProtectedRoute>
-          }
-        >
-          <Route path="dashboard" element={<EduDashboard />} />
-          <Route path="broadcast" element={<EduBroadcast />} />
-          <Route path="events" element={<EduEvents />} />
-          <Route path="archive" element={<EduArchive />} />
-          <Route
-            path="people"
-            element={
-              <EduRoleGuard allow={["faculty_admin", "student_producer", "student_producer_assigned"]}>
-                <EduPeople />
-              </EduRoleGuard>
-            }
-          />
-          <Route path="embed" element={<EduEmbed />} />
-          <Route
-            path="settings"
-            element={
-              <EduRoleGuard allow={["faculty_admin"]}>
-                <EduSettings />
-              </EduRoleGuard>
-            }
-          />
-
-          <Route path="*" element={<Navigate to="/streamline/edu/dashboard" replace />} />
-        </Route>
-      </Route>
-
-      {/* Public / auth flow */}
-      <Route path="/" element={DEMO_LANDING_ENABLED ? <Demo /> : <Navigate to="/welcome" replace />} />
-      <Route path="/login" element={<LoginPage />} />
-      <Route path="/signup" element={<SignupPage />} />
+      {/* Public pages */}
       <Route path="/privacy" element={<Privacy />} />
       <Route path="/terms" element={<Terms />} />
       <Route path="/support" element={<Support />} />
-      <Route path="/billing/canceled" element={<BillingCanceled />} />
-      <Route path="/billing/success" element={<BillingSuccess />} />
 
-      {/* Creator lane */}
-      {creatorRoutes({ canContentLibrary, canMyContentRecordings, canProjects, canEditor, canMyContent, myContentTarget })}
+      {/* Catch-all → corporate landing */}
+      <Route path="*" element={<Navigate to="/streamline/corporate" replace />} />
 
       </Routes>
     </LaneEnforcer>

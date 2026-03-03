@@ -1,73 +1,30 @@
 /**
- * LaneEnforcer — Global lane isolation guard
+ * LaneEnforcer — Corporate-only route guard
  *
- * Prevents EDU / Corporate users from accidentally (or intentionally)
- * landing on Creator routes. Reads `orgType` from the canonical
- * `sl_user` localStorage entry (set by `/api/account/me` during login)
- * and redirects to the correct lane dashboard whenever the user is on
- * a Creator-only route.
- *
- * This is the outermost enforcement layer. Individual route guards
- * (ProtectedRoute, EduProtectedRoute, CorporateProtectedRoute) provide
- * additional per-lane checks as a belt-and-suspenders measure.
+ * Ensures all navigation stays within the corporate lane.
+ * Any path outside the allowlist redirects to the corporate dashboard.
  */
 import { useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 /* ── helpers ──────────────────────────────────────────────────────── */
 
-function getStoredOrgType(): string | null {
-  try {
-    const raw = localStorage.getItem("sl_user");
-    if (!raw) return null;
-    const user = JSON.parse(raw);
-    return typeof user?.orgType === "string" && user.orgType.trim()
-      ? user.orgType.trim()
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
- * Returns true when the given path belongs to the Creator lane
- * (i.e. it is NOT a public page and NOT under /streamline/edu|corporate).
+ * Returns true when the given path is allowed in the corporate-only app.
  */
-function isCreatorRoute(path: string): boolean {
-  // EDU / Corporate lane paths — never considered "creator"
-  if (path.startsWith("/streamline/edu")) return false;
-  if (path.startsWith("/streamline/corporate")) return false;
+function isAllowedPath(path: string): boolean {
+  // Corporate lane — all sub-routes
+  if (path.startsWith("/streamline/corporate")) return true;
 
-  // Public / auth / marketing paths — lane-neutral
-  if (path === "/" || path === "") return false;
-  if (path.startsWith("/login")) return false;
-  if (path.startsWith("/signup")) return false;
-  if (path.startsWith("/demo")) return false;
-  if (path === "/welcome") return false;
-  if (path.startsWith("/privacy")) return false;
-  if (path.startsWith("/terms")) return false;
-  if (path.startsWith("/support")) return false;
-  if (path.startsWith("/billing/")) return false;
-  if (path.startsWith("/learnmore")) return false;
-  if (path.startsWith("/checkout")) return false;
-  if (path.startsWith("/pricing")) return false;
+  // Public pages
+  if (path === "/" || path === "") return true;
+  if (path.startsWith("/privacy")) return true;
+  if (path.startsWith("/terms")) return true;
+  if (path.startsWith("/support")) return true;
 
-  // Public viewer / embed pages
-  if (path.startsWith("/live")) return false;
-  if (path.startsWith("/ig/")) return false;
-
-  // Invite landing (public)
-  if (path.startsWith("/i/")) return false;
-  if (path.startsWith("/invite/")) return false;
-
-  // Everything remaining is a Creator route
-  return true;
+  // Everything else is not allowed
+  return false;
 }
-
-const LANE_DASHBOARDS: Record<string, string> = {
-  edu: "/streamline/edu/dashboard",
-  corporate: "/streamline/corporate/dashboard",
-};
 
 /* ── component ────────────────────────────────────────────────────── */
 
@@ -76,15 +33,10 @@ export default function LaneEnforcer({ children }: { children: React.ReactNode }
   const nav = useNavigate();
 
   useEffect(() => {
-    if (!isCreatorRoute(pathname)) return;
+    if (isAllowedPath(pathname)) return;
 
-    const orgType = getStoredOrgType();
-    if (!orgType) return; // creator user or not logged in — nothing to do
-
-    const target = LANE_DASHBOARDS[orgType];
-    if (target) {
-      nav(target, { replace: true });
-    }
+    // Redirect any non-corporate path to corporate dashboard
+    nav("/streamline/corporate/dashboard", { replace: true });
   }, [pathname, nav]);
 
   return <>{children}</>;
