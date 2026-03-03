@@ -7,17 +7,21 @@ import authRoutes from "./routes/auth";
 import adminRoutes from './routes/admin';
 import accountRoutes from "./routes/account";
 import { requireAuth } from "./middleware/requireAuth";
-import authRouter from "./routes/auth";
-import billingRoutes from "./routes/billing";
+// import authRouter from "./routes/auth";  // duplicate of authRoutes — unused
+// import billingRoutes from "./routes/billing";  // Creator billing: disabled for EDU build
 import recordingsRoutes from "./routes/recordings";
 import usageRoutes from "./routes/usageRoutes";
-import plansRoutes from "./routes/plans";
-import roomTokenRoute from "./routes/roomToken";
+// import plansRoutes from "./routes/plans";  // Creator plans: disabled for EDU build
+// import roomTokenRoute from "./routes/roomToken";  // unused (tokens minted via roomGuestAccess)
 import roomsCreateRoutes from "./routes/roomsCreate";
 import invitesRoutes from "./routes/invites";
 import roomInvitesRoutes from "./routes/roomInvites";
 import roomGuestAccessRoutes from "./routes/roomGuestAccess";
-import multistreamRoutes from "./routes/multistream";
+// ── Creator-only imports (disabled for EDU build) ──────────────────
+// import multistreamRoutes from "./routes/multistream";
+// import liveRoutes from "./routes/live";
+// import savedEmbedsRoutes from "./routes/savedEmbeds";
+// import editingRoutes from "./routes/editing";
 import roomsResolveRoutes from "./routes/roomsResolve";
 import roomsHlsConfigRoutes from "./routes/roomsHlsConfig";
 import roomsActiveEmbedRoutes from "./routes/roomsActiveEmbed";
@@ -27,12 +31,27 @@ import roomsLayoutRoutes from "./routes/roomsLayout";
 import roomsPolicyRoutes from "./routes/roomsPolicy";
 import roomsRecordingsRoutes from "./routes/roomsRecordings";
 import destinationsRoutes from "./routes/destinations";
-import liveRoutes from "./routes/live";
+// import liveRoutes from "./routes/live";  // Creator-only: disabled for EDU build
 import statsRoutes from "./routes/stats";
 import telemetryRoutes from "./routes/telemetry";
-import savedEmbedsRoutes from "./routes/savedEmbeds";
-import editingRoutes from "./routes/editing";
+// import savedEmbedsRoutes from "./routes/savedEmbeds";  // Creator-only: disabled for EDU build
+// import editingRoutes from "./routes/editing";  // Creator-only: disabled for EDU build
 import maintenanceRoutes from "./routes/maintenance";
+import eduEventsRoutes from "./routes/eduEvents";
+import eduPeopleRoutes from "./routes/eduPeople";
+import eduSettingsRoutes from "./routes/eduSettings";
+import eduEmbedsRoutes from "./routes/eduEmbeds";
+import eduPublicRoutes from "./routes/eduPublic";
+import eduBootstrapRoutes from "./routes/eduBootstrap";
+import eduBroadcastsRoutes from "./routes/eduBroadcasts";
+// ── Corporate lane imports (disabled for EDU build) ─────────────────
+// import corpMeRoutes from "./routes/corpMe";
+// import corpBroadcastsRoutes from "./routes/corpBroadcasts";
+// import corpCallsRoutes from "./routes/corpCalls";
+// import corpTrainingRoutes from "./routes/corpTraining";
+// import corpDocumentsRoutes from "./routes/corpDocuments";
+// import corpChatRoutes from "./routes/corpChat";
+// import corpAdminRoutes from "./routes/corpAdmin";
 import onboardingRoutes from "./routes/onboarding";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
@@ -185,17 +204,19 @@ app.use("/api/hls", hlsRoutes);
 app.use("/api/public/hls", publicHlsRoutes);
 // Public viewer-safe HLS config (no auth)
 app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
+// Public EDU embed data (no auth)
+app.use("/api/public/edu", eduPublicRoutes);
 
 // Internal maintenance/admin utilities
-app.use("/api/maintenance", maintenanceRoutes);
+app.use("/api/maintenance/edu", eduBootstrapRoutes);
 
 // Onboarding/reset endpoints (guarded; demo-safe)
 app.use("/api/onboarding", onboardingRoutes);
 // Recordings API - This handles GET /:id and POST /start, /stop
 app.use("/api/recordings", recordingsRoutes);
 
-// Editing API (authenticated)
-app.use("/api/editing", editingRoutes);
+// Editing API — Creator-only: disabled for EDU build
+// app.use("/api/editing", editingRoutes);
 
 // Health check
 app.get("/", (_req, res) => res.send("API up"));
@@ -219,8 +240,8 @@ app.use("/api", roomGuestAccessRoutes);
 // Invite resolve/accept flow
 app.use("/api/invites", invitesRoutes);
 
-// Multistream routes (YouTube/FB/Twitch)
-app.use("/api/multistream", multistreamRoutes);
+// Multistream routes — Creator-only: disabled for EDU build
+// app.use("/api/multistream", multistreamRoutes);
 // Room resolve endpoint (/api/rooms/resolve)
 app.use("/api/rooms", roomsResolveRoutes);
 // Room access policy (allowGuests, etc.)
@@ -237,23 +258,39 @@ app.use("/api/rooms", roomsRecordingsRoutes);
 app.use("/api/rooms", roomsHlsConfigRoutes);
 // Room-level selection of which Saved Embed to use for HLS control
 app.use("/api/rooms", roomsActiveEmbedRoutes);
-// Destinations management (encrypted keys)
+// Destinations management (encrypted keys) — kept for EDU YouTube output
 app.use("/api/destinations", destinationsRoutes);
-// Live preflight
-app.use("/api/live", liveRoutes);
+// Live preflight — Creator-only: disabled for EDU build
+// app.use("/api/live", liveRoutes);
 
-// Saved embeds (user-owned) -> stable Firestore rooms
-app.use("/api/saved-embeds", savedEmbedsRoutes);
+// Saved embeds — Creator-only: disabled for EDU build
+// app.use("/api/saved-embeds", savedEmbedsRoutes);
 
-// Reject legacy EDU/Corporate lane requests
-app.use("/api/edu", (_req, res) => res.status(404).json({ error: "lane_removed" }));
-app.use("/api/corp", (_req, res) => res.status(404).json({ error: "lane_removed" }));
+// EDU events (authenticated admin UI)
+app.use("/api/edu", eduEventsRoutes);
+// EDU people (authenticated admin UI)
+app.use("/api/edu", eduPeopleRoutes);
+// EDU org settings + audit (authenticated admin UI)
+app.use("/api/edu", eduSettingsRoutes);
+// EDU embed docs (authenticated admin UI)
+app.use("/api/edu", eduEmbedsRoutes);
+// EDU broadcasts (go-live, stop, watch)
+app.use("/api/edu", eduBroadcastsRoutes);
 
-// Billing routes
-app.use("/api/billing", billingRoutes);
+// Corporate lane routes — disabled for EDU build
+// app.use("/api/corp", corpMeRoutes);
+// app.use("/api/corp", corpBroadcastsRoutes);
+// app.use("/api/corp", corpCallsRoutes);
+// app.use("/api/corp", corpTrainingRoutes);
+// app.use("/api/corp", corpDocumentsRoutes);
+// app.use("/api/corp", corpChatRoutes);
+// app.use("/api/corp", corpAdminRoutes);
 
-// Plans route (for Billing page)
-app.use("/api/plans", plansRoutes);
+// Billing routes — disabled for EDU build (no EDU billing references)
+// app.use("/api/billing", billingRoutes);
+
+// Plans route — disabled for EDU build
+// app.use("/api/plans", plansRoutes);
 // Public stats for landing page
 app.use("/api/stats", statsRoutes);
 // Lightweight telemetry events
