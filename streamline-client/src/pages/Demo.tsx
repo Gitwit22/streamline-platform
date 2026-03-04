@@ -1,5 +1,5 @@
 import { Button } from "@/components/ui/button";
-import { ArrowRight, GraduationCap, Building2 } from "lucide-react";
+import { ArrowRight } from "lucide-react";
 import { Link } from "react-router-dom";
 
 export default function Demo() {
@@ -31,10 +31,8 @@ export default function Demo() {
             {/* Accent bar */}
             <div className="absolute inset-x-0 top-0 h-1 rounded-t-2xl bg-gradient-to-r from-indigo-500 to-violet-500" />
 
-            <div className="flex items-center gap-3 mb-4">
-              <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-indigo-500/15 text-indigo-400">
-                <GraduationCap className="w-6 h-6" />
-              </div>
+            <div className="flex items-center gap-4 mb-4">
+              <img src="/edu logo2.png" alt="StreamLine EDU" className="h-12 w-auto object-contain" />
               <div>
                 <h2 className="text-2xl font-bold text-white">StreamLine EDU</h2>
                 <p className="text-sm text-slate-400">For schools &amp; universities</p>
@@ -68,10 +66,8 @@ export default function Demo() {
             {/* Accent bar */}
             <div className="absolute inset-x-0 top-0 h-1 rounded-t-2xl bg-gradient-to-r from-cyan-500 to-teal-500" />
 
-            <div className="flex items-center gap-3 mb-4">
-              <div className="flex items-center justify-center w-12 h-12 rounded-xl bg-cyan-500/15 text-cyan-400">
-                <Building2 className="w-6 h-6" />
-              </div>
+            <div className="flex items-center gap-4 mb-4">
+              <img src="/corporate logo.png" alt="StreamLine Corporate" className="h-12 w-auto object-contain" />
               <div>
                 <h2 className="text-2xl font-bold text-white">StreamLine Corporate</h2>
                 <p className="text-sm text-slate-400">For teams &amp; enterprises</p>

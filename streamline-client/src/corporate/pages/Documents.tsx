@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { FileText, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { demoSeedId, demoDocId, demoStorageKey } from "@/lib/demoPaths";
 import { fetchDocuments, createDocument, deleteDocument, acknowledgeDocument, type Document } from "../api/documents";
 import { useCorporateMe } from "../layout/CorporateProtectedRoute";
 import { isCorporateBypassEnabled } from "../state/corporateMode";
@@ -9,12 +10,12 @@ const categories = ["All", "HR Policies", "Legal", "SOPs", "IT Guides", "Safety"
 type Category = (typeof categories)[number];
 
 const demoDocs: Document[] = [
-  { id: "d1", title: "Employee Handbook 2026", category: "HR Policies", version: "v3.2", requiresAck: true, ackCount: 972, totalEmployees: 1247, url: "", createdAt: Date.now() - 3 * 86400_000, createdBy: "" },
-  { id: "d2", title: "Data Processing Agreement", category: "Legal", version: "v2.1", requiresAck: true, ackCount: 1147, totalEmployees: 1247, url: "", createdAt: Date.now() - 8 * 86400_000, createdBy: "" },
-  { id: "d3", title: "Remote Work Policy", category: "HR Policies", version: "v1.4", requiresAck: true, ackCount: 1185, totalEmployees: 1247, url: "", createdAt: Date.now() - 10 * 86400_000, createdBy: "" },
-  { id: "d4", title: "Incident Response Plan", category: "IT Guides", version: "v4.0", requiresAck: false, ackCount: 0, totalEmployees: 0, url: "", createdAt: Date.now() - 13 * 86400_000, createdBy: "" },
-  { id: "d5", title: "Fire Safety SOP", category: "Safety", version: "v2.0", requiresAck: true, ackCount: 1247, totalEmployees: 1247, url: "", createdAt: Date.now() - 29 * 86400_000, createdBy: "" },
-  { id: "d6", title: "Vendor Onboarding Guide", category: "SOPs", version: "v1.1", requiresAck: false, ackCount: 0, totalEmployees: 0, url: "", createdAt: Date.now() - 37 * 86400_000, createdBy: "" },
+  { id: demoSeedId("corporate", "doc", 1), title: "Employee Handbook 2026", category: "HR Policies", version: "v3.2", requiresAck: true, ackCount: 972, totalEmployees: 1247, url: demoStorageKey("corporate", "uploads", "docs", "handbook-2026.pdf"), createdAt: Date.now() - 3 * 86400_000, createdBy: "" },
+  { id: demoSeedId("corporate", "doc", 2), title: "Data Processing Agreement", category: "Legal", version: "v2.1", requiresAck: true, ackCount: 1147, totalEmployees: 1247, url: demoStorageKey("corporate", "uploads", "docs", "dpa-v2.1.pdf"), createdAt: Date.now() - 8 * 86400_000, createdBy: "" },
+  { id: demoSeedId("corporate", "doc", 3), title: "Remote Work Policy", category: "HR Policies", version: "v1.4", requiresAck: true, ackCount: 1185, totalEmployees: 1247, url: demoStorageKey("corporate", "uploads", "docs", "remote-work-policy.pdf"), createdAt: Date.now() - 10 * 86400_000, createdBy: "" },
+  { id: demoSeedId("corporate", "doc", 4), title: "Incident Response Plan", category: "IT Guides", version: "v4.0", requiresAck: false, ackCount: 0, totalEmployees: 0, url: demoStorageKey("corporate", "uploads", "docs", "incident-response.pdf"), createdAt: Date.now() - 13 * 86400_000, createdBy: "" },
+  { id: demoSeedId("corporate", "doc", 5), title: "Fire Safety SOP", category: "Safety", version: "v2.0", requiresAck: true, ackCount: 1247, totalEmployees: 1247, url: demoStorageKey("corporate", "uploads", "docs", "fire-safety-sop.pdf"), createdAt: Date.now() - 29 * 86400_000, createdBy: "" },
+  { id: demoSeedId("corporate", "doc", 6), title: "Vendor Onboarding Guide", category: "SOPs", version: "v1.1", requiresAck: false, ackCount: 0, totalEmployees: 0, url: demoStorageKey("corporate", "uploads", "docs", "vendor-onboarding.pdf"), createdAt: Date.now() - 37 * 86400_000, createdBy: "" },
 ];
 
 function formatDate(ms: number) {
@@ -53,7 +54,7 @@ export default function Documents() {
         const d = await createDocument({ title: newTitle.trim(), category: newCat });
         setDocs(prev => [d, ...prev]);
       } else {
-        setDocs(prev => [{ id: `demo-${Date.now()}`, title: newTitle.trim(), category: newCat, version: "v1.0", requiresAck: false, ackCount: 0, totalEmployees: 0, url: "", createdAt: Date.now(), createdBy: "" }, ...prev]);
+        setDocs(prev => [{ id: demoDocId("corporate", "doc"), title: newTitle.trim(), category: newCat, version: "v1.0", requiresAck: false, ackCount: 0, totalEmployees: 0, url: "", createdAt: Date.now(), createdBy: "" }, ...prev]);
       }
       setNewTitle(""); setShowNew(false);
     } finally { setCreating(false); }

@@ -1,25 +1,28 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { Hash, Lock, Volume2, Send, Paperclip, Smile, Loader2, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { demoSeedId } from "@/lib/demoPaths";
 import { fetchChatRooms, fetchMessages, sendMessage, createChatRoom, type ChatRoom, type ChatMessage } from "../api/chat";
 import { useCorporateMe } from "../layout/CorporateProtectedRoute";
 import { isCorporateBypassEnabled } from "../state/corporateMode";
 
 const demoRooms: ChatRoom[] = [
-  { id: "r1", name: "general", section: "department", isPrivate: false, unreadCount: 12, lastMessage: "Sarah K: Did everyone get the policy update?", lastMessageAt: Date.now(), memberCount: 120, createdAt: Date.now() },
-  { id: "r2", name: "engineering", section: "department", isPrivate: false, unreadCount: 4, lastMessage: "Dev: Sprint review notes are posted", lastMessageAt: Date.now() - 120_000, memberCount: 45, createdAt: Date.now() },
-  { id: "r3", name: "marketing", section: "department", isPrivate: false, unreadCount: 0, lastMessage: "Lisa: Campaign assets are ready", lastMessageAt: Date.now() - 300_000, memberCount: 30, createdAt: Date.now() },
-  { id: "r4", name: "hr", section: "department", isPrivate: false, unreadCount: 1, lastMessage: "New hire onboarding checklist updated", lastMessageAt: Date.now() - 600_000, memberCount: 15, createdAt: Date.now() },
-  { id: "r5", name: "project-alpha", section: "project", isPrivate: true, unreadCount: 0, lastMessage: "Marcus: Deployment window confirmed", lastMessageAt: Date.now() - 900_000, memberCount: 8, createdAt: Date.now() },
-  { id: "r6", name: "merger-team", section: "project", isPrivate: true, unreadCount: 3, lastMessage: "Due diligence docs uploaded", lastMessageAt: Date.now() - 1200_000, memberCount: 5, createdAt: Date.now() },
-  { id: "r7", name: "leadership", section: "executive", isPrivate: true, unreadCount: 0, lastMessage: "Q1 targets finalized", lastMessageAt: Date.now() - 1500_000, memberCount: 6, createdAt: Date.now() },
+  { id: demoSeedId("corporate", "chat", 1), name: "general", section: "department", isPrivate: false, unreadCount: 12, lastMessage: "Sarah K: Did everyone get the policy update?", lastMessageAt: Date.now(), memberCount: 120, createdAt: Date.now() },
+  { id: demoSeedId("corporate", "chat", 2), name: "engineering", section: "department", isPrivate: false, unreadCount: 4, lastMessage: "Dev: Sprint review notes are posted", lastMessageAt: Date.now() - 120_000, memberCount: 45, createdAt: Date.now() },
+  { id: demoSeedId("corporate", "chat", 3), name: "marketing", section: "department", isPrivate: false, unreadCount: 0, lastMessage: "Lisa: Campaign assets are ready", lastMessageAt: Date.now() - 300_000, memberCount: 30, createdAt: Date.now() },
+  { id: demoSeedId("corporate", "chat", 4), name: "hr", section: "department", isPrivate: false, unreadCount: 1, lastMessage: "New hire onboarding checklist updated", lastMessageAt: Date.now() - 600_000, memberCount: 15, createdAt: Date.now() },
+  { id: demoSeedId("corporate", "chat", 5), name: "project-alpha", section: "project", isPrivate: true, unreadCount: 0, lastMessage: "Marcus: Deployment window confirmed", lastMessageAt: Date.now() - 900_000, memberCount: 8, createdAt: Date.now() },
+  { id: demoSeedId("corporate", "chat", 6), name: "merger-team", section: "project", isPrivate: true, unreadCount: 3, lastMessage: "Due diligence docs uploaded", lastMessageAt: Date.now() - 1200_000, memberCount: 5, createdAt: Date.now() },
+  { id: demoSeedId("corporate", "chat", 7), name: "leadership", section: "executive", isPrivate: true, unreadCount: 0, lastMessage: "Q1 targets finalized", lastMessageAt: Date.now() - 1500_000, memberCount: 6, createdAt: Date.now() },
 ];
 
+const DEMO_ROOM_1 = demoSeedId("corporate", "chat", 1);
+
 const demoMessages: ChatMessage[] = [
-  { id: "m1", roomId: "r1", senderUid: "u1", senderName: "Sarah Kim", content: "Did everyone get the policy update? Please review and sign the acknowledgment by Friday.", type: "text", attachmentUrl: "", createdAt: Date.now() - 600_000 },
-  { id: "m2", roomId: "r1", senderUid: "u2", senderName: "Dev Patel", content: "Got it. Forwarding to the eng team now.", type: "text", attachmentUrl: "", createdAt: Date.now() - 480_000 },
-  { id: "m3", roomId: "r1", senderUid: "u3", senderName: "Marcus Johnson", content: "Can we schedule a quick call to discuss the deployment timeline? I have some concerns about the Friday window.", type: "text", attachmentUrl: "", createdAt: Date.now() - 300_000 },
-  { id: "m4", roomId: "r1", senderUid: "corp-demo", senderName: "You", content: "Sure, let's do a 15-min sync at 2 PM. I'll send the invite.", type: "text", attachmentUrl: "", createdAt: Date.now() - 120_000 },
+  { id: demoSeedId("corporate", "msg", 1), roomId: DEMO_ROOM_1, senderUid: demoSeedId("corporate", "usr", 1), senderName: "Sarah Kim", content: "Did everyone get the policy update? Please review and sign the acknowledgment by Friday.", type: "text", attachmentUrl: "", createdAt: Date.now() - 600_000 },
+  { id: demoSeedId("corporate", "msg", 2), roomId: DEMO_ROOM_1, senderUid: demoSeedId("corporate", "usr", 2), senderName: "Dev Patel", content: "Got it. Forwarding to the eng team now.", type: "text", attachmentUrl: "", createdAt: Date.now() - 480_000 },
+  { id: demoSeedId("corporate", "msg", 3), roomId: DEMO_ROOM_1, senderUid: demoSeedId("corporate", "usr", 3), senderName: "Marcus Johnson", content: "Can we schedule a quick call to discuss the deployment timeline? I have some concerns about the Friday window.", type: "text", attachmentUrl: "", createdAt: Date.now() - 300_000 },
+  { id: demoSeedId("corporate", "msg", 4), roomId: DEMO_ROOM_1, senderUid: "test-corporate-me", senderName: "You", content: "Sure, let's do a 15-min sync at 2 PM. I'll send the invite.", type: "text", attachmentUrl: "", createdAt: Date.now() - 120_000 },
 ];
 
 function initials(name: string) {
@@ -49,7 +52,7 @@ export default function Chat() {
   const loadRooms = useCallback(async () => {
     setLoading(true);
     try {
-      if (bypass) { setRooms(demoRooms); setSelectedRoom("r1"); }
+      if (bypass) { setRooms(demoRooms); setSelectedRoom(DEMO_ROOM_1); }
       else { const data = await fetchChatRooms(); setRooms(data); if (data.length > 0) setSelectedRoom(data[0].id); }
     } catch { setRooms([]); }
     finally { setLoading(false); }

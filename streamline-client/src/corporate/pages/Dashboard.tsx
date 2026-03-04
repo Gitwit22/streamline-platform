@@ -7,6 +7,7 @@ import {
   Lock, Loader2, RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { demoSeedId } from "@/lib/demoPaths";
 import { useCorporateMe } from "../layout/CorporateProtectedRoute";
 import { fetchBroadcasts, type Broadcast } from "../api/broadcasts";
 import { fetchCalls, type Call } from "../api/calls";
@@ -17,23 +18,23 @@ import { isCorporateBypassEnabled } from "../state/corporateMode";
 
 /* ── Demo fallback data (bypass mode) ─── */
 const demoBroadcasts: Broadcast[] = [
-  { id: "demo-1", title: "Q1 All-Hands Town Hall", description: "", team: "Executive Team", scope: "Company-wide", status: "live", required: false, scheduledAt: Date.now() - 18 * 60_000, startedAt: Date.now() - 18 * 60_000, endedAt: null, viewers: 847, createdAt: Date.now(), createdBy: "" },
-  { id: "demo-2", title: "Annual Safety Briefing 2026", description: "", team: "HR & Compliance", scope: "company-wide", status: "scheduled", required: true, scheduledAt: Date.now() + 3600_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
-  { id: "demo-3", title: "Engineering Quarterly Review", description: "", team: "Engineering", scope: "department", status: "scheduled", required: false, scheduledAt: Date.now() + 86400_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
-  { id: "demo-4", title: "Data Privacy Policy Update", description: "", team: "Legal & Compliance", scope: "company-wide", status: "scheduled", required: true, scheduledAt: Date.now() + 3 * 86400_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "bcast", 1), title: "Q1 All-Hands Town Hall", description: "", team: "Executive Team", scope: "Company-wide", status: "live", required: false, scheduledAt: Date.now() - 18 * 60_000, startedAt: Date.now() - 18 * 60_000, endedAt: null, viewers: 847, createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "bcast", 2), title: "Annual Safety Briefing 2026", description: "", team: "HR & Compliance", scope: "company-wide", status: "scheduled", required: true, scheduledAt: Date.now() + 3600_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "bcast", 3), title: "Engineering Quarterly Review", description: "", team: "Engineering", scope: "department", status: "scheduled", required: false, scheduledAt: Date.now() + 86400_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "bcast", 4), title: "Data Privacy Policy Update", description: "", team: "Legal & Compliance", scope: "company-wide", status: "scheduled", required: true, scheduledAt: Date.now() + 3 * 86400_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
 ];
 
 const demoTraining: TrainingModule[] = [
-  { id: "t1", title: "OSHA Safety Training 2026", description: "", department: "HR & Compliance", type: "required", status: "active", durationMinutes: 42, deadline: Date.now() + 15 * 86400_000, assignedTo: "all", completionRate: 0, totalAssigned: 0, totalCompleted: 0, icon: "shield", createdAt: Date.now(), createdBy: "", userProgress: 0, userStatus: "not_started", userCompletedAt: null },
-  { id: "t2", title: "Data Privacy & GDPR", description: "", department: "Legal", type: "required", status: "active", durationMinutes: 28, deadline: null, assignedTo: "all", completionRate: 60, totalAssigned: 0, totalCompleted: 0, icon: "lock", createdAt: Date.now(), createdBy: "", userProgress: 60, userStatus: "in_progress", userCompletedAt: null },
-  { id: "t3", title: "Remote Work Policy 2026", description: "", department: "HR", type: "required", status: "active", durationMinutes: 15, deadline: null, assignedTo: "all", completionRate: 100, totalAssigned: 0, totalCompleted: 0, icon: "check", createdAt: Date.now(), createdBy: "", userProgress: 100, userStatus: "completed", userCompletedAt: Date.now() },
-  { id: "t4", title: "Anti-Harassment Policy", description: "", department: "HR & Legal", type: "required", status: "active", durationMinutes: 20, deadline: Date.now() - 86400_000, assignedTo: "all", completionRate: 0, totalAssigned: 0, totalCompleted: 0, icon: "alert", createdAt: Date.now(), createdBy: "", userProgress: 0, userStatus: "not_started", userCompletedAt: null },
+  { id: demoSeedId("corporate", "train", 1), title: "OSHA Safety Training 2026", description: "", department: "HR & Compliance", type: "required", status: "active", durationMinutes: 42, deadline: Date.now() + 15 * 86400_000, assignedTo: "all", completionRate: 0, totalAssigned: 0, totalCompleted: 0, icon: "shield", createdAt: Date.now(), createdBy: "", userProgress: 0, userStatus: "not_started", userCompletedAt: null },
+  { id: demoSeedId("corporate", "train", 2), title: "Data Privacy & GDPR", description: "", department: "Legal", type: "required", status: "active", durationMinutes: 28, deadline: null, assignedTo: "all", completionRate: 60, totalAssigned: 0, totalCompleted: 0, icon: "lock", createdAt: Date.now(), createdBy: "", userProgress: 60, userStatus: "in_progress", userCompletedAt: null },
+  { id: demoSeedId("corporate", "train", 3), title: "Remote Work Policy 2026", description: "", department: "HR", type: "required", status: "active", durationMinutes: 15, deadline: null, assignedTo: "all", completionRate: 100, totalAssigned: 0, totalCompleted: 0, icon: "check", createdAt: Date.now(), createdBy: "", userProgress: 100, userStatus: "completed", userCompletedAt: Date.now() },
+  { id: demoSeedId("corporate", "train", 4), title: "Anti-Harassment Policy", description: "", department: "HR & Legal", type: "required", status: "active", durationMinutes: 20, deadline: Date.now() - 86400_000, assignedTo: "all", completionRate: 0, totalAssigned: 0, totalCompleted: 0, icon: "alert", createdAt: Date.now(), createdBy: "", userProgress: 0, userStatus: "not_started", userCompletedAt: null },
 ];
 
 const demoChatRooms: ChatRoom[] = [
-  { id: "r1", name: "general", section: "department", isPrivate: false, unreadCount: 12, lastMessage: "Sarah K: Did everyone get the policy update?", lastMessageAt: Date.now(), memberCount: 120, createdAt: Date.now() },
-  { id: "r2", name: "engineering", section: "department", isPrivate: false, unreadCount: 4, lastMessage: "Dev: Sprint review notes are posted", lastMessageAt: Date.now(), memberCount: 45, createdAt: Date.now() },
-  { id: "r3", name: "project-alpha", section: "project", isPrivate: true, unreadCount: 0, lastMessage: "Marcus: Deployment window confirmed for Friday", lastMessageAt: Date.now(), memberCount: 8, createdAt: Date.now() },
+  { id: demoSeedId("corporate", "chat", 1), name: "general", section: "department", isPrivate: false, unreadCount: 12, lastMessage: "Sarah K: Did everyone get the policy update?", lastMessageAt: Date.now(), memberCount: 120, createdAt: Date.now() },
+  { id: demoSeedId("corporate", "chat", 2), name: "engineering", section: "department", isPrivate: false, unreadCount: 4, lastMessage: "Dev: Sprint review notes are posted", lastMessageAt: Date.now(), memberCount: 45, createdAt: Date.now() },
+  { id: demoSeedId("corporate", "chat", 3), name: "project-alpha", section: "project", isPrivate: true, unreadCount: 0, lastMessage: "Marcus: Deployment window confirmed for Friday", lastMessageAt: Date.now(), memberCount: 8, createdAt: Date.now() },
 ];
 
 const demoAnalytics: AnalyticsOverview = {

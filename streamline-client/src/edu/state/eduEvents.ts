@@ -37,6 +37,7 @@ export type EduEvent = {
   updatedAt: string;
 };
 
+// Maps to Firestore: env/test/tenants/edu/events
 const EVENTS_KEY = "sl_edu_events_v1";
 
 function nowIso() {

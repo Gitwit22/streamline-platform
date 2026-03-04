@@ -1,4 +1,5 @@
 import { apiFetchAuth } from "../../lib/api";
+import { isEduBypassEnabled } from "../state/eduMode";
 
 export type EduEventEmbedAccessMode = "public" | "unlisted" | "password";
 
@@ -15,6 +16,15 @@ export async function upsertEduEventEmbed(params: {
   accessMode: EduEventEmbedAccessMode;
   password?: string;
 }): Promise<EduEventEmbed> {
+  if (isEduBypassEnabled()) {
+    return {
+      embedId: `demo-embed-${params.eventId}`,
+      eventId: params.eventId,
+      accessMode: params.accessMode,
+      token: "demo-token",
+      hasPassword: params.accessMode === "password",
+    };
+  }
   const res = await apiFetchAuth("/api/edu/embeds/event", {
     method: "POST",
     body: JSON.stringify({

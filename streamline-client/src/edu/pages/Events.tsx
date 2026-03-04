@@ -19,6 +19,7 @@ import {
 
 type TabId = "upcoming" | "past";
 
+// Maps to Firestore: env/test/tenants/edu/org (settings doc)
 const DEMO_STATE_KEY = "sl_edu_demo_settings_v1";
 
 function readDemoTimezone(): string | null {

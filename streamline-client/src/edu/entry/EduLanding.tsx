@@ -112,7 +112,7 @@ export default function EduLanding() {
               to="/"
               className="inline-flex items-center rounded-full border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-slate-300 hover:bg-slate-700 hover:text-white"
             >
-              Main StreamLine
+              ← Back
             </Link>
 
             <div className="hidden items-center gap-2 rounded-full border border-slate-700 bg-slate-800 px-5 py-2.5 text-sm text-slate-300 md:flex">

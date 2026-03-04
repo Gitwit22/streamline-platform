@@ -376,6 +376,9 @@ export async function apiUpdateRoomPolicy(
 
 export function clearAuthStorage() {
   if (typeof window === "undefined") return;
+  // Keys that define the active lane/demo session — NOT auth tokens.
+  // Clearing these during a 401 would destroy demo-mode and lane identity.
+  const PRESERVE = new Set(["sl_edu_bypass", "sl_entry_lane", "sl_mode"]);
   try {
     clearAuthToken();
     // Clear all Streamline-scoped session state (auth + cached user/session hints)
@@ -384,6 +387,7 @@ export function clearAuthStorage() {
     for (let i = 0; i < window.localStorage.length; i++) {
       const key = window.localStorage.key(i);
       if (!key) continue;
+      if (PRESERVE.has(key)) continue;
       if (key === "authToken" || key.startsWith("sl_")) {
         keysToRemove.push(key);
       }

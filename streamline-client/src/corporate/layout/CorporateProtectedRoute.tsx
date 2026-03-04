@@ -3,7 +3,7 @@ import { Navigate, useLocation } from "react-router-dom";
 import { getAuthToken } from "../../lib/api";
 import { onFirebaseAuthStateChanged } from "../../lib/firebaseClient";
 import { isCorporateBypassEnabled, setCorporateLane } from "../state/corporateMode";
-import { fetchCorporateMe, type CorporateMe } from "../api/me";
+import { fetchCorporateMe, isNeedsOrg, type CorporateMe } from "../api/me";
 
 export type { CorporateMe };
 
@@ -23,6 +23,7 @@ export default function CorporateProtectedRoute({ children }: { children: ReactN
   const [me, setMe] = useState<CorporateMe | null>(null);
   const [loading, setLoading] = useState(true);
   const [firebaseAuthed, setFirebaseAuthed] = useState(false);
+  const [needsOrg, setNeedsOrg] = useState(false);
 
   useEffect(() => {
     return onFirebaseAuthStateChanged((user) => {
@@ -65,12 +66,17 @@ export default function CorporateProtectedRoute({ children }: { children: ReactN
 
     let mounted = true;
     setLoading(true);
+    setNeedsOrg(false);
     fetchCorporateMe()
       .then((data) => {
-        if (mounted) {
+        if (!mounted) return;
+        if (isNeedsOrg(data)) {
+          setMe(null);
+          setNeedsOrg(true);
+        } else {
           setMe(data);
-          setLoading(false);
         }
+        setLoading(false);
       })
       .catch(() => {
         if (mounted) {
@@ -90,6 +96,11 @@ export default function CorporateProtectedRoute({ children }: { children: ReactN
         Loading…
       </div>
     );
+  }
+
+  // User is authenticated but doesn't belong to any org → join page
+  if (needsOrg) {
+    return <Navigate to="/streamline/corporate/join" replace />;
   }
 
   if (!me) {

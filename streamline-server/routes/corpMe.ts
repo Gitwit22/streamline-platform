@@ -16,7 +16,9 @@ router.get("/me", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) {
-      return res.status(403).json({ error: "not_corporate_member" });
+      // Distinguish "no org yet" from "not corporate" so the client can
+      // redirect to the join-org page instead of the login page.
+      return res.status(200).json({ needsOrg: true, uid });
     }
 
     const account = (req as any).account || {};

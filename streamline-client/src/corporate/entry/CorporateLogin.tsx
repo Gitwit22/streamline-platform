@@ -5,14 +5,18 @@ import { setCorporateBypassEnabled, setCorporateLane } from '../state/corporateM
 import { apiFetch, apiFetchAuth, clearAuthStorage } from '../../lib/api';
 import { firebaseSignInWithCustomToken, isFirebaseWebConfigured, firebaseSendPasswordReset } from '../../lib/firebaseClient';
 
+type AuthTab = 'login' | 'signup';
+
 export default function CorporateLogin() {
   const nav = useNavigate();
   const location = useLocation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [showCredentials, setShowCredentials] = useState(false);
+  const [authTab, setAuthTab] = useState<AuthTab>('login');
 
   const returnTo = useMemo(() => {
     try {
@@ -153,6 +157,64 @@ export default function CorporateLogin() {
     }
   };
 
+  /* ── Signup handler ── */
+  const handleSignup = async (e: FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+
+    const emailNorm = email.trim().toLowerCase();
+    const pw = password.trim();
+    const name = displayName.trim();
+
+    if (!emailNorm || !pw) {
+      setError('Email and password are required.');
+      setLoading(false);
+      return;
+    }
+    if (pw.length < 6) {
+      setError('Password must be at least 6 characters.');
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const res = await apiFetch('/api/auth/signup', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: emailNorm,
+          password: pw,
+          displayName: name || emailNorm.split('@')[0],
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/Chicago',
+          tosAccepted: true,
+        }),
+      }, { allowNonOk: true });
+
+      if (!res.ok) {
+        const ct = res.headers.get('content-type') || '';
+        const body = ct.includes('application/json') ? await res.json().catch(() => ({})) : {};
+        setError((body as any)?.error || 'Signup failed');
+        setLoading(false);
+        return;
+      }
+
+      const loginBody = await res.json().catch(() => ({} as any));
+      const token = (loginBody as any)?.token as string | undefined;
+      if (token) {
+        try { localStorage.setItem('authToken', token); } catch {}
+      }
+
+      setCorporateLane();
+      setLoading(false);
+      // After signup, redirect to join-org page (user has no org yet)
+      nav('/streamline/corporate/join', { replace: true });
+    } catch (err: any) {
+      setError(err?.message || 'Signup failed. Try again.');
+      setLoading(false);
+    }
+  };
+
   return (
     <div id="login-page" className="page active">
       <div className="login-left">
@@ -226,11 +288,40 @@ export default function CorporateLogin() {
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 14, height: 14, transition: 'transform 0.2s', transform: showCredentials ? 'rotate(90deg)' : 'rotate(0deg)' }}>
                 <polyline points="9 18 15 12 9 6" />
               </svg>
-              Sign in with credentials
+              Sign in or create an account
             </span>
           </div>
 
           {showCredentials && (<>
+          {/* ── Login / Signup tabs ── */}
+          <div style={{ display: 'flex', gap: 0, marginBottom: 16, borderRadius: 8, overflow: 'hidden', border: '1px solid var(--border)' }}>
+            <button
+              type="button"
+              onClick={() => { setAuthTab('login'); setError(''); }}
+              style={{
+                flex: 1, padding: '10px 0', fontSize: 13, fontWeight: 600, cursor: 'pointer', border: 'none',
+                background: authTab === 'login' ? 'var(--surface2)' : 'transparent',
+                color: authTab === 'login' ? 'var(--blue)' : 'var(--text3)',
+                borderBottom: authTab === 'login' ? '2px solid var(--blue)' : '2px solid transparent',
+              }}
+            >
+              Sign In
+            </button>
+            <button
+              type="button"
+              onClick={() => { setAuthTab('signup'); setError(''); }}
+              style={{
+                flex: 1, padding: '10px 0', fontSize: 13, fontWeight: 600, cursor: 'pointer', border: 'none',
+                background: authTab === 'signup' ? 'var(--surface2)' : 'transparent',
+                color: authTab === 'signup' ? 'var(--green)' : 'var(--text3)',
+                borderBottom: authTab === 'signup' ? '2px solid var(--green)' : '2px solid transparent',
+              }}
+            >
+              Create Account
+            </button>
+          </div>
+
+          {authTab === 'login' && (<>
           <button className="sso-btn">
             <span className="sso-icon sso-microsoft">M</span>
             Sign in with Microsoft
@@ -283,6 +374,62 @@ export default function CorporateLogin() {
               {loading ? 'Signing in\u2026' : 'Sign In'}
             </button>
           </form>
+          </>)}
+
+          {authTab === 'signup' && (
+          <form onSubmit={handleSignup}>
+            {error && (
+              <div style={{ color: '#f87171', fontSize: 13, marginBottom: 8, background: 'rgba(248,113,113,0.08)', padding: '8px 12px', borderRadius: 8 }}>
+                {error}
+              </div>
+            )}
+            <div className="form-group">
+              <label className="form-label" htmlFor="signup-name">Display Name</label>
+              <div className="input-wrap">
+                <input
+                  type="text"
+                  id="signup-name"
+                  className="form-input"
+                  placeholder="Your full name"
+                  value={displayName}
+                  onChange={(e) => setDisplayName(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="form-group">
+              <label className="form-label" htmlFor="signup-email">Email</label>
+              <div className="input-wrap">
+                <input
+                  type="email"
+                  id="signup-email"
+                  className="form-input"
+                  placeholder="you@company.com"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                />
+              </div>
+            </div>
+            <div className="form-group">
+              <label className="form-label" htmlFor="signup-password">Password</label>
+              <div className="input-wrap">
+                <input
+                  type="password"
+                  id="signup-password"
+                  className="form-input"
+                  placeholder="6+ characters"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+              </div>
+            </div>
+            <p style={{ fontSize: 11, color: 'var(--text3)', marginBottom: 12 }}>
+              By creating an account you agree to the Terms of Service and Privacy Policy.
+            </p>
+            <button type="submit" className="submit-btn" disabled={loading} style={{ background: 'var(--green)', color: '#04090f' }}>
+              {loading ? 'Creating account\u2026' : 'Create Account'}
+            </button>
+          </form>
+          )}
           </>)}
 
 

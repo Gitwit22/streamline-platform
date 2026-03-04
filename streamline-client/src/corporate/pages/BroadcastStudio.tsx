@@ -35,11 +35,15 @@ export default function BroadcastStudio() {
   const [copied, setCopied] = useState(false);
   const [elapsed, setElapsed] = useState(0);
 
+  // Demo mode: 5-minute max broadcast
+  const DEMO_MAX_BROADCAST_MS = 5 * 60 * 1000;
+
   // Refs for LiveKit
   const videoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const roomRef = useRef<any>(null);
   const startTimeRef = useRef<number>(0);
+  const demoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Go live
   const handleGoLive = useCallback(async () => {
@@ -65,6 +69,8 @@ export default function BroadcastStudio() {
         } catch {}
         startTimeRef.current = Date.now();
         setPhase("live");
+        // Auto-stop after 5 minutes in demo mode
+        demoTimerRef.current = setTimeout(() => handleStop(), DEMO_MAX_BROADCAST_MS);
         return;
       }
 
@@ -137,6 +143,8 @@ export default function BroadcastStudio() {
   // Stop broadcast
   const handleStop = useCallback(async () => {
     try {
+      // Clear demo auto-stop timer
+      if (demoTimerRef.current) { clearTimeout(demoTimerRef.current); demoTimerRef.current = null; }
       // Stop local media
       localStreamRef.current?.getTracks().forEach(t => t.stop());
       // Disconnect from LiveKit

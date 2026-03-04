@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { apiFetchAuth } from "../../lib/api";
 import { editingApi, type Recording } from "../../lib/editingApi";
+import { demoSeedId, demoStorageKey } from "../../lib/demoPaths";
 import { useEduMe } from "../layout/EduProtectedRoute";
+import { isEduBypassEnabled } from "../state/eduMode";
 
 type ArchiveMeta = {
   title?: string;
@@ -205,6 +207,18 @@ export default function Archive() {
     setLoadError(null);
     (async () => {
       try {
+        if (isEduBypassEnabled()) {
+          // Demo mode — show sample recordings instead of hitting the API
+          if (!cancelled) {
+            setItems([
+              { id: demoSeedId("edu", "rec", 1), roomId: demoSeedId("edu", "room", 1), status: "ready", startedAt: new Date(Date.now() - 2 * 3600_000).toISOString(), endedAt: new Date(Date.now() - 2 * 3600_000 + 754_000).toISOString(), duration: 754, url: demoStorageKey("edu", "recordings", "demo-admin", "room-1", "recording.mp4"), thumbnailUrl: demoStorageKey("edu", "thumbnails", "demo-admin", "room-1", "thumb.jpg"), title: "Morning Announcements - Dec 13", format: "mp4" } as any,
+              { id: demoSeedId("edu", "rec", 2), roomId: demoSeedId("edu", "room", 2), status: "ready", startedAt: new Date(Date.now() - 86400_000).toISOString(), endedAt: new Date(Date.now() - 86400_000 + 2712_000).toISOString(), duration: 2712, url: demoStorageKey("edu", "recordings", "demo-admin", "room-2", "recording.mp4"), thumbnailUrl: demoStorageKey("edu", "thumbnails", "demo-admin", "room-2", "thumb.jpg"), title: "Band Practice Session", format: "mp4" } as any,
+              { id: demoSeedId("edu", "rec", 3), roomId: demoSeedId("edu", "room", 3), status: "ready", startedAt: new Date(Date.now() - 3 * 86400_000).toISOString(), endedAt: new Date(Date.now() - 3 * 86400_000 + 525_000).toISOString(), duration: 525, url: demoStorageKey("edu", "recordings", "demo-admin", "room-3", "recording.mp4"), thumbnailUrl: demoStorageKey("edu", "thumbnails", "demo-admin", "room-3", "thumb.jpg"), title: "Principal Address", format: "mp4" } as any,
+            ]);
+            setLoading(false);
+          }
+          return;
+        }
         const recs = await editingApi.getRecordings();
         if (cancelled) return;
         setItems(Array.isArray(recs) ? recs : []);
@@ -280,6 +294,10 @@ export default function Archive() {
     if (!canDownload) return;
     const status = normalizeStatus(r.status);
     if (status !== "ready") return;
+    if (isEduBypassEnabled()) {
+      alert("Downloads are not available in demo mode.");
+      return;
+    }
     try {
       const res = await apiFetchAuth(`/api/recordings/${encodeURIComponent(r.id)}/download-link`, {}, { allowNonOk: true });
       if (res.status === 410) {
@@ -313,6 +331,10 @@ export default function Archive() {
 
   const handleDelete = async (r: Recording) => {
     if (!isFacultyAdmin) return;
+    if (isEduBypassEnabled()) {
+      setItems((cur) => cur.filter((x) => x.id !== r.id));
+      return;
+    }
     const ok = window.confirm("Delete this recording? This cannot be undone.");
     if (!ok) return;
     try {

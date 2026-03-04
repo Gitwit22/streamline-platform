@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { cn } from "@/lib/utils";
+import { demoSeedId, demoDocId } from "@/lib/demoPaths";
 import { Loader2 } from "lucide-react";
 import { fetchTraining, createTraining, updateProgress, type TrainingModule } from "../api/training";
 import { useCorporateMe } from "../layout/CorporateProtectedRoute";
@@ -9,14 +10,14 @@ const tabs = ["Required", "Optional", "Compliance", "Certificates", "Policy Libr
 type Tab = (typeof tabs)[number];
 
 const demoModules: TrainingModule[] = [
-  { id: "t1", title: "OSHA Safety Training 2026", department: "HR & Compliance", durationMinutes: 42, progress: 0, status: "required", icon: "🛡️", assignedTo: [], createdAt: Date.now(), createdBy: "" },
-  { id: "t2", title: "Data Privacy & GDPR", department: "Legal", durationMinutes: 28, progress: 60, status: "required", icon: "🔒", assignedTo: [], createdAt: Date.now(), createdBy: "" },
-  { id: "t3", title: "Remote Work Policy 2026", department: "HR", durationMinutes: 15, progress: 100, status: "completed", icon: "✅", assignedTo: [], createdAt: Date.now(), createdBy: "" },
-  { id: "t4", title: "Anti-Harassment Policy", department: "HR & Legal", durationMinutes: 20, progress: 0, status: "overdue", icon: "⚠️", assignedTo: [], createdAt: Date.now(), createdBy: "" },
-  { id: "t5", title: "Cybersecurity Basics", department: "IT", durationMinutes: 35, progress: 45, status: "in-progress", icon: "🔐", assignedTo: [], createdAt: Date.now(), createdBy: "" },
-  { id: "t6", title: "Fire Safety Protocol", department: "Facilities", durationMinutes: 18, progress: 100, status: "completed", icon: "🔥", assignedTo: [], createdAt: Date.now(), createdBy: "" },
-  { id: "t7", title: "Customer Data Handling", department: "Sales", durationMinutes: 25, progress: 0, status: "optional", icon: "📊", assignedTo: [], createdAt: Date.now(), createdBy: "" },
-  { id: "t8", title: "Leadership Essentials", department: "Management", durationMinutes: 60, progress: 30, status: "optional", icon: "🎯", assignedTo: [], createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "train", 1), title: "OSHA Safety Training 2026", department: "HR & Compliance", durationMinutes: 42, progress: 0, status: "required", icon: "🛡️", assignedTo: [], createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "train", 2), title: "Data Privacy & GDPR", department: "Legal", durationMinutes: 28, progress: 60, status: "required", icon: "🔒", assignedTo: [], createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "train", 3), title: "Remote Work Policy 2026", department: "HR", durationMinutes: 15, progress: 100, status: "completed", icon: "✅", assignedTo: [], createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "train", 4), title: "Anti-Harassment Policy", department: "HR & Legal", durationMinutes: 20, progress: 0, status: "overdue", icon: "⚠️", assignedTo: [], createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "train", 5), title: "Cybersecurity Basics", department: "IT", durationMinutes: 35, progress: 45, status: "in-progress", icon: "🔐", assignedTo: [], createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "train", 6), title: "Fire Safety Protocol", department: "Facilities", durationMinutes: 18, progress: 100, status: "completed", icon: "🔥", assignedTo: [], createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "train", 7), title: "Customer Data Handling", department: "Sales", durationMinutes: 25, progress: 0, status: "optional", icon: "📊", assignedTo: [], createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "train", 8), title: "Leadership Essentials", department: "Management", durationMinutes: 60, progress: 30, status: "optional", icon: "🎯", assignedTo: [], createdAt: Date.now(), createdBy: "" },
 ];
 
 function statusColor(s: string): string {
@@ -72,7 +73,7 @@ export default function Training() {
         const m = await createTraining({ title: newTitle.trim(), department: newDept.trim(), durationMinutes: 30 });
         setModules(prev => [m, ...prev]);
       } else {
-        setModules(prev => [{ id: `demo-${Date.now()}`, title: newTitle.trim(), department: newDept.trim(), durationMinutes: 30, progress: 0, status: "required", icon: "📝", assignedTo: [], createdAt: Date.now(), createdBy: "" }, ...prev]);
+        setModules(prev => [{ id: demoDocId("corporate", "train"), title: newTitle.trim(), department: newDept.trim(), durationMinutes: 30, progress: 0, status: "required", icon: "📝", assignedTo: [], createdAt: Date.now(), createdBy: "" }, ...prev]);
       }
       setNewTitle(""); setNewDept(""); setShowNew(false);
     } finally { setCreating(false); }

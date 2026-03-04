@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { Phone, Video, MonitorUp, Mic, Camera, Circle, Hand, PhoneOff, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { demoSeedId, demoDocId, demoStorageKey } from "@/lib/demoPaths";
 import { fetchCalls, createCall, updateCall, type Call } from "../api/calls";
 import { isCorporateBypassEnabled } from "../state/corporateMode";
 
@@ -8,11 +9,11 @@ const tabs = ["Active Calls", "Scheduled", "Recordings", "Transcripts"] as const
 type Tab = (typeof tabs)[number];
 
 const demoCalls: Call[] = [
-  { id: "c1", title: "Engineering Standup", status: "active", scheduledAt: Date.now() - 720_000, startedAt: Date.now() - 720_000, endedAt: null, duration: null, participants: ["JD", "SK", "MR", "AL"], department: "Engineering", hasRecording: true, hasTranscript: false, recordingUrl: "", createdAt: Date.now(), createdBy: "" },
-  { id: "c2", title: "Product Sync", status: "scheduled", scheduledAt: Date.now() + 3_600_000, startedAt: null, endedAt: null, duration: null, participants: ["JD", "LK", "TP", "MN", "SR", "BW"], department: "Product", hasRecording: false, hasTranscript: false, recordingUrl: "", createdAt: Date.now(), createdBy: "" },
-  { id: "c3", title: "Client Review", status: "scheduled", scheduledAt: Date.now() + 7_200_000, startedAt: null, endedAt: null, duration: null, participants: ["JD", "SK", "MR", "AL"], department: "Sales", hasRecording: false, hasTranscript: false, recordingUrl: "", createdAt: Date.now(), createdBy: "" },
-  { id: "c4", title: "Security Briefing", status: "scheduled", scheduledAt: Date.now() + 10_800_000, startedAt: null, endedAt: null, duration: null, participants: Array.from({ length: 12 }, (_, i) => `U${i}`), department: "IT", hasRecording: false, hasTranscript: false, recordingUrl: "", createdAt: Date.now(), createdBy: "" },
-  { id: "c5", title: "All-Hands Q4 Wrap-up", status: "completed", scheduledAt: Date.now() - 86400_000, startedAt: Date.now() - 86400_000, endedAt: Date.now() - 86400_000 + 2700_000, duration: 2700_000, participants: [], department: "Company", hasRecording: true, hasTranscript: true, recordingUrl: "", createdAt: Date.now() - 86400_000, createdBy: "" },
+  { id: demoSeedId("corporate", "call", 1), title: "Engineering Standup", status: "active", scheduledAt: Date.now() - 720_000, startedAt: Date.now() - 720_000, endedAt: null, duration: null, participants: ["JD", "SK", "MR", "AL"], department: "Engineering", hasRecording: true, hasTranscript: false, recordingUrl: demoStorageKey("corporate", "recordings", "demo-admin", "call-1", "recording.mp4"), createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "call", 2), title: "Product Sync", status: "scheduled", scheduledAt: Date.now() + 3_600_000, startedAt: null, endedAt: null, duration: null, participants: ["JD", "LK", "TP", "MN", "SR", "BW"], department: "Product", hasRecording: false, hasTranscript: false, recordingUrl: "", createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "call", 3), title: "Client Review", status: "scheduled", scheduledAt: Date.now() + 7_200_000, startedAt: null, endedAt: null, duration: null, participants: ["JD", "SK", "MR", "AL"], department: "Sales", hasRecording: false, hasTranscript: false, recordingUrl: "", createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "call", 4), title: "Security Briefing", status: "scheduled", scheduledAt: Date.now() + 10_800_000, startedAt: null, endedAt: null, duration: null, participants: Array.from({ length: 12 }, (_, i) => `U${i}`), department: "IT", hasRecording: false, hasTranscript: false, recordingUrl: "", createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "call", 5), title: "All-Hands Q4 Wrap-up", status: "completed", scheduledAt: Date.now() - 86400_000, startedAt: Date.now() - 86400_000, endedAt: Date.now() - 86400_000 + 2700_000, duration: 2700_000, participants: [], department: "Company", hasRecording: true, hasTranscript: true, recordingUrl: demoStorageKey("corporate", "recordings", "demo-admin", "call-5", "recording.mp4"), createdAt: Date.now() - 86400_000, createdBy: "" },
 ];
 
 function formatTime(ms: number | null) {
@@ -48,7 +49,7 @@ export default function Calls() {
         const c = await createCall({ title: newTitle.trim() });
         setCalls(prev => [c, ...prev]);
       } else {
-        setCalls(prev => [{ id: `demo-${Date.now()}`, title: newTitle.trim(), status: "scheduled", scheduledAt: Date.now() + 3600_000, startedAt: null, endedAt: null, duration: null, participants: [], department: "", hasRecording: false, hasTranscript: false, recordingUrl: "", createdAt: Date.now(), createdBy: "" }, ...prev]);
+        setCalls(prev => [{ id: demoDocId("corporate", "call"), title: newTitle.trim(), status: "scheduled", scheduledAt: Date.now() + 3600_000, startedAt: null, endedAt: null, duration: null, participants: [], department: "", hasRecording: false, hasTranscript: false, recordingUrl: "", createdAt: Date.now(), createdBy: "" }, ...prev]);
       }
       setNewTitle(""); setShowNew(false);
     } finally { setCreating(false); }

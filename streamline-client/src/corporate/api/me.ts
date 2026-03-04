@@ -11,7 +11,19 @@ export interface CorporateMe {
   email: string;
 }
 
-export async function fetchCorporateMe(): Promise<CorporateMe> {
+/** Sentinel returned when user is authenticated but has no org yet. */
+export interface CorporateNeedsOrg {
+  needsOrg: true;
+  uid: string;
+}
+
+export type CorporateMeResult = CorporateMe | CorporateNeedsOrg;
+
+export function isNeedsOrg(result: CorporateMeResult): result is CorporateNeedsOrg {
+  return "needsOrg" in result && (result as any).needsOrg === true;
+}
+
+export async function fetchCorporateMe(): Promise<CorporateMeResult> {
   const res = await apiFetchAuth("/api/corp/me");
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

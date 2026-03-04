@@ -91,6 +91,7 @@ function actionLabel(action: string) {
   return action || "Action";
 }
 
+// Maps to Firestore: env/test/tenants/edu/org
 const DEMO_STATE_KEY = "sl_edu_demo_settings_v1";
 
 function readDemoState(): { org: EduOrgSettings; audit: EduAuditAction[]; storage: EduStorageSummary } {
@@ -98,7 +99,7 @@ function readDemoState(): { org: EduOrgSettings; audit: EduAuditAction[]; storag
 
   const defaults: { org: EduOrgSettings; audit: EduAuditAction[]; storage: EduStorageSummary } = {
     org: {
-      id: "edu-demo-org",
+      id: "test-edu-org",
       name: "EDU Demo",
       timezone: "America/New_York",
       branding: {

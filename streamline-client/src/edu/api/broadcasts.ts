@@ -1,4 +1,9 @@
 import { apiFetchAuth } from "@/lib/api";
+import { isEduBypassEnabled } from "../state/eduMode";
+
+function demoId() {
+  return `demo_${Math.random().toString(36).slice(2, 10)}`;
+}
 
 export interface EduBroadcast {
   id: string;
@@ -53,6 +58,23 @@ export async function goLiveEduBroadcast(body: {
   recordMp4: boolean;
   eventId?: string | null;
 }): Promise<GoLiveResponse> {
+  if (isEduBypassEnabled()) {
+    const id = demoId();
+    return {
+      broadcast: {
+        id, title: body.title, description: "", templateId: body.templateId,
+        layout: body.layout, status: "live", publishHls: body.publishHls,
+        recordMp4: body.recordMp4, alsoYoutube: false, scheduledAt: null,
+        startedAt: Date.now(), endedAt: null, viewers: 0, createdAt: Date.now(),
+        createdBy: "edu-demo", eventId: body.eventId || null, roomId: id,
+        livekitRoomName: id, playlistUrl: null, egressId: null,
+      },
+      lkToken: "demo-token",
+      roomAccessToken: "demo-room-token",
+      livekitUrl: "wss://demo.livekit.cloud",
+      playlistUrl: null,
+    };
+  }
   const res = await apiFetchAuth("/api/edu/broadcasts/go-live", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -70,6 +92,18 @@ export async function goLiveEduBroadcast(body: {
  * Stops HLS egress and marks broadcast as completed.
  */
 export async function stopEduBroadcast(id: string): Promise<{ broadcast: EduBroadcast }> {
+  if (isEduBypassEnabled()) {
+    return {
+      broadcast: {
+        id, title: "Demo Broadcast", description: "", templateId: "announcements",
+        layout: "speaker", status: "ended", publishHls: true, recordMp4: false,
+        alsoYoutube: false, scheduledAt: null, startedAt: Date.now() - 300_000,
+        endedAt: Date.now(), viewers: 0, createdAt: Date.now() - 300_000,
+        createdBy: "edu-demo", eventId: null, roomId: id,
+        livekitRoomName: id, playlistUrl: null, egressId: null,
+      },
+    };
+  }
   const res = await apiFetchAuth(`/api/edu/broadcasts/${id}/stop`, {
     method: "POST",
   });
@@ -85,6 +119,9 @@ export async function stopEduBroadcast(id: string): Promise<{ broadcast: EduBroa
  * Returns live status, playlist URL, and viewer count.
  */
 export async function watchEduBroadcast(id: string): Promise<WatchResponse> {
+  if (isEduBypassEnabled()) {
+    return { id, title: "Demo Broadcast", status: "live", playlistUrl: null, viewerCount: 42, startedAt: Date.now() - 120_000 };
+  }
   const res = await apiFetchAuth(`/api/edu/broadcasts/${id}/watch`);
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -100,6 +137,7 @@ export async function watchEduBroadcast(id: string): Promise<WatchResponse> {
 export async function fetchEduBroadcasts(params?: {
   limit?: number;
 }): Promise<EduBroadcast[]> {
+  if (isEduBypassEnabled()) return [];
   const qs = new URLSearchParams();
   if (params?.limit) qs.set("limit", String(params.limit));
   const url = `/api/edu/broadcasts${qs.toString() ? "?" + qs : ""}`;

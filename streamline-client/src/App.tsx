@@ -29,6 +29,7 @@ import EduOnboarding from "./edu/pages/Onboarding";
 
 import CorporateLanding from "./corporate/entry/CorporateLanding";
 import CorporateLogin from "./corporate/entry/CorporateLogin";
+import CorporateJoinOrg from "./corporate/entry/JoinOrg";
 import CorporateProtectedRoute from "./corporate/layout/CorporateProtectedRoute";
 import CorporateShell from "./corporate/layout/CorporateShell";
 import CorporateDashboard from "./corporate/pages/Dashboard";
@@ -45,6 +46,7 @@ import CorporateBroadcastViewer from "./corporate/pages/BroadcastViewer";
 import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
 import { clearPlatformFlagsCache } from "./lib/platformFlagsCache";
+import { isEduBypassEnabled } from "./edu/state/eduMode";
 
 
 function App() {
@@ -71,6 +73,14 @@ function App() {
         return;
       }
       if (DEMO_LANDING_ENABLED && path === "/") {
+        return;
+      }
+
+      // ── EDU demo/bypass mode: suppress everything ───────────────────
+      // In demo mode there is no real auth token, so every API call will
+      // 401.  We must NOT clear storage or flash the banner — the bypass
+      // flag *is* the auth for this session.
+      if (isEduBypassEnabled() && path.startsWith("/streamline/edu")) {
         return;
       }
 
@@ -136,7 +146,10 @@ function App() {
       location.pathname.startsWith("/login") ||
       location.pathname.startsWith("/signup") ||
       location.pathname.startsWith("/live") ||
-      location.pathname.startsWith("/ig/")
+      location.pathname.startsWith("/ig/") ||
+      location.pathname.startsWith("/streamline/edu/login") ||
+      location.pathname.startsWith("/streamline/corporate/login") ||
+      (DEMO_LANDING_ENABLED && location.pathname === "/")
     ) {
       setShowUnauthorized(false);
     }
@@ -167,10 +180,21 @@ function App() {
           </div>
           <button
             onClick={() => {
-              const next = `${window.location.pathname}${window.location.search}`;
-              const sp = new URLSearchParams();
-              sp.set("next", next);
-              nav(`/login?${sp.toString()}`);
+              const path = window.location.pathname || "";
+              const next = `${path}${window.location.search}`;
+              if (path.startsWith("/streamline/edu")) {
+                const sp = new URLSearchParams();
+                sp.set("returnTo", next);
+                nav(`/streamline/edu/login?${sp.toString()}`);
+              } else if (path.startsWith("/streamline/corporate")) {
+                const sp = new URLSearchParams();
+                sp.set("returnTo", next);
+                nav(`/streamline/corporate/login?${sp.toString()}`);
+              } else {
+                const sp = new URLSearchParams();
+                sp.set("next", next);
+                nav(`/login?${sp.toString()}`);
+              }
             }}
             style={{
               fontSize: 12,
@@ -196,6 +220,7 @@ function App() {
         <Route index element={<CorporateLanding />} />
         <Route path="landing" element={<CorporateLanding />} />
         <Route path="login" element={<CorporateLogin />} />
+        <Route path="join" element={<CorporateJoinOrg />} />
 
         <Route
           element={

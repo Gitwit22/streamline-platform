@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { Radio, Users, Loader2, Play } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { demoSeedId, demoDocId } from "@/lib/demoPaths";
 import { fetchBroadcasts, createBroadcast, deleteBroadcast, type Broadcast } from "../api/broadcasts";
 import { useCorporateMe } from "../layout/CorporateProtectedRoute";
 import { isCorporateBypassEnabled } from "../state/corporateMode";
@@ -10,11 +11,11 @@ const tabs = ["Live & Upcoming", "Archive", "On-Demand", "Analytics"] as const;
 type Tab = (typeof tabs)[number];
 
 const demoBroadcasts: Broadcast[] = [
-  { id: "b1", title: "Q1 All-Hands Town Hall", description: "", team: "Executive Team", scope: "Company-wide", status: "live", required: false, scheduledAt: Date.now() - 18 * 60_000, startedAt: Date.now() - 18 * 60_000, endedAt: null, viewers: 847, createdAt: Date.now(), createdBy: "" },
-  { id: "b2", title: "Annual Safety Briefing 2026", description: "", team: "HR & Compliance", scope: "company-wide", status: "scheduled", required: true, scheduledAt: Date.now() + 3600_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
-  { id: "b3", title: "Engineering Quarterly Review", description: "", team: "Engineering", scope: "department", status: "scheduled", required: false, scheduledAt: Date.now() + 86400_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
-  { id: "b4", title: "Data Privacy Policy Update", description: "", team: "Legal & Compliance", scope: "company-wide", status: "scheduled", required: true, scheduledAt: Date.now() + 3 * 86400_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
-  { id: "b5", title: "CEO Monthly Update", description: "", team: "Executive", scope: "company-wide", status: "scheduled", required: false, scheduledAt: Date.now() + 10 * 86400_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "bcast", 1), title: "Q1 All-Hands Town Hall", description: "", team: "Executive Team", scope: "Company-wide", status: "live", required: false, scheduledAt: Date.now() - 18 * 60_000, startedAt: Date.now() - 18 * 60_000, endedAt: null, viewers: 847, createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "bcast", 2), title: "Annual Safety Briefing 2026", description: "", team: "HR & Compliance", scope: "company-wide", status: "scheduled", required: true, scheduledAt: Date.now() + 3600_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "bcast", 3), title: "Engineering Quarterly Review", description: "", team: "Engineering", scope: "department", status: "scheduled", required: false, scheduledAt: Date.now() + 86400_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "bcast", 4), title: "Data Privacy Policy Update", description: "", team: "Legal & Compliance", scope: "company-wide", status: "scheduled", required: true, scheduledAt: Date.now() + 3 * 86400_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
+  { id: demoSeedId("corporate", "bcast", 5), title: "CEO Monthly Update", description: "", team: "Executive", scope: "company-wide", status: "scheduled", required: false, scheduledAt: Date.now() + 10 * 86400_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" },
 ];
 
 function formatScheduled(ms: number | null) {
@@ -62,7 +63,7 @@ export default function Broadcasts() {
         setBroadcasts(prev => [b, ...prev]);
         newId = b.id;
       } else {
-        newId = `demo-${Date.now()}`;
+        newId = demoDocId("corporate", "bcast");
         setBroadcasts(prev => [{ id: newId, title: newTitle.trim(), description: "", team: newTeam.trim(), scope: "company-wide", status: "scheduled" as const, required: false, scheduledAt: Date.now() + 86400_000, startedAt: null, endedAt: null, viewers: 0, createdAt: Date.now(), createdBy: "" }, ...prev]);
       }
       setNewTitle(""); setNewTeam(""); setShowNew(false);

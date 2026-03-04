@@ -47,6 +47,7 @@ import corpTrainingRoutes from "./routes/corpTraining";
 import corpDocumentsRoutes from "./routes/corpDocuments";
 import corpChatRoutes from "./routes/corpChat";
 import corpAdminRoutes from "./routes/corpAdmin";
+import corpOrgsRoutes from "./routes/corpOrgs";
 import onboardingRoutes from "./routes/onboarding";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
@@ -283,6 +284,7 @@ app.use("/api/corp", corpTrainingRoutes);
 app.use("/api/corp", corpDocumentsRoutes);
 app.use("/api/corp", corpChatRoutes);
 app.use("/api/corp", corpAdminRoutes);
+app.use("/api/corp", corpOrgsRoutes);
 
 // Billing routes
 app.use("/api/billing", billingRoutes);

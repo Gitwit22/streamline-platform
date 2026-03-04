@@ -1,4 +1,5 @@
 import { apiFetchAuth } from "../../lib/api";
+import { isEduBypassEnabled } from "../state/eduMode";
 
 export type EduSavedEmbed = {
   embedId: string;
@@ -21,6 +22,15 @@ export async function createEduSavedEmbed(params: {
     logoUrl?: string;
   };
 }): Promise<EduSavedEmbed> {
+  if (isEduBypassEnabled()) {
+    return {
+      embedId: `demo-embed-${Date.now()}`,
+      viewerPath: "/live/demo-embed",
+      roomId: "demo-room",
+      name: params.name,
+      description: params.description,
+    };
+  }
   const res = await apiFetchAuth("/api/saved-embeds", {
     method: "POST",
     body: JSON.stringify({

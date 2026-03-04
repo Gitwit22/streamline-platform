@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { Shield, Users, Settings, Key, FileText, Loader2, Plus, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { demoSeedId } from "@/lib/demoPaths";
 import { fetchUsers, updateUserRole, inviteUser, fetchAuditLog, fetchSettings, updateSettings, type OrgUser, type AuditEntry, type OrgSettings } from "../api/admin";
 import { useCorporateMe } from "../layout/CorporateProtectedRoute";
 import { isCorporateBypassEnabled } from "../state/corporateMode";
@@ -9,19 +10,19 @@ const tabs = ["Overview", "Users", "Roles", "Security", "Audit Logs", "Settings"
 type Tab = (typeof tabs)[number];
 
 const demoUsers: OrgUser[] = [
-  { uid: "u1", email: "sarah.kim@corp.io", displayName: "Sarah Kim", role: "admin", department: "Engineering", joinedAt: Date.now() - 365 * 86400_000 },
-  { uid: "u2", email: "dev.patel@corp.io", displayName: "Dev Patel", role: "manager", department: "Engineering", joinedAt: Date.now() - 200 * 86400_000 },
-  { uid: "u3", email: "marcus.j@corp.io", displayName: "Marcus Johnson", role: "member", department: "Sales", joinedAt: Date.now() - 150 * 86400_000 },
-  { uid: "u4", email: "lisa.chen@corp.io", displayName: "Lisa Chen", role: "member", department: "Marketing", joinedAt: Date.now() - 90 * 86400_000 },
-  { uid: "u5", email: "tom.w@corp.io", displayName: "Tom Wilson", role: "viewer", department: "Operations", joinedAt: Date.now() - 30 * 86400_000 },
+  { uid: demoSeedId("corporate", "usr", 1), email: "sarah.kim@corp.io", displayName: "Sarah Kim", role: "admin", department: "Engineering", joinedAt: Date.now() - 365 * 86400_000 },
+  { uid: demoSeedId("corporate", "usr", 2), email: "dev.patel@corp.io", displayName: "Dev Patel", role: "manager", department: "Engineering", joinedAt: Date.now() - 200 * 86400_000 },
+  { uid: demoSeedId("corporate", "usr", 3), email: "marcus.j@corp.io", displayName: "Marcus Johnson", role: "member", department: "Sales", joinedAt: Date.now() - 150 * 86400_000 },
+  { uid: demoSeedId("corporate", "usr", 4), email: "lisa.chen@corp.io", displayName: "Lisa Chen", role: "member", department: "Marketing", joinedAt: Date.now() - 90 * 86400_000 },
+  { uid: demoSeedId("corporate", "usr", 5), email: "tom.w@corp.io", displayName: "Tom Wilson", role: "viewer", department: "Operations", joinedAt: Date.now() - 30 * 86400_000 },
 ];
 
 const demoAudit: AuditEntry[] = [
-  { id: "a1", action: "user.role.update", actor: "sarah.kim@corp.io", target: "dev.patel@corp.io", detail: "Role changed to manager", timestamp: Date.now() - 3600_000 },
-  { id: "a2", action: "broadcast.create", actor: "dev.patel@corp.io", target: "Q1 Town Hall", detail: "Broadcast created", timestamp: Date.now() - 7200_000 },
-  { id: "a3", action: "document.upload", actor: "marcus.j@corp.io", target: "Employee Handbook v3.2", detail: "New version uploaded", timestamp: Date.now() - 86400_000 },
-  { id: "a4", action: "settings.update", actor: "sarah.kim@corp.io", target: "org.settings", detail: "SSO enabled", timestamp: Date.now() - 2 * 86400_000 },
-  { id: "a5", action: "user.invite", actor: "sarah.kim@corp.io", target: "newuser@corp.io", detail: "Invitation sent", timestamp: Date.now() - 3 * 86400_000 },
+  { id: demoSeedId("corporate", "audit", 1), action: "user.role.update", actor: "sarah.kim@corp.io", target: "dev.patel@corp.io", detail: "Role changed to manager", timestamp: Date.now() - 3600_000 },
+  { id: demoSeedId("corporate", "audit", 2), action: "broadcast.create", actor: "dev.patel@corp.io", target: "Q1 Town Hall", detail: "Broadcast created", timestamp: Date.now() - 7200_000 },
+  { id: demoSeedId("corporate", "audit", 3), action: "document.upload", actor: "marcus.j@corp.io", target: "Employee Handbook v3.2", detail: "New version uploaded", timestamp: Date.now() - 86400_000 },
+  { id: demoSeedId("corporate", "audit", 4), action: "settings.update", actor: "sarah.kim@corp.io", target: "org.settings", detail: "SSO enabled", timestamp: Date.now() - 2 * 86400_000 },
+  { id: demoSeedId("corporate", "audit", 5), action: "user.invite", actor: "sarah.kim@corp.io", target: "newuser@corp.io", detail: "Invitation sent", timestamp: Date.now() - 3 * 86400_000 },
 ];
 
 const demoSettings: OrgSettings = { orgName: "Acme Corp", ssoEnabled: true, defaultRole: "member", allowGuestAccess: false, retentionDays: 90 };
