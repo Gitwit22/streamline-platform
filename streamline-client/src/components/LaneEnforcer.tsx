@@ -1,15 +1,15 @@
 /**
  * LaneEnforcer — Global lane isolation guard
  *
- * Prevents EDU / Corporate users from accidentally (or intentionally)
- * landing on Creator routes. Reads `orgType` from the canonical
- * `sl_user` localStorage entry (set by `/api/account/me` during login)
- * and redirects to the correct lane dashboard whenever the user is on
- * a Creator-only route.
+ * Prevents EDU / Corporate users from accidentally landing on
+ * unrecognised routes. Reads `orgType` from the canonical `sl_user`
+ * localStorage entry (set by `/api/account/me` during login) and
+ * redirects to the correct lane dashboard when the user is on an
+ * unknown route.
  *
  * This is the outermost enforcement layer. Individual route guards
- * (ProtectedRoute, EduProtectedRoute, CorporateProtectedRoute) provide
- * additional per-lane checks as a belt-and-suspenders measure.
+ * (EduProtectedRoute, CorporateProtectedRoute) provide additional
+ * per-lane checks as a belt-and-suspenders measure.
  */
 import { useEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -30,11 +30,11 @@ function getStoredOrgType(): string | null {
 }
 
 /**
- * Returns true when the given path belongs to the Creator lane
- * (i.e. it is NOT a public page and NOT under /streamline/edu|corporate).
+ * Returns true when the given path is an unknown route (not under
+ * a known lane or a public page).
  */
-function isCreatorRoute(path: string): boolean {
-  // EDU / Corporate lane paths — never considered "creator"
+function isUnknownRoute(path: string): boolean {
+  // EDU / Corporate lane paths
   if (path.startsWith("/streamline/edu")) return false;
   if (path.startsWith("/streamline/corporate")) return false;
 
@@ -60,7 +60,7 @@ function isCreatorRoute(path: string): boolean {
   if (path.startsWith("/i/")) return false;
   if (path.startsWith("/invite/")) return false;
 
-  // Everything remaining is a Creator route
+  // Everything remaining is an unknown route
   return true;
 }
 
@@ -76,10 +76,10 @@ export default function LaneEnforcer({ children }: { children: React.ReactNode }
   const nav = useNavigate();
 
   useEffect(() => {
-    if (!isCreatorRoute(pathname)) return;
+    if (!isUnknownRoute(pathname)) return;
 
     const orgType = getStoredOrgType();
-    if (!orgType) return; // creator user or not logged in — nothing to do
+    if (!orgType) return; // not logged in — nothing to do
 
     const target = LANE_DASHBOARDS[orgType];
     if (target) {

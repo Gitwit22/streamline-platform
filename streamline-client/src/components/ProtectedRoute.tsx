@@ -4,7 +4,7 @@ import { useAuthMe } from "../hooks/useAuthMe";
 
 /**
  * Reads orgType from the canonical sl_user localStorage entry
- * (set by /api/account/me during login). Returns null for creator users.
+ * (set by /api/account/me during login). Returns null if no orgType set.
  */
 function getStoredOrgType(): string | null {
   try {
@@ -32,7 +32,7 @@ export function ProtectedRoute({ children }: { children: ReactElement }) {
     return <Navigate to={`/login?next=${encodeURIComponent(next)}`} replace />;
   }
 
-  // Prevent EDU / Corporate users from accessing Creator routes.
+  // Redirect users to their lane dashboard.
   const orgType = getStoredOrgType();
   const laneDash = orgType ? LANE_DASHBOARDS[orgType] : null;
   if (laneDash) {

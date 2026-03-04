@@ -89,12 +89,11 @@ export default function EduProtectedRoute({ children }: { children: ReactNode })
 
   const eduAllowed = me.orgType === "edu";
   if (!eduAllowed) {
-    // Don't send non-EDU users to Creator; send them to the EDU login
-    // with a hint, or their own lane if orgType is known.
+    // Send non-EDU users to their own lane, or fallback to EDU login.
     if (me.orgType === "corporate") {
       return <Navigate to="/streamline/corporate/dashboard" replace />;
     }
-    // Fallback: EDU login page (not Creator /join)
+    // Fallback: EDU login page
     return <Navigate to="/streamline/edu/login" replace />;
   }
 

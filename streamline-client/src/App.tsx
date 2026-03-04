@@ -12,8 +12,6 @@ import LaneEnforcer from "./components/LaneEnforcer";
 import Demo from "./pages/Demo";
 import { DEMO_LANDING_ENABLED } from "./config/demoLanding";
 
-import { creatorRoutes } from "./creator/routes";
-
 import EduLanding from "./edu/entry/EduLanding";
 import EduLogin from "./edu/entry/EduLogin";
 import EduProtectedRoute from "./edu/layout/EduProtectedRoute";
@@ -47,28 +45,12 @@ import CorporateBroadcastViewer from "./corporate/pages/BroadcastViewer";
 import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
 import { clearPlatformFlagsCache } from "./lib/platformFlagsCache";
-import { useFeatureAccess } from "./hooks/useFeatureAccess";
-import { useEffectiveEntitlements } from "./hooks/useEffectiveEntitlements";
 
 
 function App() {
   const nav = useNavigate();
   const location = useLocation();
   const [showUnauthorized, setShowUnauthorized] = useState(false);
-  const { effectiveEntitlements } = useEffectiveEntitlements();
-  const { access } = useFeatureAccess(effectiveEntitlements);
-
-  const canContentLibrary = access.contentLibrary.allowed;
-  const canProjects = access.projects.allowed;
-  const canEditor = access.editor.allowed;
-  const canMyContentRecordings = !!access?.myContentRecordings?.allowed;
-  const canMyContent = !!access?.myContent?.allowed;
-
-  const myContentTarget = canProjects
-    ? "/projects"
-    : (canContentLibrary || canMyContentRecordings)
-      ? "/content"
-      : null;
 
   useEffect(() => {
     const onUnauthorized = () => {
@@ -288,8 +270,8 @@ function App() {
       <Route path="/billing/canceled" element={<BillingCanceled />} />
       <Route path="/billing/success" element={<BillingSuccess />} />
 
-      {/* Creator lane */}
-      {creatorRoutes({ canContentLibrary, canMyContentRecordings, canProjects, canEditor, canMyContent, myContentTarget })}
+      {/* Catch-all: redirect unknown routes to demo landing */}
+      <Route path="*" element={<Navigate to="/" replace />} />
 
       </Routes>
     </LaneEnforcer>

@@ -103,7 +103,7 @@ export default function CorporateProtectedRoute({ children }: { children: ReactN
     if ((me as any).orgType === "edu") {
       return <Navigate to="/streamline/edu/dashboard" replace />;
     }
-    // Fallback: Corporate login page (not Creator /join)
+    // Fallback: Corporate login page
     return <Navigate to="/streamline/corporate/login" replace />;
   }
 
