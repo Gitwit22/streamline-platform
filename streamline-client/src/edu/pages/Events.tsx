@@ -391,6 +391,7 @@ export default function Events() {
     if (isBypass) {
       const tz = readDemoTimezone();
       if (tz && !cancelled) setOrgTimezone(tz);
+      return () => { cancelled = true; };
     }
 
     fetchEduOrg()
@@ -611,18 +612,25 @@ export default function Events() {
             // Try to create a viewer embed for this event (best-effort)
             if (ev.outputs.publishHls) {
               try {
-                const embed = await createEduSavedEmbed({
-                  name: `${ev.title} (Viewer)`,
-                  description: "Event viewer link",
-                  hlsConfig: {
-                    title: ev.title,
-                    offlineMessage: "Off Air",
-                    theme: "dark",
-                    enabled: true,
-                  },
-                });
-                upsertEduEvent({ ...ev, savedEmbedId: embed.embedId });
-                refreshEvents();
+                if (isEduBypassEnabled()) {
+                  // Demo mode: generate a mock embed id
+                  const demoEmbedId = `demo_embed_${Date.now()}`;
+                  upsertEduEvent({ ...ev, savedEmbedId: demoEmbedId });
+                  refreshEvents();
+                } else {
+                  const embed = await createEduSavedEmbed({
+                    name: `${ev.title} (Viewer)`,
+                    description: "Event viewer link",
+                    hlsConfig: {
+                      title: ev.title,
+                      offlineMessage: "Off Air",
+                      theme: "dark",
+                      enabled: true,
+                    },
+                  });
+                  upsertEduEvent({ ...ev, savedEmbedId: embed.embedId });
+                  refreshEvents();
+                }
               } catch {
                 // ignore
               }
@@ -651,6 +659,7 @@ export default function Events() {
           }}
           onStart={() => nav(`/streamline/edu/broadcast?eventId=${encodeURIComponent(selectedEvent.id)}`)}
           fetchYoutubeDestinations={isFacultyAdmin ? async () => {
+            if (isEduBypassEnabled()) return [] as DestinationItem[];
             const res = await fetchDestinations({ platform: "youtube", includeDisabled: false });
             return Array.isArray((res as any)?.items) ? ((res as any).items as DestinationItem[]) : [];
           } : undefined}
@@ -992,9 +1001,7 @@ function EventDetailDrawer({
   const viewerUrl = useMemo(() => {
     const origin = typeof window !== "undefined" ? window.location.origin : "";
     if (!draft.savedEmbedId) return "";
-    const u = new URL(`${origin}/streamline/edu/embed/event`);
-    u.searchParams.set("embedId", draft.savedEmbedId);
-    return u.toString();
+    return `${origin}/live/${encodeURIComponent(draft.savedEmbedId)}`;
   }, [draft.savedEmbedId]);
 
   const embedCode = useMemo(() => {

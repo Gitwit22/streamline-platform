@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { createEduSavedEmbed } from "../api/savedEmbeds";
 import { listEduEventsFromApi, type EduEventListItem } from "../api/events";
 import { upsertEduEventEmbed, type EduEventEmbed } from "../api/embeds";
+import { isEduBypassEnabled } from "../state/eduMode";
+import { listEduEvents, computeEduEventStatus } from "../state/eduEvents";
 
 type EmbedTarget = "event" | "channel" | "recording";
 type Placement = "internal" | "public";
@@ -58,6 +60,7 @@ function statusLabel(raw: string | null) {
 }
 
 export default function Embed() {
+  const isBypass = isEduBypassEnabled();
   const [target, setTarget] = useState<EmbedTarget>("event");
   const [placement, setPlacement] = useState<Placement>("internal");
   const [accessMode, setAccessMode] = useState<AccessMode>("public");
@@ -94,9 +97,21 @@ export default function Embed() {
       setEventEmbedLoading(true);
       setEventEmbedError(null);
       try {
-        const embed = await upsertEduEventEmbed({ eventId, accessMode });
-        if (cancelled) return;
-        setEventEmbed(embed);
+        if (isBypass) {
+          // Demo mode: mock embed
+          const mockEmbed: EduEventEmbed = {
+            embedId: `demo_evt_embed_${eventId}`,
+            eventId,
+            accessMode,
+            token: "demo_token_" + eventId,
+            hasPassword: false,
+          };
+          if (!cancelled) setEventEmbed(mockEmbed);
+        } else {
+          const embed = await upsertEduEventEmbed({ eventId, accessMode });
+          if (cancelled) return;
+          setEventEmbed(embed);
+        }
       } catch (e: any) {
         if (cancelled) return;
         setEventEmbed(null);
@@ -118,7 +133,22 @@ export default function Embed() {
       setEventsLoading(true);
       setEventsError(null);
       try {
-        const list = await listEduEventsFromApi({ limit: 50 });
+        let list: EduEventListItem[];
+        if (isBypass) {
+          // Demo mode: derive event list from local state
+          list = listEduEvents()
+            .filter((e) => computeEduEventStatus(e) !== "canceled")
+            .map((e) => ({
+              id: e.id,
+              title: e.title,
+              status: computeEduEventStatus(e),
+              scheduledStartAt: e.startsAt,
+              broadcastId: null,
+              updatedAt: null,
+            }));
+        } else {
+          list = await listEduEventsFromApi({ limit: 50 });
+        }
         if (cancelled) return;
         setEvents(list);
         if (!selectedEventId && list[0]?.id) setSelectedEventId(list[0].id);
@@ -143,9 +173,7 @@ export default function Embed() {
 
   const channelViewerUrl = useMemo(() => {
     if (!channelEmbedId) return "";
-    const u = new URL(`${origin}/streamline/edu/embed/event`);
-    u.searchParams.set("embedId", channelEmbedId);
-    return u.toString();
+    return `${origin}/live/${encodeURIComponent(channelEmbedId)}`;
   }, [origin, channelEmbedId]);
 
   async function ensureChannelEmbed() {
@@ -153,6 +181,13 @@ export default function Embed() {
     setChannelBusy(true);
     setChannelError(null);
     try {
+      if (isBypass) {
+        const demoId = `demo_channel_${Date.now()}`;
+        persistSchoolNetworkEmbedId(demoId);
+        setChannelEmbedId(demoId);
+        setChannelBusy(false);
+        return;
+      }
       const embed = await createEduSavedEmbed({
         name: "School Network (Current Live)",
         description: "Stable embed for Morning Announcements / Current Live",
@@ -435,12 +470,17 @@ export default function Embed() {
                     setPasswordBusy(true);
                     setPasswordError(null);
                     try {
-                      const embed = await upsertEduEventEmbed({
-                        eventId: selectedEventId,
-                        accessMode: "password",
-                        password: passwordDraft,
-                      });
-                      setEventEmbed(embed);
+                      if (isBypass) {
+                        // Demo mode: mock password set
+                        setEventEmbed((cur) => cur ? { ...cur, hasPassword: true, accessMode: "password" } : cur);
+                      } else {
+                        const embed = await upsertEduEventEmbed({
+                          eventId: selectedEventId,
+                          accessMode: "password",
+                          password: passwordDraft,
+                        });
+                        setEventEmbed(embed);
+                      }
                     } catch (e: any) {
                       setPasswordError(e?.message || "Failed to set password");
                     } finally {

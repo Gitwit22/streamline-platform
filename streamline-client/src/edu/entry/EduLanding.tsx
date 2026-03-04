@@ -327,7 +327,7 @@ export default function EduLanding() {
                 <br />
                 <span className="text-orange-300">{'<iframe'}</span>
                 <br />
-                <span className="pl-4 text-slate-300">{'src="https://streamline.app/streamline/edu/embed/event?embedId=abc123"'}</span>
+                <span className="pl-4 text-slate-300">{'src="https://streamline.app/live/abc123"'}</span>
                 <br />
                 <span className="pl-4 text-slate-300">{'width="100%" height="480"'}</span>
                 <br />

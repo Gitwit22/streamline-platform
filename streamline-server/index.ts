@@ -20,7 +20,7 @@ import roomGuestAccessRoutes from "./routes/roomGuestAccess";
 // ── Creator-only imports (disabled for EDU build) ──────────────────
 // import multistreamRoutes from "./routes/multistream";
 // import liveRoutes from "./routes/live";
-// import savedEmbedsRoutes from "./routes/savedEmbeds";
+import savedEmbedsRoutes from "./routes/savedEmbeds";
 // import editingRoutes from "./routes/editing";
 import roomsResolveRoutes from "./routes/roomsResolve";
 import roomsHlsConfigRoutes from "./routes/roomsHlsConfig";
@@ -34,7 +34,6 @@ import destinationsRoutes from "./routes/destinations";
 // import liveRoutes from "./routes/live";  // Creator-only: disabled for EDU build
 import statsRoutes from "./routes/stats";
 import telemetryRoutes from "./routes/telemetry";
-// import savedEmbedsRoutes from "./routes/savedEmbeds";  // Creator-only: disabled for EDU build
 // import editingRoutes from "./routes/editing";  // Creator-only: disabled for EDU build
 import maintenanceRoutes from "./routes/maintenance";
 import eduEventsRoutes from "./routes/eduEvents";
@@ -263,8 +262,8 @@ app.use("/api/destinations", destinationsRoutes);
 // Live preflight — Creator-only: disabled for EDU build
 // app.use("/api/live", liveRoutes);
 
-// Saved embeds — Creator-only: disabled for EDU build
-// app.use("/api/saved-embeds", savedEmbedsRoutes);
+// Saved embeds — re-enabled for EDU (Events + Embed pages)
+app.use("/api/saved-embeds", savedEmbedsRoutes);
 
 // EDU events (authenticated admin UI)
 app.use("/api/edu", eduEventsRoutes);
