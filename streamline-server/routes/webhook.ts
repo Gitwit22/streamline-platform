@@ -23,6 +23,8 @@ import {
   S3Client,
   HeadObjectCommand,
 } from "@aws-sdk/client-s3";
+import { tenantCol, globalCol } from "../lib/dbPaths";
+import { storagePrefix } from "../lib/storagePaths";
 
 const router = express.Router();
 
@@ -37,7 +39,7 @@ function mustGetEnv(name: string): string {
 }
 
 function getUserRef(uid: string) {
-  return db.collection("users").doc(uid);
+  return globalCol("users").doc(uid);
 }
 
 function getR2Config() {
@@ -95,7 +97,7 @@ async function incrementTranscodeMinutes(params: {
 
   const monthKey = getCurrentMonthKey();
   const usageDocId = `${params.uid}_${monthKey}`;
-  const usageRef = db.collection("usageMonthly").doc(usageDocId);
+  const usageRef = tenantCol("usageMonthly").doc(usageDocId);
 
   await db.runTransaction(async (tx) => {
     const snap = await tx.get(usageRef);
@@ -155,7 +157,7 @@ async function incrementHlsMinutes(params: {
 
   const monthKey = getCurrentMonthKey();
   const usageDocId = `${params.uid}_${monthKey}`;
-  const usageRef = db.collection("usageMonthly").doc(usageDocId);
+  const usageRef = tenantCol("usageMonthly").doc(usageDocId);
   const snap = await usageRef.get();
   const existing = snap.exists ? (snap.data() as any) : {};
   const prevUsage = existing.usage || {};
@@ -198,7 +200,7 @@ async function maybeCountRecordingUsage(params: {
   const usageType = typeof params.recordingData?.usageType === "string" ? params.recordingData.usageType : "recording_only";
 
   const monthKey = getCurrentMonthKey();
-  const usageRef = db.collection("usageMonthly").doc(`${uid}_${monthKey}`);
+  const usageRef = tenantCol("usageMonthly").doc(`${uid}_${monthKey}`);
 
   let didCount = false;
 
@@ -666,7 +668,7 @@ router.post(
             fromPlan: currentPlan,
           });
 
-          await db.collection("users").doc(userId).set(
+          await globalCol("users").doc(userId).set(
             {
               planId: "free",
               billingActive: false,
@@ -854,8 +856,7 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     // If this egressId belongs to an HLS session (rooms.hls.egressId), do an
     // immediate best-effort cleanup so segments don't linger after the stream ends.
     try {
-      const roomSnap = await db
-        .collection("rooms")
+      const roomSnap = await tenantCol("rooms")
         .where("hls.egressId", "==", egressId)
         .limit(1)
         .get();
@@ -863,7 +864,7 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       if (!roomSnap.empty) {
         const roomDoc = roomSnap.docs[0];
         const roomData = (roomDoc.data() || {}) as any;
-        const prefix = String(roomData?.hls?.prefix || `hls/${roomDoc.id}/`).trim();
+        const prefix = String(roomData?.hls?.prefix || storagePrefix("hls", roomDoc.id)).trim();
 
         // Count HLS usage for cases where the app did not call /api/hls/stop.
         try {
@@ -901,8 +902,7 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     // With retry on not found (doc might not be written yet)
     // =========================================================================
     async function findRecordingByEgressId(egressId: string, retryCount: number = 0): Promise<FirebaseFirestore.QueryDocumentSnapshot | null> {
-      const querySnap = await db
-        .collection("recordings")
+      const querySnap = await tenantCol("recordings")
         .where("egressId", "==", egressId)
         .limit(1)
         .get();
@@ -937,7 +937,7 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     if (!recordingDoc) {
       // Not HLS, and not a recording: treat as other egress types (e.g., RTMP multistream).
       try {
-        const sessionRef = db.collection("egressSessions").doc(egressId);
+        const sessionRef = tenantCol("egressSessions").doc(egressId);
         const sessionSnap = await sessionRef.get();
         if (sessionSnap.exists) {
           const session = sessionSnap.data() as any;
@@ -954,7 +954,7 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
               if (sData.countedAt) return;
 
               const monthKey = getCurrentMonthKey();
-              const usageRef = db.collection("usageMonthly").doc(`${usageUid}_${monthKey}`);
+              const usageRef = tenantCol("usageMonthly").doc(`${usageUid}_${monthKey}`);
               const usageSnap = await tx.get(usageRef);
               const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
               const usage = existing.usage || {};
@@ -1166,7 +1166,7 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     try {
       const roomId = typeof recordingData.roomId === "string" ? String(recordingData.roomId).trim() : "";
       if (roomId) {
-        const roomRef = db.collection("rooms").doc(roomId);
+        const roomRef = tenantCol("rooms").doc(roomId);
         const roomSnap = await roomRef.get();
         const roomData = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
         const currentLatest = String(roomData.latestRecordingId || "").trim();

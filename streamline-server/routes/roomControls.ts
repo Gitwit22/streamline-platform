@@ -7,6 +7,7 @@ import { getLiveKitSdk } from "../lib/livekit";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
 import { roleToParticipantPermission } from "../lib/livekitPermissions";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -36,7 +37,7 @@ const DEFAULT_CONTROLS: Required<Pick<RoomControls, "canPublishAudio" | "tileVis
 };
 
 function controlsDocRef(roomId: string, docId: string) {
-  return admin.firestore().collection("rooms").doc(roomId).collection("controls").doc(docId);
+  return tenantCol("rooms").doc(roomId).collection("controls").doc(docId);
 }
 
 function normalizeControlsDocId(raw: any): string {
@@ -106,7 +107,7 @@ const SYSTEM_ROLE_PRESETS: Record<
 
 function presetDocRef(uid: string, presetId: PresetId) {
   // "Account" is currently modeled as the authenticated user document.
-  return admin.firestore().collection("users").doc(uid).collection("rolePresets").doc(presetId);
+  return globalCol("users").doc(uid).collection("rolePresets").doc(presetId);
 }
 
 function parsePresetId(raw: any): RawPresetId | null {

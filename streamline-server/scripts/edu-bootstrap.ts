@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { firestore } from "../firebaseAdmin";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 function getArg(name: string): string | null {
   const idx = process.argv.findIndex((a) => a === `--${name}`);
@@ -27,10 +28,10 @@ async function main() {
     process.exit(1);
   }
 
-  const orgId = orgIdArg || firestore.collection("orgs").doc().id;
+  const orgId = orgIdArg || tenantCol("orgs").doc().id;
   const now = Date.now();
 
-  await firestore.collection("orgs").doc(orgId).set(
+  await tenantCol("orgs").doc(orgId).set(
     {
       id: orgId,
       name: orgName,
@@ -41,7 +42,7 @@ async function main() {
     { merge: true },
   );
 
-  const userSnap = await firestore.collection("users").where("email", "==", adminEmail).limit(1).get();
+  const userSnap = await globalCol("users").where("email", "==", adminEmail).limit(1).get();
   if (userSnap.empty) {
     console.error("User not found for email. Sign up first.");
     process.exit(2);
@@ -50,7 +51,7 @@ async function main() {
   const userDoc = userSnap.docs[0];
   const uid = userDoc.id;
 
-  await firestore.collection("users").doc(uid).set(
+  await globalCol("users").doc(uid).set(
     {
       orgId,
       orgType: "edu",
@@ -61,7 +62,7 @@ async function main() {
   );
 
   const memberId = `${orgId}_${uid}`;
-  await firestore.collection("orgMembers").doc(memberId).set(
+  await tenantCol("orgMembers").doc(memberId).set(
     {
       orgId,
       uid,

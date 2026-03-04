@@ -2,6 +2,7 @@ import express from "express";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -19,7 +20,7 @@ router.get("/events", requireAuth, async (req, res) => {
     const limitRaw = Number(req.query.limit);
     const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(100, Math.floor(limitRaw))) : 50;
 
-    let q = db.collection("events").where("ownerUid", "==", uid);
+    let q = tenantCol("events").where("ownerUid", "==", uid);
 
     // Prefer ordering by scheduledStartAt when present.
     // If the dataset lacks that field, Firestore will throw; fall back to unsorted list.

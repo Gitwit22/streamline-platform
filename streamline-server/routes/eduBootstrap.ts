@@ -3,6 +3,7 @@ import { firestore } from "../firebaseAdmin";
 import { requireAdmin } from "../middleware/adminAuth";
 import { writeEduAudit } from "../lib/eduAudit";
 import { coerceEduOrgRole, type EduOrgRole } from "../lib/eduOrgContext";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -51,8 +52,8 @@ router.post("/bootstrap", async (req, res) => {
     const adminEmail = coerceEmail(req.body?.adminEmail);
     if (!adminEmail) return res.status(400).json({ error: "adminEmail_invalid" });
 
-    const orgId = asString(req.body?.orgId).trim() || firestore.collection("orgs").doc().id;
-    const orgRef = firestore.collection("orgs").doc(orgId);
+    const orgId = asString(req.body?.orgId).trim() || tenantCol("orgs").doc().id;
+    const orgRef = tenantCol("orgs").doc(orgId);
     const now = Date.now();
 
     await orgRef.set(
@@ -66,7 +67,7 @@ router.post("/bootstrap", async (req, res) => {
       { merge: true },
     );
 
-    const userSnap = await firestore.collection("users").where("email", "==", adminEmail).limit(1).get();
+    const userSnap = await globalCol("users").where("email", "==", adminEmail).limit(1).get();
     if (userSnap.empty) {
       return res.status(404).json({ error: "user_not_found", detail: "Sign up first, then re-run bootstrap." });
     }
@@ -75,7 +76,7 @@ router.post("/bootstrap", async (req, res) => {
     const uid = userDoc.id;
     const user = (userDoc.data() as any) || {};
 
-    await firestore.collection("users").doc(uid).set(
+    await globalCol("users").doc(uid).set(
       {
         orgId,
         orgType: "edu",
@@ -86,7 +87,7 @@ router.post("/bootstrap", async (req, res) => {
     );
 
     const memberId = `${orgId}_${uid}`;
-    await firestore.collection("orgMembers").doc(memberId).set(
+    await tenantCol("orgMembers").doc(memberId).set(
       {
         orgId,
         uid,
@@ -132,11 +133,11 @@ router.post("/members/promote", async (req, res) => {
     const role = coerceEduOrgRole(req.body?.role) as EduOrgRole | null;
     if (!role) return res.status(400).json({ error: "role_invalid" });
 
-    const orgSnap = await firestore.collection("orgs").doc(orgId).get();
+    const orgSnap = await tenantCol("orgs").doc(orgId).get();
     if (!orgSnap.exists) return res.status(404).json({ error: "org_not_found" });
     const org = (orgSnap.data() as any) || {};
 
-    const userSnap = await firestore.collection("users").where("email", "==", email).limit(1).get();
+    const userSnap = await globalCol("users").where("email", "==", email).limit(1).get();
     if (userSnap.empty) {
       return res.status(404).json({ error: "user_not_found", detail: "User must sign up before promotion." });
     }
@@ -145,7 +146,7 @@ router.post("/members/promote", async (req, res) => {
     const user = (userDoc.data() as any) || {};
 
     const now = Date.now();
-    await firestore.collection("users").doc(uid).set(
+    await globalCol("users").doc(uid).set(
       {
         orgId,
         orgType: typeof org.orgType === "string" && String(org.orgType).trim() ? String(org.orgType).trim() : "edu",
@@ -156,7 +157,7 @@ router.post("/members/promote", async (req, res) => {
     );
 
     const memberId = `${orgId}_${uid}`;
-    await firestore.collection("orgMembers").doc(memberId).set(
+    await tenantCol("orgMembers").doc(memberId).set(
       {
         orgId,
         uid,

@@ -4,6 +4,7 @@ import { extractRoomAccessToken, verifyRoomAccessToken } from "../middleware/roo
 import { verifyInviteToken } from "../middleware/requireAuth";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -43,7 +44,7 @@ router.get("/resolve", async (req, res) => {
       return res.status(400).json({ error: "token_missing_roomId" });
     }
 
-    const ref = db.collection("rooms").doc(roomId);
+    const ref = tenantCol("rooms").doc(roomId);
     const snap = await ref.get();
     if (!snap.exists) {
       return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });

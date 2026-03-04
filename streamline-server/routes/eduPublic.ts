@@ -3,6 +3,7 @@ import { firestore as db } from "../firebaseAdmin";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -71,7 +72,7 @@ function verifyEmbedGrant(grant: string, embedId: string): boolean {
 }
 
 async function loadPublicEventPayload(eventId: string) {
-  const evSnap = await db.collection("events").doc(eventId).get();
+  const evSnap = await tenantCol("events").doc(eventId).get();
   if (!evSnap.exists) return null;
 
   const ev = evSnap.data() || {};
@@ -83,7 +84,7 @@ async function loadPublicEventPayload(eventId: string) {
 
   let broadcast: any = null;
   if (broadcastId) {
-    const bSnap = await db.collection("broadcasts").doc(broadcastId).get();
+    const bSnap = await tenantCol("broadcasts").doc(broadcastId).get();
     if (bSnap.exists) {
       const b = bSnap.data() || {};
       broadcast = {
@@ -129,7 +130,7 @@ router.get("/events/:eventId", async (req, res) => {
     const eventId = String(req.params.eventId || "").trim();
     if (!eventId) return res.status(400).json({ error: "eventId_required" });
 
-    const evSnap = await db.collection("events").doc(eventId).get();
+    const evSnap = await tenantCol("events").doc(eventId).get();
     if (!evSnap.exists) return res.status(404).json({ error: "event_not_found" });
 
     const ev = evSnap.data() || {};
@@ -143,7 +144,7 @@ router.get("/events/:eventId", async (req, res) => {
     // Use GET /api/public/edu/embed?embedId=... for authorized playback details.
     let broadcast: any = null;
     if (broadcastId) {
-      const bSnap = await db.collection("broadcasts").doc(broadcastId).get();
+      const bSnap = await tenantCol("broadcasts").doc(broadcastId).get();
       if (bSnap.exists) {
         const b = bSnap.data() || {};
         broadcast = {
@@ -190,7 +191,7 @@ router.get("/embed/meta", async (req, res) => {
     const token = asString(req.query.t).trim();
     if (!embedId) return res.status(400).json({ error: "embedId_required" });
 
-    const embedSnap = await db.collection("embeds").doc(embedId).get();
+    const embedSnap = await tenantCol("embeds").doc(embedId).get();
     if (!embedSnap.exists) return res.status(404).json({ error: "embed_not_found" });
     const embed = embedSnap.data() || {};
 
@@ -250,7 +251,7 @@ router.post("/embed/auth", express.json(), async (req, res) => {
     const password = asString(req.body?.password);
     if (!embedId) return res.status(400).json({ error: "embedId_required" });
 
-    const embedSnap = await db.collection("embeds").doc(embedId).get();
+    const embedSnap = await tenantCol("embeds").doc(embedId).get();
     if (!embedSnap.exists) return res.status(404).json({ error: "embed_not_found" });
     const embed = embedSnap.data() || {};
 
@@ -290,7 +291,7 @@ router.get("/embed", async (req, res) => {
     const grant = asString(req.query.g).trim();
     if (!embedId) return res.status(400).json({ error: "embedId_required" });
 
-    const embedSnap = await db.collection("embeds").doc(embedId).get();
+    const embedSnap = await tenantCol("embeds").doc(embedId).get();
     if (!embedSnap.exists) return res.status(404).json({ error: "embed_not_found" });
     const embed = embedSnap.data() || {};
 

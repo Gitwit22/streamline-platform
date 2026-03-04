@@ -1,5 +1,6 @@
 import express from "express";
 import { firestore } from "../firebaseAdmin";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -20,8 +21,8 @@ router.get("/public", async (_req, res) => {
 
     // Run both queries in parallel for speed
     const [usersSnap, usageSnap] = await Promise.all([
-      firestore.collection("users").get(),
-      firestore.collection("usageMonthly").get(),
+      globalCol("users").get(),
+      tenantCol("usageMonthly").get(),
     ]);
 
     // Total registered users (streamers)

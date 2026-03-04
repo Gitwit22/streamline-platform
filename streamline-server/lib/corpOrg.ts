@@ -1,4 +1,5 @@
 import { firestore as db } from "../firebaseAdmin";
+import { tenantCol, globalCol } from "./dbPaths";
 
 export type CorpOrgRole = "admin" | "manager" | "member" | "viewer";
 
@@ -53,7 +54,7 @@ export type CorpOrgContext = {
  * Validates that the org is of type "corporate".
  */
 export async function getCorpOrgContext(uid: string): Promise<CorpOrgContext | null> {
-  const userSnap = await db.collection("users").doc(uid).get().catch(() => null as any);
+  const userSnap = await globalCol("users").doc(uid).get().catch(() => null as any);
   const user = userSnap && userSnap.exists ? (userSnap.data() as any) : null;
   if (!user) return null;
 
@@ -62,7 +63,7 @@ export async function getCorpOrgContext(uid: string): Promise<CorpOrgContext | n
   if (!orgId) return null;
 
   // Verify org exists and is corporate type
-  const orgSnap = await db.collection("orgs").doc(orgId).get().catch(() => null as any);
+  const orgSnap = await tenantCol("orgs").doc(orgId).get().catch(() => null as any);
   const org = orgSnap && orgSnap.exists ? (orgSnap.data() as any) : null;
   if (!org) return null;
   // Allow both "corporate" and missing orgType (for dev/bypass scenarios)
@@ -71,7 +72,7 @@ export async function getCorpOrgContext(uid: string): Promise<CorpOrgContext | n
   const orgName = asString(org.name || "Corporate");
 
   const memberId = `${orgId}_${uid}`;
-  const memberSnap = await db.collection("orgMembers").doc(memberId).get().catch(() => null as any);
+  const memberSnap = await tenantCol("orgMembers").doc(memberId).get().catch(() => null as any);
   const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
   const orgRole = coerceCorpRole(member?.role);
 

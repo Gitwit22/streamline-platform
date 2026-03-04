@@ -3,6 +3,7 @@ import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { getCorpOrgContext, asString, coerceMillis } from "../lib/corpOrg";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -44,7 +45,7 @@ router.get("/chat/rooms", requireAuth, async (req, res) => {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
 
-    const snap = await db.collection("corpChatRooms")
+    const snap = await tenantCol("corpChatRooms")
       .where("orgId", "==", ctx.orgId)
       .orderBy("lastMessageAt", "desc")
       .limit(100)
@@ -74,12 +75,12 @@ router.get("/chat/rooms/:id/messages", requireAuth, async (req, res) => {
     const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 50, 1), 200);
 
     // Verify room belongs to org
-    const roomSnap = await db.collection("corpChatRooms").doc(roomId).get();
+    const roomSnap = await tenantCol("corpChatRooms").doc(roomId).get();
     if (!roomSnap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
     const room = roomSnap.data() as any;
     if (room.orgId !== ctx.orgId) return res.status(403).json({ error: "wrong_org" });
 
-    let query = db.collection("corpChatMessages")
+    let query = tenantCol("corpChatMessages")
       .where("roomId", "==", roomId)
       .orderBy("createdAt", "desc")
       .limit(limit);
@@ -115,7 +116,7 @@ router.post("/chat/rooms/:id/messages", requireAuth, async (req, res) => {
     if (!content) return res.status(400).json({ error: "content_required" });
 
     // Verify room
-    const roomSnap = await db.collection("corpChatRooms").doc(roomId).get();
+    const roomSnap = await tenantCol("corpChatRooms").doc(roomId).get();
     if (!roomSnap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
     const room = roomSnap.data() as any;
     if (room.orgId !== ctx.orgId) return res.status(403).json({ error: "wrong_org" });
@@ -134,10 +135,10 @@ router.post("/chat/rooms/:id/messages", requireAuth, async (req, res) => {
       createdAt: now,
     };
 
-    await db.collection("corpChatMessages").doc(msgId).set(doc, { merge: true });
+    await tenantCol("corpChatMessages").doc(msgId).set(doc, { merge: true });
 
     // Update room's last message
-    await db.collection("corpChatRooms").doc(roomId).set({
+    await tenantCol("corpChatRooms").doc(roomId).set({
       lastMessage: `${doc.senderName}: ${content.slice(0, 100)}`,
       lastMessageAt: now,
     }, { merge: true });
@@ -179,7 +180,7 @@ router.post("/chat/rooms", requireAuth, async (req, res) => {
       createdBy: uid,
     };
 
-    await db.collection("corpChatRooms").doc(roomId).set(doc, { merge: true });
+    await tenantCol("corpChatRooms").doc(roomId).set(doc, { merge: true });
 
     return res.json({ room: normalizeRoom(roomId, doc) });
   } catch (err: any) {

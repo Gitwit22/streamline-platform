@@ -9,12 +9,13 @@ import { isAdmin } from "../middleware/adminAuth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = Router();
 
 async function getPlatformHlsEnabled(): Promise<boolean> {
   try {
-    const snap = await db.collection("featureFlags").doc("hlsSettingsTab").get();
+    const snap = await globalCol("featureFlags").doc("hlsSettingsTab").get();
     const data = snap.exists ? snap.data() || {} : {};
     const hlsEnabled = (data as any).hlsEnabled;
     const enabled = (data as any).enabled;
@@ -163,11 +164,11 @@ router.post("/", requireAuth as any, async (req: any, res) => {
   }
 
   // Create a NEW Firestore roomId (canonical), and create a friendly LiveKit room name.
-  const roomId = db.collection("rooms").doc().id;
+  const roomId = tenantCol("rooms").doc().id;
   const livekitRoomName = buildFriendlyLivekitRoomName(req, resolvedName, roomId);
 
   // Pre-create the embed document reference so we know its id up front.
-  const embedRef = db.collection("savedEmbeds").doc();
+  const embedRef = tenantCol("savedEmbeds").doc();
   const savedEmbedId = embedRef.id;
 
   try {
@@ -188,7 +189,7 @@ router.post("/", requireAuth as any, async (req: any, res) => {
       updatedAt: new Date().toISOString(),
     };
 
-    await db.collection("rooms").doc(roomId).set({ hlsConfig: nextHlsConfig }, { merge: true });
+    await tenantCol("rooms").doc(roomId).set({ hlsConfig: nextHlsConfig }, { merge: true });
 
     const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
 
@@ -240,8 +241,7 @@ router.get("/", requireAuth as any, async (req: any, res) => {
   try {
     // Query top-level collection by owner + archived flag, then sort in memory by updatedAt desc.
     // NOTE: This may require a composite index on (ownerId, archived).
-    const snap = await db
-      .collection("savedEmbeds")
+    const snap = await tenantCol("savedEmbeds")
       .where("ownerId", "==", uid)
       .where("archived", "==", false)
       .get();
@@ -297,7 +297,7 @@ router.get("/public/:savedEmbedId", async (req: any, res) => {
   }
 
   try {
-    const docSnap = await db.collection("savedEmbeds").doc(savedEmbedId).get();
+    const docSnap = await tenantCol("savedEmbeds").doc(savedEmbedId).get();
     if (!docSnap.exists) {
       return res.status(404).json({ error: "not_found" });
     }
@@ -358,7 +358,7 @@ router.put("/:embedId", requireAuth as any, async (req: any, res) => {
     return errorResponse(res, 400, "invalid_input");
   }
   try {
-    const ref = db.collection("savedEmbeds").doc(embedId);
+    const ref = tenantCol("savedEmbeds").doc(embedId);
     const snap = await ref.get();
     if (!snap.exists) {
       return errorResponse(res, 404, "not_found");

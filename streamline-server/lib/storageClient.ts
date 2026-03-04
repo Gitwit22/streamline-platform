@@ -9,6 +9,7 @@ import {
   ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { storageKey } from "./storagePaths";
 
 // Unified R2 env scheme
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
@@ -298,10 +299,7 @@ export async function getFileMetadata(remotePath: string): Promise<HeadObjectCom
  * @returns Formatted path for recordings
  */
 export function generateRecordingPath(userId: string, roomName: string, timestamp: number): string {
-  const rawRoot = String(process.env.R2_RECORDINGS_ROOT_PREFIX ?? "").trim();
-  const rootNoLeadingSlash = rawRoot.replace(/^\/+/, "");
-  const root = rootNoLeadingSlash ? (rootNoLeadingSlash.endsWith("/") ? rootNoLeadingSlash : `${rootNoLeadingSlash}/`) : "";
-  return `${root}recordings/${userId}/${roomName}/${timestamp}.mp4`;
+  return storageKey("recordings", userId, roomName, `${timestamp}.mp4`);
 }
 
 /**
@@ -312,7 +310,7 @@ export function generateRecordingPath(userId: string, roomName: string, timestam
  * @returns Formatted path for thumbnails
  */
 export function generateThumbnailPath(userId: string, roomName: string, timestamp: number): string {
-  return `thumbnails/${userId}/${roomName}/${timestamp}.jpg`;
+  return storageKey("thumbnails", userId, roomName, `${timestamp}.jpg`);
 }
 
 export default {

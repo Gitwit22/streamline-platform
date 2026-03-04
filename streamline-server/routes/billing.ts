@@ -18,6 +18,7 @@ import {
   type BillingGuards,
 } from "../lib/billingGuards";
 import { createOveragesEndpointHandler } from "../lib/overagesEndpoint";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const PLAN_CHANGE_LOCK_TTL_MS = 60 * 1000; // 60 seconds
 
@@ -40,7 +41,7 @@ const TEST_PLAN_CHANGE_THROTTLE_MS = 2000; // 1 req / 2s per uid
 const testPlanChangeThrottle = new Map<string, number>();
 
 function getUserRef(uid: string) {
-  return db.collection("users").doc(uid);
+  return globalCol("users").doc(uid);
 }
 
 /**
@@ -412,7 +413,7 @@ router.post("/checkout", requireAuth, async (req, res) => {
     // If misconfigured, return a safe error and leave Firestore unchanged.
     let preflightPlanMeta: any = {};
     try {
-      const planSnap = await db.collection("plans").doc(canonicalPlan).get();
+      const planSnap = await globalCol("plans").doc(canonicalPlan).get();
       if (planSnap.exists) preflightPlanMeta = planSnap.data();
     } catch {}
 
@@ -987,7 +988,7 @@ router.post("/test/change-plan", requireAuth, async (req, res) => {
     const requestIdHeader = (req.headers["x-request-id"] as string) || "";
     const requestId = requestIdHeader || `${uid}-${now}`;
 
-    await db.collection("billingAudit").add({
+    await tenantCol("billingAudit").add({
       type: "test_plan_change",
       uid,
       fromPlan,

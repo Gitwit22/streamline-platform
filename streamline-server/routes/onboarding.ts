@@ -8,6 +8,7 @@ import { requireAuth } from "../middleware/requireAuth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { writeEduAudit } from "../lib/eduAudit";
 import { buildNewUserDoc } from "../lib/newUserDefaults";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -57,7 +58,7 @@ type SystemStateDoc = {
 };
 
 async function getOrCreateSystemState(): Promise<SystemStateDoc> {
-  const ref = firestore.collection("system").doc("state");
+  const ref = globalCol("system").doc("state");
   const snap = await ref.get().catch(() => null as any);
   const data = snap && snap.exists ? ((snap.data() as any) || {}) : null;
 
@@ -128,7 +129,7 @@ async function deleteByQuery(q: FirebaseFirestore.Query, max = 5000) {
 }
 
 async function markUsersDisabledForOrg(orgId: string) {
-  const usersSnap = await firestore.collection("users").where("orgId", "==", orgId).limit(250).get().catch(() => null as any);
+  const usersSnap = await globalCol("users").where("orgId", "==", orgId).limit(250).get().catch(() => null as any);
   const docs = usersSnap?.docs || [];
   if (!docs.length) return 0;
 
@@ -192,7 +193,7 @@ router.post("/reset-demo", async (req, res) => {
       return res.status(400).json({ error: "demo_only" });
     }
 
-    const orgRef = firestore.collection("orgs").doc(demoOrgId);
+    const orgRef = tenantCol("orgs").doc(demoOrgId);
     const orgSnap = await orgRef.get().catch(() => null as any);
     const org = orgSnap && orgSnap.exists ? ((orgSnap.data() as any) || {}) : null;
 
@@ -203,13 +204,13 @@ router.post("/reset-demo", async (req, res) => {
     }
 
     // Delete org-scoped data.
-    const deletedOrgMembers = await deleteByQuery(firestore.collection("orgMembers").where("orgId", "==", demoOrgId));
+    const deletedOrgMembers = await deleteByQuery(tenantCol("orgMembers").where("orgId", "==", demoOrgId));
 
     // Best-effort: delete events/rooms/invites/etc when orgId exists.
-    const deletedEvents = await deleteByQuery(firestore.collection("events").where("orgId", "==", demoOrgId)).catch(() => 0);
-    const deletedRooms = await deleteByQuery(firestore.collection("rooms").where("orgId", "==", demoOrgId)).catch(() => 0);
-    const deletedInvites = await deleteByQuery(firestore.collection("invites").where("orgId", "==", demoOrgId)).catch(() => 0);
-    const deletedEmbeds = await deleteByQuery(firestore.collection("embeds").where("orgId", "==", demoOrgId)).catch(() => 0);
+    const deletedEvents = await deleteByQuery(tenantCol("events").where("orgId", "==", demoOrgId)).catch(() => 0);
+    const deletedRooms = await deleteByQuery(tenantCol("rooms").where("orgId", "==", demoOrgId)).catch(() => 0);
+    const deletedInvites = await deleteByQuery(tenantCol("invites").where("orgId", "==", demoOrgId)).catch(() => 0);
+    const deletedEmbeds = await deleteByQuery(tenantCol("embeds").where("orgId", "==", demoOrgId)).catch(() => 0);
 
     const disabledUsers = await markUsersDisabledForOrg(demoOrgId).catch(() => 0);
 
@@ -252,8 +253,7 @@ router.post("/reset-demo", async (req, res) => {
 
 async function orgAlreadyHasFacultyAdmin(orgId: string): Promise<boolean> {
   try {
-    const snap = await firestore
-      .collection("orgMembers")
+    const snap = await tenantCol("orgMembers")
       .where("orgId", "==", orgId)
       .where("role", "==", "faculty_admin")
       .limit(1)
@@ -261,7 +261,7 @@ async function orgAlreadyHasFacultyAdmin(orgId: string): Promise<boolean> {
     return !snap.empty;
   } catch {
     // Index-free fallback: scan a small window.
-    const snap = await firestore.collection("orgMembers").where("orgId", "==", orgId).limit(50).get().catch(() => null as any);
+    const snap = await tenantCol("orgMembers").where("orgId", "==", orgId).limit(50).get().catch(() => null as any);
     const docs = snap?.docs || [];
     return docs.some((d: any) => String((d.data() || {}).role || "") === "faculty_admin");
   }
@@ -290,14 +290,14 @@ router.post("/create-top-admin", async (req, res) => {
     if (password !== confirmPassword) return res.status(400).json({ error: "password_mismatch" });
 
     // Prevent creating an EDU top admin using an existing email.
-    const existing = await firestore.collection("users").where("email", "==", email).limit(1).get();
+    const existing = await globalCol("users").where("email", "==", email).limit(1).get();
     if (!existing.empty) {
       return res.status(409).json({ error: "email_in_use" });
     }
 
     const now = Date.now();
 
-    const orgId = firestore.collection("orgs").doc().id;
+    const orgId = tenantCol("orgs").doc().id;
 
     // Hard rule: only allow top admin creation when there is no existing top admin.
     // (This should always be true for a new orgId, but keep the guard for safety.)
@@ -308,7 +308,7 @@ router.post("/create-top-admin", async (req, res) => {
     const passwordHash = await bcrypt.hash(password, 10);
     const displayName = `${firstName} ${lastName}`.trim();
 
-    const userRef = firestore.collection("users").doc();
+    const userRef = globalCol("users").doc();
     const uid = userRef.id;
 
     const memberId = `${orgId}_${uid}`;
@@ -316,7 +316,7 @@ router.post("/create-top-admin", async (req, res) => {
     await firestore.runTransaction(async (tx) => {
       // Create org
       tx.set(
-        firestore.collection("orgs").doc(orgId),
+        tenantCol("orgs").doc(orgId),
         {
           id: orgId,
           name: orgName,
@@ -355,7 +355,7 @@ router.post("/create-top-admin", async (req, res) => {
 
       // Create membership
       tx.set(
-        firestore.collection("orgMembers").doc(memberId),
+        tenantCol("orgMembers").doc(memberId),
         {
           orgId,
           uid,
@@ -405,18 +405,18 @@ router.post("/progress", requireAuth, async (req, res) => {
     const step = Number.isFinite(stepRaw) ? Math.max(1, Math.min(5, Math.floor(stepRaw))) : null;
     if (!step) return res.status(400).json({ error: "invalid_step" });
 
-    const userSnap = await firestore.collection("users").doc(uid).get();
+    const userSnap = await globalCol("users").doc(uid).get();
     const user = (userSnap.data() as any) || {};
     const orgId = typeof user.orgId === "string" ? user.orgId : "";
     if (!orgId) return res.status(400).json({ error: "missing_org" });
 
     const memberId = `${orgId}_${uid}`;
-    const mSnap = await firestore.collection("orgMembers").doc(memberId).get();
+    const mSnap = await tenantCol("orgMembers").doc(memberId).get();
     const member = (mSnap.data() as any) || {};
     const role = String(member.role || "");
     if (role !== "faculty_admin") return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
 
-    const orgRef = firestore.collection("orgs").doc(orgId);
+    const orgRef = tenantCol("orgs").doc(orgId);
     const now = Date.now();
     await orgRef.set(
       {

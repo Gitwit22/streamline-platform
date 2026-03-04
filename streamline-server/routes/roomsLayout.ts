@@ -5,6 +5,7 @@ import { requireAuth } from "../middleware/requireAuth";
 import { requireRoomAccessToken, type RoomAccessClaims } from "../middleware/roomAccessToken";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeRoomLayout, resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -22,7 +23,7 @@ router.get("/:roomId/layout", requireRoomAccessToken as any, async (req: any, re
   if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.ROOM_TOKEN_REQUIRED });
   if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
 
-  const snap = await db.collection("rooms").doc(roomId).get();
+  const snap = await tenantCol("rooms").doc(roomId).get();
   const data = snap.exists ? ((snap.data() as any) || {}) : {};
 
   const roomLayout = normalizeRoomLayout(data.roomLayout) || null;
@@ -63,8 +64,7 @@ router.patch("/:roomId/layout", requireAuth as any, requireRoomAccessToken as an
   }
 
   const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
-  await db
-    .collection("rooms")
+  await tenantCol("rooms")
     .doc(roomId)
     .set({ roomLayout: normalized, updatedAt: serverTimestamp } as any, { merge: true });
 

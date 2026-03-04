@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/requireAuth";
 import { getCorpOrgContext, assertCorpRole, asString, coerceMillis } from "../lib/corpOrg";
 import { writeCorpAudit } from "../lib/corpAudit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -40,7 +41,7 @@ router.get("/documents", requireAuth, async (req, res) => {
 
     const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 50, 1), 200);
 
-    const snap = await db.collection("corpDocuments")
+    const snap = await tenantCol("corpDocuments")
       .where("orgId", "==", ctx.orgId)
       .orderBy("updatedAt", "desc")
       .limit(limit)
@@ -97,7 +98,7 @@ router.post("/documents", requireAuth, async (req, res) => {
       createdBy: uid,
     };
 
-    await db.collection("corpDocuments").doc(docId).set(doc, { merge: true });
+    await tenantCol("corpDocuments").doc(docId).set(doc, { merge: true });
 
     await writeCorpAudit({
       orgId: ctx.orgId,
@@ -130,13 +131,13 @@ router.delete("/documents/:id", requireAuth, async (req, res) => {
     }
 
     const docId = req.params.id;
-    const snap = await db.collection("corpDocuments").doc(docId).get();
+    const snap = await tenantCol("corpDocuments").doc(docId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const existing = snap.data() as any;
     if (existing.orgId !== ctx.orgId) return res.status(403).json({ error: "wrong_org" });
 
-    await db.collection("corpDocuments").doc(docId).delete();
+    await tenantCol("corpDocuments").doc(docId).delete();
 
     await writeCorpAudit({
       orgId: ctx.orgId,
@@ -165,7 +166,7 @@ router.post("/documents/:id/acknowledge", requireAuth, async (req, res) => {
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
 
     const docId = req.params.id;
-    const snap = await db.collection("corpDocuments").doc(docId).get();
+    const snap = await tenantCol("corpDocuments").doc(docId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const existing = snap.data() as any;
@@ -174,7 +175,7 @@ router.post("/documents/:id/acknowledge", requireAuth, async (req, res) => {
     const ackId = `${docId}_${uid}`;
     const now = Date.now();
 
-    await db.collection("corpDocumentAcks").doc(ackId).set({
+    await tenantCol("corpDocumentAcks").doc(ackId).set({
       orgId: ctx.orgId,
       documentId: docId,
       uid,
@@ -182,12 +183,12 @@ router.post("/documents/:id/acknowledge", requireAuth, async (req, res) => {
     }, { merge: true });
 
     // Increment the acknowledged counter
-    const ackSnap = await db.collection("corpDocumentAcks")
+    const ackSnap = await tenantCol("corpDocumentAcks")
       .where("documentId", "==", docId)
       .get();
     const totalAcknowledged = ackSnap.size;
 
-    await db.collection("corpDocuments").doc(docId).set({
+    await tenantCol("corpDocuments").doc(docId).set({
       totalAcknowledged,
       updatedAt: now,
     }, { merge: true });

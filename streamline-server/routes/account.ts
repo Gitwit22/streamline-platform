@@ -18,6 +18,7 @@ import { getPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { stripe } from "../lib/stripe";
 import { computeAccountMeBillingFields } from "../lib/billingTruth";
 import { normalizeRoomLayout } from "../lib/roomLayout";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -125,7 +126,7 @@ function pickBoolean(v: any): boolean | undefined {
 async function readRolePreset(uid: string, presetId: RolePresetId): Promise<RolePresetDoc> {
   const base = DEFAULT_ROLE_PRESETS[presetId];
   try {
-    const snap = await firestore.collection("users").doc(uid).collection("rolePresets").doc(presetId).get();
+    const snap = await globalCol("users").doc(uid).collection("rolePresets").doc(presetId).get();
     const data = snap.exists ? (snap.data() as any) : {};
     const merged: RolePresetDoc = {
       ...base,
@@ -220,7 +221,7 @@ function normalizeMediaPrefs(raw: any, planId: string) {
 
 async function getNormalizedMediaPrefs(uid: string) {
   const planId = await getUserPlanId(uid);
-  const snap = await firestore.collection("users").doc(uid).get();
+  const snap = await globalCol("users").doc(uid).get();
   const data = snap.exists ? snap.data() || {} : {};
   return { mediaPrefs: normalizeMediaPrefs((data as any).mediaPrefs, planId), planId };
 }
@@ -233,11 +234,11 @@ async function getSegmentedUiFlags() {
     myContentSnap,
     myContentRecordingsSnap,
   ] = await Promise.all([
-    firestore.collection("featureFlags").doc("contentLibraryEnabled").get(),
-    firestore.collection("featureFlags").doc("projectsEnabled").get(),
-    firestore.collection("featureFlags").doc("editorEnabled").get(),
-    firestore.collection("featureFlags").doc("myContentEnabled").get(),
-    firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
+    globalCol("featureFlags").doc("contentLibraryEnabled").get(),
+    globalCol("featureFlags").doc("projectsEnabled").get(),
+    globalCol("featureFlags").doc("editorEnabled").get(),
+    globalCol("featureFlags").doc("myContentEnabled").get(),
+    globalCol("featureFlags").doc("myContentRecordingsEnabled").get(),
   ]);
 
   const contentLibraryData = contentLibrarySnap.exists ? ((contentLibrarySnap.data() as any) || {}) : {};
@@ -265,7 +266,7 @@ async function getSegmentedUiFlags() {
 async function getHlsUiFlag() {
   // Global HLS UI/tab flag, driven from the featureFlags collection.
   // When missing, we default to enabled so HLS UI is visible by default.
-  const snap = await firestore.collection("featureFlags").doc("hlsSettingsTab").get();
+  const snap = await globalCol("featureFlags").doc("hlsSettingsTab").get();
   const data = snap.exists ? (snap.data() as any) || {} : {};
   const enabled = data.enabled === undefined ? true : !!data.enabled;
   return {
@@ -277,7 +278,7 @@ async function getHlsUiFlag() {
 // Global recording UI/feature flag.
 // When missing, we default to enabled so recording behaves according to the plan.
 async function getRecordingUiFlag() {
-  const snap = await firestore.collection("featureFlags").doc("recording").get();
+  const snap = await globalCol("featureFlags").doc("recording").get();
   const data = snap.exists ? (snap.data() as any) || {} : {};
   const enabled = data.enabled === undefined ? true : !!data.enabled;
   return {
@@ -287,7 +288,7 @@ async function getRecordingUiFlag() {
 }
 
 async function getAdvancedPermissionsEnabled(uid: string) {
-  const userSnap = await firestore.collection("users").doc(uid).get();
+  const userSnap = await globalCol("users").doc(uid).get();
   const userData = userSnap.exists ? userSnap.data() || {} : {};
   const planId = await getUserPlanId(uid);
   return {
@@ -400,7 +401,7 @@ function normalizeRoleProfiles(rawRoles: any): RoleProfile[] {
 }
 
 async function loadRolesForUser(uid: string) {
-  const snap = await firestore.collection("users").doc(uid).get();
+  const snap = await globalCol("users").doc(uid).get();
   const data = snap.exists ? snap.data() || {} : {};
   const roleProfiles = normalizeRoleProfiles(data.roleProfiles);
   const quickRoleIdsRaw: string[] = Array.isArray((data as any).quickRoleIds) ? (data as any).quickRoleIds : [];
@@ -467,7 +468,7 @@ router.post("/init", async (req, res) => {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
-    const accountsRef = firestore.collection("accounts").doc(uid);
+    const accountsRef = globalCol("accounts").doc(uid);
     const existing = await accountsRef.get();
 
     if (existing.exists) {
@@ -486,7 +487,7 @@ router.post("/init", async (req, res) => {
     // users/{uid} document when available. If the user doc is missing,
     // we still create the minimal accounts/{uid} shell.
     try {
-      const userSnap = await firestore.collection("users").doc(uid).get();
+      const userSnap = await globalCol("users").doc(uid).get();
       const userData = userSnap.exists ? (userSnap.data() as any) || {} : {};
 
       if (typeof userData.email === "string" && userData.email) {
@@ -520,7 +521,7 @@ router.get("/me", async (req, res) => {
     const uid = (req as any).user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    const snap = await firestore.collection("users").doc(uid).get();
+    const snap = await globalCol("users").doc(uid).get();
     if (!snap.exists) return res.status(404).json({ error: "user_not_found" });
 
     const data = snap.data() || {};
@@ -531,7 +532,7 @@ router.get("/me", async (req, res) => {
 
     const monthKey = getCurrentMonthKey();
     const usageDocId = `${uid}_${monthKey}`;
-    const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
+    const usageSnap = await tenantCol("usageMonthly").doc(usageDocId).get();
     const usageRaw = usageSnap.exists ? (usageSnap.data() as any) : {};
     const usage = usageRaw.usage || {};
     const ytd = usageRaw.ytd || {};
@@ -677,7 +678,7 @@ router.get("/me", async (req, res) => {
             const patch: any = { updatedAt: Date.now() };
             if (planIdMissing) patch.planId = "free";
             if (billingTruthMissing) patch.billingTruth = billingTruth;
-            firestore.collection("users").doc(uid).set(patch, { merge: true }).catch(() => {});
+            globalCol("users").doc(uid).set(patch, { merge: true }).catch(() => {});
           }
         } catch {
           // non-fatal
@@ -699,13 +700,13 @@ router.get("/me", async (req, res) => {
       orgType = typeof rawOrgType === "string" && rawOrgType.trim() ? rawOrgType.trim() : null;
 
       if (orgId) {
-        const orgSnap = await firestore.collection("orgs").doc(orgId).get().catch(() => null as any);
+        const orgSnap = await tenantCol("orgs").doc(orgId).get().catch(() => null as any);
         const org = orgSnap && orgSnap.exists ? (orgSnap.data() as any) : null;
         if (org && typeof org.orgType === "string" && String(org.orgType).trim()) orgType = String(org.orgType).trim();
         if (org && typeof org.name === "string" && String(org.name).trim()) orgName = String(org.name).trim();
 
         const memberId = `${orgId}_${uid}`;
-        const memberSnap = await firestore.collection("orgMembers").doc(memberId).get().catch(() => null as any);
+        const memberSnap = await tenantCol("orgMembers").doc(memberId).get().catch(() => null as any);
         const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
         if (member && typeof member.role === "string" && String(member.role).trim()) orgRole = String(member.role).trim();
       }
@@ -814,7 +815,7 @@ router.post("/close", async (req, res) => {
       return res.status(400).json({ error: "invalid_mode" });
     }
 
-    const userRef = firestore.collection("users").doc(uid);
+    const userRef = globalCol("users").doc(uid);
     const snap = await userRef.get();
     if (!snap.exists) return res.status(404).json({ error: "user_not_found" });
     const user = (snap.data() as any) || {};
@@ -920,7 +921,7 @@ router.patch("/media-prefs", async (req, res) => {
       updates.permissionsMode = body.permissionsMode;
     }
 
-    const snap = await firestore.collection("users").doc(uid).get();
+    const snap = await globalCol("users").doc(uid).get();
     const existingPrefs = snap.exists ? (snap.data() as any)?.mediaPrefs : undefined;
     const normalizedExisting = normalizeMediaPrefs(existingPrefs, planId);
     const mergedCandidate = normalizeMediaPrefs({ ...normalizedExisting, ...updates }, planId);
@@ -929,7 +930,7 @@ router.patch("/media-prefs", async (req, res) => {
     if (!adv.enabled && mergedCandidate.permissionsMode === "advanced") {
       console.log("[media-prefs] coerced permissionsMode to simple due to feature flag", { uid, lockReason: adv.lockReason });
     }
-    await firestore.collection("users").doc(uid).set({ mediaPrefs: merged }, { merge: true });
+    await globalCol("users").doc(uid).set({ mediaPrefs: merged }, { merge: true });
 
     return res.json({ mediaPrefs: merged, lockReason: adv.lockReason || null });
   } catch (err: any) {
@@ -945,7 +946,7 @@ router.post("/accept-tos", async (req, res) => {
     const uid = (req as any).user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    const userRef = firestore.collection("users").doc(uid);
+    const userRef = globalCol("users").doc(uid);
     const existing = await userRef.get();
 
     // Do not create "ghost" user documents that only contain TOS fields.
@@ -984,7 +985,7 @@ router.get("/cohost-profile", async (req, res) => {
     const simpleMode = mediaPrefs.permissionsMode === "simple" || !adv.enabled;
     const profile = simpleMode
       ? normalizeCohostProfile({ ...SIMPLE_ROLE_DEFAULTS.cohost, label: "Co-Host", isSystem: true })
-      : normalizeCohostProfile((await firestore.collection("users").doc(uid).get()).data()?.cohostProfile);
+      : normalizeCohostProfile((await globalCol("users").doc(uid).get()).data()?.cohostProfile);
 
     return res.json({
       profile,
@@ -1073,8 +1074,7 @@ router.patch("/role-presets/:presetId", requireAuth, async (req, res) => {
     // Host-only moderation: templates never grant guest mute/remove powers.
     if ("canMuteGuests" in cleaned) delete cleaned.canMuteGuests;
 
-    await firestore
-      .collection("users")
+    await globalCol("users")
       .doc(uid)
       .collection("rolePresets")
       .doc(presetId)
@@ -1109,7 +1109,7 @@ router.patch("/cohost-profile", async (req, res) => {
     }
 
     const profile = normalizeCohostProfile(req.body || {});
-    await firestore.collection("users").doc(uid).set({ cohostProfile: profile }, { merge: true });
+    await globalCol("users").doc(uid).set({ cohostProfile: profile }, { merge: true });
 
     return res.json({ profile, locked: false });
   } catch (err: any) {

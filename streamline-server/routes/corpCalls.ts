@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/requireAuth";
 import { getCorpOrgContext, assertCorpRole, asString, coerceMillis } from "../lib/corpOrg";
 import { writeCorpAudit } from "../lib/corpAudit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -40,7 +41,7 @@ router.get("/calls", requireAuth, async (req, res) => {
 
     const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 50, 1), 200);
 
-    const snap = await db.collection("corpCalls")
+    const snap = await tenantCol("corpCalls")
       .where("orgId", "==", ctx.orgId)
       .orderBy("scheduledAt", "desc")
       .limit(limit)
@@ -100,7 +101,7 @@ router.post("/calls", requireAuth, async (req, res) => {
       createdBy: uid,
     };
 
-    await db.collection("corpCalls").doc(callId).set(doc, { merge: true });
+    await tenantCol("corpCalls").doc(callId).set(doc, { merge: true });
 
     await writeCorpAudit({
       orgId: ctx.orgId,
@@ -130,7 +131,7 @@ router.patch("/calls/:id", requireAuth, async (req, res) => {
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
 
     const callId = req.params.id;
-    const snap = await db.collection("corpCalls").doc(callId).get();
+    const snap = await tenantCol("corpCalls").doc(callId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const existing = snap.data() as any;
@@ -151,7 +152,7 @@ router.patch("/calls/:id", requireAuth, async (req, res) => {
 
     updates.updatedAt = Date.now();
 
-    await db.collection("corpCalls").doc(callId).set(updates, { merge: true });
+    await tenantCol("corpCalls").doc(callId).set(updates, { merge: true });
 
     await writeCorpAudit({
       orgId: ctx.orgId,
@@ -181,14 +182,14 @@ router.get("/calls/:id/transcript", requireAuth, async (req, res) => {
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
 
     const callId = req.params.id;
-    const snap = await db.collection("corpCalls").doc(callId).get();
+    const snap = await tenantCol("corpCalls").doc(callId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const existing = snap.data() as any;
     if (existing.orgId !== ctx.orgId) return res.status(403).json({ error: "wrong_org" });
 
     // Look up transcript doc
-    const transcriptSnap = await db.collection("corpTranscripts").doc(callId).get().catch(() => null as any);
+    const transcriptSnap = await tenantCol("corpTranscripts").doc(callId).get().catch(() => null as any);
     const transcript = transcriptSnap && transcriptSnap.exists ? (transcriptSnap.data() as any) : null;
 
     return res.json({

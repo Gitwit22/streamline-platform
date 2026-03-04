@@ -1,4 +1,5 @@
 import { firestore as db } from "../firebaseAdmin";
+import { globalCol } from "./dbPaths";
 import { PlanId, isPlanId } from "../types/plan";
 import { normalizeBillingTruthFromUser } from "./billingTruth";
 
@@ -37,7 +38,7 @@ async function getPlatformBillingEnabled(): Promise<boolean> {
   }
 
   try {
-    const snap = await db.collection(CONFIG_COLLECTION).doc(FEATURES_DOC_ID).get();
+    const snap = await globalCol(CONFIG_COLLECTION).doc(FEATURES_DOC_ID).get();
     const data = snap.exists ? snap.data() || {} : {};
     if (typeof (data as any).billingSystemEnabled === "boolean") {
       cachedPlatformBillingEnabled = (data as any).billingSystemEnabled;
@@ -67,7 +68,7 @@ export function invalidatePlatformBillingCache() {
  * - Normalizes planId to a valid PlanId, defaulting to "free".
  */
 export async function getUserAccount(uid: string): Promise<UserAccount> {
-  const userRef = db.collection(USERS_COLLECTION).doc(uid);
+  const userRef = globalCol(USERS_COLLECTION).doc(uid);
   const snap = await userRef.get();
   const now = Date.now();
 

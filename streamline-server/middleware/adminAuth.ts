@@ -33,7 +33,7 @@ declare global {
 export async function isAdmin(uid: string): Promise<boolean> {
   try {
     console.log("[isAdmin] checking users/%s and admins/%s", uid, uid);
-    const userDoc = await firestore.collection("users").doc(uid).get();
+    const userDoc = await globalCol("users").doc(uid).get();
     const userData = userDoc.data() || {};
 
     const fromUserDoc = userData?.admin?.isAdmin === true || userData?.isAdmin === true;
@@ -43,7 +43,7 @@ export async function isAdmin(uid: string): Promise<boolean> {
       return true;
     }
 
-    const adminDoc = await firestore.collection("admins").doc(uid).get();
+    const adminDoc = await globalCol("admins").doc(uid).get();
     const fromLegacyAdmins = adminDoc.exists && adminDoc.data()?.isAdmin === true;
     if (fromLegacyAdmins) {
       console.log("[isAdmin] resolved from legacy admins collection");
@@ -60,6 +60,7 @@ export async function isAdmin(uid: string): Promise<boolean> {
  * Expects JWT token in Authorization header or userId in request body
  */
 import jwt from "jsonwebtoken";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 function getJwtSecret(): string {
   const raw = String(process.env.JWT_SECRET || "").trim();
@@ -131,7 +132,7 @@ export async function requireAdmin(
     // Get admin user details
     let userData: any = {};
     try {
-      const userDoc = await firestore.collection("users").doc(userId).get();
+      const userDoc = await globalCol("users").doc(userId).get();
       userData = userDoc.data() || {};
     } catch {}
 
@@ -161,7 +162,7 @@ export async function grantAdminPrivileges(
   userId: string,
   grantedBy: string
 ): Promise<void> {
-  await firestore.collection("admins").doc(userId).set({
+  await globalCol("admins").doc(userId).set({
     isAdmin: true,
     grantedBy,
     grantedAt: new Date(),
@@ -177,7 +178,7 @@ export async function revokeAdminPrivileges(
   userId: string,
   revokedBy: string
 ): Promise<void> {
-  await firestore.collection("admins").doc(userId).delete();
+  await globalCol("admins").doc(userId).delete();
 
   console.log(`Admin privileges revoked from ${userId} by ${revokedBy}`);
 }
@@ -195,7 +196,7 @@ export async function logAdminAction(
       Object.entries(details || {}).filter(([, v]) => v !== undefined)
     );
     const ip = safeDetails.ip || "unknown";
-    await firestore.collection("adminLogs").add({
+    await tenantCol("adminLogs").add({
       adminId,
       action,
       details: safeDetails,

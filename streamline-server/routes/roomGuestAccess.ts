@@ -10,6 +10,7 @@ import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { signGuestSession } from "../middleware/guestSession";
 import { roleToParticipantPermission, toSdkSources } from "../lib/livekitPermissions";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 export function extractInviteToken(req: any): string | null {
   const hdr = (req?.headers as any) || {};
@@ -100,9 +101,9 @@ async function getParticipantCount(livekitRoomName: string): Promise<number | nu
 }
 
 async function getPlanLimit(uid: string, field: string): Promise<number | undefined> {
-  const userSnap = await firestore.collection("users").doc(uid).get();
+  const userSnap = await globalCol("users").doc(uid).get();
   const planId = String((userSnap.data() || {}).planId || "free");
-  const planSnap = await firestore.collection("plans").doc(planId).get();
+  const planSnap = await globalCol("plans").doc(planId).get();
   if (!planSnap.exists) return undefined;
   const limits = (planSnap.data() || {}).limits || {};
   const raw = (limits as any)[field];
@@ -132,7 +133,7 @@ const CAPACITY_LOCK_TTL_MS = 10_000;
 
 async function acquireCapacityLock(roomId: string): Promise<string | null> {
   const owner = crypto.randomUUID();
-  const ref = firestore.collection("roomCapacityLocks").doc(roomId);
+  const ref = tenantCol("roomCapacityLocks").doc(roomId);
   const now = Date.now();
   try {
     await firestore.runTransaction(async (tx) => {
@@ -160,7 +161,7 @@ async function acquireCapacityLock(roomId: string): Promise<string | null> {
 }
 
 async function releaseCapacityLock(roomId: string, owner: string): Promise<void> {
-  const ref = firestore.collection("roomCapacityLocks").doc(roomId);
+  const ref = tenantCol("roomCapacityLocks").doc(roomId);
   try {
     await firestore.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
@@ -353,7 +354,7 @@ router.post("/invites/:inviteId/redeem", async (req: any, res) => {
       return res.status(429).json({ error: "rate_limited" });
     }
 
-    const inviteRef = firestore.collection("roomInvites").doc(inviteId);
+    const inviteRef = tenantCol("roomInvites").doc(inviteId);
 
     const result = await firestore.runTransaction(async (tx) => {
       const snap = await tx.get(inviteRef);
@@ -477,7 +478,7 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     }
 
     // Step 1: Redeem the invite (validate + increment use count)
-    const inviteRef = firestore.collection("roomInvites").doc(inviteId);
+    const inviteRef = tenantCol("roomInvites").doc(inviteId);
 
     const redeemResult = await firestore.runTransaction(async (tx) => {
       const snap = await tx.get(inviteRef);
@@ -564,7 +565,7 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     logPayload.currentUseCount = redeemResult.useCount;
 
     // Step 2: Get room details (validate room exists)
-    const roomSnap = await firestore.collection("rooms").doc(roomId).get();
+    const roomSnap = await tenantCol("rooms").doc(roomId).get();
     if (!roomSnap.exists) {
       logPayload.event = "join_now_fail";
       logPayload.reason = PERMISSION_ERRORS.ROOM_NOT_FOUND;
@@ -774,7 +775,7 @@ router.get("/rooms/:roomId/status", async (req: any, res) => {
     const roomId = String(req.params.roomId || "").trim();
     if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
-    const snap = await firestore.collection("rooms").doc(roomId).get();
+    const snap = await tenantCol("rooms").doc(roomId).get();
     if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
     const room = (snap.data() as any) || {};
@@ -855,7 +856,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
 
     const allowGuestJoin = String(process.env.ALLOW_GUEST_RTC_JOIN || "").trim() === "1";
 
-    const snap = await firestore.collection("rooms").doc(roomId).get();
+    const snap = await tenantCol("rooms").doc(roomId).get();
     if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
     const room = (snap.data() as any) || {};
@@ -963,7 +964,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
 
     // When host joins, flip room live.
     if (user && isOwner && roomStatus !== "live") {
-      await firestore.collection("rooms").doc(roomId).set(
+      await tenantCol("rooms").doc(roomId).set(
         {
           status: "live",
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),

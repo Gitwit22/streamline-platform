@@ -4,6 +4,7 @@ import { firestore as db } from "../firebaseAdmin";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import type { RoomHlsConfig } from "../services/rooms";
 import { DEFAULT_ROOM_HLS_CONFIG } from "../services/rooms";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -89,7 +90,7 @@ router.put("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
     if (theme !== undefined) nextConfig.theme = theme;
 
     // Merge update to rooms/{roomId}.hlsConfig ONLY (no runtime hls state).
-    await db.collection("rooms").doc(ctx.roomId).set(
+    await tenantCol("rooms").doc(ctx.roomId).set(
       {
         hlsConfig: nextConfig,
       },

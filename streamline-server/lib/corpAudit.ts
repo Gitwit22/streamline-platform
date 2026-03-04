@@ -1,4 +1,5 @@
 import { firestore } from "../firebaseAdmin";
+import { tenantCol } from "./dbPaths";
 
 export type CorpAuditParams = {
   orgId: string;
@@ -22,5 +23,5 @@ export async function writeCorpAudit(params: CorpAuditParams) {
   };
 
   const id = `${params.orgId}_${now}_${Math.random().toString(36).slice(2, 8)}`;
-  await firestore.collection("corpAudit").doc(id).set(doc, { merge: true });
+  await tenantCol("corpAudit").doc(id).set(doc, { merge: true });
 }

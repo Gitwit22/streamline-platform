@@ -7,6 +7,7 @@ import { getCurrentMonthKey } from "../lib/usageTracker";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 // Helper function to get the next reset date (start of next month)
 function getNextResetDate(): Date {
@@ -29,7 +30,7 @@ export type UsageSummaryResult = {
 
 export async function computeUsageSummaryResult(uid: string): Promise<UsageSummaryResult> {
   // 1) User doc (planId + overages setting)
-  const userRef = firestore.collection("users").doc(uid);
+  const userRef = globalCol("users").doc(uid);
   const userSnap = await userRef.get();
 
   if (!userSnap.exists) {
@@ -53,7 +54,7 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
   const monthKey = getCurrentMonthKey();
   const usageDocId = `${uid}_${monthKey}`;
 
-  const usageRef = firestore.collection("usageMonthly").doc(usageDocId);
+  const usageRef = tenantCol("usageMonthly").doc(usageDocId);
   const usageSnap = await usageRef.get();
 
   // If missing, do NOT fail—return a zeroed shape so the UI is stable.
@@ -305,7 +306,7 @@ router.get("/entitlements", requireAuth, async (req, res) => {
    // if the flag doc is missing so plans behave as defined out of the box.
    let recordingEnabledFlag = true;
    try {
-     const snap = await firestore.collection("featureFlags").doc("recording").get();
+     const snap = await globalCol("featureFlags").doc("recording").get();
      const data = snap.exists ? (snap.data() as any) || {} : {};
      recordingEnabledFlag = data.enabled === undefined ? true : !!data.enabled;
    } catch {

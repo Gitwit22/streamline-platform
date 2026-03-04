@@ -1,4 +1,5 @@
 import { firestore } from "../firebaseAdmin";
+import { tenantCol } from "./dbPaths";
 
 export async function upsertUsageMonthlyOverageTotals(params: {
   uid: string;
@@ -16,7 +17,7 @@ export async function upsertUsageMonthlyOverageTotals(params: {
   const transcodeMinutes = Math.max(0, Math.round(Number(params.totals.transcodeMinutes || 0)));
 
   const usageDocId = `${uid}_${monthKey}`;
-  const usageRef = firestore.collection("usageMonthly").doc(usageDocId);
+  const usageRef = tenantCol("usageMonthly").doc(usageDocId);
 
   await firestore.runTransaction(async (tx) => {
     const snap = await tx.get(usageRef);

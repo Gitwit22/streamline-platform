@@ -2,6 +2,7 @@ import express from "express";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -56,7 +57,7 @@ function coerceRole(value: any): EduOrgRole | null {
 }
 
 async function getOrgContext(uid: string): Promise<{ orgId: string; orgRole: EduOrgRole | null; orgName: string | null; userName: string | null } | null> {
-  const userSnap = await db.collection("users").doc(uid).get().catch(() => null as any);
+  const userSnap = await globalCol("users").doc(uid).get().catch(() => null as any);
   const user = userSnap && userSnap.exists ? (userSnap.data() as any) : null;
   if (!user) return null;
 
@@ -65,7 +66,7 @@ async function getOrgContext(uid: string): Promise<{ orgId: string; orgRole: Edu
   if (!orgId) return null;
 
   const memberId = `${orgId}_${uid}`;
-  const memberSnap = await db.collection("orgMembers").doc(memberId).get().catch(() => null as any);
+  const memberSnap = await tenantCol("orgMembers").doc(memberId).get().catch(() => null as any);
   const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
   const orgRole = coerceRole(member?.role);
 
@@ -166,7 +167,7 @@ async function writeAudit(params: {
     createdAt: now,
   };
   const id = `${params.orgId}_${now}_${Math.random().toString(36).slice(2, 8)}`;
-  await db.collection("audit").doc(id).set(auditDoc, { merge: true });
+  await tenantCol("audit").doc(id).set(auditDoc, { merge: true });
 }
 
 // GET /api/edu/org
@@ -182,7 +183,7 @@ router.get("/org", requireAuth, async (req, res) => {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    const orgRef = db.collection("orgs").doc(ctx.orgId);
+    const orgRef = tenantCol("orgs").doc(ctx.orgId);
     const snap = await orgRef.get();
 
     if (!snap.exists) {
@@ -261,7 +262,7 @@ router.patch("/org", requireAuth, async (req, res) => {
       updatedAt: Date.now(),
     };
 
-    const orgRef = db.collection("orgs").doc(ctx.orgId);
+    const orgRef = tenantCol("orgs").doc(ctx.orgId);
     await orgRef.set(next, { merge: true });
 
     await writeAudit({
@@ -292,7 +293,7 @@ router.get("/storage-summary", requireAuth, async (req, res) => {
 
     let docs: any[] = [];
     try {
-      const snap = await db.collection("recordings").where("orgId", "==", ctx.orgId).limit(500).get();
+      const snap = await tenantCol("recordings").where("orgId", "==", ctx.orgId).limit(500).get();
       docs = snap.docs;
     } catch {
       docs = [];
@@ -332,8 +333,7 @@ router.get("/audit", requireAuth, async (req, res) => {
 
     let docs: any[] = [];
     try {
-      const snap = await db
-        .collection("audit")
+      const snap = await tenantCol("audit")
         .where("orgId", "==", ctx.orgId)
         .orderBy("createdAt", "desc")
         .limit(limit)
@@ -341,7 +341,7 @@ router.get("/audit", requireAuth, async (req, res) => {
       docs = snap.docs;
     } catch {
       // Index-free fallback: read a small window and filter.
-      const snap = await db.collection("audit").orderBy("createdAt", "desc").limit(50).get().catch(() => null as any);
+      const snap = await tenantCol("audit").orderBy("createdAt", "desc").limit(50).get().catch(() => null as any);
       docs = snap?.docs ? snap.docs.filter((d: any) => String((d.data() || {}).orgId || "") === ctx.orgId).slice(0, limit) : [];
     }
 

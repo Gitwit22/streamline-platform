@@ -1,4 +1,5 @@
 import { auth as firebaseAuth, firestore } from "../firebaseAdmin";
+import { globalCol } from "../lib/dbPaths";
 
 type Mode = "dry" | "apply";
 
@@ -54,7 +55,7 @@ async function main() {
     )
   );
 
-  const usersRef = firestore.collection("users");
+  const usersRef = globalCol("users");
 
   let last: FirebaseFirestore.QueryDocumentSnapshot | null = null;
   if (startAfterUid) {

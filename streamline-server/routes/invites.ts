@@ -7,6 +7,7 @@ import { requireAuth, tryGetAuthUserAny, verifyInviteToken } from "../middleware
 import { resolveRoomIdentity } from "../lib/roomIdentity";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 type InviteRole = "guest" | "cohost";
 
@@ -172,7 +173,7 @@ router.post("/legacy/resolve", async (req, res) => {
       ? admin.firestore.Timestamp.fromMillis(expSec * 1000)
       : null;
 
-    const ref = firestore.collection("roomInvites").doc(inviteId);
+    const ref = tenantCol("roomInvites").doc(inviteId);
 
     await firestore.runTransaction(async (tx) => {
       const snap = await tx.get(ref);
@@ -347,7 +348,7 @@ router.post("/accept", async (req, res) => {
 
     if (user) {
       const docId = `${user.uid}_${Buffer.from(inviteToken).toString("base64url").slice(0, 40)}`;
-      await firestore.collection("inviteAcceptances").doc(docId).set(
+      await tenantCol("inviteAcceptances").doc(docId).set(
         {
           uid: user.uid,
           roomId: resolved.roomId,
@@ -403,7 +404,7 @@ router.post("/track-landing", async (req, res) => {
     const inviteHash = Buffer.from(inviteToken).toString("base64url").slice(0, 40);
     const docId = `${resolved.roomId}_${inviteHash}`;
 
-    await firestore.collection("inviteLandings").doc(docId).set(
+    await tenantCol("inviteLandings").doc(docId).set(
       {
         roomId: resolved.roomId,
         roomName: resolved.roomName,
@@ -431,8 +432,7 @@ router.get("/room-status", async (req, res) => {
     const roomId = normalizeRoomId((req.query as any)?.roomId);
     if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
-    const snap = await firestore
-      .collection("inviteLandings")
+    const snap = await tenantCol("inviteLandings")
       .where("roomId", "==", roomId)
       .get();
 

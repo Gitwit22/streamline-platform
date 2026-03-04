@@ -17,6 +17,8 @@ import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { deletePrefix } from "../lib/storageClient";
 import { loadEduOrgSettingsForUid, isEduOrgType } from "../lib/eduOrgContext";
 import { writeEduAudit } from "../lib/eduAudit";
+import { tenantCol } from "../lib/dbPaths";
+import { storagePrefix } from "../lib/storagePaths";
 
 const router = Router();
 
@@ -26,7 +28,7 @@ async function incrementHlsUsageMinutes(uid: string, minutes: number) {
 
   const monthKey = getCurrentMonthKey();
   const usageDocId = `${uid}_${monthKey}`;
-  const usageRef = firestore.collection("usageMonthly").doc(usageDocId);
+  const usageRef = tenantCol("usageMonthly").doc(usageDocId);
 
   // Use transaction for atomic increment (safe for concurrent requests)
   await firestore.runTransaction(async (tx) => {
@@ -78,7 +80,7 @@ function getHlsPublicBaseUrl(): string {
 }
 
 async function cleanupHlsArtifacts(params: { roomId: string; prefix?: string | null }) {
-  const prefix = (params.prefix && String(params.prefix).trim()) || `hls/${params.roomId}/`;
+  const prefix = (params.prefix && String(params.prefix).trim()) || storagePrefix("hls", params.roomId);
   try {
     await deletePrefix(prefix);
   } catch (e: any) {
@@ -180,7 +182,7 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
       const entitlements = await getEffectiveEntitlements((req as any).account || uid);
       const monthKey = getCurrentMonthKey();
       const usageDocId = `${uid}_${monthKey}`;
-      const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
+      const usageSnap = await tenantCol("usageMonthly").doc(usageDocId).get();
       const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
       const usage = existing.usage || {};
 
@@ -233,7 +235,7 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
     }
 
     // Build stable paths
-    const prefix = `hls/${roomId}/`;
+    const prefix = storagePrefix("hls", roomId);
     const playlistName = `room.m3u8`;
     const livePlaylistName = `live.m3u8`;
     const publicBase = getHlsPublicBaseUrl();
@@ -292,7 +294,7 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
         console.warn("[hls] start: room has no savedEmbedId; activeRoomId will not be synced", { roomId });
       } else {
         try {
-          const embedRef = firestore.collection("savedEmbeds").doc(savedEmbedId);
+          const embedRef = tenantCol("savedEmbeds").doc(savedEmbedId);
           await embedRef.set(
             {
               activeRoomId: roomId,
@@ -378,7 +380,7 @@ router.get("/status/:roomId", requireAuth as any, requireRoomAccessToken as any,
     if ((hls.status || "idle") === "live" && stopAtIso) {
       const stopAtMs = Date.parse(stopAtIso);
       if (Number.isFinite(stopAtMs) && Date.now() >= stopAtMs) {
-        const roomRef = firestore.collection("rooms").doc(roomId);
+        const roomRef = tenantCol("rooms").doc(roomId);
 
         if (hls.egressId) {
           try {
@@ -481,7 +483,7 @@ router.post("/stop/:roomId", requireAuth as any, requireRoomAccessToken as any, 
     try {
       const ctx = await assertRoomPerm(req as any, roomId, "canStream");
       room = ctx.room;
-      roomRef = firestore.collection("rooms").doc(roomId);
+      roomRef = tenantCol("rooms").doc(roomId);
     } catch (err: any) {
       if (err instanceof RoomPermissionError) {
         return res.status(err.status).json({ error: err.code });

@@ -5,6 +5,8 @@ import { deleteFiles, deletePrefix } from "../lib/storageClient";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { stopEgress } from "../services/livekitEgress";
 import { setHlsIdle } from "../services/rooms";
+import { tenantCol, globalCol } from "../lib/dbPaths";
+import { storagePrefix } from "../lib/storagePaths";
 
 const router = Router();
 
@@ -105,16 +107,14 @@ async function expireEmergencyRecordings(now: Date): Promise<{ deletedCount: num
 
       // Best-effort: mark recording doc deleted as well
       if (recordingId) {
-        await firestore
-          .collection("recordings")
+        await tenantCol("recordings")
           .doc(recordingId)
           .set({ status: "deleted", deletedAt: now, updatedAt: now }, { merge: true });
       }
 
       // Best-effort: annotate user doc so we can audit deletions later
       if (uid) {
-        await firestore
-          .collection("users")
+        await globalCol("users")
           .doc(uid)
           .set({ lastEmergencyRecordingExpiredAt: now }, { merge: true });
       }
@@ -139,8 +139,7 @@ async function deleteCollection(ref: FirebaseFirestore.CollectionReference, limi
 
 async function purgeDeletedAccounts(now: Date): Promise<{ purgedCount: number }> {
   const nowMs = now.getTime();
-  const snap = await firestore
-    .collection("users")
+  const snap = await globalCol("users")
     .where("deleteAfterMs", "<=", nowMs)
     .limit(50)
     .get();
@@ -188,14 +187,13 @@ async function purgeDeletedAccounts(now: Date): Promise<{ purgedCount: number }>
 
       // accounts/{uid}
       try {
-        await firestore.collection("accounts").doc(uid).delete();
+        await globalCol("accounts").doc(uid).delete();
       } catch {}
 
       // billingAudit where uid == uid (best-effort, small batches)
       try {
         for (let i = 0; i < 5; i++) {
-          const auditSnap = await firestore
-            .collection("billingAudit")
+          const auditSnap = await tenantCol("billingAudit")
             .where("uid", "==", uid)
             .limit(200)
             .get();
@@ -225,8 +223,7 @@ async function purgeExpiredRecordings(now: Date, opts?: { limit?: number }): Pro
 
   // Only recordings with a deleteAfterMs field are eligible.
   // This is intended for emergency recordings (1-hour retention).
-  const snap = await firestore
-    .collection("recordings")
+  const snap = await tenantCol("recordings")
     .where("deleteAfterMs", "<=", nowMs)
     .limit(limit)
     .get();
@@ -270,15 +267,13 @@ async function purgeStaleHls(now: Date, opts?: { ttlMinutes?: number; limit?: nu
   // Prefer a targeted query; if Firestore complains about indexes, fall back to a bounded scan.
   let docs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
   try {
-    const snap = await firestore
-      .collection("rooms")
+    const snap = await tenantCol("rooms")
       .where("hls.status", "in", ["starting", "live", "error"])
       .limit(limit)
       .get();
     docs = snap.docs;
   } catch (e) {
-    const snap = await firestore
-      .collection("rooms")
+    const snap = await tenantCol("rooms")
       .orderBy("updatedAt", "desc")
       .limit(Math.max(limit, 200))
       .get();
@@ -306,7 +301,7 @@ async function purgeStaleHls(now: Date, opts?: { ttlMinutes?: number; limit?: nu
     if (updatedAtMs && updatedAtMs > cutoffMs) continue;
 
     const roomId = doc.id;
-    const prefix = String(hls.prefix || `hls/${roomId}/`).trim();
+    const prefix = String(hls.prefix || storagePrefix("hls", roomId)).trim();
     const egressId = typeof hls.egressId === "string" ? hls.egressId : null;
 
     try {

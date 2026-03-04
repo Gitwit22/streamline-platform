@@ -9,6 +9,8 @@ import { startHlsEgress, stopEgress } from "../services/livekitEgress";
 import { deletePrefix } from "../lib/storageClient";
 import { getLiveKitSdk } from "../lib/livekit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
+import { storagePrefix } from "../lib/storagePaths";
 
 const router = express.Router();
 
@@ -45,7 +47,7 @@ router.get("/broadcasts", requireAuth, async (req, res) => {
     const statusFilter = asString(req.query.status as string).split(",").map(s => s.trim()).filter(Boolean);
     const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 50, 1), 200);
 
-    let query = db.collection("corpBroadcasts")
+    let query = tenantCol("corpBroadcasts")
       .where("orgId", "==", ctx.orgId)
       .orderBy("scheduledAt", "desc")
       .limit(limit);
@@ -100,7 +102,7 @@ router.post("/broadcasts", requireAuth, async (req, res) => {
       createdBy: uid,
     };
 
-    await db.collection("corpBroadcasts").doc(broadcastId).set(doc, { merge: true });
+    await tenantCol("corpBroadcasts").doc(broadcastId).set(doc, { merge: true });
 
     await writeCorpAudit({
       orgId: ctx.orgId,
@@ -133,7 +135,7 @@ router.patch("/broadcasts/:id", requireAuth, async (req, res) => {
     }
 
     const broadcastId = req.params.id;
-    const snap = await db.collection("corpBroadcasts").doc(broadcastId).get();
+    const snap = await tenantCol("corpBroadcasts").doc(broadcastId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const existing = snap.data() as any;
@@ -151,7 +153,7 @@ router.patch("/broadcasts/:id", requireAuth, async (req, res) => {
 
     updates.updatedAt = Date.now();
 
-    await db.collection("corpBroadcasts").doc(broadcastId).set(updates, { merge: true });
+    await tenantCol("corpBroadcasts").doc(broadcastId).set(updates, { merge: true });
 
     await writeCorpAudit({
       orgId: ctx.orgId,
@@ -185,13 +187,13 @@ router.delete("/broadcasts/:id", requireAuth, async (req, res) => {
     }
 
     const broadcastId = req.params.id;
-    const snap = await db.collection("corpBroadcasts").doc(broadcastId).get();
+    const snap = await tenantCol("corpBroadcasts").doc(broadcastId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const existing = snap.data() as any;
     if (existing.orgId !== ctx.orgId) return res.status(403).json({ error: "wrong_org" });
 
-    await db.collection("corpBroadcasts").doc(broadcastId).delete();
+    await tenantCol("corpBroadcasts").doc(broadcastId).delete();
 
     await writeCorpAudit({
       orgId: ctx.orgId,
@@ -268,7 +270,7 @@ router.post("/broadcasts/:id/go-live", requireAuth, async (req, res) => {
     }
 
     const broadcastId = req.params.id;
-    const snap = await db.collection("corpBroadcasts").doc(broadcastId).get();
+    const snap = await tenantCol("corpBroadcasts").doc(broadcastId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const existing = snap.data() as any;
@@ -318,7 +320,7 @@ router.post("/broadcasts/:id/go-live", requireAuth, async (req, res) => {
     const lkToken = await at.toJwt();
 
     // 3) Start HLS egress
-    const prefix = `hls/${roomId}/`;
+    const prefix = storagePrefix("hls", roomId);
     const playlistName = "room.m3u8";
     const livePlaylistName = "live.m3u8";
     const publicBase = getHlsPublicBaseUrl();
@@ -355,7 +357,7 @@ router.post("/broadcasts/:id/go-live", requireAuth, async (req, res) => {
       playlistUrl,
       updatedAt: now,
     };
-    await db.collection("corpBroadcasts").doc(broadcastId).set(updates, { merge: true });
+    await tenantCol("corpBroadcasts").doc(broadcastId).set(updates, { merge: true });
 
     // 5) Mint room access token for client
     const roomAccessToken = jwt.sign(
@@ -402,7 +404,7 @@ router.post("/broadcasts/:id/stop", requireAuth, async (req, res) => {
     }
 
     const broadcastId = req.params.id;
-    const snap = await db.collection("corpBroadcasts").doc(broadcastId).get();
+    const snap = await tenantCol("corpBroadcasts").doc(broadcastId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const existing = snap.data() as any;
@@ -418,9 +420,9 @@ router.post("/broadcasts/:id/stop", requireAuth, async (req, res) => {
     // Clean up HLS artifacts from R2
     const roomId = existing.roomId;
     if (roomId) {
-      try { await deletePrefix(`hls/${roomId}/`); } catch {}
+      try { await deletePrefix(storagePrefix("hls", roomId)); } catch {}
       // Reset room HLS state
-      const roomRef = db.collection("rooms").doc(roomId);
+      const roomRef = tenantCol("rooms").doc(roomId);
       const roomSnap = await roomRef.get();
       if (roomSnap.exists) {
         await setHlsIdle(roomRef);
@@ -429,7 +431,7 @@ router.post("/broadcasts/:id/stop", requireAuth, async (req, res) => {
 
     // Update broadcast to completed
     const now = Date.now();
-    await db.collection("corpBroadcasts").doc(broadcastId).set({
+    await tenantCol("corpBroadcasts").doc(broadcastId).set({
       status: "completed",
       endedAt: now,
       updatedAt: now,
@@ -467,7 +469,7 @@ router.get("/broadcasts/:id/watch", requireAuth, async (req, res) => {
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
 
     const broadcastId = req.params.id;
-    const snap = await db.collection("corpBroadcasts").doc(broadcastId).get();
+    const snap = await tenantCol("corpBroadcasts").doc(broadcastId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const data = snap.data() as any;
@@ -481,7 +483,7 @@ router.get("/broadcasts/:id/watch", requireAuth, async (req, res) => {
 
     // Increment viewer count on broadcast doc (best-effort)
     if (isLive) {
-      db.collection("corpBroadcasts").doc(broadcastId).set({
+      tenantCol("corpBroadcasts").doc(broadcastId).set({
         viewers: (data.viewers || 0) + 1,
         updatedAt: Date.now(),
       }, { merge: true }).catch(() => {});

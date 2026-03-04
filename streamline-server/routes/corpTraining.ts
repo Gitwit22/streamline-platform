@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/requireAuth";
 import { getCorpOrgContext, assertCorpRole, asString, coerceMillis } from "../lib/corpOrg";
 import { writeCorpAudit } from "../lib/corpAudit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -41,7 +42,7 @@ router.get("/training", requireAuth, async (req, res) => {
 
     const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 50, 1), 200);
 
-    const snap = await db.collection("corpTraining")
+    const snap = await tenantCol("corpTraining")
       .where("orgId", "==", ctx.orgId)
       .orderBy("createdAt", "desc")
       .limit(limit)
@@ -55,7 +56,7 @@ router.get("/training", requireAuth, async (req, res) => {
     }
 
     // Enrich with per-user progress
-    const progressSnap = await db.collection("corpTrainingProgress")
+    const progressSnap = await tenantCol("corpTrainingProgress")
       .where("orgId", "==", ctx.orgId)
       .where("uid", "==", uid)
       .get()
@@ -119,7 +120,7 @@ router.post("/training", requireAuth, async (req, res) => {
       createdBy: uid,
     };
 
-    await db.collection("corpTraining").doc(moduleId).set(doc, { merge: true });
+    await tenantCol("corpTraining").doc(moduleId).set(doc, { merge: true });
 
     await writeCorpAudit({
       orgId: ctx.orgId,
@@ -149,7 +150,7 @@ router.patch("/training/:id/progress", requireAuth, async (req, res) => {
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
 
     const moduleId = req.params.id;
-    const snap = await db.collection("corpTraining").doc(moduleId).get();
+    const snap = await tenantCol("corpTraining").doc(moduleId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const existing = snap.data() as any;
@@ -171,7 +172,7 @@ router.patch("/training/:id/progress", requireAuth, async (req, res) => {
     };
     if (progress >= 100) progressDoc.completedAt = now;
 
-    await db.collection("corpTrainingProgress").doc(progressId).set(progressDoc, { merge: true });
+    await tenantCol("corpTrainingProgress").doc(progressId).set(progressDoc, { merge: true });
 
     return res.json({ progress: progressDoc });
   } catch (err: any) {
@@ -195,7 +196,7 @@ router.post("/training/:id/assign", requireAuth, async (req, res) => {
     }
 
     const moduleId = req.params.id;
-    const snap = await db.collection("corpTraining").doc(moduleId).get();
+    const snap = await tenantCol("corpTraining").doc(moduleId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const existing = snap.data() as any;
@@ -205,7 +206,7 @@ router.post("/training/:id/assign", requireAuth, async (req, res) => {
     if (req.body.assignedTo !== undefined) updates.assignedTo = asString(req.body.assignedTo).trim();
     if (req.body.deadline !== undefined) updates.deadline = coerceMillis(req.body.deadline);
 
-    await db.collection("corpTraining").doc(moduleId).set(updates, { merge: true });
+    await tenantCol("corpTraining").doc(moduleId).set(updates, { merge: true });
 
     await writeCorpAudit({
       orgId: ctx.orgId,

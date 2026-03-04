@@ -6,6 +6,7 @@ import { requireAuth } from "../middleware/requireAuth";
 import { loadEduOrgSettingsForUid, isEduOrgType } from "../lib/eduOrgContext";
 import { writeEduAudit } from "../lib/eduAudit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -49,7 +50,7 @@ router.post("/embeds/event", requireAuth, async (req, res) => {
     const password = asString(req.body?.password);
 
     // Basic authorization: user must own the event.
-    const evRef = db.collection("events").doc(eventId);
+    const evRef = tenantCol("events").doc(eventId);
     const evSnap = await evRef.get();
     if (!evSnap.exists) return res.status(404).json({ error: "event_not_found" });
     const ev = evSnap.data() || {};
@@ -66,7 +67,7 @@ router.post("/embeds/event", requireAuth, async (req, res) => {
     }
 
     const embedId = embedIdForEvent(eventId);
-    const embedRef = db.collection("embeds").doc(embedId);
+    const embedRef = tenantCol("embeds").doc(embedId);
 
     const existedBefore = (await embedRef.get()).exists;
 

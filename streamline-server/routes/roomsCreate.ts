@@ -5,6 +5,7 @@ import { ensureRoomDoc } from "../services/rooms";
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeRoomLayout, type RoomLayout } from "../lib/roomLayout";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -38,7 +39,7 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
   const savedEmbedId = typeof savedEmbedIdRaw === "string" ? savedEmbedIdRaw.trim() : "";
 
   // Generate a new Firestore document id for the room.
-  const roomId = db.collection("rooms").doc().id;
+  const roomId = tenantCol("rooms").doc().id;
 
   const livekitRoomName = rawName || roomId;
 
@@ -46,7 +47,7 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
   // so new rooms inherit the user's preferred layout without requiring per-room setup.
   let initialRoomLayout: RoomLayout | undefined = undefined;
   try {
-    const userSnap = await db.collection("users").doc(uid).get();
+    const userSnap = await globalCol("users").doc(uid).get();
     const userData = userSnap.exists ? (userSnap.data() as any) || {} : {};
     const mediaPrefs = (userData as any)?.mediaPrefs || {};
     initialRoomLayout =

@@ -7,6 +7,7 @@ import { getUserAccount } from "../lib/userAccount";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { buildNewUserDoc } from "../lib/newUserDefaults";
+import { globalCol } from "../lib/dbPaths";
 
 console.log("✅ auth router loaded");
 
@@ -72,7 +73,7 @@ router.get("/me", requireAuth, async (req, res) => {
     const account = (req as any).account || await getUserAccount(userId);
 
     // Load the latest Firestore snapshot so we can strip sensitive fields
-    const snap = await db.collection("users").doc(userId).get();
+    const snap = await globalCol("users").doc(userId).get();
     const raw = stripSensitiveUserFields(snap.data() || account.rawUser || {});
 
     // Ensure billingTruth/planId are present for legacy docs.
@@ -89,7 +90,7 @@ router.get("/me", requireAuth, async (req, res) => {
         if (billingTruthMissing) {
           patch.billingTruth = normalizeBillingTruthFromUser({ ...raw, planId: nextPlanId }, now);
         }
-        await db.collection("users").doc(userId).set(patch, { merge: true });
+        await globalCol("users").doc(userId).set(patch, { merge: true });
         // Keep response in sync without requiring another round-trip.
         if (planIdMissing) (raw as any).planId = "free";
         if (billingTruthMissing) (raw as any).billingTruth = patch.billingTruth;
@@ -134,8 +135,7 @@ router.post("/login", async (req, res) => {
     const emailNorm = email.trim().toLowerCase();
 
     // Find user by email (stored in Firestore)
-    const snap = await db
-      .collection("users")
+    const snap = await globalCol("users")
       .where("email", "==", emailNorm)
       .limit(1)
       .get();
@@ -200,7 +200,7 @@ router.post("/legacy-login", async (req, res) => {
     const emailNorm = String(email).trim().toLowerCase();
 
     // 1) Find legacy user doc by email (legacy lookup). Canonical identity is doc.id (uid).
-    const snap = await db.collection("users").where("email", "==", emailNorm).limit(1).get();
+    const snap = await globalCol("users").where("email", "==", emailNorm).limit(1).get();
     if (snap.empty) return res.status(401).json({ error: "Invalid credentials" });
 
     const doc = snap.docs[0];
@@ -267,7 +267,7 @@ router.post("/legacy-login", async (req, res) => {
 
     // Optional: annotate user doc for audit/debugging.
     try {
-      await db.collection("users").doc(uid).set(
+      await globalCol("users").doc(uid).set(
         {
           firebaseAuthMigratedAtMs: Date.now(),
           updatedAt: Date.now(),
@@ -300,8 +300,7 @@ router.post("/signup", async (req, res) => {
 
     const emailNorm = String(email).trim().toLowerCase();
 
-    const existing = await db
-      .collection("users")
+    const existing = await globalCol("users")
       .where("email", "==", emailNorm)
       .limit(1)
       .get();
@@ -312,7 +311,7 @@ router.post("/signup", async (req, res) => {
 
     const passwordHash = await bcrypt.hash(String(password), 10);
 
-    const userRef = db.collection("users").doc();
+    const userRef = globalCol("users").doc();
     const uid = userRef.id;
 
     const now = Date.now();

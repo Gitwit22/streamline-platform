@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/requireAuth";
 import { getSignedDownloadUrl, headObjectSize, isR2Configured } from "../lib/storageClient";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -56,7 +57,7 @@ function toIsoOrNull(value: any): string | null {
 async function getRecordingById(recordingId: string): Promise<RecordingDoc | null> {
   const id = String(recordingId || "").trim();
   if (!id) return null;
-  const snap = await firestore.collection("recordings").doc(id).get();
+  const snap = await tenantCol("recordings").doc(id).get();
   if (!snap.exists) return null;
   return { id: snap.id, data: (snap.data() as any) || {} };
 }
@@ -83,7 +84,7 @@ async function findLatestRecordingForRoom(params: {
   // This avoids Firestore composite index requirements and works even when the room pointer is missing.
   try {
     const activeKey = `${uid}_${roomId}`;
-    const activeSnap = await firestore.collection("activeRecordings").doc(activeKey).get();
+    const activeSnap = await tenantCol("activeRecordings").doc(activeKey).get();
     if (activeSnap.exists) {
       const active = (activeSnap.data() as any) || {};
       const activeRecordingId = String(active.recordingId || "").trim();
@@ -107,8 +108,7 @@ async function findLatestRecordingForRoom(params: {
   // 2) Deterministic fallback: newest by startedAt (or createdAt).
   // Note: this may require a composite index in Firestore; if it fails, we fall back safely.
   try {
-    const querySnap = await firestore
-      .collection("recordings")
+    const querySnap = await tenantCol("recordings")
       .where("roomId", "==", roomId)
       .where("userId", "==", uid)
       .orderBy("startedAt", "desc")
@@ -146,12 +146,12 @@ router.get("/:roomId/latest-recording", requireAuth, async (req, res) => {
 
     // Allow UI to pass either the Firestore room doc id OR a human-friendly room name.
     let roomId = roomKey;
-    let roomSnap = await firestore.collection("rooms").doc(roomId).get();
+    let roomSnap = await tenantCol("rooms").doc(roomId).get();
     if (!roomSnap.exists) {
       const resolved = await resolveRoomIdentity({ roomName: roomKey });
       if (resolved?.roomId) {
         roomId = resolved.roomId;
-        roomSnap = await firestore.collection("rooms").doc(roomId).get();
+        roomSnap = await tenantCol("rooms").doc(roomId).get();
       }
     }
 
@@ -174,8 +174,7 @@ router.get("/:roomId/latest-recording", requireAuth, async (req, res) => {
 
     // Keep room pointer synced if it was missing or stale (best-effort; do not block response).
     if (!roomLatestRecordingId || roomLatestRecordingId !== recordingId) {
-      void firestore
-        .collection("rooms")
+      void tenantCol("rooms")
         .doc(roomId)
         .set(
           {
@@ -294,13 +293,13 @@ router.post("/:roomId/recordings/reconcile", requireAuth, async (req, res) => {
 
     // Allow reconcile to work when the UI supplies room name.
     let roomId = roomKey;
-    let roomRef = firestore.collection("rooms").doc(roomId);
+    let roomRef = tenantCol("rooms").doc(roomId);
     let roomSnap = await roomRef.get();
     if (!roomSnap.exists) {
       const resolved = await resolveRoomIdentity({ roomName: roomKey });
       if (resolved?.roomId) {
         roomId = resolved.roomId;
-        roomRef = firestore.collection("rooms").doc(roomId);
+        roomRef = tenantCol("rooms").doc(roomId);
         roomSnap = await roomRef.get();
       }
     }
@@ -338,8 +337,7 @@ router.post("/:roomId/recordings/reconcile", requireAuth, async (req, res) => {
     }
 
     const now = new Date();
-    await firestore
-      .collection("recordings")
+    await tenantCol("recordings")
       .doc(recordingId)
       .set(
         {

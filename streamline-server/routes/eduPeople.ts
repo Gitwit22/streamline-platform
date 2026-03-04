@@ -3,6 +3,7 @@ import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { writeEduAudit } from "../lib/eduAudit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -49,7 +50,7 @@ function coerceMillis(value: any): number | null {
 }
 
 async function getOrgContext(uid: string): Promise<{ orgId: string; orgRole: EduOrgRole | null } | null> {
-  const userSnap = await db.collection("users").doc(uid).get().catch(() => null as any);
+  const userSnap = await globalCol("users").doc(uid).get().catch(() => null as any);
   const user = userSnap && userSnap.exists ? (userSnap.data() as any) : null;
   if (!user) return null;
 
@@ -58,7 +59,7 @@ async function getOrgContext(uid: string): Promise<{ orgId: string; orgRole: Edu
   if (!orgId) return null;
 
   const memberId = `${orgId}_${uid}`;
-  const memberSnap = await db.collection("orgMembers").doc(memberId).get().catch(() => null as any);
+  const memberSnap = await tenantCol("orgMembers").doc(memberId).get().catch(() => null as any);
   const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
   const orgRole = coerceRole(member?.role);
 
@@ -154,7 +155,7 @@ router.get("/people", requireAuth, async (req, res) => {
 
     let docs: any[] = [];
     try {
-      const snap = await db.collection("orgMembers").where("orgId", "==", ctx.orgId).limit(limit).get();
+      const snap = await tenantCol("orgMembers").where("orgId", "==", ctx.orgId).limit(limit).get();
       docs = snap.docs;
     } catch {
       docs = [];
@@ -162,7 +163,7 @@ router.get("/people", requireAuth, async (req, res) => {
 
     // Fallback for legacy datasets missing orgId on orgMembers docs.
     if (!docs.length) {
-      const snap = await db.collection("orgMembers").limit(limit).get();
+      const snap = await tenantCol("orgMembers").limit(limit).get();
       const prefix = `${ctx.orgId}_`;
       docs = snap.docs.filter((d) => String(d.id || "").startsWith(prefix));
     }
@@ -198,8 +199,7 @@ router.post("/people/invite", requireAuth, async (req, res) => {
     // Avoid duplicate rows for the same person (common source of count mismatch).
     // If the user is already a member: block. If an invite already exists: treat as resend.
     try {
-      const existingSnap = await db
-        .collection("orgMembers")
+      const existingSnap = await tenantCol("orgMembers")
         .where("orgId", "==", ctx.orgId)
         .where("email", "==", email)
         .limit(5)
@@ -217,7 +217,7 @@ router.post("/people/invite", requireAuth, async (req, res) => {
         }
         if (preferredStatus === "invited") {
           const now = Date.now();
-          const docRef = db.collection("orgMembers").doc(String(preferred.id));
+          const docRef = tenantCol("orgMembers").doc(String(preferred.id));
           const prev = typeof (existingDocs[0].data() as any)?.inviteResendCount === "number" ? (existingDocs[0].data() as any).inviteResendCount : 0;
           await docRef.set({ invitedAt: now, inviteResendCount: prev + 1, updatedAt: now }, { merge: true });
           const after = (await docRef.get()).data() || {};
@@ -245,7 +245,7 @@ router.post("/people/invite", requireAuth, async (req, res) => {
       updatedAt: now,
     };
 
-    await db.collection("orgMembers").doc(memberId).set(doc, { merge: true });
+    await tenantCol("orgMembers").doc(memberId).set(doc, { merge: true });
 
     await writeEduAudit({
       orgId: ctx.orgId,
@@ -278,7 +278,7 @@ router.patch("/people/:memberId/role", requireAuth, async (req, res) => {
     const nextRole = coerceRole(req.body?.role);
     if (!nextRole) return res.status(400).json({ error: "role_invalid" });
 
-    const docRef = db.collection("orgMembers").doc(memberId);
+    const docRef = tenantCol("orgMembers").doc(memberId);
     const snap = await docRef.get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
     const existing = snap.data() || {};
@@ -317,7 +317,7 @@ router.post("/people/:memberId/disable", requireAuth, async (req, res) => {
     const memberId = asString(req.params.memberId).trim();
     if (!memberId) return res.status(400).json({ error: "memberId_required" });
 
-    const docRef = db.collection("orgMembers").doc(memberId);
+    const docRef = tenantCol("orgMembers").doc(memberId);
     const snap = await docRef.get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
     const existing = snap.data() || {};
@@ -356,7 +356,7 @@ router.post("/people/:memberId/resend", requireAuth, async (req, res) => {
     const memberId = asString(req.params.memberId).trim();
     if (!memberId) return res.status(400).json({ error: "memberId_required" });
 
-    const docRef = db.collection("orgMembers").doc(memberId);
+    const docRef = tenantCol("orgMembers").doc(memberId);
     const snap = await docRef.get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
     const existing = snap.data() || {};

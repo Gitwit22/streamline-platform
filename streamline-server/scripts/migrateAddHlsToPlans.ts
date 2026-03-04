@@ -1,6 +1,7 @@
 import admin from "firebase-admin";
 import fs from "fs";
 import path from "path";
+import { globalCol } from "../lib/dbPaths";
 
 function initFirebase() {
   const json = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
@@ -66,7 +67,7 @@ async function run() {
   initFirebase();
   const db = admin.firestore();
 
-  const snap = await db.collection("plans").get();
+  const snap = await globalCol("plans").get();
   console.log(`Found ${snap.size} plans`);
 
   const batch = db.batch();

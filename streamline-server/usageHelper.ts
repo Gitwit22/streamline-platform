@@ -1,5 +1,6 @@
 // server/usageHelper.ts
 import { firestore } from "./firebaseAdmin";
+import { globalCol } from "./lib/dbPaths";
 
 /**
  * Helper to compute the billing period reset date based on user.createdAt
@@ -38,7 +39,7 @@ export async function addUsageForUser(
   }
 ) {
   try {
-    const userRef = firestore.collection("users").doc(userId);
+    const userRef = globalCol("users").doc(userId);
     const userSnap = await userRef.get();
 
     if (!userSnap.exists) {
@@ -54,7 +55,7 @@ export async function addUsageForUser(
     const planId = (userData.planId || userData.plan || "free") as string;
 
     // Get plan limits
-    const planSnap = await firestore.collection("plans").doc(planId).get();
+    const planSnap = await globalCol("plans").doc(planId).get();
     const planData = planSnap.data() || {};
     const maxHoursPerMonth = planData.maxHoursPerMonth || 0;
 
@@ -114,7 +115,7 @@ export async function addUsageForUser(
  */
 export async function getUserUsage(userId: string) {
   try {
-    const userRef = firestore.collection("users").doc(userId);
+    const userRef = globalCol("users").doc(userId);
     const userSnap = await userRef.get();
 
     if (!userSnap.exists) {
@@ -126,7 +127,7 @@ export async function getUserUsage(userId: string) {
     const planId = (userData.planId || userData.plan || "free") as string;
 
     // Get plan limits
-    const planSnap = await firestore.collection("plans").doc(planId).get();
+    const planSnap = await globalCol("plans").doc(planId).get();
     const planData = planSnap.data() || {};
     const maxHoursPerMonth = planData.maxHoursPerMonth || 0;
     const maxGuests = planData.maxGuests || 0;
@@ -163,7 +164,7 @@ export async function getUserUsage(userId: string) {
  */
 export async function checkStorageLimit(userId: string, fileSizeBytes: number): Promise<void> {
   try {
-    const userRef = firestore.collection("users").doc(userId);
+    const userRef = globalCol("users").doc(userId);
     const userSnap = await userRef.get();
 
     if (!userSnap.exists) {
@@ -174,7 +175,7 @@ export async function checkStorageLimit(userId: string, fileSizeBytes: number): 
     const planId = (userData.planId || userData.plan || "free") as string;
 
     // Get plan limits
-    const planSnap = await firestore.collection("plans").doc(planId).get();
+    const planSnap = await globalCol("plans").doc(planId).get();
     const planData = planSnap.data() || {};
     const maxStorageGB = (() => {
       const editing = (planData as any).editing || {};
@@ -230,7 +231,7 @@ export async function checkStorageLimit(userId: string, fileSizeBytes: number): 
  */
 export async function updateStorageUsage(userId: string, fileSizeBytes: number): Promise<void> {
   try {
-    const userRef = firestore.collection("users").doc(userId);
+    const userRef = globalCol("users").doc(userId);
     const userSnap = await userRef.get();
 
     if (!userSnap.exists) {

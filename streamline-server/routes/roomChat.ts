@@ -4,6 +4,7 @@ import { firestore } from "../firebaseAdmin";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { getRoomAccess, requireRoomAccessToken } from "../middleware/roomAccessToken";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -43,7 +44,7 @@ function sanitizeMessageText(input: any): string {
 }
 
 async function ensureRoomExists(roomId: string) {
-  const roomRef = firestore.collection("rooms").doc(roomId);
+  const roomRef = tenantCol("rooms").doc(roomId);
   const snap = await roomRef.get();
   if (!snap.exists) {
     throw new Error(PERMISSION_ERRORS.ROOM_NOT_FOUND);
@@ -65,7 +66,7 @@ async function getOrStartActiveSession(params: {
 }> {
   const { roomId, accessRole, accessIdentity, uid, displayName, allowAutoStart } = params;
 
-  const roomRef = firestore.collection("rooms").doc(roomId);
+  const roomRef = tenantCol("rooms").doc(roomId);
 
   return await firestore.runTransaction(async (tx) => {
     const snap = await tx.get(roomRef);
@@ -184,7 +185,7 @@ router.post("/:roomId/chat/session/end", requireRoomAccessToken as any, async (r
       return res.status(403).json({ error: "not_allowed" });
     }
 
-    const roomRef = firestore.collection("rooms").doc(canonicalRoomId);
+    const roomRef = tenantCol("rooms").doc(canonicalRoomId);
     const snap = await roomRef.get();
     if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
@@ -240,7 +241,7 @@ router.get("/:roomId/chat/messages", requireRoomAccessToken as any, async (req: 
     // If sessionId not provided, return messages for the current active session if present.
     let effectiveSessionId = sessionId;
     if (!effectiveSessionId) {
-      const roomRef = firestore.collection("rooms").doc(canonicalRoomId);
+      const roomRef = tenantCol("rooms").doc(canonicalRoomId);
       const snap = await roomRef.get();
       if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
       const room = (snap.data() as any) || {};
@@ -253,8 +254,7 @@ router.get("/:roomId/chat/messages", requireRoomAccessToken as any, async (req: 
       return res.json({ roomId: canonicalRoomId, sessionId: null, messages: [] });
     }
 
-    const messagesSnap = await firestore
-      .collection("rooms")
+    const messagesSnap = await tenantCol("rooms")
       .doc(canonicalRoomId)
       .collection("chatSessions")
       .doc(effectiveSessionId)
@@ -324,7 +324,7 @@ router.post("/:roomId/chat/messages", requireRoomAccessToken as any, async (req:
       return res.status(409).json({ error: "no_active_session" });
     }
 
-    const roomRef = firestore.collection("rooms").doc(canonicalRoomId);
+    const roomRef = tenantCol("rooms").doc(canonicalRoomId);
     const messageRef = roomRef
       .collection("chatSessions")
       .doc(session.sessionId)
@@ -394,8 +394,7 @@ router.get("/:roomId/chat/stream", requireRoomAccessToken as any, async (req: an
 
     send("ready", { ok: true, roomId: canonicalRoomId, sessionId });
 
-    const query = firestore
-      .collection("rooms")
+    const query = tenantCol("rooms")
       .doc(canonicalRoomId)
       .collection("chatSessions")
       .doc(sessionId)

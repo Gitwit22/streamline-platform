@@ -18,6 +18,7 @@ const BAD_BILLING_STATUSES = new Set([
 
 import { PLAN_IDS, PlanId, isPlanId } from "../types/plan";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
+import { globalCol } from "../lib/dbPaths";
 
 // List of paid plans (update as needed, or drive from plan config)
 const PAID_PLANS: PlanId[] = [
@@ -119,7 +120,7 @@ export async function canAccessFeature(
   }
   // Source 2: membership in /admins collection
   try {
-    const adminSnap = await db.collection("admins").doc(uid).get();
+    const adminSnap = await globalCol("admins").doc(uid).get();
     const isAdmin = adminSnap.exists && adminSnap.data()?.isAdmin === true;
     if (process.env.DEBUG_FEATURE_ACCESS === "1") {
       console.log(`[featureAccess] admin collection isAdmin=${isAdmin}`);
@@ -150,7 +151,7 @@ export async function canAccessFeature(
   }
 
   // 3) Load plan
-  const planSnap = await db.collection("plans").doc(planId).get();
+  const planSnap = await globalCol("plans").doc(planId).get();
   if (!planSnap.exists) {
     return { allowed: false, code: LIMIT_ERRORS.FEATURE_NOT_ENTITLED, reason: "Plan not found" };
   }
@@ -235,7 +236,7 @@ async function getPlatformFeatureEnabled(featureKey: "recording" | "hls"): Promi
       return cachedRecordingEnabled;
     }
     try {
-      const snap = await db.collection("featureFlags").doc("recording").get();
+      const snap = await globalCol("featureFlags").doc("recording").get();
       const data = snap.exists ? snap.data() || {} : {};
       const enabled = (data as any).enabled;
       cachedRecordingEnabled = enabled === undefined ? true : !!enabled;
@@ -253,7 +254,7 @@ async function getPlatformFeatureEnabled(featureKey: "recording" | "hls"): Promi
     return cachedHlsEnabled;
   }
   try {
-    const snap = await db.collection("featureFlags").doc("hlsSettingsTab").get();
+    const snap = await globalCol("featureFlags").doc("hlsSettingsTab").get();
     const data = snap.exists ? snap.data() || {} : {};
     const hlsEnabled = (data as any).hlsEnabled;
     const enabled = (data as any).enabled;

@@ -8,6 +8,7 @@ import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import type { DestinationStatus, DestinationStatusReason, ApiErrorCode, DestinationItem, DestinationsGetResponse, DestinationPostResponse, ValidateRequestBody, ValidateResponse } from "../types/streaming";
 import { decryptStreamKey, encryptStreamKey, normalizeRtmpBase } from "../lib/crypto";
+import { globalCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -76,7 +77,7 @@ router.get("/", requireAuth, async (req: any, res) => {
     const platform = req.query.platform ? String(req.query.platform).trim().toLowerCase() : "";
     const includeDisabled = req.query.includeDisabled === "true" || req.query.includeDisabled === true ? true : false;
 
-    let q = firestore.collection("users").doc(uid).collection("destinations") as FirebaseFirestore.CollectionReference;
+    let q = globalCol("users").doc(uid).collection("destinations") as FirebaseFirestore.CollectionReference;
     if (platform) {
       q = q.where("platform", "==", platform) as any;
     }
@@ -95,9 +96,9 @@ router.get("/", requireAuth, async (req: any, res) => {
 });
 
 async function getPlanLimit(uid: string): Promise<number | undefined> {
-  const userSnap = await firestore.collection("users").doc(uid).get();
+  const userSnap = await globalCol("users").doc(uid).get();
   const planId = String((userSnap.data() || {}).planId || "free");
-  const planSnap = await firestore.collection("plans").doc(planId).get();
+  const planSnap = await globalCol("plans").doc(planId).get();
   if (planSnap.exists) {
     const limits = (planSnap.data() || {}).limits || {};
     const resolved = resolveMaxDestinations(limits);
@@ -108,7 +109,7 @@ async function getPlanLimit(uid: string): Promise<number | undefined> {
 }
 
 async function getEnabledCount(uid: string): Promise<number> {
-  const snap = await firestore.collection("users").doc(uid).collection("destinations").where("enabled", "==", true).get();
+  const snap = await globalCol("users").doc(uid).collection("destinations").where("enabled", "==", true).get();
   return snap.size;
 }
 
@@ -160,8 +161,7 @@ router.post("/", requireAuth, async (req: any, res) => {
     // Duplicate rules:
     // 1) Names must be unique per platform (case-insensitive).
     // 2) Stream keys must be unique per platform (match on decrypted plaintext).
-    const existingSnap = await firestore
-      .collection("users")
+    const existingSnap = await globalCol("users")
       .doc(uid)
       .collection("destinations")
       .where("platform", "==", normalizedPlatform)
@@ -197,7 +197,7 @@ router.post("/", requireAuth, async (req: any, res) => {
       updatedAt: now,
     };
 
-    const col = firestore.collection("users").doc(uid).collection("destinations");
+    const col = globalCol("users").doc(uid).collection("destinations");
     const createdRef = await col.add(docData);
 
     const createdSnap = await createdRef.get();
@@ -271,7 +271,7 @@ router.post("/:id/validate", requireAuth, async (req: any, res) => {
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ error: "invalid_query" as ApiErrorCode });
 
-    const ref = firestore.collection("users").doc(uid).collection("destinations").doc(id);
+    const ref = globalCol("users").doc(uid).collection("destinations").doc(id);
     const snap = await ref.get();
     if (!snap.exists) return res.status(404).json({ error: "destination_not_found" as ApiErrorCode });
     const item = toItem(snap);
@@ -299,7 +299,7 @@ router.put("/:id", requireAuth, async (req: any, res) => {
     if (!id) return res.status(400).json({ error: "invalid_query" as ApiErrorCode });
     const updates = req.body || {};
 
-    const ref = firestore.collection("users").doc(uid).collection("destinations").doc(id);
+    const ref = globalCol("users").doc(uid).collection("destinations").doc(id);
     const snap = await ref.get();
     if (!snap.exists) return res.status(404).json({ error: "destination_not_found" as ApiErrorCode });
     const current = snap.data() as any;
@@ -346,8 +346,7 @@ router.put("/:id", requireAuth, async (req: any, res) => {
     // Duplicate rules on update (exclude current doc):
     // 1) Names unique per platform.
     // 2) Stream keys unique per platform.
-    const existingSnap = await firestore
-      .collection("users")
+    const existingSnap = await globalCol("users")
       .doc(uid)
       .collection("destinations")
       .where("platform", "==", nextPlatform)
@@ -415,7 +414,7 @@ router.delete("/:id", requireAuth, async (req: any, res) => {
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ error: "invalid_query" as ApiErrorCode });
 
-    const ref = firestore.collection("users").doc(uid).collection("destinations").doc(id);
+    const ref = globalCol("users").doc(uid).collection("destinations").doc(id);
     const snap = await ref.get();
     if (!snap.exists) return res.status(404).json({ error: "destination_not_found" as ApiErrorCode });
     await ref.delete();

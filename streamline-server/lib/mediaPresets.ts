@@ -1,4 +1,5 @@
 import { firestore } from "../firebaseAdmin";
+import { globalCol } from "./dbPaths";
 
 export type MediaPresetId = "standard_720p30" | "hd_1080p30" | "sports_1080p60" | "pro_1440p30" | "ultra_4k30";
 
@@ -123,7 +124,7 @@ export function toEncodingOptions(preset: MediaPreset, target: "record" | "strea
 }
 
 export async function getUserPlanId(uid: string): Promise<string> {
-  const snap = await firestore.collection("users").doc(uid).get();
+  const snap = await globalCol("users").doc(uid).get();
   if (!snap.exists) return "free";
   const data = snap.data() || {};
   return String(data.planId || data.plan || "free");

@@ -3,6 +3,7 @@ import admin from "firebase-admin";
 import { requireAuth } from "../middleware/requireAuth";
 import { firestore } from "../firebaseAdmin";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 type RoomInviteDoc = {
   roomId: string;
@@ -31,7 +32,7 @@ router.post("/:roomId/invites", requireAuth as any, async (req: any, res) => {
     const roomId = String(req.params.roomId || "").trim();
     if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
-    const roomSnap = await firestore.collection("rooms").doc(roomId).get();
+    const roomSnap = await tenantCol("rooms").doc(roomId).get();
     if (!roomSnap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
     const room = (roomSnap.data() as any) || {};
@@ -56,7 +57,7 @@ router.post("/:roomId/invites", requireAuth as any, async (req: any, res) => {
         ? Number(maxUsesRaw)
         : null;
 
-    const ref = firestore.collection("roomInvites").doc();
+    const ref = tenantCol("roomInvites").doc();
     const doc: RoomInviteDoc = {
       roomId,
       mode: "guest",

@@ -1,4 +1,5 @@
 import { firestore } from "../firebaseAdmin";
+import { tenantCol } from "./dbPaths";
 
 export type ResolvedRoomIdentity = {
   roomId: string;
@@ -10,7 +11,7 @@ async function resolveByRoomId(roomId: string): Promise<ResolvedRoomIdentity | n
   const id = String(roomId || "").trim();
   if (!id) return null;
 
-  const snap = await firestore.collection("rooms").doc(id).get();
+  const snap = await tenantCol("rooms").doc(id).get();
   if (!snap.exists) return null;
   const data = (snap.data() as any) || {};
   const roomName = String(data.livekitRoomName || data.roomName || data.name || id).trim() || id;
@@ -32,8 +33,7 @@ async function resolveByRoomName(roomName: string): Promise<ResolvedRoomIdentity
   ];
 
   for (const candidate of candidates) {
-    const snap = await firestore
-      .collection("rooms")
+    const snap = await tenantCol("rooms")
       .where(candidate.field as any, "==", candidate.value)
       .limit(1)
       .get();
@@ -46,7 +46,7 @@ async function resolveByRoomName(roomName: string): Promise<ResolvedRoomIdentity
   }
 
   // Legacy fallback: treat roomName as doc id if it exists
-  const direct = await firestore.collection("rooms").doc(name).get();
+  const direct = await tenantCol("rooms").doc(name).get();
   if (direct.exists) {
     const data = (direct.data() as any) || {};
     const resolvedName = String(data.livekitRoomName || name).trim() || name;

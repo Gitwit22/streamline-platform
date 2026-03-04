@@ -6,6 +6,7 @@ import type { DestinationStatus, DestinationStatusReason, ApiErrorCode } from ".
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { decryptStreamKey } from "../lib/crypto";
+import { globalCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -32,7 +33,7 @@ router.post("/preflight", requireAuth, async (req: any, res) => {
 
     const destinationIds: string[] = Array.isArray(req.body?.destinationIds) ? req.body.destinationIds.map((s: any) => String(s)) : [];
 
-    let q = firestore.collection("users").doc(uid).collection("destinations") as FirebaseFirestore.CollectionReference;
+    let q = globalCol("users").doc(uid).collection("destinations") as FirebaseFirestore.CollectionReference;
     if (destinationIds.length > 0) {
       // Firestore cannot do IN with more than 10; if >10, fallback to fetch all and filter
       if (destinationIds.length <= 10) {

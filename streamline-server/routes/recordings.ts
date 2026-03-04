@@ -42,6 +42,8 @@ import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
 import { deleteFiles, deletePrefix } from "../lib/storageClient";
 import { resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
+import { tenantCol, globalCol } from "../lib/dbPaths";
+import { storageKey, storagePrefix } from "../lib/storagePaths";
 
 const router = Router();
 
@@ -62,8 +64,8 @@ async function getMyContentPlatformFlags(): Promise<MyContentPlatformFlags> {
 
   try {
     const [myContentSnap, myContentRecordingsSnap] = await Promise.all([
-      firestore.collection("featureFlags").doc("myContentEnabled").get(),
-      firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
+      globalCol("featureFlags").doc("myContentEnabled").get(),
+      globalCol("featureFlags").doc("myContentRecordingsEnabled").get(),
     ]);
 
     const myContentData = myContentSnap.exists ? ((myContentSnap.data() as any) || {}) : {};
@@ -252,7 +254,7 @@ async function incrementRecordingUsage(uid: string, minutes: number) {
 
   const monthKey = getCurrentMonthKey();
   const usageDocId = `${uid}_${monthKey}`;
-  const usageRef = firestore.collection("usageMonthly").doc(usageDocId);
+  const usageRef = tenantCol("usageMonthly").doc(usageDocId);
 
   let alertContext: {
     liveCurrent: number;
@@ -380,32 +382,22 @@ function getAuthUserId(req: any): string | null {
   return req.user?.uid || req.user?.id || null;
 }
 
-function normalizeRootPrefix(raw: unknown): string {
-  const v = String(raw ?? "").trim();
-  const noLeadingSlash = v.replace(/^\/+/, "");
-  if (!noLeadingSlash) return "";
-  return noLeadingSlash.endsWith("/") ? noLeadingSlash : `${noLeadingSlash}/`;
-}
-
 /**
  * Generate recording path for R2
  * CRITICAL: No leading slash - use "recordings/..." not "/recordings/..."
  */
-function generateRecordingPrefix(userId: string, roomKey: string, recordingId: string, rootPrefix: string = ""): string {
-  const root = normalizeRootPrefix(rootPrefix);
+function generateRecordingPrefix(userId: string, roomKey: string, recordingId: string): string {
   const safeRoom = roomKey.replace(/[^a-zA-Z0-9_-]/g, "_");
   const safeRecordingId = String(recordingId || "").trim() || "unknown";
-  // Ensure no leading slash - R2/S3 keys should not start with /
-  return `${root}recordings/${userId}/${safeRoom}/${safeRecordingId}/`;
+  return storagePrefix("recordings", userId, safeRoom, safeRecordingId);
 }
 
 function generateRecordingPath(
   userId: string,
   roomKey: string,
   recordingId: string,
-  rootPrefix: string = ""
 ): { objectKey: string; prefix: string } {
-  const prefix = generateRecordingPrefix(userId, roomKey, recordingId, rootPrefix);
+  const prefix = generateRecordingPrefix(userId, roomKey, recordingId);
   return { prefix, objectKey: `${prefix}recording.mp4` };
 }
 
@@ -451,7 +443,7 @@ async function stopRecordingInternal(options: {
 }): Promise<void> {
   const { recordingId, uid: explicitUid, reason, enforceOwnership } = options;
 
-  const recordingRef = firestore.collection("recordings").doc(recordingId);
+  const recordingRef = tenantCol("recordings").doc(recordingId);
   const snap = await recordingRef.get();
 
   if (!snap.exists) {
@@ -521,7 +513,7 @@ async function stopRecordingInternal(options: {
     const recData = recSnap.data() || {};
 
     const monthKey = getCurrentMonthKey();
-    const usageRef = firestore.collection("usageMonthly").doc(`${uid}_${monthKey}`);
+    const usageRef = tenantCol("usageMonthly").doc(`${uid}_${monthKey}`);
     const usageSnap = await tx.get(usageRef);
     const existingUsage = usageSnap.exists ? (usageSnap.data() as any) : {};
     const usage = existingUsage.usage || {};
@@ -637,7 +629,7 @@ async function stopRecordingInternal(options: {
   try {
     const roomId = typeof (data as any).roomId === "string" ? String((data as any).roomId).trim() : "";
     if (roomId) {
-      const roomRef = firestore.collection("rooms").doc(roomId);
+      const roomRef = tenantCol("rooms").doc(roomId);
       await roomRef.set(
         {
           latestRecordingId: recordingId,
@@ -658,7 +650,7 @@ async function stopRecordingInternal(options: {
     const roomKey = roomId || roomName;
     if (roomKey && uid) {
       const activeKey = `${uid}_${roomKey}`;
-      const activeRef = firestore.collection("activeRecordings").doc(activeKey);
+      const activeRef = tenantCol("activeRecordings").doc(activeKey);
       await activeRef.set(
         {
           status: "stopped",
@@ -691,8 +683,7 @@ async function stopRecordingInternal(options: {
           try {
             const roomId = typeof (data as any).roomId === "string" ? String((data as any).roomId).trim() : "";
             if (roomId) {
-              await firestore
-                .collection("rooms")
+              await tenantCol("rooms")
                 .doc(roomId)
                 .set(
                   {
@@ -793,13 +784,13 @@ router.post(
     // - Room Layout is the source of truth
     // - Recordings inherit Room Layout
     // If a legacy room lacks roomLayout, seed it from account defaults before starting.
-    const roomRef = firestore.collection("rooms").doc(roomId);
+    const roomRef = tenantCol("rooms").doc(roomId);
     const roomSnap = await roomRef.get();
     let roomDoc = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
 
     if (!roomDoc.roomLayout) {
       try {
-        const userSnap = await firestore.collection("users").doc(uid).get();
+        const userSnap = await globalCol("users").doc(uid).get();
         const userData = userSnap.exists ? ((userSnap.data() as any) || {}) : {};
         const mediaPrefs = (userData as any).mediaPrefs || {};
         const candidate = mediaPrefs.defaultRoomLayout;
@@ -828,7 +819,7 @@ router.post(
     try {
       const monthKey = getCurrentMonthKey();
       const usageDocId = `${uid}_${monthKey}`;
-      const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
+      const usageSnap = await tenantCol("usageMonthly").doc(usageDocId).get();
       const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
       const usage = existing.usage || {};
 
@@ -884,9 +875,9 @@ router.post(
     let activeStreamPresetId: string | null = null;
     let hasActiveStream = false;
     try {
-      let streamSnap = await firestore.collection("activeStreams").doc(streamDocIdNew).get();
+      let streamSnap = await tenantCol("activeStreams").doc(streamDocIdNew).get();
       if (!streamSnap.exists && streamDocIdLegacy !== streamDocIdNew) {
-        streamSnap = await firestore.collection("activeStreams").doc(streamDocIdLegacy).get();
+        streamSnap = await tenantCol("activeStreams").doc(streamDocIdLegacy).get();
         if (streamSnap.exists) streamDocId = streamDocIdLegacy;
       }
       if (streamSnap.exists) {
@@ -926,7 +917,7 @@ router.post(
 
     // Generate recording ID, then decide storage root prefix.
     const now = new Date();
-    const recordingId = firestore.collection("recordings").doc().id;
+    const recordingId = tenantCol("recordings").doc().id;
 
     // Best-effort: detect EDU context for storage routing + attach orgId for EDU reporting.
     // This is intentionally non-fatal and remains compatible with legacy datasets.
@@ -934,7 +925,7 @@ router.post(
     let orgType: string | null = null;
     let orgRole: string | null = null;
     try {
-      const uSnap = await firestore.collection("users").doc(uid).get();
+      const uSnap = await globalCol("users").doc(uid).get();
       if (uSnap.exists) {
         const u = (uSnap.data() as any) || {};
         const rawOrgId = u?.orgId ?? u?.org?.id ?? u?.org?.orgId;
@@ -946,7 +937,7 @@ router.post(
 
       if (orgId) {
         const memberId = `${orgId}_${uid}`;
-        const memberSnap = await firestore.collection("orgMembers").doc(memberId).get().catch(() => null as any);
+        const memberSnap = await tenantCol("orgMembers").doc(memberId).get().catch(() => null as any);
         const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
         orgRole = member && typeof member.role === "string" && String(member.role).trim() ? String(member.role).trim() : null;
       }
@@ -961,18 +952,12 @@ router.post(
       roleLower === "student_producer_assigned" ||
       roleLower === "talent" ||
       roleLower === "viewer";
-    const typeLower = String(orgType || "").toLowerCase();
-    const isEduByType = typeLower.includes("edu");
-    const useEduPrefix = isEduByType || isEduByRole;
-
-    const eduRootPrefix = useEduPrefix ? normalizeRootPrefix(process.env.R2_EDU_RECORDINGS_PREFIX ?? "edu/") : "";
-
-    const { objectKey, prefix: r2Prefix } = generateRecordingPath(uid, roomId, recordingId, eduRootPrefix);
-    const recordingRef = firestore.collection("recordings").doc(recordingId);
+    // env/tenant prefix is now handled automatically by storagePaths
+    const { objectKey, prefix: r2Prefix } = generateRecordingPath(uid, roomId, recordingId);
+    const recordingRef = tenantCol("recordings").doc(recordingId);
 
     const isEmergency = recordingClass === "emergency";
-    const emergencyCurrentRef = firestore
-      .collection("users")
+    const emergencyCurrentRef = globalCol("users")
       .doc(uid)
       .collection("emergencyRecording")
       .doc("current");
@@ -987,7 +972,7 @@ router.post(
 
     // activeRecordings lock for (uid, room)
     const activeKey = `${uid}_${roomId}`;
-    const activeRef = firestore.collection("activeRecordings").doc(activeKey);
+    const activeRef = tenantCol("activeRecordings").doc(activeKey);
 
     // =========================================================================
     // STEP 1: Create Firestore doc IMMEDIATELY with status=starting
@@ -1061,7 +1046,7 @@ router.post(
           const oldRecordingId = currentData.recordingId ? String(currentData.recordingId) : "";
           if (currentStatus !== "deleted" && oldRecordingId) {
             tx.set(
-              firestore.collection("recordings").doc(oldRecordingId),
+              tenantCol("recordings").doc(oldRecordingId),
               {
                 status: "deleting",
                 deleteReason: "replaced_emergency",
@@ -1133,8 +1118,7 @@ router.post(
             await deletePrefix(oldPrefix);
           }
 
-          await firestore
-            .collection("recordings")
+          await tenantCol("recordings")
             .doc(oldRecordingId)
             .set({ status: "deleted", deletedAt: new Date(), updatedAt: new Date() }, { merge: true });
         } catch (e: any) {
@@ -1163,8 +1147,7 @@ router.post(
 
     if (hasActiveStream) {
       try {
-        await firestore
-          .collection("activeStreams")
+        await tenantCol("activeStreams")
           .doc(streamDocId)
           .set({ usageType: "live+recording", lastRecordingId: recordingId }, { merge: true });
       } catch (e) {
@@ -1353,8 +1336,7 @@ router.post("/sweep", async (_req, res) => {
   console.log("[recordings/sweep] Starting sweep at", now.toISOString());
 
   try {
-    const snap = await firestore
-      .collection("recordings")
+    const snap = await tenantCol("recordings")
       .where("status", "==", "recording")
       .where("autoStopAt", "<=", now)
       .limit(50)
@@ -1410,7 +1392,7 @@ router.post(
       return res.status(400).json({ error: "recordingId is required" });
     }
 
-    const recordingRef = firestore.collection("recordings").doc(recordingId);
+    const recordingRef = tenantCol("recordings").doc(recordingId);
     const snap = await recordingRef.get();
 
     if (!snap.exists) {
@@ -1485,7 +1467,7 @@ router.post(
       const recData = recSnap.data() || {};
 
       const monthKey = getCurrentMonthKey();
-      const usageRef = firestore.collection("usageMonthly").doc(`${uid}_${monthKey}`);
+      const usageRef = tenantCol("usageMonthly").doc(`${uid}_${monthKey}`);
       const usageSnap = await tx.get(usageRef);
       const existingUsage = usageSnap.exists ? (usageSnap.data() as any) : {};
       const usage = existingUsage.usage || {};
@@ -1602,7 +1584,7 @@ router.post(
       const roomKey = roomId || roomName;
       if (roomKey) {
         const activeKey = `${uid}_${roomKey}`;
-        const activeRef = firestore.collection("activeRecordings").doc(activeKey);
+        const activeRef = tenantCol("activeRecordings").doc(activeKey);
         await activeRef.set(
           {
             status: "stopped",
@@ -1664,8 +1646,7 @@ router.get("/emergency-status", requireAuth, requireMyContentRecordingsEnabled a
     const uid = getAuthUserId(req);
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    const currentRef = firestore
-      .collection("users")
+    const currentRef = globalCol("users")
       .doc(uid)
       .collection("emergencyRecording")
       .doc("current");
@@ -1723,8 +1704,7 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
 
     // Prefer the emergency pointer if present (for emergency retention + countdown UX)
     try {
-      const currentRef = firestore
-        .collection("users")
+      const currentRef = globalCol("users")
         .doc(uid)
         .collection("emergencyRecording")
         .doc("current");
@@ -1772,7 +1752,7 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
           let objectKey: string | null = normalizeStorageKey(keys[0]) || null;
 
           if (!objectKey && recordingId) {
-            const recSnap = await firestore.collection("recordings").doc(recordingId).get();
+            const recSnap = await tenantCol("recordings").doc(recordingId).get();
             const rec = recSnap.exists ? (recSnap.data() || {}) : {};
             objectKey =
               normalizeStorageKey(rec.objectKey as string | undefined) ||
@@ -1828,8 +1808,7 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
     // Order by createdAt descending, limit 1
     // NOTE: This requires a Firestore composite index on the recordings collection:
     // fields: status ASC, userId ASC, createdAt DESC
-    const snap = await firestore
-      .collection("recordings")
+    const snap = await tenantCol("recordings")
       .where("userId", "==", uid)
       .where("status", "==", "ready")
       .orderBy("createdAt", "desc")
@@ -1838,8 +1817,7 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
 
     if (snap.empty) {
       // Fallback: try to find any recent recording with a stored path
-      const fallbackSnap = await firestore
-        .collection("recordings")
+      const fallbackSnap = await tenantCol("recordings")
         .where("userId", "==", uid)
         .orderBy("createdAt", "desc")
         .limit(5)
@@ -1891,8 +1869,7 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
       const signedUrl = await getSignedDownloadUrl(normalizedFallbackKey, 15 * 60);
 
       const nowTs = Timestamp.now();
-      await firestore
-        .collection("recordings")
+      await tenantCol("recordings")
         .doc(fallbackDoc.id)
         .set(
           {
@@ -1942,8 +1919,7 @@ router.get("/emergency-latest", requireAuth, requireMyContentRecordingsEnabled a
     const signedUrl = await getSignedDownloadUrl(normalizedObjectKey, 15 * 60);
 
     const nowTs = Timestamp.now();
-    await firestore
-      .collection("recordings")
+    await tenantCol("recordings")
       .doc(readyDoc.id)
       .set(
         {
@@ -1982,7 +1958,7 @@ router.get("/:id/storage-check", requireAuth, requireMyContentRecordingsEnabled 
     const uid = getAuthUserId(req);
     const recordingId = req.params.id;
 
-    const snap = await firestore.collection("recordings").doc(recordingId).get();
+    const snap = await tenantCol("recordings").doc(recordingId).get();
     if (!snap.exists) {
       return res.status(404).json({ error: "Recording not found" });
     }
@@ -2015,7 +1991,7 @@ router.get("/:id", requireAuth, requireMyContentRecordingsEnabled as any, async 
     const uid = getAuthUserId(req);
     const recordingId = req.params.id;
 
-    const snap = await firestore.collection("recordings").doc(recordingId).get();
+    const snap = await tenantCol("recordings").doc(recordingId).get();
     if (!snap.exists) {
       return res.status(404).json({ error: "Recording not found" });
     }
@@ -2043,7 +2019,7 @@ router.delete("/:id", requireAuth, requireMyContentRecordingsEnabled as any, asy
     const uid = getAuthUserId(req);
     const recordingId = req.params.id;
 
-    const snap = await firestore.collection("recordings").doc(recordingId).get();
+    const snap = await tenantCol("recordings").doc(recordingId).get();
     if (!snap.exists) {
       return res.status(404).json({ error: "Recording not found" });
     }
@@ -2059,7 +2035,7 @@ router.delete("/:id", requireAuth, requireMyContentRecordingsEnabled as any, asy
     try {
       const roomId = typeof data.roomId === "string" ? String(data.roomId).trim() : "";
       if (roomId) {
-        const roomRef = firestore.collection("rooms").doc(roomId);
+        const roomRef = tenantCol("rooms").doc(roomId);
         const roomSnap = await roomRef.get();
         const roomData = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
         const latestId = String(roomData.latestRecordingId || "").trim();
@@ -2080,7 +2056,7 @@ router.delete("/:id", requireAuth, requireMyContentRecordingsEnabled as any, asy
     try {
       const recordingClass = String(data.recordingClass || "").toLowerCase();
       if (recordingClass === "emergency") {
-        const currentRef = firestore.collection("users").doc(uid).collection("emergencyRecording").doc("current");
+        const currentRef = globalCol("users").doc(uid).collection("emergencyRecording").doc("current");
         const curSnap = await currentRef.get();
         const cur = curSnap.exists ? ((curSnap.data() as any) || {}) : {};
         if (String(cur.recordingId || "") === recordingId) {
@@ -2098,9 +2074,9 @@ router.delete("/:id", requireAuth, requireMyContentRecordingsEnabled as any, asy
 
     const hard = req.query.hard === "1" || req.query.hard === "true";
     if (hard) {
-      await firestore.collection("recordings").doc(recordingId).delete();
+      await tenantCol("recordings").doc(recordingId).delete();
     } else {
-      await firestore.collection("recordings").doc(recordingId).set(
+      await tenantCol("recordings").doc(recordingId).set(
         {
           status: "deleted",
           deleteReason: "user_deleted",
@@ -2129,7 +2105,7 @@ router.get("/:id/download-link", requireAuth, requireMyContentRecordingsEnabled 
     const uid = getAuthUserId(req);
     const recordingId = req.params.id;
 
-    const snap = await firestore.collection("recordings").doc(recordingId).get();
+    const snap = await tenantCol("recordings").doc(recordingId).get();
     if (!snap.exists) {
       return res.status(404).json({ error: "Recording not found" });
     }
@@ -2202,7 +2178,7 @@ router.get("/:id/download-link", requireAuth, requireMyContentRecordingsEnabled 
     const updates: any = { lastDownloadRequestedAt: Timestamp.now() };
     if (confirm) updates.downloadConfirmedAt = Timestamp.now();
 
-    await firestore.collection("recordings").doc(recordingId).set(updates, { merge: true });
+    await tenantCol("recordings").doc(recordingId).set(updates, { merge: true });
 
     return res.json({
       success: true,
@@ -2228,7 +2204,7 @@ router.post("/:id/report-download-issue", requireAuth, requireMyContentRecording
     const uid = getAuthUserId(req);
     const recordingId = req.params.id;
 
-    const snap = await firestore.collection("recordings").doc(recordingId).get();
+    const snap = await tenantCol("recordings").doc(recordingId).get();
     if (!snap.exists) {
       return res.status(404).json({ error: "Recording not found" });
     }
@@ -2238,7 +2214,7 @@ router.post("/:id/report-download-issue", requireAuth, requireMyContentRecording
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    await firestore.collection("recordings").doc(recordingId).set(
+    await tenantCol("recordings").doc(recordingId).set(
       {
         downloadIssueReportedAt: Timestamp.now(),
         downloadIssueNote: req.body?.reason || null,
@@ -2264,7 +2240,7 @@ router.get("/:id/download", requireAuth, requireMyContentRecordingsEnabled as an
     const uid = getAuthUserId(req);
     const recordingId = req.params.id;
 
-    const snap = await firestore.collection("recordings").doc(recordingId).get();
+    const snap = await tenantCol("recordings").doc(recordingId).get();
     if (!snap.exists) {
       return res.status(404).send("Recording not found");
     }

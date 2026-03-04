@@ -8,6 +8,8 @@ import { startHlsEgress, stopEgress } from "../services/livekitEgress";
 import { deletePrefix } from "../lib/storageClient";
 import { getLiveKitSdk } from "../lib/livekit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
+import { storagePrefix } from "../lib/storagePaths";
 
 const router = express.Router();
 
@@ -105,7 +107,7 @@ async function writeEduAudit(params: {
 }) {
   const now = Date.now();
   const id = `${params.orgId}_${now}_${Math.random().toString(36).slice(2, 8)}`;
-  await db.collection("audit").doc(id).set({
+  await tenantCol("audit").doc(id).set({
     orgId: params.orgId,
     action: params.action,
     actorUid: params.actorUid,
@@ -205,7 +207,7 @@ router.post("/broadcasts/go-live", requireAuth, async (req, res) => {
     let egressId: string | null = null;
 
     if (publishHls) {
-      const prefix = `hls/${roomId}/`;
+      const prefix = storagePrefix("hls", roomId);
       const playlistName = "room.m3u8";
       const livePlaylistName = "live.m3u8";
       const publicBase = getHlsPublicBaseUrl();
@@ -234,7 +236,7 @@ router.post("/broadcasts/go-live", requireAuth, async (req, res) => {
     doc.playlistUrl = playlistUrl;
     doc.egressId = egressId;
 
-    await db.collection("eduBroadcasts").doc(broadcastId).set(doc, { merge: true });
+    await tenantCol("eduBroadcasts").doc(broadcastId).set(doc, { merge: true });
 
     // 5) Mint room access token
     const roomAccessToken = jwt.sign(
@@ -279,7 +281,7 @@ router.post("/broadcasts/:id/stop", requireAuth, async (req, res) => {
     }
 
     const broadcastId = req.params.id;
-    const snap = await db.collection("eduBroadcasts").doc(broadcastId).get();
+    const snap = await tenantCol("eduBroadcasts").doc(broadcastId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const existing = snap.data() as any;
@@ -295,8 +297,8 @@ router.post("/broadcasts/:id/stop", requireAuth, async (req, res) => {
     // Clean up HLS artifacts
     const roomId = existing.roomId;
     if (roomId) {
-      try { await deletePrefix(`hls/${roomId}/`); } catch {}
-      const roomRef = db.collection("rooms").doc(roomId);
+      try { await deletePrefix(storagePrefix("hls", roomId)); } catch {}
+      const roomRef = tenantCol("rooms").doc(roomId);
       const roomSnap = await roomRef.get();
       if (roomSnap.exists) {
         await setHlsIdle(roomRef);
@@ -305,7 +307,7 @@ router.post("/broadcasts/:id/stop", requireAuth, async (req, res) => {
 
     // Update broadcast doc
     const now = Date.now();
-    await db.collection("eduBroadcasts").doc(broadcastId).set({
+    await tenantCol("eduBroadcasts").doc(broadcastId).set({
       status: "completed",
       endedAt: now,
       updatedAt: now,
@@ -342,7 +344,7 @@ router.get("/broadcasts/:id/watch", requireAuth, async (req, res) => {
     if (!ctx) return res.status(403).json({ error: "not_edu_member" });
 
     const broadcastId = req.params.id;
-    const snap = await db.collection("eduBroadcasts").doc(broadcastId).get();
+    const snap = await tenantCol("eduBroadcasts").doc(broadcastId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const data = snap.data() as any;
@@ -380,7 +382,7 @@ router.get("/broadcasts", requireAuth, async (req, res) => {
 
     const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 50, 1), 200);
 
-    const snap = await db.collection("eduBroadcasts")
+    const snap = await tenantCol("eduBroadcasts")
       .where("orgId", "==", ctx.orgId)
       .orderBy("createdAt", "desc")
       .limit(limit)

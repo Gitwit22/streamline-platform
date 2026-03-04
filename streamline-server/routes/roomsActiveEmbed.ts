@@ -5,6 +5,7 @@ import { requireAuth } from "../middleware/requireAuth";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { isAdmin } from "../middleware/adminAuth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -68,7 +69,7 @@ router.put("/:roomId/active-embed", requireAuth as any, async (req: any, res) =>
   try {
     const ctx = await assertRoomPerm(req as any, roomId, "canStream");
 
-    const embedRef = db.collection("savedEmbeds").doc(embedId);
+    const embedRef = tenantCol("savedEmbeds").doc(embedId);
     const embedSnap = await embedRef.get();
     if (!embedSnap.exists) {
       return res.status(404).json({ error: "not_found" });
@@ -94,8 +95,7 @@ router.put("/:roomId/active-embed", requireAuth as any, async (req: any, res) =>
     const nowIso = new Date().toISOString();
 
     // Bind the host room to this saved embed and track the latest active room
-    await db
-      .collection("rooms")
+    await tenantCol("rooms")
       .doc(ctx.roomId)
       .set(
         {

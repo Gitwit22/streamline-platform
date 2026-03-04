@@ -72,6 +72,9 @@ import { requireAdmin } from "./middleware/adminAuth";
 
 
 import { uploadVideo } from "./lib/storageClient";
+import { tenantCol, globalCol } from "./lib/dbPaths";
+import { storageKey } from "./lib/storagePaths";
+import { getAppEnv, getTenantFromEnv } from "./lib/runtimeContext";
 
 
 console.log("CLIENT_URL:", process.env.CLIENT_URL);
@@ -312,7 +315,7 @@ app.get("/api/storage/test", requireAdmin, async (req, res) => {
   try {
     const testContent = `StreamLine Storage Test - ${new Date().toISOString()}`;
     const testBuffer = Buffer.from(testContent);
-    const testPath = `test/${Date.now()}-test.txt`;
+    const testPath = storageKey("test", `${Date.now()}-test.txt`);
 
     const publicUrl = await uploadVideo(testBuffer, testPath, "text/plain");
 
@@ -328,6 +331,59 @@ app.get("/api/storage/test", requireAdmin, async (req, res) => {
     res.status(500).json({
       success: false,
       error: error.message || "Storage test failed",
+    });
+  }
+});
+
+// =============================================================================
+// Multi-Tenant Seed / Ping Verification
+// Writes a tiny document to the tenant-scoped and global Firestore paths to
+// verify the env/{APP_ENV}/tenants/{TENANT}/... and env/{APP_ENV}/global/... roots
+// are writable. Requires admin auth. Non-prod only.
+// =============================================================================
+app.get("/api/health/tenant-seed", requireAdmin, async (req, res) => {
+  const appEnv = getAppEnv();
+  const tenant = getTenantFromEnv();
+
+  if (appEnv === "prod") {
+    return res.status(403).json({ error: "tenant-seed is disabled in production" });
+  }
+
+  const now = Date.now();
+  const seedId = `_seed_ping_${now}`;
+
+  try {
+    // Write to tenant-scoped path
+    const tenantRef = tenantCol("_seed").doc(seedId);
+    await tenantRef.set({ ts: now, appEnv, tenant, type: "tenant" });
+    const tenantSnap = await tenantRef.get();
+    const tenantOk = tenantSnap.exists;
+    await tenantRef.delete(); // Clean up
+
+    // Write to global path
+    const globalRef = globalCol("_seed").doc(seedId);
+    await globalRef.set({ ts: now, appEnv, tenant, type: "global" });
+    const globalSnap = await globalRef.get();
+    const globalOk = globalSnap.exists;
+    await globalRef.delete(); // Clean up
+
+    return res.json({
+      ok: tenantOk && globalOk,
+      appEnv,
+      tenant,
+      tenantPath: tenantRef.path,
+      globalPath: globalRef.path,
+      tenantWrite: tenantOk,
+      globalWrite: globalOk,
+      ts: now,
+    });
+  } catch (err: any) {
+    console.error("[tenant-seed] Verification failed:", err?.message || err);
+    return res.status(500).json({
+      ok: false,
+      appEnv,
+      tenant,
+      error: err?.message || "Tenant seed verification failed",
     });
   }
 });
@@ -778,8 +834,7 @@ app.post("/api/auth/signup", async (req, res) => {
       return res.status(400).json({ error: "password must be at least 6 characters" });
     }
 
-    const existingSnap = await db
-      .collection("users")
+    const existingSnap = await globalCol("users")
       .where("email", "==", email.trim().toLowerCase())
       .limit(1)
       .get();
@@ -869,7 +924,7 @@ const userRecord = await admin.auth().createUser({
 const uid = userRecord.uid;
 
 // 2) Create Firestore user doc at users/{uid}
-const userRef = db.collection("users").doc(uid);
+const userRef = globalCol("users").doc(uid);
 
 await userRef.set({
   ...userData,
@@ -906,7 +961,7 @@ console.log("✅ User document created:", uid);
       updatedAt: now,
     };
 
-    await db.collection("usageMonthly").doc(`${userRef.id}_${monthKey}`).set(usageData);
+    await tenantCol("usageMonthly").doc(`${userRef.id}_${monthKey}`).set(usageData);
     console.log("✅ Monthly usage document initialized");
 
     // =============================================================================
@@ -995,7 +1050,7 @@ app.post("/api/usage/streamEnded", async (req, res) => {
       return res.status(400).json({ error: "minutes required" });
     }
 
-    const userRef = db.collection("users").doc(uid);
+    const userRef = globalCol("users").doc(uid);
     const userSnap = await userRef.get();
 
     if (!userSnap.exists) {
@@ -1063,7 +1118,7 @@ app.post("/api/usage/streamEnded", async (req, res) => {
     // Also track canonical usageMonthly participant/transcode minutes
     const monthKey = getCurrentMonthKey();
     const usageDocId = `${uid}_${monthKey}`;
-    const usageRef = db.collection("usageMonthly").doc(usageDocId);
+    const usageRef = tenantCol("usageMonthly").doc(usageDocId);
     const usageSnap = await usageRef.get();
     const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
 

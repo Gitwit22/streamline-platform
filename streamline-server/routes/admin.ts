@@ -17,6 +17,7 @@ import { PLAN_IDS, PlanId, isPlanId, getAllPlanIds } from "../types/plan";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -59,7 +60,7 @@ router.get("/env-sanity", async (req, res) => {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED, message: "Missing admin uid" });
     }
 
-    const userSnap = await firestore.collection("users").doc(uid).get();
+    const userSnap = await globalCol("users").doc(uid).get();
     if (!userSnap.exists) {
       return res.status(404).json({ error: "user_doc_missing", uid });
     }
@@ -67,7 +68,7 @@ router.get("/env-sanity", async (req, res) => {
     const user = userSnap.data() || {};
 
     const planId = String(user.planId ?? user.plan ?? "free");
-    const planSnap = await firestore.collection("plans").doc(planId).get();
+    const planSnap = await globalCol("plans").doc(planId).get();
     const planDoc = planSnap.exists ? (planSnap.data() as any) : null;
 
     const limits = (planDoc?.limits || {}) as any;
@@ -128,7 +129,7 @@ router.get("/plans", async (req, res) => {
   console.log("🎯 1. Plans route handler started (admin, all plans)");
   try {
     console.log("🎯 2. About to query Firestore for ALL plans");
-    const snap = await firestore.collection("plans").get();
+    const snap = await globalCol("plans").get();
     console.log("🎯 3. Firestore returned, docs count:", snap.size);
 
     const plans = snap.docs.map((d) => ({
@@ -150,7 +151,7 @@ router.put("/plans/:planId", async (req, res) => {
     if ("id" in updateData) {
       delete updateData.id;
     }
-    const planRef = firestore.collection("plans").doc(planId);
+    const planRef = globalCol("plans").doc(planId);
     const planSnap = await planRef.get();
     if (!planSnap.exists) {
       return res.status(404).json({ error: "Plan not found" });
@@ -177,7 +178,7 @@ router.get("/users", async (req, res) => {
       return raw === "1" || raw === "true" || raw === "yes";
     })();
 
-    let query = firestore.collection("users").orderBy("createdAt", "desc");
+    let query = globalCol("users").orderBy("createdAt", "desc");
 
     if (planFilter) {
       query = query.where("planId", "==", planFilter) as any;
@@ -235,14 +236,14 @@ router.get("/users", async (req, res) => {
 router.delete("/users/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
-    const userRef = firestore.collection("users").doc(userId);
+    const userRef = globalCol("users").doc(userId);
     const userDoc = await userRef.get();
     if (!userDoc.exists) {
       return res.status(404).json({ error: "User not found" });
     }
     await userRef.delete();
     // Optionally, delete related usage records
-    // const usageSnap = await firestore.collection("usage").where("userId", "==", userId).get();
+    // const usageSnap = await tenantCol("usage").where("userId", "==", userId).get();
     // const batch = firestore.batch();
     // usageSnap.forEach(doc => batch.delete(doc.ref));
     // await batch.commit();
@@ -261,7 +262,7 @@ router.get("/users/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
 
-    const userDoc = await firestore.collection("users").doc(userId).get();
+    const userDoc = await globalCol("users").doc(userId).get();
 
     if (!userDoc.exists) {
       return res.status(404).json({ error: "User not found" });
@@ -273,8 +274,7 @@ router.get("/users/:userId", async (req, res) => {
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
-    const usageSnapshot = await firestore
-      .collection("usage")
+    const usageSnapshot = await tenantCol("usage")
       .where("userId", "==", userId)
       .where("timestamp", ">=", monthStart)
       .orderBy("timestamp", "desc")
@@ -286,8 +286,7 @@ router.get("/users/:userId", async (req, res) => {
     );
 
     // Get all-time usage
-    const allUsageSnapshot = await firestore
-      .collection("usage")
+    const allUsageSnapshot = await tenantCol("usage")
       .where("userId", "==", userId)
       .get();
 
@@ -303,7 +302,7 @@ router.get("/users/:userId", async (req, res) => {
 
     // ---- Fetch plan limits live from Firestore ----
     const planId = (userData?.planId || userData?.plan || "free").toLowerCase();
-    const planSnap = await firestore.collection("plans").doc(planId).get();
+    const planSnap = await globalCol("plans").doc(planId).get();
     const planData = planSnap.exists ? (planSnap.data() as any) : null;
     // Safe fallback if plan doc missing. Prefer canonical participant/monthly minutes fields.
     const includedMinutes =
@@ -344,7 +343,7 @@ router.post("/users/:userId/grant-minutes", async (req, res) => {
       return res.status(400).json({ error: "Invalid minutes amount" });
     }
 
-    const userRef = firestore.collection("users").doc(userId);
+    const userRef = globalCol("users").doc(userId);
     const userDoc = await userRef.get();
 
     if (!userDoc.exists) {
@@ -396,13 +395,13 @@ router.post("/users/:userId/change-plan", async (req, res) => {
     
 
     // Dynamically fetch all valid plan IDs from Firestore
-    const plansSnap = await firestore.collection("plans").get();
+    const plansSnap = await globalCol("plans").get();
 const validPlans: string[] = plansSnap.docs.map((d) => d.id);
     if (!validPlans.includes(newPlan)) {
       return res.status(400).json({ error: "Invalid plan", validPlans });
     }
 
-    const userRef = firestore.collection("users").doc(userId);
+    const userRef = globalCol("users").doc(userId);
     const userDoc = await userRef.get();
 
     if (!userDoc.exists) {
@@ -458,7 +457,7 @@ router.post("/users/:userId/toggle-billing", async (req, res) => {
       return res.status(400).json({ error: "enabled must be a boolean" });
     }
 
-    const userRef = firestore.collection("users").doc(userId);
+    const userRef = globalCol("users").doc(userId);
     const userDoc = await userRef.get();
 
     if (!userDoc.exists) {
@@ -511,7 +510,7 @@ router.post("/users/:userId/toggle-billing", async (req, res) => {
  */
 router.post("/plans/migrate-schema", async (req, res) => {
   try {
-    const snap = await firestore.collection("plans").get();
+    const snap = await globalCol("plans").get();
     const report: Array<{
       id: string;
       updated: boolean;
@@ -662,7 +661,7 @@ router.post("/feature-flags/billing", async (req, res) => {
       return res.status(400).json({ error: "reason_required_in_production" });
     }
 
-    const docRef = firestore.collection("config").doc("features");
+    const docRef = globalCol("config").doc("features");
     const now = new Date();
 
     const beforeSnap = await docRef.get();
@@ -730,7 +729,7 @@ router.get("/usage", async (req, res) => {
     // whether Stripe is globally enabled.
     let platformBillingEnabled = true;
     try {
-      const featuresSnap = await firestore.collection("config").doc("features").get();
+      const featuresSnap = await globalCol("config").doc("features").get();
       const features = featuresSnap.exists ? (featuresSnap.data() as any) : {};
       if (typeof features?.billingSystemEnabled === "boolean") {
         platformBillingEnabled = features.billingSystemEnabled;
@@ -740,7 +739,7 @@ router.get("/usage", async (req, res) => {
     }
 
     // Get all users
-    let usersQuery = firestore.collection("users");
+    let usersQuery = globalCol("users");
     if (planFilter) {
       usersQuery = usersQuery.where("planId", "==", planFilter) as any;
     }
@@ -752,7 +751,7 @@ router.get("/usage", async (req, res) => {
       : usersSnapshot.docs.filter((doc) => !isDeletedUserRecord(doc.data()));
 
     // Fetch all plans once for efficiency
-    const plansSnap = await firestore.collection("plans").get();
+    const plansSnap = await globalCol("plans").get();
     const plansMap = Object.fromEntries(plansSnap.docs.map(d => [d.id, d.data()]));
 
     const usageData = await Promise.all(
@@ -761,7 +760,7 @@ router.get("/usage", async (req, res) => {
         const userId = doc.id;
         // usageMonthly doc id shape: `${uid}_${YYYY-MM}`
         const usageDocId = `${userId}_${monthKey}`;
-        const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
+        const usageSnap = await tenantCol("usageMonthly").doc(usageDocId).get();
         const usageData = usageSnap.exists ? (usageSnap.data() as any) : {};
         const usage = usageData.usage || usageData.totals || {};
         const minutesUsed = Number(
@@ -860,7 +859,7 @@ router.get("/usage/summary", async (req, res) => {
  */
 router.get("/stats", async (req, res) => {
   try {
-    const usersSnapshot = await firestore.collection("users").get();
+    const usersSnapshot = await globalCol("users").get();
     const includeDeleted = (() => {
       const raw = String(req.query.includeDeleted || "").trim().toLowerCase();
       return raw === "1" || raw === "true" || raw === "yes";
@@ -906,7 +905,7 @@ router.get("/stats", async (req, res) => {
     });
 
     // Get total minutes used
-    const usageSnapshot = await firestore.collection("usage").get();
+    const usageSnapshot = await tenantCol("usage").get();
     const totalMinutesUsed = usageSnapshot.docs.reduce(
       (sum, doc) => sum + (doc.data().minutes || 0),
       0
@@ -945,7 +944,7 @@ router.post("/features/toggle", async (req, res) => {
       return res.status(400).json({ error: "enabled must be a boolean" });
     }
 
-    const featureRef = firestore.collection("featureFlags").doc(featureName);
+    const featureRef = globalCol("featureFlags").doc(featureName);
     
     await featureRef.set(
       {
@@ -985,7 +984,7 @@ router.post("/features/toggle", async (req, res) => {
  */
 router.get("/features", async (req, res) => {
   try {
-    const snapshot = await firestore.collection("featureFlags").get();
+    const snapshot = await globalCol("featureFlags").get();
 
     // Ensure important flags are visible in the Admin UI even before they have
     // been explicitly created in Firestore.

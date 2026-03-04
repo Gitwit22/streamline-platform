@@ -1,4 +1,5 @@
 import { firestore } from "../firebaseAdmin";
+import { globalCol } from "../lib/dbPaths";
 
 function normalizeEmail(value: any): string {
   return typeof value === "string" ? value.trim().toLowerCase() : "";
@@ -6,7 +7,7 @@ function normalizeEmail(value: any): string {
 
 async function main() {
   const limit = Number(process.env.LIMIT || "0");
-  const usersRef = firestore.collection("users");
+  const usersRef = globalCol("users");
 
   const emailToUids = new Map<string, string[]>();
 

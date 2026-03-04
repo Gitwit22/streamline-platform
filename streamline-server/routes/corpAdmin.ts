@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/requireAuth";
 import { getCorpOrgContext, assertCorpRole, asString, coerceMillis, coerceCorpRole, coerceEmail } from "../lib/corpOrg";
 import { writeCorpAudit } from "../lib/corpAudit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -24,7 +25,7 @@ router.get("/admin/users", requireAuth, async (req, res) => {
 
     const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 100, 1), 500);
 
-    const snap = await db.collection("orgMembers")
+    const snap = await tenantCol("orgMembers")
       .where("orgId", "==", ctx.orgId)
       .limit(limit)
       .get();
@@ -87,13 +88,13 @@ router.patch("/admin/users/:id/role", requireAuth, async (req, res) => {
     const newRole = coerceCorpRole(req.body.role);
     if (!newRole) return res.status(400).json({ error: "invalid_role" });
 
-    const snap = await db.collection("orgMembers").doc(memberId).get();
+    const snap = await tenantCol("orgMembers").doc(memberId).get();
     if (!snap.exists) return res.status(404).json({ error: "not_found" });
 
     const existing = snap.data() as any;
     if (existing.orgId !== ctx.orgId) return res.status(403).json({ error: "wrong_org" });
 
-    await db.collection("orgMembers").doc(memberId).set({
+    await tenantCol("orgMembers").doc(memberId).set({
       role: newRole,
       updatedAt: Date.now(),
     }, { merge: true });
@@ -137,7 +138,7 @@ router.post("/admin/users/invite", requireAuth, async (req, res) => {
     const now = Date.now();
     const inviteId = `${ctx.orgId}_inv_${now}_${Math.random().toString(36).slice(2, 8)}`;
 
-    await db.collection("orgMembers").doc(inviteId).set({
+    await tenantCol("orgMembers").doc(inviteId).set({
       orgId: ctx.orgId,
       email,
       name,
@@ -181,7 +182,7 @@ router.get("/admin/audit", requireAuth, async (req, res) => {
 
     const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 100, 1), 500);
 
-    const snap = await db.collection("corpAudit")
+    const snap = await tenantCol("corpAudit")
       .where("orgId", "==", ctx.orgId)
       .orderBy("createdAt", "desc")
       .limit(limit)
@@ -226,7 +227,7 @@ router.get("/admin/settings", requireAuth, async (req, res) => {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    const orgSnap = await db.collection("orgs").doc(ctx.orgId).get();
+    const orgSnap = await tenantCol("orgs").doc(ctx.orgId).get();
     const org = orgSnap.exists ? (orgSnap.data() as any) : {};
 
     return res.json({
@@ -272,7 +273,7 @@ router.patch("/admin/settings", requireAuth, async (req, res) => {
     if (req.body.mfaRequired !== undefined) updates.mfaRequired = !!req.body.mfaRequired;
     if (req.body.defaultRole !== undefined) updates.defaultRole = asString(req.body.defaultRole).trim();
 
-    await db.collection("orgs").doc(ctx.orgId).set(updates, { merge: true });
+    await tenantCol("orgs").doc(ctx.orgId).set(updates, { merge: true });
 
     await writeCorpAudit({
       orgId: ctx.orgId,
@@ -302,11 +303,11 @@ router.get("/admin/analytics", requireAuth, async (req, res) => {
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
 
     const [broadcastsSnap, callsSnap, trainingSnap, membersSnap, messagesSnap] = await Promise.all([
-      db.collection("corpBroadcasts").where("orgId", "==", ctx.orgId).get().catch(() => ({ size: 0, docs: [] } as any)),
-      db.collection("corpCalls").where("orgId", "==", ctx.orgId).get().catch(() => ({ size: 0, docs: [] } as any)),
-      db.collection("corpTraining").where("orgId", "==", ctx.orgId).get().catch(() => ({ size: 0, docs: [] } as any)),
-      db.collection("orgMembers").where("orgId", "==", ctx.orgId).get().catch(() => ({ size: 0, docs: [] } as any)),
-      db.collection("corpChatMessages").where("orgId", "==", ctx.orgId).get().catch(() => ({ size: 0, docs: [] } as any)),
+      tenantCol("corpBroadcasts").where("orgId", "==", ctx.orgId).get().catch(() => ({ size: 0, docs: [] } as any)),
+      tenantCol("corpCalls").where("orgId", "==", ctx.orgId).get().catch(() => ({ size: 0, docs: [] } as any)),
+      tenantCol("corpTraining").where("orgId", "==", ctx.orgId).get().catch(() => ({ size: 0, docs: [] } as any)),
+      tenantCol("orgMembers").where("orgId", "==", ctx.orgId).get().catch(() => ({ size: 0, docs: [] } as any)),
+      tenantCol("corpChatMessages").where("orgId", "==", ctx.orgId).get().catch(() => ({ size: 0, docs: [] } as any)),
     ]);
 
     const broadcasts = broadcastsSnap.docs.map((d: any) => d.data());

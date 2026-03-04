@@ -14,6 +14,7 @@ import { getCurrentMonthKey } from "../lib/usageTracker";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { evaluateUsageGate } from "../lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 // livekit-server-sdk is ESM; use dynamic import so CommonJS builds work on Render
 let _lkMod: any | null = null;
@@ -58,9 +59,9 @@ function computeBilledMinutes(start: Date | null, end: Date): number {
 }
 
 async function getPlanLimit(uid: string, field: string): Promise<number | undefined> {
-  const userSnap = await firestore.collection("users").doc(uid).get();
+  const userSnap = await globalCol("users").doc(uid).get();
   const planId = String((userSnap.data() || {}).planId || "free");
-  const planSnap = await firestore.collection("plans").doc(planId).get();
+  const planSnap = await globalCol("plans").doc(planId).get();
   if (!planSnap.exists) return undefined;
   const limits = (planSnap.data() || {}).limits || {};
   const raw = limits[field];
@@ -103,7 +104,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
     }
 
     const streamDocId = `${uid}_${roomId}`; // canonical
-    const ref = firestore.collection("activeStreams").doc(streamDocId);
+    const ref = tenantCol("activeStreams").doc(streamDocId);
 
     // if your client sends individual keys or destination IDs:
     const rawBody = req.body || {};
@@ -156,7 +157,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
     
 
     // Load user (optional, but fine)
-    const userSnap = await firestore.collection("users").doc(uid).get();
+    const userSnap = await globalCol("users").doc(uid).get();
     if (!userSnap.exists) return res.status(401).json({ error: "User not found" });
     const planId = await getUserPlanId(uid);
 
@@ -173,7 +174,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       const entitlements = await getEffectiveEntitlements(uid);
       const monthKey = getCurrentMonthKey();
       const usageDocId = `${uid}_${monthKey}`;
-      const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
+      const usageSnap = await tenantCol("usageMonthly").doc(usageDocId).get();
       const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
       const usage = existing.usage || {};
 
@@ -278,7 +279,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
 
     if (destIds.length > 0) {
       try {
-        const col = firestore.collection("users").doc(uid).collection("destinations");
+        const col = globalCol("users").doc(uid).collection("destinations");
         const snaps = await Promise.all(destIds.map((id) => col.doc(id).get()));
         for (const snap of snaps) {
           if (!snap.exists) continue;
@@ -507,8 +508,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         );
 
         for (const row of sessionRows) {
-          await firestore
-            .collection("egressSessions")
+          await tenantCol("egressSessions")
             .doc(String(row.id))
             .set(
               {
@@ -577,7 +577,7 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
     }
 
     const streamDocId = `${uid}_${roomId}`;
-    const ref = firestore.collection("activeStreams").doc(streamDocId);
+    const ref = tenantCol("activeStreams").doc(streamDocId);
     let doc = await ref.get();
     let egressId: string | null = null;
     let egressIds: { normal?: string; instagram?: string } | null = null;
@@ -589,7 +589,7 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
     } else {
       // Legacy fallback: older docs were keyed by uid_roomName
       const legacyStreamDocId = `${uid}_${roomName}`;
-      const legacyRef = firestore.collection("activeStreams").doc(legacyStreamDocId);
+      const legacyRef = tenantCol("activeStreams").doc(legacyStreamDocId);
       const legacyDoc = await legacyRef.get();
       if (legacyDoc.exists) {
         const data = legacyDoc.data();
@@ -604,8 +604,7 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
       if (!egressId) {
         return res.status(404).json({ error: "No active multistream found for this room and no egressId provided" });
       }
-      const querySnap = await firestore
-        .collection("activeStreams")
+      const querySnap = await tenantCol("activeStreams")
         .where("egressId", "==", egressId)
         .limit(1)
         .get();
@@ -686,7 +685,7 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
     // LiveKit webhooks are not configured or are delayed.
     const countUsageForEgress = async (id: string) => {
       try {
-        const sessionRef = firestore.collection("egressSessions").doc(String(id));
+        const sessionRef = tenantCol("egressSessions").doc(String(id));
         await firestore.runTransaction(async (tx) => {
           const s = await tx.get(sessionRef);
           if (!s.exists) return;
@@ -698,7 +697,7 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
           if (billedMinutes <= 0) return;
 
           const monthKey = getCurrentMonthKey();
-          const usageRef = firestore.collection("usageMonthly").doc(`${uid}_${monthKey}`);
+          const usageRef = tenantCol("usageMonthly").doc(`${uid}_${monthKey}`);
           const usageSnap = await tx.get(usageRef);
           const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
           const usage = existing.usage || {};

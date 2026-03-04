@@ -4,6 +4,7 @@ import { firestore as db } from "../firebaseAdmin";
 import type { HlsPresetId } from "./livekitEgress";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import type { RoomLayout } from "../lib/roomLayout";
+import { tenantCol } from "../lib/dbPaths";
 
 export type RoomHlsConfig = {
   enabled: boolean;
@@ -78,7 +79,7 @@ export async function ensureRoomDoc(params: {
   data: RoomDoc;
 }> {
   const { roomId, ownerId, livekitRoomName, roomType, initialStatus, savedEmbedId, initialRoomLayout } = params;
-  const ref = db.collection("rooms").doc(roomId);
+  const ref = tenantCol("rooms").doc(roomId);
   const snap = await ref.get();
   const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
 
@@ -139,7 +140,7 @@ export async function getRoom(roomId: string): Promise<{
   ref: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
   data: RoomDoc;
 }> {
-  const ref = db.collection("rooms").doc(roomId);
+  const ref = tenantCol("rooms").doc(roomId);
   const snap = await ref.get();
   if (!snap.exists) {
     throw new Error(PERMISSION_ERRORS.ROOM_NOT_FOUND);

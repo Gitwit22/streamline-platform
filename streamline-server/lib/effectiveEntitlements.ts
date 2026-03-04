@@ -1,4 +1,5 @@
 import { firestore } from "../firebaseAdmin";
+import { globalCol } from "./dbPaths";
 import { CanonicalPlan, normalizePlan } from "./normalizePlan";
 import { getUserAccount, UserAccount } from "./userAccount";
 
@@ -19,7 +20,7 @@ function resolveEffectivePlanId(account: UserAccount): string {
 }
 
 async function loadPlan(planId: string): Promise<CanonicalPlan> {
-  const snap = await firestore.collection("plans").doc(planId).get();
+  const snap = await globalCol("plans").doc(planId).get();
   const data = snap.exists ? snap.data() || {} : {};
   return normalizePlan(planId, data);
 }

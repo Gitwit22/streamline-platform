@@ -4,6 +4,7 @@ import { PLAN_IDS, PlanId, isPlanId } from "../types/plan";
 import { firestore } from "../firebaseAdmin";
 import { normalizePlan } from "../lib/normalizePlan";
 import { getPlatformTranscodeEnabled } from "../lib/platformFlags";
+import { globalCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -18,13 +19,13 @@ router.get("/", async (_req, res) => {
       myContentSnap,
       myContentRecordingsSnap,
     ] = await Promise.all([
-      firestore.collection("featureFlags").doc("hlsSettingsTab").get(),
-      firestore.collection("featureFlags").doc("recording").get(),
-      firestore.collection("featureFlags").doc("contentLibraryEnabled").get(),
-      firestore.collection("featureFlags").doc("projectsEnabled").get(),
-      firestore.collection("featureFlags").doc("editorEnabled").get(),
-      firestore.collection("featureFlags").doc("myContentEnabled").get(),
-      firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
+      globalCol("featureFlags").doc("hlsSettingsTab").get(),
+      globalCol("featureFlags").doc("recording").get(),
+      globalCol("featureFlags").doc("contentLibraryEnabled").get(),
+      globalCol("featureFlags").doc("projectsEnabled").get(),
+      globalCol("featureFlags").doc("editorEnabled").get(),
+      globalCol("featureFlags").doc("myContentEnabled").get(),
+      globalCol("featureFlags").doc("myContentRecordingsEnabled").get(),
     ]);
 
     const hlsUiData = hlsUiSnap.exists ? ((hlsUiSnap.data() as any) || {}) : {};
@@ -50,7 +51,7 @@ router.get("/", async (_req, res) => {
     const myContentEnabled = myContentData.enabled === true;
     const myContentRecordingsEnabled = myContentRecordingsData.enabled === true;
 
-    const snap = await firestore.collection("plans").get();
+    const snap = await globalCol("plans").get();
     const mapped = snap.docs.map((d) => {
       const data = (d.data() as any) || {};
       const id = d.id;
@@ -200,7 +201,7 @@ router.get("/:id", async (req, res) => {
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ error: "missing_plan_id" });
 
-    const snap = await firestore.collection("plans").doc(id).get();
+    const snap = await globalCol("plans").doc(id).get();
     if (!snap.exists) return res.status(404).json({ error: "plan_not_found" });
 
     const plan = normalizePlan(id, snap.data() || {});

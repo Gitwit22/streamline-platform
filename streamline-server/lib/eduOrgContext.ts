@@ -1,4 +1,5 @@
 import { firestore } from "../firebaseAdmin";
+import { tenantCol, globalCol } from "./dbPaths";
 
 export type EduOrgRole =
   | "faculty_admin"
@@ -46,7 +47,7 @@ export async function loadEduOrgSettingsForUid(uid: string): Promise<
     }
   | null
 > {
-  const userSnap = await firestore.collection("users").doc(uid).get().catch(() => null as any);
+  const userSnap = await globalCol("users").doc(uid).get().catch(() => null as any);
   const user = userSnap && userSnap.exists ? ((userSnap.data() as any) || {}) : null;
   if (!user) return null;
 
@@ -55,7 +56,7 @@ export async function loadEduOrgSettingsForUid(uid: string): Promise<
   if (!orgId) return null;
 
   const memberId = `${orgId}_${uid}`;
-  const memberSnap = await firestore.collection("orgMembers").doc(memberId).get().catch(() => null as any);
+  const memberSnap = await tenantCol("orgMembers").doc(memberId).get().catch(() => null as any);
   const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
   const orgRole = coerceEduOrgRole(member?.role);
 
@@ -70,7 +71,7 @@ export async function loadEduOrgSettingsForUid(uid: string): Promise<
 
   let org: EduOrgSettings | null = null;
   try {
-    const orgSnap = await firestore.collection("orgs").doc(orgId).get();
+    const orgSnap = await tenantCol("orgs").doc(orgId).get();
     if (orgSnap.exists) {
       const data = (orgSnap.data() as any) || {};
       const orgType = typeof data.orgType === "string" ? data.orgType : null;

@@ -9,6 +9,8 @@ import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { canAccessFeature } from "./featureAccess";
+import { tenantCol, globalCol } from "../lib/dbPaths";
+import { storageKey } from "../lib/storagePaths";
 
 const router = Router();
 
@@ -32,11 +34,11 @@ async function getSegmentedPlatformFlags(): Promise<SegmentedPlatformFlags> {
 
   try {
     const [contentLibrarySnap, projectsSnap, editorSnap, myContentSnap, myContentRecordingsSnap] = await Promise.all([
-      db.collection("featureFlags").doc("contentLibraryEnabled").get(),
-      db.collection("featureFlags").doc("projectsEnabled").get(),
-      db.collection("featureFlags").doc("editorEnabled").get(),
-      db.collection("featureFlags").doc("myContentEnabled").get(),
-      db.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
+      globalCol("featureFlags").doc("contentLibraryEnabled").get(),
+      globalCol("featureFlags").doc("projectsEnabled").get(),
+      globalCol("featureFlags").doc("editorEnabled").get(),
+      globalCol("featureFlags").doc("myContentEnabled").get(),
+      globalCol("featureFlags").doc("myContentRecordingsEnabled").get(),
     ]);
 
     const contentLibraryData = contentLibrarySnap.exists
@@ -114,11 +116,11 @@ type EditingPlanInfo = {
 };
 
 async function getEditingPlanInfo(uid: string): Promise<EditingPlanInfo> {
-  const userSnap = await db.collection("users").doc(uid).get();
+  const userSnap = await globalCol("users").doc(uid).get();
   const userData = userSnap.exists ? ((userSnap.data() as any) || {}) : {};
   const planId = String(userData.planId || userData.plan || "free");
 
-  const planSnap = await db.collection("plans").doc(planId).get();
+  const planSnap = await globalCol("plans").doc(planId).get();
   const planData = planSnap.exists ? ((planSnap.data() as any) || {}) : {};
 
   const editing = (planData.editing || {}) as any;
@@ -221,7 +223,7 @@ router.post(
       const timestamp = Date.now();
       const safeName = title.replace(/[^a-z0-9]/gi, "-").toLowerCase();
       const fileName = `${timestamp}-${safeName}.${file.originalname.split('.').pop()}`;
-      const path = `uploads/${userId}/${fileName}`;
+      const path = storageKey("uploads", userId, fileName);
 
       console.log(`☁️ Uploading to: ${path}`);
 
@@ -255,7 +257,7 @@ router.post(
         source: 'upload'
       };
 
-      const assetRef = await db.collection('editing_assets').add(assetData);
+      const assetRef = await tenantCol("editing_assets").add(assetData);
       console.log(`💾 Asset saved: ${assetRef.id}`);
 
       res.json({
@@ -293,8 +295,7 @@ router.get("/assets", async (req: Request, res: Response) => {
     }
 
     // Fetch all recordings for this user and convert to assets format
-    const recordingsSnap = await db
-      .collection("recordings")
+    const recordingsSnap = await tenantCol("recordings")
       .where("userId", "==", userId)
       .get();
 
@@ -316,8 +317,7 @@ router.get("/assets", async (req: Request, res: Response) => {
     });
 
     // Also fetch uploaded assets
-    const uploadsSnap = await db
-      .collection("editing_assets")
+    const uploadsSnap = await tenantCol("editing_assets")
       .where("userId", "==", userId)
       .get();
 
@@ -357,8 +357,8 @@ router.get("/listall", async (req: Request, res: Response) => {
     if (!(await assertMyContentRecordingsEnabled(res))) {
       return;
     }
-    const recordingsSnap = await db.collection("recordings").where("userId", "==", userId).get();
-    const uploadsSnap = await db.collection("editing_assets").where("userId", "==", userId).get();
+    const recordingsSnap = await tenantCol("recordings").where("userId", "==", userId).get();
+    const uploadsSnap = await tenantCol("editing_assets").where("userId", "==", userId).get();
     
     const assets = [...recordingsSnap.docs, ...uploadsSnap.docs].map((doc) => {
       const data = doc.data();
@@ -394,7 +394,7 @@ router.get("/assets/:id", async (req: Request, res: Response) => {
     }
 
     // 1) Recordings-backed assets
-    const recordingSnap = await db.collection("recordings").doc(id).get();
+    const recordingSnap = await tenantCol("recordings").doc(id).get();
     if (recordingSnap.exists) {
       const data = recordingSnap.data();
 
@@ -420,7 +420,7 @@ router.get("/assets/:id", async (req: Request, res: Response) => {
     }
 
     // 2) Uploaded assets
-    const uploadSnap = await db.collection("editing_assets").doc(id).get();
+    const uploadSnap = await tenantCol("editing_assets").doc(id).get();
     if (!uploadSnap.exists) {
       return res.status(404).json({ error: "Asset not found" });
     }
@@ -463,7 +463,7 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
     }
 
     // 1) Try recordings-backed assets
-    const recordingSnap = await db.collection("recordings").doc(id).get();
+    const recordingSnap = await tenantCol("recordings").doc(id).get();
     if (recordingSnap.exists) {
       const data = recordingSnap.data();
 
@@ -475,13 +475,13 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
       const storage = await deleteRecordingStorage(data);
 
       // Delete from Firestore
-      await db.collection("recordings").doc(id).delete();
+      await tenantCol("recordings").doc(id).delete();
 
       return res.json({ ok: true, message: "Asset deleted", storage });
     }
 
     // 2) Try uploaded editing_assets
-    const uploadSnap = await db.collection("editing_assets").doc(id).get();
+    const uploadSnap = await tenantCol("editing_assets").doc(id).get();
     if (!uploadSnap.exists) {
       return res.status(404).json({ error: "Asset not found" });
     }
@@ -502,7 +502,7 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
       }
     }
 
-    await db.collection("editing_assets").doc(id).delete();
+    await tenantCol("editing_assets").doc(id).delete();
     return res.json({ ok: true, message: "Asset deleted" });
   } catch (err: any) {
     console.error("delete asset error:", err);
@@ -528,7 +528,7 @@ router.post("/assets/from-recording", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "recordingId is required" });
     }
 
-    const recordingSnap = await db.collection("recordings").doc(recordingId).get();
+    const recordingSnap = await tenantCol("recordings").doc(recordingId).get();
 
     if (!recordingSnap.exists) {
       return res.status(404).json({ error: "Recording not found" });
@@ -580,8 +580,7 @@ router.get("/projects", async (req: Request, res: Response) => {
     const access = await assertEditingAccess(req, res);
     if (!access) return;
     
-    const projectsSnap = await db
-      .collection("editing_projects")
+    const projectsSnap = await tenantCol("editing_projects")
       .where("userId", "==", userId)
       .get();
 
@@ -634,8 +633,7 @@ router.post("/projects", async (req: Request, res: Response) => {
 
     // Enforce max projects (0 means unlimited when access=true)
     if (access.plan.maxProjects > 0) {
-      const existingSnap = await db
-        .collection("editing_projects")
+      const existingSnap = await tenantCol("editing_projects")
         .where("userId", "==", userId)
         .get();
       if (existingSnap.size >= access.plan.maxProjects) {
@@ -668,7 +666,7 @@ router.post("/projects", async (req: Request, res: Response) => {
       }
     };
 
-    const projectRef = await db.collection("editing_projects").add(newProject);
+    const projectRef = await tenantCol("editing_projects").add(newProject);
 
     res.json({
       id: projectRef.id,
@@ -699,7 +697,7 @@ router.get("/projects/:id", async (req: Request, res: Response) => {
     const access = await assertEditingAccess(req, res);
     if (!access) return;
 
-    const snap = await db.collection("editing_projects").doc(id).get();
+    const snap = await tenantCol("editing_projects").doc(id).get();
     if (!snap.exists) {
       return res.status(404).json({ error: "Project not found" });
     }
@@ -744,7 +742,7 @@ router.patch("/projects/:id", async (req: Request, res: Response) => {
     const access = await assertEditingAccess(req, res);
     if (!access) return;
 
-    const ref = db.collection("editing_projects").doc(id);
+    const ref = tenantCol("editing_projects").doc(id);
     const snap = await ref.get();
     if (!snap.exists) {
       return res.status(404).json({ error: "Project not found" });
@@ -799,7 +797,7 @@ router.delete("/projects/:id", async (req: Request, res: Response) => {
     const access = await assertEditingAccess(req, res);
     if (!access) return;
 
-    const ref = db.collection("editing_projects").doc(id);
+    const ref = tenantCol("editing_projects").doc(id);
     const snap = await ref.get();
     if (!snap.exists) {
       return res.status(404).json({ error: "Project not found" });
@@ -835,7 +833,7 @@ router.put("/projects/:id/timeline", async (req: Request, res: Response) => {
     const access = await assertEditingAccess(req, res);
     if (!access) return;
 
-    const ref = db.collection("editing_projects").doc(id);
+    const ref = tenantCol("editing_projects").doc(id);
     const snap = await ref.get();
     if (!snap.exists) {
       return res.status(404).json({ error: "Project not found" });
@@ -906,7 +904,7 @@ router.post("/export", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "projectId is required" });
     }
 
-    const projectSnap = await db.collection("editing_projects").doc(projectId).get();
+    const projectSnap = await tenantCol("editing_projects").doc(projectId).get();
     if (!projectSnap.exists) {
       return res.status(404).json({ error: "Project not found" });
     }
@@ -915,7 +913,7 @@ router.post("/export", async (req: Request, res: Response) => {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    const jobRef = db.collection("editing_exports").doc();
+    const jobRef = tenantCol("editing_exports").doc();
     const createdAt = new Date();
 
     // MVP: return the source asset's videoUrl as the downloadable output.
@@ -923,12 +921,12 @@ router.post("/export", async (req: Request, res: Response) => {
     try {
       const assetId = String(project.assetId || "");
       if (assetId) {
-        const recordingSnap = await db.collection("recordings").doc(assetId).get();
+        const recordingSnap = await tenantCol("recordings").doc(assetId).get();
         if (recordingSnap.exists) {
           const d = recordingSnap.data() as any;
           if (d?.userId === userId) downloadUrl = d?.videoUrl || d?.publicExportUrl;
         } else {
-          const uploadSnap = await db.collection("editing_assets").doc(assetId).get();
+          const uploadSnap = await tenantCol("editing_assets").doc(assetId).get();
           if (uploadSnap.exists) {
             const d = uploadSnap.data() as any;
             if (d?.userId === userId) downloadUrl = d?.videoUrl;
@@ -980,7 +978,7 @@ router.get("/exports/:exportId", async (req: Request, res: Response) => {
     const access = await assertEditingAccess(req, res);
     if (!access) return;
 
-    const snap = await db.collection("editing_exports").doc(exportId).get();
+    const snap = await tenantCol("editing_exports").doc(exportId).get();
     if (!snap.exists) {
       return res.status(404).json({ error: "Export job not found" });
     }
@@ -1024,7 +1022,7 @@ router.get("/recordings/:id", async (req: Request, res: Response) => {
       return;
     }
     
-    const recordingDoc = await db.collection("recordings").doc(id).get();
+    const recordingDoc = await tenantCol("recordings").doc(id).get();
     
     if (!recordingDoc.exists) {
       return res.status(404).json({ error: "Recording not found" });
@@ -1058,8 +1056,7 @@ router.get("/list", async (req: Request, res: Response) => {
       return;
     }
 
-    const recordingsSnap = await db
-      .collection("recordings")
+    const recordingsSnap = await tenantCol("recordings")
       .where("userId", "==", userId)
       .get();
 
@@ -1101,7 +1098,7 @@ router.post("/save", async (req: Request, res: Response) => {
     }
 
     // Verify ownership
-    const recordingSnap = await db.collection("recordings").doc(recordingId).get();
+    const recordingSnap = await tenantCol("recordings").doc(recordingId).get();
 
     if (!recordingSnap.exists) {
       return res.status(404).json({ error: "Recording not found" });
@@ -1113,7 +1110,7 @@ router.post("/save", async (req: Request, res: Response) => {
     }
 
     // Save edit config
-    await db.collection("recordings").doc(recordingId).update({
+    await tenantCol("recordings").doc(recordingId).update({
       editConfig,
       updatedAt: new Date(),
     });
@@ -1145,7 +1142,7 @@ router.put("/:recordingId", async (req: Request, res: Response) => {
     }
 
     // Verify ownership
-    const recordingSnap = await db.collection("recordings").doc(recordingId).get();
+    const recordingSnap = await tenantCol("recordings").doc(recordingId).get();
 
     if (!recordingSnap.exists) {
       return res.status(404).json({ error: "Recording not found" });
@@ -1163,7 +1160,7 @@ router.put("/:recordingId", async (req: Request, res: Response) => {
     if (typeof viewerCount === 'number') updateData.viewerCount = viewerCount;
     if (typeof peakViewers === 'number') updateData.peakViewers = peakViewers;
 
-    await db.collection("recordings").doc(recordingId).update(updateData);
+    await tenantCol("recordings").doc(recordingId).update(updateData);
 
     console.log("✅ Recording updated:", { recordingId, ...updateData });
 
@@ -1200,7 +1197,7 @@ router.post("/render", async (req: Request, res: Response) => {
     }
 
     // Verify ownership
-    const recordingSnap = await db.collection("recordings").doc(recordingId).get();
+    const recordingSnap = await tenantCol("recordings").doc(recordingId).get();
 
     if (!recordingSnap.exists) {
       return res.status(404).json({ error: "Recording not found" });
@@ -1212,7 +1209,7 @@ router.post("/render", async (req: Request, res: Response) => {
     }
 
     // Update recording status to "rendering"
-    await db.collection("recordings").doc(recordingId).update({
+    await tenantCol("recordings").doc(recordingId).update({
       status: "rendering",
       renderStartedAt: new Date(),
     });
@@ -1233,7 +1230,7 @@ router.post("/render", async (req: Request, res: Response) => {
         }
 
         // Upload to R2
-        const exportPath = `exports/${userId}/${recordingId}/${Date.now()}.mp4`;
+        const exportPath = storageKey("exports", userId, recordingId, `${Date.now()}.mp4`);
         const publicUrl = await uploadVideo(buffer, exportPath, "video/mp4");
 
         // Update storage usage (best-effort)
@@ -1244,7 +1241,7 @@ router.post("/render", async (req: Request, res: Response) => {
         }
 
         // Update recording with rendered path and URL
-        await db.collection("recordings").doc(recordingId).update({
+        await tenantCol("recordings").doc(recordingId).update({
           status: "complete",
           renderedPath: exportPath,
           publicExportUrl: publicUrl,
@@ -1260,7 +1257,7 @@ router.post("/render", async (req: Request, res: Response) => {
         });
       } catch (uploadErr: any) {
         console.error("Export upload failed:", uploadErr);
-        await db.collection("recordings").doc(recordingId).update({
+        await tenantCol("recordings").doc(recordingId).update({
           status: "render_failed",
           error: uploadErr.message,
         });
@@ -1307,7 +1304,7 @@ router.post("/create-recording", async (req: Request, res: Response) => {
     }
 
     // Create new recording document
-    const recordingRef = db.collection("recordings").doc();
+    const recordingRef = tenantCol("recordings").doc();
     const recordingData = {
       id: recordingRef.id,
       userId,
@@ -1370,7 +1367,7 @@ router.post("/recordings/start", async (req: Request, res: Response) => {
     }
 
     // Create recording document
-    const recordingRef = db.collection("recordings").doc();
+    const recordingRef = tenantCol("recordings").doc();
     const recordingData = {
       id: recordingRef.id,
       userId,
@@ -1418,7 +1415,7 @@ router.post("/recordings/stop", async (req: Request, res: Response) => {
     }
 
     // Update recording document
-    const recordingRef = db.collection("recordings").doc(recordingId);
+    const recordingRef = tenantCol("recordings").doc(recordingId);
 
     const snap = await recordingRef.get();
     if (!snap.exists) {

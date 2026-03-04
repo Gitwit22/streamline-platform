@@ -4,6 +4,7 @@ import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { requireRoomAccessToken, type RoomAccessClaims } from "../middleware/roomAccessToken";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = Router();
 
@@ -21,7 +22,7 @@ router.get("/:roomId/policy", requireRoomAccessToken as any, async (req: any, re
   if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.ROOM_TOKEN_REQUIRED });
   if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
 
-  const snap = await db.collection("rooms").doc(roomId).get();
+  const snap = await tenantCol("rooms").doc(roomId).get();
   if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
   const room = (snap.data() as any) || {};
@@ -70,8 +71,7 @@ router.patch("/:roomId/policy", requireAuth as any, requireRoomAccessToken as an
   }
 
   const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
-  await db
-    .collection("rooms")
+  await tenantCol("rooms")
     .doc(roomId)
     .set({ allowGuests, updatedAt: serverTimestamp } as any, { merge: true });
 

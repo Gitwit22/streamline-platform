@@ -17,6 +17,7 @@ import jwt from "jsonwebtoken";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { getPlatformTranscodeEnabled } from "../lib/platformFlags";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 // Dynamic import for AccessToken constructor
 async function getAccessTokenCtor() {
@@ -30,7 +31,7 @@ async function getRoomServiceClient() {
 }
 
 async function getHlsUiFlag() {
-  const snap = await firestore.collection("featureFlags").doc("hlsSettingsTab").get();
+  const snap = await globalCol("featureFlags").doc("hlsSettingsTab").get();
   const data = snap.exists ? ((snap.data() as any) || {}) : {};
   const enabled = data.enabled === undefined ? true : !!data.enabled;
   return {
@@ -40,7 +41,7 @@ async function getHlsUiFlag() {
 }
 
 async function getRecordingUiFlag() {
-  const snap = await firestore.collection("featureFlags").doc("recording").get();
+  const snap = await globalCol("featureFlags").doc("recording").get();
   const data = snap.exists ? ((snap.data() as any) || {}) : {};
   const enabled = data.enabled === undefined ? true : !!data.enabled;
   return {
@@ -57,11 +58,11 @@ async function getSegmentedUiFlags() {
     myContentSnap,
     myContentRecordingsSnap,
   ] = await Promise.all([
-    firestore.collection("featureFlags").doc("contentLibraryEnabled").get(),
-    firestore.collection("featureFlags").doc("projectsEnabled").get(),
-    firestore.collection("featureFlags").doc("editorEnabled").get(),
-    firestore.collection("featureFlags").doc("myContentEnabled").get(),
-    firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
+    globalCol("featureFlags").doc("contentLibraryEnabled").get(),
+    globalCol("featureFlags").doc("projectsEnabled").get(),
+    globalCol("featureFlags").doc("editorEnabled").get(),
+    globalCol("featureFlags").doc("myContentEnabled").get(),
+    globalCol("featureFlags").doc("myContentRecordingsEnabled").get(),
   ]);
 
   const contentLibraryData = contentLibrarySnap.exists ? ((contentLibrarySnap.data() as any) || {}) : {};
@@ -219,9 +220,9 @@ async function resolveRoleForInvite(opts: { uid?: string; requestedRole?: string
 }
 
 async function getPlanLimit(uid: string, field: string): Promise<number | undefined> {
-  const userSnap = await firestore.collection("users").doc(uid).get();
+  const userSnap = await globalCol("users").doc(uid).get();
   const planId = String((userSnap.data() || {}).planId || "free");
-  const planSnap = await firestore.collection("plans").doc(planId).get();
+  const planSnap = await globalCol("plans").doc(planId).get();
   if (!planSnap.exists) return undefined;
   const limits = (planSnap.data() || {}).limits || {};
   const raw = limits[field];
@@ -291,7 +292,7 @@ async function resolveMaxGuestsCap(ownerId: string | null): Promise<number | und
 }
 
 function capacityLockRef(roomId: string) {
-  return firestore.collection("roomCapacityLocks").doc(roomId);
+  return tenantCol("roomCapacityLocks").doc(roomId);
 }
 
 async function acquireCapacityLock(roomId: string): Promise<string | null> {
@@ -371,8 +372,7 @@ async function recordLegacyRoomNameJoin(ctx: {
     });
 
     const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
-    const ref = firestore
-      .collection("metrics")
+    const ref = tenantCol("metrics")
       .doc("legacyJoinEvents")
       .collection("days")
       .doc(today);
@@ -398,7 +398,7 @@ async function createViewerInvite(roomId: string, opts: {
   allowAnonymous?: boolean;
   viewerGraceMinutes?: number;
 }) {
-  const docRef = firestore.collection("viewerInvites").doc();
+  const docRef = tenantCol("viewerInvites").doc();
   const payload: ViewerInvite = {
     roomId,
     roleProfileId: "viewer",
@@ -421,7 +421,7 @@ async function createViewerInvite(roomId: string, opts: {
 }
 
 async function validateViewerInvite(inviteToken: string, roomId: string, sessionId: string, passcode?: string) {
-  const doc = await firestore.collection("viewerInvites").doc(inviteToken).get();
+  const doc = await tenantCol("viewerInvites").doc(inviteToken).get();
   if (!doc.exists) return { ok: false, reason: "not_found" } as const;
   const data = doc.data() as ViewerInvite;
   if (data.roomId !== roomId) return { ok: false, reason: PERMISSION_ERRORS.ROOM_MISMATCH } as const;
@@ -589,7 +589,7 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
       roomType: null,
     };
     try {
-      const roomRef = firestore.collection("rooms").doc(roomId);
+      const roomRef = tenantCol("rooms").doc(roomId);
       const roomSnap = await roomRef.get();
       roomSnapExists = roomSnap.exists;
       const roomData = (roomSnap.exists ? roomSnap.data() : null) as any;
@@ -872,8 +872,7 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
 
     // Optional audit trail for token issuance (do NOT store tokens).
     if (process.env.AUDIT_ROOM_TOKENS === "1") {
-      firestore
-        .collection("roomTokenAudit")
+      tenantCol("roomTokenAudit")
         .add({
           route: "/api/roomToken",
           uid,
@@ -1009,7 +1008,7 @@ router.post("/guest", requireAuth as any, async (req: any, res) => {
     let requiresPayment = false;
     let roomType: string | null = null;
     try {
-      const roomSnap = await firestore.collection("rooms").doc(roomId).get();
+      const roomSnap = await tenantCol("rooms").doc(roomId).get();
       const roomData = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
       ownerId = typeof roomData.ownerId === "string" && roomData.ownerId.trim() ? roomData.ownerId.trim() : null;
       const visibilityRaw = String(roomData.visibility || "").trim().toLowerCase();
@@ -1113,8 +1112,7 @@ router.post("/guest", requireAuth as any, async (req: any, res) => {
 
     // Optional audit trail for token issuance (do NOT store tokens).
     if (process.env.AUDIT_ROOM_TOKENS === "1") {
-      firestore
-        .collection("roomTokenAudit")
+      tenantCol("roomTokenAudit")
         .add({
           route: "/api/roomToken/guest",
           uid,
