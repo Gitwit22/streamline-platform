@@ -136,8 +136,8 @@ export default function Members() {
                 <span
                   className="text-xs font-mono px-2 py-0.5 rounded-full w-fit"
                   style={{
-                    background: m.role === "leader" ? "hsl(197 89% 66% / 0.15)" : "hsl(215 28% 18%)",
-                    color: m.role === "leader" ? "hsl(197 89% 66%)" : "hsl(214 25% 55%)",
+                    background: m.role === "leader" ? "hsl(197 89% 66% / 0.15)" : m.role === "external" ? "hsl(40 90% 50% / 0.12)" : "hsl(215 28% 18%)",
+                    color: m.role === "leader" ? "hsl(197 89% 66%)" : m.role === "external" ? "hsl(40 90% 60%)" : "hsl(214 25% 55%)",
                   }}
                 >
                   {m.role}

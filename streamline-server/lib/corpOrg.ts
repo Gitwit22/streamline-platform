@@ -1,7 +1,7 @@
 import { firestore as db } from "../firebaseAdmin";
 import { tenantCol, globalCol } from "./dbPaths";
 
-export type CorpOrgRole = "leader" | "employee";
+export type CorpOrgRole = "leader" | "employee" | "external";
 
 export function asString(v: any): string {
   return typeof v === "string" ? v : "";
@@ -15,6 +15,7 @@ export function coerceCorpRole(value: any): CorpOrgRole | null {
   const r = asString(value).trim();
   if (r === "leader") return "leader";
   if (r === "employee") return "employee";
+  if (r === "external") return "external";
   // Legacy migration: map old roles to new ones
   if (r === "admin") return "leader";
   if (r === "manager" || r === "member" || r === "viewer") return "employee";

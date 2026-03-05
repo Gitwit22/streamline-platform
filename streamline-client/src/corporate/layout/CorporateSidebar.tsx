@@ -15,15 +15,22 @@ export default function CorporateSidebar() {
   const role = String(me?.orgRole || me?.role || "employee");
   const orgName = String(me?.orgName || "Your Organization");
   const isLeader = role === "leader";
+  const isExternal = role === "external";
 
   const items = useMemo<NavItem[]>(
     () => [
       { id: "dashboard", label: "Dashboard", path: "/streamline/corporate/dashboard" },
       { id: "chat", label: "Chat", path: "/streamline/corporate/chat" },
-      { id: "calls", label: "Calls", path: "/streamline/corporate/calls" },
-      { id: "broadcasts", label: "Broadcasts", path: "/streamline/corporate/broadcasts" },
-      { id: "training", label: "Training", path: "/streamline/corporate/training" },
-      { id: "documents", label: "Documents", path: "/streamline/corporate/documents" },
+      ...(isExternal
+        ? [
+            { id: "documents", label: "Documents", path: "/streamline/corporate/documents" },
+          ]
+        : [
+            { id: "calls", label: "Calls", path: "/streamline/corporate/calls" },
+            { id: "broadcasts", label: "Broadcasts", path: "/streamline/corporate/broadcasts" },
+            { id: "training", label: "Training", path: "/streamline/corporate/training" },
+            { id: "documents", label: "Documents", path: "/streamline/corporate/documents" },
+          ]),
       ...(isLeader
         ? [
             { id: "analytics", label: "Analytics", path: "/streamline/corporate/analytics" },
@@ -33,7 +40,7 @@ export default function CorporateSidebar() {
         : []),
       { id: "settings", label: "Settings", path: "/streamline/corporate/settings" },
     ],
-    [isLeader],
+    [isLeader, isExternal],
   );
 
   useEffect(() => {

@@ -1,6 +1,6 @@
 import { apiFetchAuth } from "@/lib/api";
 
-export type CorpRole = "leader" | "employee";
+export type CorpRole = "leader" | "employee" | "external";
 
 export interface CorporateMe {
   uid: string;

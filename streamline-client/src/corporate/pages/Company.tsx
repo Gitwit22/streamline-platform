@@ -147,6 +147,10 @@ export default function Company() {
                   <span className="text-xs font-mono font-semibold px-2.5 py-1 rounded-full" style={{ background: "hsl(215 28% 18%)", color: "hsl(214 25% 55%)" }}>employee</span>
                   <span className="text-xs flex-1" style={{ color: "hsl(214 25% 65%)" }}>Day-to-day access — chat, calls, broadcasts, training, documents</span>
                 </div>
+                <div className="flex items-center gap-3 px-4 py-3 rounded-lg" style={{ background: "hsl(218 35% 10%)", border: "1px solid hsl(215 35% 20% / 0.5)" }}>
+                  <span className="text-xs font-mono font-semibold px-2.5 py-1 rounded-full" style={{ background: "hsl(40 90% 50% / 0.12)", color: "hsl(40 90% 60%)" }}>external</span>
+                  <span className="text-xs flex-1" style={{ color: "hsl(214 25% 65%)" }}>Limited access for vendors &amp; partners — chat, documents</span>
+                </div>
               </div>
             </div>
           </div>
