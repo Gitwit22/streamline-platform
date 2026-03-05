@@ -3,6 +3,7 @@ import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { getCorpOrgContext, asString } from "../lib/corpOrg";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tenantCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -21,6 +22,25 @@ router.get("/me", requireAuth, async (req, res) => {
       return res.status(200).json({ needsOrg: true, uid });
     }
 
+    // ── Auto-promote org creator to owner if stuck with a lesser role ──
+    // This fixes accounts created before the "first member = owner" rule.
+    let effectiveRole = ctx.orgRole || "employee";
+    try {
+      const orgSnap = await tenantCol("orgs", undefined, "corporate").doc(ctx.orgId).get().catch(() => null as any);
+      const orgData = orgSnap && orgSnap.exists ? (orgSnap.data() as any) : null;
+      if (orgData && orgData.createdBy === uid && effectiveRole !== "owner") {
+        const memberId = `${ctx.orgId}_${uid}`;
+        await tenantCol("orgMembers", undefined, "corporate").doc(memberId).set(
+          { role: "owner", updatedAt: Date.now() },
+          { merge: true },
+        );
+        console.log(`[corp/me] auto-promoted org creator ${uid} to owner (was ${effectiveRole})`);
+        effectiveRole = "owner";
+      }
+    } catch (promoteErr: any) {
+      console.warn("[corp/me] auto-promote check failed:", promoteErr?.message || promoteErr);
+    }
+
     const account = (req as any).account || {};
     const displayName = asString(account.displayName || account.name || "User");
 
@@ -29,8 +49,8 @@ router.get("/me", requireAuth, async (req, res) => {
       orgType: "corporate",
       orgId: ctx.orgId,
       orgName: ctx.orgName,
-      role: ctx.orgRole || "employee",
-      orgRole: ctx.orgRole || "employee",
+      role: effectiveRole,
+      orgRole: effectiveRole,
       displayName,
       email: asString(account.email || ""),
     });
