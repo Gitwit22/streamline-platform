@@ -92,7 +92,7 @@ router.post("/training", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin", "manager"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -191,7 +191,7 @@ router.post("/training/:id/assign", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin", "manager"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 

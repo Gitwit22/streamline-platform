@@ -1,5 +1,7 @@
 import { apiFetchAuth } from "@/lib/api";
 
+export type CorpRole = "leader" | "employee";
+
 export interface CorporateMe {
   uid: string;
   orgType: "corporate";
@@ -9,6 +11,11 @@ export interface CorporateMe {
   orgRole: string;
   displayName: string;
   email: string;
+}
+
+/** Helper: true when the user has the "leader" role */
+export function isCorporateLeader(me: CorporateMe | null): boolean {
+  return me?.orgRole === "leader";
 }
 
 /** Sentinel returned when user is authenticated but has no org yet. */

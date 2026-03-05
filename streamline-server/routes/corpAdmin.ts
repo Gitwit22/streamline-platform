@@ -19,7 +19,7 @@ router.get("/admin/users", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin", "manager"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -37,7 +37,7 @@ router.get("/admin/users", requireAuth, async (req, res) => {
         uid: asString(data?.uid),
         name: asString(data?.name || data?.displayName),
         email: asString(data?.email),
-        role: asString(data?.role || "viewer"),
+        role: asString(data?.role || "employee"),
         status: asString(data?.status || "active"),
         department: asString(data?.department),
         lastActiveAt: coerceMillis(data?.lastActiveAt),
@@ -80,7 +80,7 @@ router.patch("/admin/users/:id/role", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -125,14 +125,14 @@ router.post("/admin/users/invite", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin", "manager"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
     const email = coerceEmail(req.body.email);
     if (!email) return res.status(400).json({ error: "invalid_email" });
 
-    const role = coerceCorpRole(req.body.role) || "member";
+    const role = coerceCorpRole(req.body.role) || "employee";
     const name = asString(req.body.name).trim();
 
     const now = Date.now();
@@ -176,7 +176,7 @@ router.get("/admin/audit", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -223,7 +223,7 @@ router.get("/admin/settings", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -240,7 +240,7 @@ router.get("/admin/settings", requireAuth, async (req, res) => {
       ssoEnabled: !!org.ssoEnabled,
       ssoProvider: asString(org.ssoProvider),
       mfaRequired: !!org.mfaRequired,
-      defaultRole: asString(org.defaultRole || "member"),
+      defaultRole: asString(org.defaultRole || "employee"),
     });
   } catch (err: any) {
     console.error("[corp/admin] settings error:", err?.message || err);
@@ -258,7 +258,7 @@ router.patch("/admin/settings", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 

@@ -12,22 +12,28 @@ export default function CorporateSidebar() {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
-  const role = String(me?.orgRole || me?.role || "viewer");
+  const role = String(me?.orgRole || me?.role || "employee");
   const orgName = String(me?.orgName || "Your Organization");
-  const isAdmin = role === "admin";
+  const isLeader = role === "leader";
 
   const items = useMemo<NavItem[]>(
     () => [
       { id: "dashboard", label: "Dashboard", path: "/streamline/corporate/dashboard" },
+      { id: "chat", label: "Chat", path: "/streamline/corporate/chat" },
       { id: "calls", label: "Calls", path: "/streamline/corporate/calls" },
       { id: "broadcasts", label: "Broadcasts", path: "/streamline/corporate/broadcasts" },
-      { id: "chat", label: "Chat", path: "/streamline/corporate/chat" },
       { id: "training", label: "Training", path: "/streamline/corporate/training" },
       { id: "documents", label: "Documents", path: "/streamline/corporate/documents" },
-      { id: "analytics", label: "Analytics", path: "/streamline/corporate/analytics" },
-      ...(isAdmin ? [{ id: "admin", label: "Admin", path: "/streamline/corporate/admin" }] : []),
+      ...(isLeader
+        ? [
+            { id: "analytics", label: "Analytics", path: "/streamline/corporate/analytics" },
+            { id: "members", label: "Members", path: "/streamline/corporate/members" },
+            { id: "company", label: "Company", path: "/streamline/corporate/company" },
+          ]
+        : []),
+      { id: "settings", label: "Settings", path: "/streamline/corporate/settings" },
     ],
-    [isAdmin],
+    [isLeader],
   );
 
   useEffect(() => {

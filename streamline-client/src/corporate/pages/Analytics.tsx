@@ -56,8 +56,8 @@ export default function Analytics() {
   useEffect(() => { load(); }, [load]);
 
   const a = analytics;
-  const meetingData = demoMeetingData;
-  const engagementData = demoEngagementData;
+  const meetingData = bypass ? demoMeetingData : [];
+  const engagementData = bypass ? demoEngagementData : [];
 
   return (
     <div className="flex flex-col h-full animate-fade-in">
@@ -80,15 +80,22 @@ export default function Analytics() {
 
         {loading && <div className="flex items-center justify-center py-12"><Loader2 className="w-5 h-5 animate-spin text-primary" /></div>}
 
+        {!loading && !a && (
+          <div className="flex flex-col items-center justify-center py-20 text-center">
+            <div className="text-muted-foreground text-[15px] font-medium mb-1">No analytics data yet</div>
+            <div className="text-[12px] text-muted-foreground">Analytics will populate as your organization uses the platform — broadcasts, calls, training, and chat activity will appear here.</div>
+          </div>
+        )}
+
         {!loading && a && (
           <>
             {/* Top Stats */}
             <div className="grid grid-cols-4 gap-3">
               {[
                 { label: "TOTAL MEETINGS", value: a.totalCalls.toLocaleString(), sub: "this month", color: "text-primary" },
-                { label: "AVG. ATTENDANCE", value: "94%", sub: "broadcast avg", color: "text-sl-green" },
+                { label: "AVG. ATTENDANCE", value: bypass ? "94%" : "—", sub: "broadcast avg", color: "text-sl-green" },
                 { label: "TRAINING COMPLIANCE", value: `${a.complianceRate}%`, sub: "company-wide", color: a.complianceRate >= 90 ? "text-sl-green" : a.complianceRate >= 75 ? "text-sl-amber" : "text-sl-red" },
-                { label: "CHAT MESSAGES", value: "12.4K", sub: "this week", color: "text-primary" },
+                { label: "CHAT MESSAGES", value: bypass ? "12.4K" : "—", sub: "this week", color: "text-primary" },
               ].map(s => (
                 <div key={s.label} className="bg-surface border border-border rounded-xl p-4">
                   <div className="text-[10px] font-semibold text-muted-foreground tracking-[1.2px] uppercase mb-2">{s.label}</div>

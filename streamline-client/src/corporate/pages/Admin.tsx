@@ -10,11 +10,11 @@ const tabs = ["Overview", "Users", "Roles", "Security", "Audit Logs", "Settings"
 type Tab = (typeof tabs)[number];
 
 const demoUsers: OrgUser[] = [
-  { uid: demoSeedId("corporate", "usr", 1), email: "sarah.kim@corp.io", displayName: "Sarah Kim", role: "admin", department: "Engineering", joinedAt: Date.now() - 365 * 86400_000 },
-  { uid: demoSeedId("corporate", "usr", 2), email: "dev.patel@corp.io", displayName: "Dev Patel", role: "manager", department: "Engineering", joinedAt: Date.now() - 200 * 86400_000 },
-  { uid: demoSeedId("corporate", "usr", 3), email: "marcus.j@corp.io", displayName: "Marcus Johnson", role: "member", department: "Sales", joinedAt: Date.now() - 150 * 86400_000 },
-  { uid: demoSeedId("corporate", "usr", 4), email: "lisa.chen@corp.io", displayName: "Lisa Chen", role: "member", department: "Marketing", joinedAt: Date.now() - 90 * 86400_000 },
-  { uid: demoSeedId("corporate", "usr", 5), email: "tom.w@corp.io", displayName: "Tom Wilson", role: "viewer", department: "Operations", joinedAt: Date.now() - 30 * 86400_000 },
+  { uid: demoSeedId("corporate", "usr", 1), email: "sarah.kim@corp.io", displayName: "Sarah Kim", role: "leader", department: "Engineering", joinedAt: Date.now() - 365 * 86400_000 },
+  { uid: demoSeedId("corporate", "usr", 2), email: "dev.patel@corp.io", displayName: "Dev Patel", role: "employee", department: "Engineering", joinedAt: Date.now() - 200 * 86400_000 },
+  { uid: demoSeedId("corporate", "usr", 3), email: "marcus.j@corp.io", displayName: "Marcus Johnson", role: "employee", department: "Sales", joinedAt: Date.now() - 150 * 86400_000 },
+  { uid: demoSeedId("corporate", "usr", 4), email: "lisa.chen@corp.io", displayName: "Lisa Chen", role: "employee", department: "Marketing", joinedAt: Date.now() - 90 * 86400_000 },
+  { uid: demoSeedId("corporate", "usr", 5), email: "tom.w@corp.io", displayName: "Tom Wilson", role: "employee", department: "Operations", joinedAt: Date.now() - 30 * 86400_000 },
 ];
 
 const demoAudit: AuditEntry[] = [
@@ -25,7 +25,7 @@ const demoAudit: AuditEntry[] = [
   { id: demoSeedId("corporate", "audit", 5), action: "user.invite", actor: "sarah.kim@corp.io", target: "newuser@corp.io", detail: "Invitation sent", timestamp: Date.now() - 3 * 86400_000 },
 ];
 
-const demoSettings: OrgSettings = { orgName: "Acme Corp", ssoEnabled: true, defaultRole: "member", allowGuestAccess: false, retentionDays: 90 };
+const demoSettings: OrgSettings = { orgName: "Acme Corp", ssoEnabled: true, defaultRole: "employee", allowGuestAccess: false, retentionDays: 90 };
 
 const adminSections = [
   { icon: Users, title: "User Management", desc: "Manage employees, roles, and department assignments", tab: "Users" as Tab },
@@ -41,7 +41,7 @@ function formatTime(ms: number) { return new Date(ms).toLocaleTimeString([], { h
 export default function Admin() {
   const bypass = isCorporateBypassEnabled();
   const me = useCorporateMe();
-  const isAdmin = me?.orgRole === "admin";
+  const isAdmin = me?.orgRole === "leader";
 
   const [activeTab, setActiveTab] = useState<Tab>("Overview");
   const [users, setUsers] = useState<OrgUser[]>([]);
@@ -153,10 +153,10 @@ export default function Admin() {
                   <div>
                     {isAdmin ? (
                       <select value={u.role} onChange={e => handleRoleChange(u.uid, e.target.value)} className="bg-surface-2 border border-border rounded px-2 py-1 text-xs text-foreground outline-none">
-                        {["admin", "manager", "member", "viewer"].map(r => <option key={r} value={r}>{r}</option>)}
+                        {["leader", "employee"].map(r => <option key={r} value={r}>{r}</option>)}
                       </select>
                     ) : (
-                      <span className={cn("text-xs font-mono px-2 py-0.5 rounded-full border", u.role === "admin" ? "bg-sl-red-dim text-sl-red border-sl-red/20" : u.role === "manager" ? "bg-sl-amber-dim text-sl-amber border-sl-amber/20" : "bg-surface-3 text-muted-foreground border-border-2")}>{u.role}</span>
+                      <span className={cn("text-xs font-mono px-2 py-0.5 rounded-full border", u.role === "leader" ? "bg-sl-red-dim text-sl-red border-sl-red/20" : "bg-surface-3 text-muted-foreground border-border-2")}>{u.role}</span>
                     )}
                   </div>
                   <span className="text-xs text-muted-foreground">{u.department}</span>
@@ -173,13 +173,11 @@ export default function Admin() {
           <div className="bg-surface border border-border rounded-xl overflow-hidden">
             <div className="px-[18px] py-3.5 border-b border-border"><span className="text-[13px] font-semibold text-foreground">Role Definitions</span></div>
             {[
-              { role: "admin", desc: "Full platform access, user management, settings", count: users.filter(u => u.role === "admin").length },
-              { role: "manager", desc: "Create broadcasts, training, manage team members", count: users.filter(u => u.role === "manager").length },
-              { role: "member", desc: "Standard access — calls, chat, training, documents", count: users.filter(u => u.role === "member").length },
-              { role: "viewer", desc: "Read-only access to broadcasts and documents", count: users.filter(u => u.role === "viewer").length },
+              { role: "leader", desc: "Full platform access — company setup, user management, analytics, settings", count: users.filter(u => u.role === "leader").length },
+              { role: "employee", desc: "Day-to-day access — chat, calls, broadcasts, training, documents", count: users.filter(u => u.role === "employee").length },
             ].map(r => (
               <div key={r.role} className="flex items-center gap-4 px-[18px] py-3.5 border-b border-border last:border-b-0">
-                <span className={cn("text-xs font-mono font-semibold px-2.5 py-1 rounded-full border min-w-[70px] text-center", r.role === "admin" ? "bg-sl-red-dim text-sl-red border-sl-red/20" : r.role === "manager" ? "bg-sl-amber-dim text-sl-amber border-sl-amber/20" : r.role === "member" ? "bg-accent-soft text-primary border-primary/20" : "bg-surface-3 text-muted-foreground border-border-2")}>{r.role}</span>
+                <span className={cn("text-xs font-mono font-semibold px-2.5 py-1 rounded-full border min-w-[70px] text-center", r.role === "leader" ? "bg-sl-red-dim text-sl-red border-sl-red/20" : "bg-surface-3 text-muted-foreground border-border-2")}>{r.role}</span>
                 <div className="flex-1">
                   <div className="text-[13px] text-foreground">{r.desc}</div>
                 </div>
@@ -238,7 +236,7 @@ export default function Admin() {
             <div className="flex items-center gap-3 py-2 border-b border-border">
               <span className="text-[13px] text-muted-foreground w-[140px]">Default Role</span>
               <select value={settings.defaultRole} onChange={e => handleSettingsUpdate({ defaultRole: e.target.value })} className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-foreground outline-none">
-                {["admin", "manager", "member", "viewer"].map(r => <option key={r} value={r}>{r}</option>)}
+                {["leader", "employee"].map(r => <option key={r} value={r}>{r}</option>)}
               </select>
             </div>
             <div className="flex items-center gap-3 py-2">

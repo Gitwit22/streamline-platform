@@ -129,6 +129,12 @@ export default function Chat() {
 
         <div className="flex-1 overflow-y-auto">
           {loading && <div className="flex items-center justify-center py-8"><Loader2 className="w-4 h-4 animate-spin text-primary" /></div>}
+          {!loading && rooms.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-10 px-4 text-center">
+              <div className="text-muted-foreground text-[13px] mb-1">No chat rooms yet</div>
+              <div className="text-[11px] text-muted-foreground">Click + to create your first room</div>
+            </div>
+          )}
           {Object.entries(sections).map(([section, sectionRooms]) => (
             <div key={section}>
               <div className="px-4 pt-4 pb-1 text-[10px] font-semibold text-muted-foreground tracking-[1.8px] uppercase">{section}</div>

@@ -40,8 +40,12 @@ import CorporateTraining from "./corporate/pages/Training";
 import CorporateDocuments from "./corporate/pages/Documents";
 import CorporateAnalytics from "./corporate/pages/Analytics";
 import CorporateAdmin from "./corporate/pages/Admin";
+import CorporateSettings from "./corporate/pages/Settings";
+import CorporateCompany from "./corporate/pages/Company";
+import CorporateMembers from "./corporate/pages/Members";
 import CorporateBroadcastStudio from "./corporate/pages/BroadcastStudio";
 import CorporateBroadcastViewer from "./corporate/pages/BroadcastViewer";
+import CorporateRoleGuard from "./corporate/layout/CorporateRoleGuard";
 
 import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
@@ -69,6 +73,22 @@ function App() {
         path.startsWith("/support") || path.startsWith("/learnmore") ||
         path.startsWith("/i/") || path.startsWith("/invite/") ||
         path.startsWith("/billing/")
+      ) {
+        return;
+      }
+
+      // ── EDU / Corporate public entry pages: suppress everything ─────
+      // Landing, login, and onboarding pages don't require auth.
+      // A stale token or background refresh 401 must NOT flash the
+      // banner or clear storage — the user hasn't even logged in yet.
+      if (
+        path === "/streamline/edu" ||
+        path.startsWith("/streamline/edu/login") ||
+        path.startsWith("/streamline/edu/onboarding") ||
+        path.startsWith("/streamline/edu/embed/event") ||
+        path === "/streamline/corporate" ||
+        path.startsWith("/streamline/corporate/login") ||
+        path.startsWith("/streamline/corporate/join")
       ) {
         return;
       }
@@ -238,8 +258,11 @@ function App() {
           <Route path="chat" element={<CorporateChat />} />
           <Route path="training" element={<CorporateTraining />} />
           <Route path="documents" element={<CorporateDocuments />} />
-          <Route path="analytics" element={<CorporateAnalytics />} />
-          <Route path="admin" element={<CorporateAdmin />} />
+          <Route path="analytics" element={<CorporateRoleGuard allow={["leader"]}><CorporateAnalytics /></CorporateRoleGuard>} />
+          <Route path="admin" element={<CorporateRoleGuard allow={["leader"]}><CorporateAdmin /></CorporateRoleGuard>} />
+          <Route path="company" element={<CorporateRoleGuard allow={["leader"]}><CorporateCompany /></CorporateRoleGuard>} />
+          <Route path="members" element={<CorporateRoleGuard allow={["leader"]}><CorporateMembers /></CorporateRoleGuard>} />
+          <Route path="settings" element={<CorporateSettings />} />
           <Route path="*" element={<Navigate to="/streamline/corporate/dashboard" replace />} />
         </Route>
       </Route>

@@ -1,5 +1,6 @@
 import express from "express";
 import crypto from "crypto";
+import admin from "firebase-admin";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { tenantCol, globalCol } from "../lib/dbPaths";
@@ -74,7 +75,7 @@ router.post("/orgs/create", requireAuth, async (req, res) => {
       slug,
       joinCode,
       orgType: "corporate",
-      defaultRole: "member" as CorpOrgRole,
+      defaultRole: "employee" as CorpOrgRole,
       timezone: userData.timeZone || "America/Chicago",
       createdAt: now,
       updatedAt: now,
@@ -92,7 +93,7 @@ router.post("/orgs/create", requireAuth, async (req, res) => {
       uid,
       email: asString(userData.email),
       displayName: asString(userData.displayName || userData.name || ""),
-      role: "admin" as CorpOrgRole,
+      role: "leader" as CorpOrgRole,
       status: "active",
       joinedAt: now,
       createdAt: now,
@@ -107,7 +108,7 @@ router.post("/orgs/create", requireAuth, async (req, res) => {
       name: orgName,
       slug,
       joinCode,
-      role: "admin",
+      role: "leader",
     });
   } catch (err: any) {
     console.error("[corpOrgs] create error:", err?.message || err);
@@ -157,7 +158,7 @@ router.post("/orgs/join", requireAuth, async (req, res) => {
     }
 
     const now = Date.now();
-    const defaultRole = coerceCorpRole(org.defaultRole) || "member";
+    const defaultRole = coerceCorpRole(org.defaultRole) || "employee";
 
     // Check not already a member
     const memberId = `${orgId}_${uid}`;
@@ -247,6 +248,136 @@ router.get("/orgs/info", requireAuth, async (req, res) => {
     });
   } catch (err: any) {
     console.error("[corpOrgs] info error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── GET /orgs/members — list org members (admin only) ──────────── */
+router.get("/orgs/members", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+  try {
+    const userSnap = await globalCol("users").doc(uid).get();
+    const userData = userSnap.exists ? (userSnap.data() as any) : null;
+    if (!userData?.orgId) return res.status(404).json({ error: "no_org" });
+
+    const orgId = userData.orgId;
+
+    // Verify caller is leader
+    const callerMember = await tenantCol("orgMembers", undefined, "corporate")
+      .doc(`${orgId}_${uid}`)
+      .get();
+    const callerRole = callerMember.exists ? (callerMember.data() as any).role : null;
+    if (callerRole !== "leader" && callerRole !== "admin") {
+      return res.status(403).json({ error: "leader_only" });
+    }
+
+    const membersSnap = await tenantCol("orgMembers", undefined, "corporate")
+      .where("orgId", "==", orgId)
+      .orderBy("joinedAt", "asc")
+      .get();
+
+    const members = membersSnap.docs.map((d) => {
+      const m = d.data() as any;
+      return {
+        uid: asString(m.uid),
+        email: asString(m.email),
+        displayName: asString(m.displayName),
+        role: asString(m.role),
+        status: asString(m.status || "active"),
+        joinedAt: m.joinedAt || null,
+      };
+    });
+
+    return res.json({ members });
+  } catch (err: any) {
+    console.error("[corpOrgs] members error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── POST /orgs/regenerate-code — regenerate join code (admin only) */
+router.post("/orgs/regenerate-code", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+  try {
+    const userSnap = await globalCol("users").doc(uid).get();
+    const userData = userSnap.exists ? (userSnap.data() as any) : null;
+    if (!userData?.orgId) return res.status(404).json({ error: "no_org" });
+
+    const orgId = userData.orgId;
+
+    // Verify caller is leader
+    const callerMember = await tenantCol("orgMembers", undefined, "corporate")
+      .doc(`${orgId}_${uid}`)
+      .get();
+    const callerRole = callerMember.exists ? (callerMember.data() as any).role : null;
+    if (callerRole !== "leader" && callerRole !== "admin") {
+      return res.status(403).json({ error: "leader_only" });
+    }
+
+    const orgSnap = await tenantCol("orgs", undefined, "corporate").doc(orgId).get();
+    if (!orgSnap.exists) return res.status(404).json({ error: "org_not_found" });
+
+    const org = orgSnap.data() as any;
+    const newCode = generateJoinCode(asString(org.slug));
+
+    await tenantCol("orgs", undefined, "corporate").doc(orgId).update({
+      joinCode: newCode,
+      updatedAt: Date.now(),
+    });
+
+    return res.json({ joinCode: newCode });
+  } catch (err: any) {
+    console.error("[corpOrgs] regenerate-code error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── POST /orgs/remove-member — remove a member (admin only) ───── */
+router.post("/orgs/remove-member", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+  try {
+    const { targetUid } = req.body || ({} as any);
+    const target = asString(targetUid).trim();
+    if (!target) return res.status(400).json({ error: "target_uid_required" });
+
+    // Can't remove yourself
+    if (target === uid) {
+      return res.status(400).json({ error: "cannot_remove_self" });
+    }
+
+    const userSnap = await globalCol("users").doc(uid).get();
+    const userData = userSnap.exists ? (userSnap.data() as any) : null;
+    if (!userData?.orgId) return res.status(404).json({ error: "no_org" });
+
+    const orgId = userData.orgId;
+
+    // Verify caller is leader
+    const callerMember = await tenantCol("orgMembers", undefined, "corporate")
+      .doc(`${orgId}_${uid}`)
+      .get();
+    const callerRole = callerMember.exists ? (callerMember.data() as any).role : null;
+    if (callerRole !== "leader" && callerRole !== "admin") {
+      return res.status(403).json({ error: "leader_only" });
+    }
+
+    // Delete member + clear user's orgId
+    const batch = db.batch();
+    batch.delete(tenantCol("orgMembers", undefined, "corporate").doc(`${orgId}_${target}`));
+    batch.update(globalCol("users").doc(target), {
+      orgId: admin.firestore.FieldValue.delete(),
+      updatedAt: Date.now(),
+    });
+    await batch.commit();
+
+    return res.json({ removed: target });
+  } catch (err: any) {
+    console.error("[corpOrgs] remove-member error:", err?.message || err);
     return res.status(500).json({ error: "internal" });
   }
 });

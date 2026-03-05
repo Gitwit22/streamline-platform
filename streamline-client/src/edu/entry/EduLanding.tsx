@@ -1,10 +1,23 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { useAuthMe } from "../../hooks/useAuthMe";
 import { setEduLane } from "../state/eduMode";
 
+/** Read cached user from localStorage without triggering any API calls.
+ *  EduLanding is a public page — it must never fire `sl:unauthorized`. */
+function getCachedUserEmail(): string {
+  try {
+    const raw = localStorage.getItem("sl_user");
+    if (!raw) return "";
+    const u = JSON.parse(raw);
+    return typeof u?.email === "string" ? u.email.trim() : "";
+  } catch {
+    return "";
+  }
+}
+
 export default function EduLanding() {
-  const { user } = useAuthMe();
+  const [cachedEmail] = useState(() => getCachedUserEmail());
+  const user = cachedEmail ? { email: cachedEmail } : null;
 
   useEffect(() => {
     setEduLane();

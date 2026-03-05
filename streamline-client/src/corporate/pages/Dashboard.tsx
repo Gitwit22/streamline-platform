@@ -259,6 +259,9 @@ export default function Dashboard() {
                 <span className="text-[11px] text-primary cursor-pointer font-medium" onClick={() => navigate("/streamline/corporate/chat")}>Open Chat →</span>
               </div>
             </div>
+            {chatRooms.length === 0 && (
+              <div className="px-[18px] py-4 text-center text-[12px] text-muted-foreground">No chat rooms yet</div>
+            )}
             {chatRooms.slice(0, 3).map((room) => (
               <div key={room.id} onClick={() => navigate("/streamline/corporate/chat")} className="flex items-center gap-2.5 px-[18px] py-2 border-b border-border last:border-b-0 hover:bg-surface-2 cursor-pointer transition-colors">
                 <span className={cn("font-mono text-base flex-shrink-0 w-[18px] text-center", room.isPrivate ? "text-sl-amber" : "text-muted-foreground")}>#</span>

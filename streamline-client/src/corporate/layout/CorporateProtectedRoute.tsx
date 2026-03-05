@@ -53,8 +53,8 @@ export default function CorporateProtectedRoute({ children }: { children: ReactN
       setMe({
         uid: "corp-demo",
         orgType: "corporate",
-        role: "admin",
-        orgRole: "admin",
+        role: "leader",
+        orgRole: "leader",
         orgName: "StreamLine Corporate HQ",
         displayName: "Demo Admin",
         email: "demo@streamline.corp",

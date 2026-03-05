@@ -29,8 +29,8 @@ router.get("/me", requireAuth, async (req, res) => {
       orgType: "corporate",
       orgId: ctx.orgId,
       orgName: ctx.orgName,
-      role: ctx.orgRole || "viewer",
-      orgRole: ctx.orgRole || "viewer",
+      role: ctx.orgRole || "employee",
+      orgRole: ctx.orgRole || "employee",
       displayName,
       email: asString(account.email || ""),
     });

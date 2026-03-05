@@ -76,7 +76,7 @@ router.post("/broadcasts", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin", "manager"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -130,7 +130,7 @@ router.patch("/broadcasts/:id", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin", "manager"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -182,7 +182,7 @@ router.delete("/broadcasts/:id", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -265,7 +265,7 @@ router.post("/broadcasts/:id/go-live", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin", "manager"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -399,7 +399,7 @@ router.post("/broadcasts/:id/stop", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
-    if (!assertCorpRole(ctx.orgRole, ["admin", "manager"])) {
+    if (!assertCorpRole(ctx.orgRole, ["leader"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 

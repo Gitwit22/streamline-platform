@@ -66,3 +66,42 @@ export async function getOrgInfo(): Promise<OrgInfoResult> {
   if (!res.ok) throw new Error(body.error || "org_info_failed");
   return body;
 }
+
+/* ── Members ──────────────────────────────────────────────────────── */
+
+export interface OrgMember {
+  uid: string;
+  email: string;
+  displayName: string;
+  role: string;
+  status: string;
+  joinedAt: number | null;
+}
+
+export async function getOrgMembers(): Promise<OrgMember[]> {
+  const res = await apiFetchAuth("/api/corp/orgs/members");
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || "members_failed");
+  return body.members;
+}
+
+export async function regenerateJoinCode(): Promise<string> {
+  const res = await apiFetchAuth("/api/corp/orgs/regenerate-code", {
+    method: "POST",
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || "regenerate_failed");
+  return body.joinCode;
+}
+
+export async function removeMember(targetUid: string): Promise<void> {
+  const res = await apiFetchAuth("/api/corp/orgs/remove-member", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ targetUid }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || "remove_failed");
+  }
+}
