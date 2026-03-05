@@ -69,7 +69,7 @@ export async function getCorpOrgContext(uid: string): Promise<CorpOrgContext | n
   if (!orgId) return null;
 
   // Verify org exists and is corporate type
-  const orgSnap = await tenantCol("orgs").doc(orgId).get().catch(() => null as any);
+  const orgSnap = await tenantCol("orgs", undefined, "corporate").doc(orgId).get().catch(() => null as any);
   const org = orgSnap && orgSnap.exists ? (orgSnap.data() as any) : null;
   if (!org) return null;
   // Allow both "corporate" and missing orgType (for dev/bypass scenarios)
@@ -78,7 +78,7 @@ export async function getCorpOrgContext(uid: string): Promise<CorpOrgContext | n
   const orgName = asString(org.name || "Corporate");
 
   const memberId = `${orgId}_${uid}`;
-  const memberSnap = await tenantCol("orgMembers").doc(memberId).get().catch(() => null as any);
+  const memberSnap = await tenantCol("orgMembers", undefined, "corporate").doc(memberId).get().catch(() => null as any);
   const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
   const orgRole = coerceCorpRole(member?.role);
 

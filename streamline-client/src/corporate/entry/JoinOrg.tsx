@@ -144,7 +144,7 @@ export default function JoinOrg() {
               marginBottom: 8,
             }}
           >
-            Welcome to StreamLine
+            Welcome to StreamLine Corporate
           </h1>
           <p style={{ fontSize: 14, color: "var(--text2)" }}>
             Join your organization to get started, or create a new one.
