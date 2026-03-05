@@ -125,7 +125,14 @@ router.post("/me/self-promote", requireAuth, async (req, res) => {
       .get();
     const isSoleMember = membersSnap.size <= 1;
 
-    if (!isCreator && !isSoleMember) {
+    // Check if the org has no owner at all (bootstrapping case for orgs
+    // created before createdBy was tracked)
+    const hasOwner = membersSnap.docs.some((d) => {
+      const data = d.data() as any;
+      return data?.role === "owner";
+    });
+
+    if (!isCreator && !isSoleMember && hasOwner) {
       return res.status(403).json({ error: "self_promote_not_allowed" });
     }
 
