@@ -1,9 +1,9 @@
 import express from "express";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
-import { getCorpOrgContext, asString } from "../lib/corpOrg";
+import { getCorpOrgContext, asString, coerceCorpRole } from "../lib/corpOrg";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
-import { tenantCol } from "../lib/dbPaths";
+import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
@@ -56,6 +56,97 @@ router.get("/me", requireAuth, async (req, res) => {
     });
   } catch (err: any) {
     console.error("[corp/me] error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/**
+ * PATCH /me/profile — update your own display name (any member)
+ */
+router.patch("/me/profile", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+  try {
+    const ctx = await getCorpOrgContext(uid);
+    if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
+
+    const displayName = asString(req.body.displayName).trim();
+    if (!displayName) return res.status(400).json({ error: "display_name_required" });
+
+    const memberId = `${ctx.orgId}_${uid}`;
+
+    // Update member doc
+    await tenantCol("orgMembers", undefined, "corporate").doc(memberId).set(
+      { displayName, updatedAt: Date.now() },
+      { merge: true },
+    );
+
+    // Also update the global users doc so it persists across sessions
+    await globalCol("users").doc(uid).set(
+      { displayName, updatedAt: Date.now() },
+      { merge: true },
+    );
+
+    return res.json({ ok: true, displayName });
+  } catch (err: any) {
+    console.error("[corp/me] profile update error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/**
+ * POST /me/self-promote — promote yourself to owner
+ * Allowed when: you are the sole member of the org, OR you are the org creator.
+ * This bypasses the normal admin-only role gating for bootstrapping.
+ */
+router.post("/me/self-promote", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+  try {
+    const ctx = await getCorpOrgContext(uid);
+    if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
+
+    if (ctx.orgRole === "owner") {
+      return res.json({ ok: true, role: "owner", reason: "already_owner" });
+    }
+
+    const newRole = coerceCorpRole(req.body.role) || "owner";
+
+    // Check if user is the org creator
+    const orgSnap = await tenantCol("orgs", undefined, "corporate").doc(ctx.orgId).get();
+    const orgData = orgSnap.exists ? (orgSnap.data() as any) : null;
+    const isCreator = orgData && orgData.createdBy === uid;
+
+    // Check if user is the sole member
+    const membersSnap = await tenantCol("orgMembers", undefined, "corporate")
+      .where("orgId", "==", ctx.orgId)
+      .get();
+    const isSoleMember = membersSnap.size <= 1;
+
+    if (!isCreator && !isSoleMember) {
+      return res.status(403).json({ error: "self_promote_not_allowed" });
+    }
+
+    const memberId = `${ctx.orgId}_${uid}`;
+    await tenantCol("orgMembers", undefined, "corporate").doc(memberId).set(
+      { role: newRole, updatedAt: Date.now() },
+      { merge: true },
+    );
+
+    // Also set createdBy if missing so future auto-promote works
+    if (!orgData?.createdBy) {
+      await tenantCol("orgs", undefined, "corporate").doc(ctx.orgId).set(
+        { createdBy: uid, updatedAt: Date.now() },
+        { merge: true },
+      );
+    }
+
+    console.log(`[corp/me] self-promoted ${uid} to ${newRole} (creator=${isCreator}, sole=${isSoleMember})`);
+    return res.json({ ok: true, role: newRole });
+  } catch (err: any) {
+    console.error("[corp/me] self-promote error:", err?.message || err);
     return res.status(500).json({ error: "internal" });
   }
 });

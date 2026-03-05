@@ -14,6 +14,9 @@ import {
   Eye,
   EyeOff,
   ClipboardCopy,
+  Pencil,
+  Save,
+  Crown,
 } from "lucide-react";
 import { useCorporateMe } from "../layout/CorporateProtectedRoute";
 import { isCorporateBypassEnabled } from "../state/corporateMode";
@@ -23,6 +26,9 @@ import {
   regenerateJoinCode,
   removeMember,
   changeMemberRole,
+  updateMyProfile,
+  selfPromote,
+  updateOrgSettings,
   type OrgInfoResult,
   type OrgMember,
 } from "../api/orgs";
@@ -45,6 +51,22 @@ export default function CorporateSettings() {
   const [removingUid, setRemovingUid] = useState<string | null>(null);
   const [changingRoleUid, setChangingRoleUid] = useState<string | null>(null);
   const [codeRevealed, setCodeRevealed] = useState(false);
+
+  /* -- Edit-mode state ----------------------------------------------- */
+  const [editingName, setEditingName] = useState(false);
+  const [draftName, setDraftName] = useState("");
+  const [savingName, setSavingName] = useState(false);
+
+  const [editingOrgName, setEditingOrgName] = useState(false);
+  const [draftOrgName, setDraftOrgName] = useState("");
+  const [savingOrgName, setSavingOrgName] = useState(false);
+
+  const [editingDefaultRole, setEditingDefaultRole] = useState(false);
+  const [draftDefaultRole, setDraftDefaultRole] = useState("employee");
+  const [savingDefaultRole, setSavingDefaultRole] = useState(false);
+
+  const [promoting, setPromoting] = useState(false);
+  const [promoted, setPromoted] = useState(false);
 
   /* -- Fetch org info ------------------------------------------------ */
   const loadOrg = useCallback(async () => {
@@ -142,6 +164,66 @@ export default function CorporateSettings() {
       setError(e.message || "Role change failed");
     } finally {
       setChangingRoleUid(null);
+    }
+  };
+
+  /* -- Profile edit handlers ----------------------------------------- */
+  const handleSaveName = async () => {
+    const trimmed = draftName.trim();
+    if (!trimmed) return;
+    setSavingName(true);
+    try {
+      await updateMyProfile({ displayName: trimmed });
+      setEditingName(false);
+      // Reload to get the fresh me context
+      window.location.reload();
+    } catch (e: any) {
+      setError(e.message || "Failed to update name");
+    } finally {
+      setSavingName(false);
+    }
+  };
+
+  const handleSelfPromote = async () => {
+    if (!window.confirm("Promote yourself to Owner? This gives you full admin access.")) return;
+    setPromoting(true);
+    try {
+      await selfPromote("owner");
+      setPromoted(true);
+      // Reload to refresh the me context with the new role
+      setTimeout(() => window.location.reload(), 600);
+    } catch (e: any) {
+      setError(e.message || "Promotion failed — you may not be the sole member or org creator");
+    } finally {
+      setPromoting(false);
+    }
+  };
+
+  const handleSaveOrgName = async () => {
+    const trimmed = draftOrgName.trim();
+    if (!trimmed) return;
+    setSavingOrgName(true);
+    try {
+      await updateOrgSettings({ name: trimmed });
+      setOrg((prev) => (prev ? { ...prev, name: trimmed } : prev));
+      setEditingOrgName(false);
+    } catch (e: any) {
+      setError(e.message || "Failed to update company name");
+    } finally {
+      setSavingOrgName(false);
+    }
+  };
+
+  const handleSaveDefaultRole = async () => {
+    setSavingDefaultRole(true);
+    try {
+      await updateOrgSettings({ defaultRole: draftDefaultRole });
+      setOrg((prev) => (prev ? { ...prev, defaultRole: draftDefaultRole } : prev));
+      setEditingDefaultRole(false);
+    } catch (e: any) {
+      setError(e.message || "Failed to update default role");
+    } finally {
+      setSavingDefaultRole(false);
     }
   };
 
@@ -246,9 +328,38 @@ export default function CorporateSettings() {
                   <div className="text-[10px] font-semibold tracking-[1px] uppercase mb-1" style={{ color: "hsl(214 25% 45%)" }}>
                     Company Name
                   </div>
-                  <div className="text-sm" style={{ color: "#fff" }}>
-                    {org?.name || me?.orgName || "\u2014"}
-                  </div>
+                  {editingOrgName ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        autoFocus
+                        value={draftOrgName}
+                        onChange={(e) => setDraftOrgName(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && handleSaveOrgName()}
+                        className="flex-1 text-sm px-3 py-1.5 rounded-lg outline-none"
+                        style={{ background: "hsl(218 35% 8%)", border: "1px solid hsl(197 89% 66%)", color: "#fff" }}
+                      />
+                      <button
+                        onClick={handleSaveOrgName}
+                        disabled={savingOrgName || !draftOrgName.trim()}
+                        className="p-1.5 rounded-lg transition-colors disabled:opacity-50"
+                        style={{ color: "hsl(142 60% 55%)" }}
+                      >
+                        {savingOrgName ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm" style={{ color: "#fff" }}>{org?.name || me?.orgName || "\u2014"}</span>
+                      <button
+                        onClick={() => { setDraftOrgName(org?.name || me?.orgName || ""); setEditingOrgName(true); }}
+                        className="p-1 rounded transition-colors hover:bg-[hsl(215_28%_18%)]"
+                        style={{ color: "hsl(214 25% 55%)" }}
+                        title="Edit company name"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div>
                   <div className="text-[10px] font-semibold tracking-[1px] uppercase mb-1" style={{ color: "hsl(214 25% 45%)" }}>
@@ -259,6 +370,46 @@ export default function CorporateSettings() {
                     {org?.slug || "\u2014"}
                   </div>
                 </div>
+              </div>
+
+              {/* Default role setting */}
+              <div>
+                <div className="text-[10px] font-semibold tracking-[1px] uppercase mb-1" style={{ color: "hsl(214 25% 45%)" }}>
+                  Default Role for New Members
+                </div>
+                {editingDefaultRole ? (
+                  <div className="flex items-center gap-2">
+                    <select
+                      value={draftDefaultRole}
+                      onChange={(e) => setDraftDefaultRole(e.target.value)}
+                      className="text-sm px-3 py-1.5 rounded-lg outline-none cursor-pointer"
+                      style={{ background: "hsl(218 35% 8%)", border: "1px solid hsl(197 89% 66%)", color: "#fff" }}
+                    >
+                      <option value="employee">employee</option>
+                      <option value="admin">admin</option>
+                    </select>
+                    <button
+                      onClick={handleSaveDefaultRole}
+                      disabled={savingDefaultRole}
+                      className="p-1.5 rounded-lg transition-colors disabled:opacity-50"
+                      style={{ color: "hsl(142 60% 55%)" }}
+                    >
+                      {savingDefaultRole ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-mono" style={{ color: "hsl(214 25% 65%)" }}>{org?.defaultRole || "employee"}</span>
+                    <button
+                      onClick={() => { setDraftDefaultRole(org?.defaultRole || "employee"); setEditingDefaultRole(true); }}
+                      className="p-1 rounded transition-colors hover:bg-[hsl(215_28%_18%)]"
+                      style={{ color: "hsl(214 25% 55%)" }}
+                      title="Edit default role"
+                    >
+                      <Pencil className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
 
@@ -536,23 +687,83 @@ export default function CorporateSettings() {
                 <span className="text-sm font-semibold" style={{ color: "#fff" }}>Your Account</span>
               </div>
               <div className="grid grid-cols-3 gap-4">
+                {/* Display Name — editable */}
                 <div>
                   <div className="text-[10px] font-semibold tracking-[1px] uppercase mb-1" style={{ color: "hsl(214 25% 45%)" }}>
                     Display Name
                   </div>
-                  <div className="text-sm" style={{ color: "#fff" }}>{me?.displayName || "\u2014"}</div>
+                  {editingName ? (
+                    <div className="flex items-center gap-2">
+                      <input
+                        autoFocus
+                        value={draftName}
+                        onChange={(e) => setDraftName(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && handleSaveName()}
+                        className="flex-1 text-sm px-3 py-1.5 rounded-lg outline-none"
+                        style={{ background: "hsl(218 35% 8%)", border: "1px solid hsl(197 89% 66%)", color: "#fff" }}
+                      />
+                      <button
+                        onClick={handleSaveName}
+                        disabled={savingName || !draftName.trim()}
+                        className="p-1.5 rounded-lg transition-colors disabled:opacity-50"
+                        style={{ color: "hsl(142 60% 55%)" }}
+                      >
+                        {savingName ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm" style={{ color: "#fff" }}>{me?.displayName || "\u2014"}</span>
+                      <button
+                        onClick={() => { setDraftName(me?.displayName || ""); setEditingName(true); }}
+                        className="p-1 rounded transition-colors hover:bg-[hsl(215_28%_18%)]"
+                        style={{ color: "hsl(214 25% 55%)" }}
+                        title="Edit display name"
+                      >
+                        <Pencil className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
                 </div>
+
+                {/* Email — read-only */}
                 <div>
                   <div className="text-[10px] font-semibold tracking-[1px] uppercase mb-1" style={{ color: "hsl(214 25% 45%)" }}>
                     Email
+                    <span className="text-[9px] ml-1 normal-case font-normal" style={{ color: "hsl(214 25% 40%)" }}>(read-only)</span>
                   </div>
                   <div className="text-sm" style={{ color: "#fff" }}>{me?.email || "\u2014"}</div>
                 </div>
+
+                {/* Role — with self-promote button */}
                 <div>
                   <div className="text-[10px] font-semibold tracking-[1px] uppercase mb-1" style={{ color: "hsl(214 25% 45%)" }}>
                     Role
                   </div>
-                  {roleBadge(me?.orgRole || "employee")}
+                  <div className="flex items-center gap-2">
+                    {roleBadge(me?.orgRole || "employee")}
+                    {me?.orgRole !== "owner" && !promoted && (
+                      <button
+                        onClick={handleSelfPromote}
+                        disabled={promoting}
+                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold transition-colors disabled:opacity-50"
+                        style={{
+                          background: "hsl(40 90% 50% / 0.15)",
+                          border: "1px solid hsl(40 90% 50% / 0.3)",
+                          color: "hsl(40 90% 60%)",
+                        }}
+                        title="Promote yourself to Owner (only works if you are the sole member or org creator)"
+                      >
+                        {promoting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Crown className="w-3 h-3" />}
+                        Claim Owner
+                      </button>
+                    )}
+                    {promoted && (
+                      <span className="flex items-center gap-1 text-[11px] font-semibold" style={{ color: "hsl(142 60% 55%)" }}>
+                        <Check className="w-3.5 h-3.5" /> Promoted!
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>

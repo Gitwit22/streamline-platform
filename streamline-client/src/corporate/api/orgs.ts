@@ -120,3 +120,58 @@ export async function changeMemberRole(targetUid: string, newRole: string): Prom
   if (!res.ok) throw new Error(body.error || "role_change_failed");
   return body;
 }
+
+/* ── Profile / Self-service ──────────────────────────────────────── */
+
+export async function updateMyProfile(data: { displayName: string }): Promise<{ ok: boolean; displayName: string }> {
+  const res = await apiFetchAuth("/api/corp/me/profile", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || "profile_update_failed");
+  return body;
+}
+
+export async function selfPromote(role = "owner"): Promise<{ ok: boolean; role: string }> {
+  const res = await apiFetchAuth("/api/corp/me/self-promote", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || "self_promote_failed");
+  return body;
+}
+
+export interface OrgSettings {
+  orgId: string;
+  name: string;
+  orgType: string;
+  timezone: string;
+  defaultRole: string;
+  branding: Record<string, unknown>;
+  retentionDays: number;
+  ssoEnabled: boolean;
+  ssoProvider: string;
+  mfaRequired: boolean;
+}
+
+export async function getOrgSettings(): Promise<OrgSettings> {
+  const res = await apiFetchAuth("/api/corp/admin/settings");
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || "settings_fetch_failed");
+  return body;
+}
+
+export async function updateOrgSettings(data: Partial<Pick<OrgSettings, "name" | "timezone" | "defaultRole">>): Promise<{ ok: boolean }> {
+  const res = await apiFetchAuth("/api/corp/admin/settings", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || "settings_update_failed");
+  return body;
+}
