@@ -84,7 +84,7 @@ export default function EduProtectedRoute({ children }: { children: ReactNode })
   if (!me) {
     const sp = new URLSearchParams();
     sp.set("returnTo", `${loc.pathname}${loc.search}`);
-    return <Navigate to={`/streamline/edu/login?${sp.toString()}`} replace />;
+    return <Navigate to={`/streamline/edu?${sp.toString()}`} replace />;
   }
 
   const eduAllowed = me.orgType === "edu";
@@ -93,8 +93,8 @@ export default function EduProtectedRoute({ children }: { children: ReactNode })
     if (me.orgType === "corporate") {
       return <Navigate to="/streamline/corporate/dashboard" replace />;
     }
-    // Fallback: EDU login page
-    return <Navigate to="/streamline/edu/login" replace />;
+    // Fallback: EDU landing page
+    return <Navigate to="/streamline/edu" replace />;
   }
 
   return <EduAuthContext.Provider value={{ me }}>{children}</EduAuthContext.Provider>;

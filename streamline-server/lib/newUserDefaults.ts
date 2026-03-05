@@ -36,8 +36,8 @@ export function buildNewUserDoc(input: NewUserDocInput) {
     // Terms of Service
     tosVersion: CURRENT_TOS_VERSION,
     tosAcceptedAt: now,
-    tosAcceptedIp: input.tosAcceptedIp,
-    tosUserAgent: input.tosUserAgent,
+    ...(input.tosAcceptedIp ? { tosAcceptedIp: input.tosAcceptedIp } : {}),
+    ...(input.tosUserAgent ? { tosUserAgent: input.tosUserAgent } : {}),
   };
 
   return base;

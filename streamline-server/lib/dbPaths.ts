@@ -97,7 +97,9 @@ export function tenantPath(
 
 function globalRoot(appEnv?: AppEnv): string {
   const e = appEnv ?? getAppEnv();
-  return `env/${e}/global`;
+  // Use a sentinel document "_" so that subcollections have an odd segment count.
+  // env/{e}/global/_/{collection} = 5 segments → valid Firestore collection path.
+  return `env/${e}/global/_`;
 }
 
 /**

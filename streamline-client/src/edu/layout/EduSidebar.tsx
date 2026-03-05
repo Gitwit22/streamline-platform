@@ -62,7 +62,7 @@ export default function EduSidebar() {
     await logout();
     setMenuOpen(false);
     setLoggingOut(false);
-    nav("/streamline/edu/login", { replace: true });
+    nav("/streamline/edu", { replace: true });
   }
 
   return (

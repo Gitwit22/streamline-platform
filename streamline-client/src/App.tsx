@@ -111,12 +111,12 @@ function App() {
       clearPlatformFlagsCache();
       setShowUnauthorized(true);
 
-      // EDU lane should stay within EDU login.
+      // EDU lane should stay within EDU landing.
       if (path.startsWith("/streamline/edu")) {
         const next = `${window.location.pathname}${window.location.search}`;
         const sp = new URLSearchParams();
         sp.set("returnTo", next);
-        nav(`/streamline/edu/login?${sp.toString()}`);
+        nav(`/streamline/edu?${sp.toString()}`);
         return;
       }
 
@@ -147,6 +147,7 @@ function App() {
       location.pathname.startsWith("/signup") ||
       location.pathname.startsWith("/live") ||
       location.pathname.startsWith("/ig/") ||
+      location.pathname === "/streamline/edu" ||
       location.pathname.startsWith("/streamline/edu/login") ||
       location.pathname.startsWith("/streamline/corporate/login") ||
       (DEMO_LANDING_ENABLED && location.pathname === "/")
@@ -185,7 +186,7 @@ function App() {
               if (path.startsWith("/streamline/edu")) {
                 const sp = new URLSearchParams();
                 sp.set("returnTo", next);
-                nav(`/streamline/edu/login?${sp.toString()}`);
+                nav(`/streamline/edu?${sp.toString()}`);
               } else if (path.startsWith("/streamline/corporate")) {
                 const sp = new URLSearchParams();
                 sp.set("returnTo", next);
