@@ -137,6 +137,59 @@ function dedupePeopleByEmail(people: any[]): any[] {
   return [...byEmail.values(), ...noEmail];
 }
 
+// Read-only school directory (all org members can view)
+router.get("/directory", requireAuth, async (req, res) => {
+  try {
+    const uid = String((req as any).user?.uid || "").trim();
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    const ctx = await getOrgContext(uid);
+    if (!ctx) return res.status(403).json({ error: "org_required" });
+
+    // All authenticated org members can see the directory
+    if (!ctx.orgRole) return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(200, Math.floor(limitRaw))) : 200;
+
+    let docs: any[] = [];
+    try {
+      const snap = await tenantCol("orgMembers").where("orgId", "==", ctx.orgId).limit(limit).get();
+      docs = snap.docs;
+    } catch {
+      docs = [];
+    }
+
+    if (!docs.length) {
+      const snap = await tenantCol("orgMembers").limit(limit).get();
+      const prefix = `${ctx.orgId}_`;
+      docs = snap.docs.filter((d) => String(d.id || "").startsWith(prefix));
+    }
+
+    // Return simplified directory entries — only active members, no admin-level info
+    const entries = docs
+      .map((d) => {
+        const data = d.data() || {};
+        const role = coerceRole(data?.role) || "viewer";
+        const status = asString(data?.status).trim() || "active";
+        if (status === "disabled") return null; // hide disabled
+        return {
+          id: d.id,
+          name: typeof data?.name === "string" ? data.name : typeof data?.displayName === "string" ? data.displayName : "",
+          role,
+          department: typeof data?.department === "string" ? data.department : null,
+          avatar: typeof data?.avatar === "string" ? data.avatar : null,
+        };
+      })
+      .filter(Boolean);
+
+    return res.json({ entries });
+  } catch (err: any) {
+    console.error("GET /api/edu/directory error", err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
 // List org members (Faculty Admin + Student Producer)
 router.get("/people", requireAuth, async (req, res) => {
   try {

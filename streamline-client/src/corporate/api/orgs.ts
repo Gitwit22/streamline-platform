@@ -76,6 +76,10 @@ export interface OrgMember {
   role: string;
   status: string;
   joinedAt: number | null;
+  jobTitle?: string;
+  department?: string;
+  location?: string;
+  managerUserId?: string | null;
 }
 
 export async function getOrgMembers(): Promise<OrgMember[]> {
@@ -104,4 +108,15 @@ export async function removeMember(targetUid: string): Promise<void> {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error || "remove_failed");
   }
+}
+
+export async function changeMemberRole(targetUid: string, newRole: string): Promise<{ uid: string; role: string }> {
+  const res = await apiFetchAuth("/api/corp/orgs/change-role", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ targetUid, newRole }),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error || "role_change_failed");
+  return body;
 }

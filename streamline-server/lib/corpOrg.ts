@@ -1,24 +1,24 @@
 import { firestore as db } from "../firebaseAdmin";
 import { tenantCol, globalCol } from "./dbPaths";
 
-export type CorpOrgRole = "leader" | "employee" | "external";
+export type CorpOrgRole = "owner" | "admin" | "employee";
 
 export function asString(v: any): string {
   return typeof v === "string" ? v : "";
 }
 
-export function isLeader(role: CorpOrgRole | null): boolean {
-  return role === "leader";
+export function isOrgAdmin(role: CorpOrgRole | null): boolean {
+  return role === "owner" || role === "admin";
 }
 
 export function coerceCorpRole(value: any): CorpOrgRole | null {
   const r = asString(value).trim();
-  if (r === "leader") return "leader";
+  if (r === "owner") return "owner";
+  if (r === "admin") return "admin";
   if (r === "employee") return "employee";
-  if (r === "external") return "external";
   // Legacy migration: map old roles to new ones
-  if (r === "admin") return "leader";
-  if (r === "manager" || r === "member" || r === "viewer") return "employee";
+  if (r === "leader") return "owner";
+  if (r === "manager" || r === "member" || r === "viewer" || r === "external") return "employee";
   return null;
 }
 

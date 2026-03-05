@@ -40,6 +40,7 @@ import eduEmbedsRoutes from "./routes/eduEmbeds";
 import eduPublicRoutes from "./routes/eduPublic";
 import eduBootstrapRoutes from "./routes/eduBootstrap";
 import eduBroadcastsRoutes from "./routes/eduBroadcasts";
+import eduCallsRoutes from "./routes/eduCalls";
 import corpMeRoutes from "./routes/corpMe";
 import corpBroadcastsRoutes from "./routes/corpBroadcasts";
 import corpCallsRoutes from "./routes/corpCalls";
@@ -275,6 +276,8 @@ app.use("/api/edu", eduSettingsRoutes);
 app.use("/api/edu", eduEmbedsRoutes);
 // EDU broadcasts (go-live, stop, watch)
 app.use("/api/edu", eduBroadcastsRoutes);
+// EDU calls (WebRTC token minting)
+app.use("/api/edu", eduCallsRoutes);
 
 // Corporate lane routes
 app.use("/api/corp", corpMeRoutes);

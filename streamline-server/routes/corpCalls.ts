@@ -5,6 +5,7 @@ import { getCorpOrgContext, assertCorpRole, asString, coerceMillis } from "../li
 import { writeCorpAudit } from "../lib/corpAudit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { tenantCol } from "../lib/dbPaths";
+import { getLiveKitSdk } from "../lib/livekit";
 
 const router = express.Router();
 
@@ -199,6 +200,93 @@ router.get("/calls/:id/transcript", requireAuth, async (req, res) => {
     });
   } catch (err: any) {
     console.error("[corp/calls] transcript error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── POST /calls/token — mint a LiveKit token for org-scoped WebRTC call ── */
+router.post("/calls/token", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+  try {
+    const ctx = await getCorpOrgContext(uid);
+    if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
+
+    const kind = asString(req.body.kind).trim(); // "dm" | "channel"
+    if (kind !== "dm" && kind !== "channel") {
+      return res.status(400).json({ error: "invalid_kind", message: "kind must be 'dm' or 'channel'" });
+    }
+
+    let roomName: string;
+
+    if (kind === "dm") {
+      const targetUserId = asString(req.body.targetUserId).trim();
+      if (!targetUserId) return res.status(400).json({ error: "target_required" });
+      if (targetUserId === uid) return res.status(400).json({ error: "cannot_call_self" });
+
+      // Verify target is in same org
+      const targetMemberId = `${ctx.orgId}_${targetUserId}`;
+      const targetSnap = await tenantCol("orgMembers", undefined, "corporate").doc(targetMemberId).get().catch(() => null as any);
+      if (!targetSnap || !targetSnap.exists) {
+        return res.status(404).json({ error: "target_not_in_org" });
+      }
+
+      // Deterministic room name: sorted user IDs
+      const sorted = [uid, targetUserId].sort();
+      roomName = `org_${ctx.orgId}_dm_${sorted[0]}_${sorted[1]}`;
+    } else {
+      // kind === "channel"
+      const channelId = asString(req.body.channelId).trim();
+      if (!channelId) return res.status(400).json({ error: "channel_required" });
+
+      // Verify channel belongs to this org (chat rooms are scoped by orgId)
+      const chSnap = await tenantCol("corpChatRooms").doc(channelId).get().catch(() => null as any);
+      if (chSnap && chSnap.exists) {
+        const chData = chSnap.data() as any;
+        if (chData.orgId && chData.orgId !== ctx.orgId) {
+          return res.status(403).json({ error: "wrong_org" });
+        }
+      }
+      // Even if doc doesn't exist yet, we still allow — token is org-scoped
+
+      roomName = `org_${ctx.orgId}_ch_${channelId}_call`;
+    }
+
+    // Mint LiveKit token
+    const apiKey = process.env.LIVEKIT_API_KEY;
+    const apiSecret = process.env.LIVEKIT_API_SECRET;
+    if (!apiKey || !apiSecret) {
+      return res.status(503).json({ error: "livekit_not_configured" });
+    }
+
+    const displayName = asString((req as any).account?.displayName || uid);
+    const { AccessToken } = await getLiveKitSdk();
+    const at = new AccessToken(apiKey, apiSecret, {
+      identity: uid,
+      name: displayName,
+    });
+    at.addGrant({
+      room: roomName,
+      roomJoin: true,
+      canPublish: true,
+      canSubscribe: true,
+      canPublishData: true,
+    });
+    const token = await at.toJwt();
+
+    // Provide the client-facing LiveKit websocket URL
+    const rawUrl = String(process.env.LIVEKIT_URL || "").trim();
+    let livekitUrl: string | null = null;
+    if (rawUrl) {
+      livekitUrl = /^https?:\/\//i.test(rawUrl)
+        ? rawUrl.replace(/^http:\/\//i, "ws://").replace(/^https:\/\//i, "wss://")
+        : rawUrl;
+    }
+
+    return res.json({ roomName, token, livekitUrl });
+  } catch (err: any) {
+    console.error("[corp/calls] token error:", err?.message || err);
     return res.status(500).json({ error: "internal" });
   }
 });

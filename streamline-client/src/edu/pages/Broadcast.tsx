@@ -307,6 +307,16 @@ export default function Broadcast() {
   const [goLiveError, setGoLiveError] = useState<string | null>(null);
   const [viewerCount, setViewerCount] = useState(0);
 
+  // Pre-recorded media playback state
+  const [mediaPlaying, setMediaPlaying] = useState(false);
+  const [mediaFileName, setMediaFileName] = useState<string>("");
+  const [mediaProgress, setMediaProgress] = useState(0);
+  const [mediaDuration, setMediaDuration] = useState(0);
+  const mediaVideoRef = useRef<HTMLVideoElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const mediaTracksRef = useRef<any[]>([]);
+  const mediaCleanupRef = useRef<(() => void) | null>(null);
+
   async function refreshDevices() {
     if (!navigator.mediaDevices?.enumerateDevices) return;
     const list = await navigator.mediaDevices.enumerateDevices();
@@ -556,6 +566,9 @@ export default function Broadcast() {
   async function endBroadcast() {
     if (!canStartStop) return;
 
+    // Stop any pre-recorded media playback first
+    if (mediaPlaying) { await stopMedia().catch(() => void 0); }
+
     // Clear demo auto-stop timer
     if (demoTimerRef.current) { clearTimeout(demoTimerRef.current); demoTimerRef.current = null; }
 
@@ -588,6 +601,11 @@ export default function Broadcast() {
 
   async function emergencyCut() {
     if (!isFacultyAdmin) return;
+
+    // Stop any pre-recorded media playback
+    if (mediaCleanupRef.current) { mediaCleanupRef.current(); mediaCleanupRef.current = null; }
+    mediaTracksRef.current = [];
+    setMediaPlaying(false);
 
     // Disconnect LiveKit immediately
     if (lkRoomRef.current) {
@@ -622,6 +640,151 @@ export default function Broadcast() {
         // ignore
       }
     })();
+  }
+
+  /* ── Pre-recorded media playback helpers ──────────────────────── */
+
+  async function stopMedia() {
+    // Unpublish media tracks from LiveKit
+    const room = lkRoomRef.current;
+    if (room) {
+      for (const t of mediaTracksRef.current) {
+        try { await room.localParticipant.unpublishTrack(t); } catch {}
+      }
+    }
+    mediaTracksRef.current = [];
+
+    // Pause/stop the hidden video
+    if (mediaVideoRef.current) {
+      mediaVideoRef.current.pause();
+      mediaVideoRef.current.removeAttribute("src");
+      mediaVideoRef.current.load();
+    }
+
+    // Re-attach camera/mic (only in real LiveKit mode, not demo bypass)
+    if (room && !isEduBypassEnabled()) {
+      try {
+        const { Track } = await import("livekit-client");
+
+        // Re-enable camera
+        await room.localParticipant.setCameraEnabled(true);
+        const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+        if (camPub?.track && liveVideoRef.current) {
+          camPub.track.attach(liveVideoRef.current);
+        }
+
+        // Re-enable mic
+        await room.localParticipant.setMicrophoneEnabled(true);
+      } catch (err) {
+        console.warn("[EduBroadcast] failed to restore camera/mic after media:", err);
+      }
+    }
+
+    // Run any additional cleanup (e.g. progress interval)
+    if (mediaCleanupRef.current) { mediaCleanupRef.current(); mediaCleanupRef.current = null; }
+
+    setMediaPlaying(false);
+    setMediaFileName("");
+    setMediaProgress(0);
+    setMediaDuration(0);
+  }
+
+  async function onFileSelected(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // Reset input so re-selecting the same file triggers onChange
+    e.target.value = "";
+
+    if (!isLive) return;
+
+    setMediaFileName(file.name);
+    setMediaPlaying(true);
+    setMediaProgress(0);
+    setMediaDuration(0);
+
+    const url = URL.createObjectURL(file);
+    const vid = mediaVideoRef.current;
+    if (!vid) { URL.revokeObjectURL(url); return; }
+
+    vid.src = url;
+    vid.muted = false;
+    vid.playsInline = true;
+
+    try {
+      await vid.play();
+    } catch (err) {
+      console.warn("[EduBroadcast] media play error:", err);
+      URL.revokeObjectURL(url);
+      setMediaPlaying(false);
+      return;
+    }
+
+    setMediaDuration(vid.duration || 0);
+
+    // Progress timer
+    const iv = setInterval(() => {
+      if (vid.paused || vid.ended) return;
+      setMediaProgress(vid.currentTime || 0);
+    }, 500);
+
+    // Auto-stop when media ends
+    const handleEnded = () => void stopMedia();
+    vid.addEventListener("ended", handleEnded);
+
+    mediaCleanupRef.current = () => {
+      clearInterval(iv);
+      vid.removeEventListener("ended", handleEnded);
+      URL.revokeObjectURL(url);
+    };
+
+    // Capture stream from the hidden video element & publish to LiveKit
+    const room = lkRoomRef.current;
+    if (room && !isEduBypassEnabled()) {
+      try {
+        const { LocalVideoTrack, LocalAudioTrack } = await import("livekit-client");
+
+        // captureStream is Chrome/Edge; mozCaptureStream for Firefox
+        const capture = (vid as any).captureStream?.() || (vid as any).mozCaptureStream?.();
+        if (!capture) { console.warn("[EduBroadcast] captureStream not supported"); return; }
+
+        const videoTrack = capture.getVideoTracks()[0];
+        const audioTrack = capture.getAudioTracks()[0];
+
+        // Unpublish current camera/mic
+        await room.localParticipant.setCameraEnabled(false);
+        await room.localParticipant.setMicrophoneEnabled(false);
+
+        const published: any[] = [];
+        if (videoTrack) {
+          const lkVideo = new LocalVideoTrack(videoTrack);
+          await room.localParticipant.publishTrack(lkVideo, { name: "media-video", source: "camera" as any });
+          published.push(lkVideo);
+        }
+        if (audioTrack) {
+          const lkAudio = new LocalAudioTrack(audioTrack);
+          await room.localParticipant.publishTrack(lkAudio, { name: "media-audio", source: "microphone" as any });
+          published.push(lkAudio);
+        }
+        mediaTracksRef.current = published;
+
+        // Attach capture stream to live preview so the producer sees the media
+        if (liveVideoRef.current) {
+          liveVideoRef.current.srcObject = capture;
+          liveVideoRef.current.muted = true; // avoid double audio
+          await liveVideoRef.current.play().catch(() => void 0);
+        }
+      } catch (err) {
+        console.warn("[EduBroadcast] media publish error:", err);
+      }
+    } else if (isEduBypassEnabled()) {
+      // Demo mode: just show the media in the live preview
+      if (liveVideoRef.current) {
+        liveVideoRef.current.srcObject = null;
+        liveVideoRef.current.src = url;
+        liveVideoRef.current.muted = false;
+        await liveVideoRef.current.play().catch(() => void 0);
+      }
+    }
   }
 
   // Poll viewer count while live
@@ -1130,13 +1293,28 @@ export default function Broadcast() {
 
             <div className="relative aspect-video w-full overflow-hidden rounded-xl border border-slate-800/50 bg-black">
               <video ref={liveVideoRef} className="h-full w-full object-cover" />
-              {!streamsRef.current?.cam ? (
+              {!streamsRef.current?.cam && !mediaPlaying ? (
                 <div className="absolute inset-0 flex items-center justify-center p-6 text-center">
                   <div className="rounded-xl border border-slate-800/50 bg-slate-950/70 px-4 py-3 text-sm text-slate-200">
                     No camera preview yet. Use Device Check before starting, or allow camera permissions.
                   </div>
                 </div>
               ) : null}
+              {/* Media progress overlay */}
+              {mediaPlaying && (
+                <div className="absolute bottom-0 left-0 right-0 bg-black/60 px-3 py-2 flex items-center gap-3">
+                  <span className="text-xs font-medium text-orange-300 truncate max-w-[200px]">{mediaFileName}</span>
+                  <div className="flex-1 h-1.5 rounded-full bg-slate-700 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-gradient-to-r from-orange-500 to-red-500 transition-all"
+                      style={{ width: mediaDuration > 0 ? `${Math.min((mediaProgress / mediaDuration) * 100, 100)}%` : "0%" }}
+                    />
+                  </div>
+                  <span className="text-xs text-slate-300 font-mono whitespace-nowrap">
+                    {formatElapsed(Math.floor(mediaProgress) * 1000)}/{formatElapsed(Math.floor(mediaDuration) * 1000)}
+                  </span>
+                </div>
+              )}
             </div>
 
             <div className="mt-4">
@@ -1165,6 +1343,41 @@ export default function Broadcast() {
                   );
                 })}
               </div>
+            </div>
+          </div>
+
+          {/* Pre-recorded media playback controls */}
+          <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
+            <div className="mb-4">
+              <div className="text-lg font-semibold text-white">Pre-recorded Media</div>
+              <div className="mt-1 text-sm text-slate-400">Play a video/audio file through the broadcast feed.</div>
+            </div>
+            <div className="flex items-center gap-3">
+              {!mediaPlaying ? (
+                <button
+                  type="button"
+                  disabled={!canStartStop}
+                  onClick={() => fileInputRef.current?.click()}
+                  className={`rounded-xl px-4 py-3 text-sm font-semibold transition-colors ${
+                    canStartStop
+                      ? "bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 text-white hover:from-orange-400 hover:via-red-500 hover:to-violet-500"
+                      : "cursor-not-allowed bg-slate-700 text-slate-400"
+                  }`}
+                >
+                  Play Media
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => void stopMedia()}
+                  className="rounded-xl bg-red-600 px-4 py-3 text-sm font-semibold text-white hover:bg-red-500"
+                >
+                  Stop Media
+                </button>
+              )}
+              {mediaPlaying && (
+                <span className="text-sm text-slate-300 truncate max-w-[250px]">{mediaFileName}</span>
+              )}
             </div>
           </div>
 
@@ -1281,6 +1494,16 @@ export default function Broadcast() {
           </div>
         </div>
       </div>
+
+      {/* Hidden elements for media playback */}
+      <video ref={mediaVideoRef} className="hidden" playsInline />
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept="video/*,audio/*"
+        className="hidden"
+        onChange={onFileSelected}
+      />
     </div>
   );
 }

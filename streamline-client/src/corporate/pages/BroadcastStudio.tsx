@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
-  Mic, MicOff, Video, VideoOff, MonitorUp, Radio, Users, Loader2, Copy, Check, Square,
+  Mic, MicOff, Video, VideoOff, MonitorUp, Radio, Users, Loader2, Copy, Check, Square, Film,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { goLiveBroadcast, stopBroadcast, watchBroadcast, type GoLiveResponse } from "../api/broadcasts";
@@ -22,6 +22,19 @@ export default function BroadcastStudio() {
   const navigate = useNavigate();
   const bypass = isCorporateBypassEnabled();
   const me = useCorporateMe();
+  const isAdmin = me?.orgRole === "owner" || me?.orgRole === "admin";
+
+  // Employees cannot access the studio — redirect to watch page
+  if (!bypass && !isAdmin) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full gap-4 text-center p-8">
+        <Radio className="w-10 h-10 text-muted-foreground" />
+        <h2 className="text-lg font-semibold text-foreground">Access Restricted</h2>
+        <p className="text-sm text-muted-foreground max-w-md">Only admins and owners can start or manage broadcasts. You can watch scheduled broadcasts from the Broadcasts page.</p>
+        <button onClick={() => navigate("/streamline/corporate/broadcasts")} className="px-4 h-9 rounded-lg bg-primary text-primary-foreground text-[13px] font-semibold">Back to Broadcasts</button>
+      </div>
+    );
+  }
 
   const [phase, setPhase] = useState<"init" | "connecting" | "live" | "ended" | "error">("init");
   const [error, setError] = useState<string | null>(null);
@@ -38,12 +51,22 @@ export default function BroadcastStudio() {
   // Demo mode: 5-minute max broadcast
   const DEMO_MAX_BROADCAST_MS = 5 * 60 * 1000;
 
+  // Pre-recorded media playback state
+  const [mediaPlaying, setMediaPlaying] = useState(false);
+  const [mediaFileName, setMediaFileName] = useState<string | null>(null);
+  const [mediaProgress, setMediaProgress] = useState(0);
+  const [mediaDuration, setMediaDuration] = useState(0);
+
   // Refs for LiveKit
   const videoRef = useRef<HTMLVideoElement>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const roomRef = useRef<any>(null);
   const startTimeRef = useRef<number>(0);
   const demoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mediaVideoRef = useRef<HTMLVideoElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const mediaTracksRef = useRef<any[]>([]);
+  const mediaCleanupRef = useRef<(() => void) | null>(null);
 
   // Go live
   const handleGoLive = useCallback(async () => {
@@ -143,6 +166,10 @@ export default function BroadcastStudio() {
   // Stop broadcast
   const handleStop = useCallback(async () => {
     try {
+      // Clean up any media playback
+      mediaCleanupRef.current?.();
+      mediaCleanupRef.current = null;
+      if (mediaVideoRef.current) { mediaVideoRef.current.pause(); mediaVideoRef.current.removeAttribute("src"); }
       // Clear demo auto-stop timer
       if (demoTimerRef.current) { clearTimeout(demoTimerRef.current); demoTimerRef.current = null; }
       // Stop local media
@@ -195,6 +222,123 @@ export default function BroadcastStudio() {
     } catch {}
   }, [screenOn]);
 
+  // ── Pre-recorded media playback ──────────────────────────────────────
+
+  const handlePlayMedia = () => fileInputRef.current?.click();
+
+  const stopMedia = useCallback(async () => {
+    mediaCleanupRef.current?.();
+    mediaCleanupRef.current = null;
+    const mediaEl = mediaVideoRef.current;
+    if (mediaEl) { mediaEl.pause(); mediaEl.removeAttribute("src"); mediaEl.load(); }
+
+    // Unpublish media tracks and restore camera/mic
+    const room = roomRef.current;
+    if (room?.localParticipant && !bypass) {
+      for (const t of mediaTracksRef.current) {
+        try { room.localParticipant.unpublishTrack(t, true); } catch {}
+      }
+      mediaTracksRef.current = [];
+      await room.localParticipant.setCameraEnabled(true);
+      await room.localParticipant.setMicrophoneEnabled(true);
+      try {
+        const lk = await import("livekit-client");
+        const camPub = room.localParticipant.getTrackPublication(lk.Track.Source.Camera);
+        if (camPub?.track && videoRef.current) camPub.track.attach(videoRef.current);
+      } catch {}
+    }
+
+    // Bypass: restore local stream
+    if (bypass && localStreamRef.current) {
+      localStreamRef.current.getVideoTracks().forEach(t => { t.enabled = true; });
+      localStreamRef.current.getAudioTracks().forEach(t => { t.enabled = true; });
+      if (videoRef.current) videoRef.current.srcObject = localStreamRef.current;
+    }
+
+    setMediaPlaying(false);
+    setMediaFileName(null);
+    setMediaProgress(0);
+    setMediaDuration(0);
+    setMicOn(true);
+    setCamOn(true);
+  }, [bypass]);
+
+  const onFileSelected = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file || phase !== "live") return;
+    e.target.value = "";
+
+    const url = URL.createObjectURL(file);
+    const mediaEl = mediaVideoRef.current;
+    if (!mediaEl) { URL.revokeObjectURL(url); return; }
+
+    setMediaFileName(file.name);
+    mediaEl.src = url;
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        mediaEl.onloadedmetadata = () => { setMediaDuration(mediaEl.duration); resolve(); };
+        mediaEl.onerror = () => reject(new Error("Cannot load media file"));
+      });
+      await mediaEl.play();
+    } catch (err) {
+      console.error("[BroadcastStudio] media load error:", err);
+      URL.revokeObjectURL(url);
+      setMediaFileName(null);
+      return;
+    }
+
+    // Register event listeners
+    const onProgress = () => setMediaProgress(mediaEl.currentTime);
+    const onEnded = () => { stopMedia(); };
+    mediaEl.addEventListener("timeupdate", onProgress);
+    mediaEl.addEventListener("ended", onEnded);
+    mediaCleanupRef.current = () => {
+      mediaEl.removeEventListener("timeupdate", onProgress);
+      mediaEl.removeEventListener("ended", onEnded);
+      URL.revokeObjectURL(url);
+    };
+
+    setMediaPlaying(true);
+
+    // Publish media tracks to LiveKit room
+    const room = roomRef.current;
+    if (room?.localParticipant && !bypass) {
+      try {
+        await room.localParticipant.setCameraEnabled(false);
+        await room.localParticipant.setMicrophoneEnabled(false);
+
+        const stream: MediaStream | null =
+          ("captureStream" in mediaEl) ? (mediaEl as any).captureStream() :
+          ("mozCaptureStream" in mediaEl) ? (mediaEl as any).mozCaptureStream() : null;
+
+        if (stream) {
+          const lk = await import("livekit-client");
+          const published: any[] = [];
+          const vt = stream.getVideoTracks()[0];
+          if (vt) {
+            const lvt = new lk.LocalVideoTrack(vt);
+            await room.localParticipant.publishTrack(lvt, { source: lk.Track.Source.Camera });
+            published.push(lvt);
+          }
+          const at = stream.getAudioTracks()[0];
+          if (at) {
+            const lat = new lk.LocalAudioTrack(at);
+            await room.localParticipant.publishTrack(lat, { source: lk.Track.Source.Microphone });
+            published.push(lat);
+          }
+          mediaTracksRef.current = published;
+        }
+      } catch (err) { console.error("[BroadcastStudio] media publish error:", err); }
+    }
+
+    // Bypass: mute local stream so preview shows the media video
+    if (bypass && localStreamRef.current) {
+      localStreamRef.current.getVideoTracks().forEach(t => { t.enabled = false; });
+      localStreamRef.current.getAudioTracks().forEach(t => { t.enabled = false; });
+    }
+  }, [phase, bypass, stopMedia]);
+
   // Copy watch link
   const viewerLink = id ? `${window.location.origin}/streamline/corporate/broadcasts/${id}/watch` : "";
   const handleCopy = () => {
@@ -216,6 +360,8 @@ export default function BroadcastStudio() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      mediaCleanupRef.current?.();
+      if (mediaVideoRef.current) { mediaVideoRef.current.pause(); }
       localStreamRef.current?.getTracks().forEach(t => t.stop());
       if (roomRef.current) { try { roomRef.current.disconnect(); } catch {} }
     };
@@ -275,16 +421,36 @@ export default function BroadcastStudio() {
           <>
             {/* Video preview */}
             <div className="relative w-full max-w-3xl aspect-video bg-black rounded-2xl overflow-hidden border border-border shadow-lg">
+              {/* Camera preview */}
               <video
                 ref={videoRef}
                 autoPlay
                 playsInline
                 muted
-                className="w-full h-full object-cover"
+                className={cn("w-full h-full object-cover", mediaPlaying && "hidden")}
               />
-              {!camOn && (
+              {/* Pre-recorded media preview */}
+              <video
+                ref={mediaVideoRef}
+                playsInline
+                className={cn("w-full h-full object-contain bg-black", !mediaPlaying && "hidden")}
+              />
+              {!camOn && !mediaPlaying && (
                 <div className="absolute inset-0 flex items-center justify-center bg-surface-3">
                   <VideoOff className="w-10 h-10 text-muted-foreground/50" />
+                </div>
+              )}
+              {/* Media progress overlay */}
+              {mediaPlaying && (
+                <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent px-4 pb-3 pt-8">
+                  <div className="flex items-center gap-2 text-white/90 text-xs">
+                    <Film className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">{mediaFileName}</span>
+                    <span className="ml-auto font-mono whitespace-nowrap">{fmt(Math.floor(mediaProgress))} / {fmt(Math.floor(mediaDuration))}</span>
+                  </div>
+                  <div className="mt-1.5 h-1 bg-white/20 rounded-full overflow-hidden">
+                    <div className="h-full bg-primary rounded-full transition-[width] duration-300" style={{ width: `${mediaDuration > 0 ? (mediaProgress / mediaDuration) * 100 : 0}%` }} />
+                  </div>
                 </div>
               )}
               {/* Live badge overlay */}
@@ -292,20 +458,34 @@ export default function BroadcastStudio() {
                 <span className="flex items-center gap-1.5 text-[10px] font-bold tracking-wider bg-sl-red text-white px-2 py-0.5 rounded">
                   <span className="w-1.5 h-1.5 rounded-full bg-white animate-pulse" /> LIVE
                 </span>
+                {mediaPlaying && (
+                  <span className="text-[10px] font-bold tracking-wider bg-primary text-primary-foreground px-2 py-0.5 rounded">
+                    MEDIA
+                  </span>
+                )}
               </div>
             </div>
 
             {/* Controls */}
             <div className="flex items-center gap-3">
-              <button onClick={toggleMic} className={cn("w-11 h-11 rounded-full flex items-center justify-center transition-colors", micOn ? "bg-surface-2 border border-border text-foreground hover:bg-surface-3" : "bg-sl-red text-white")}>
+              <button onClick={toggleMic} disabled={mediaPlaying} className={cn("w-11 h-11 rounded-full flex items-center justify-center transition-colors disabled:opacity-40 disabled:pointer-events-none", micOn ? "bg-surface-2 border border-border text-foreground hover:bg-surface-3" : "bg-sl-red text-white")}>
                 {micOn ? <Mic className="w-5 h-5" /> : <MicOff className="w-5 h-5" />}
               </button>
-              <button onClick={toggleCam} className={cn("w-11 h-11 rounded-full flex items-center justify-center transition-colors", camOn ? "bg-surface-2 border border-border text-foreground hover:bg-surface-3" : "bg-sl-red text-white")}>
+              <button onClick={toggleCam} disabled={mediaPlaying} className={cn("w-11 h-11 rounded-full flex items-center justify-center transition-colors disabled:opacity-40 disabled:pointer-events-none", camOn ? "bg-surface-2 border border-border text-foreground hover:bg-surface-3" : "bg-sl-red text-white")}>
                 {camOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
               </button>
-              <button onClick={toggleScreen} className={cn("w-11 h-11 rounded-full flex items-center justify-center transition-colors", screenOn ? "bg-primary text-primary-foreground" : "bg-surface-2 border border-border text-foreground hover:bg-surface-3")}>
+              <button onClick={toggleScreen} disabled={mediaPlaying} className={cn("w-11 h-11 rounded-full flex items-center justify-center transition-colors disabled:opacity-40 disabled:pointer-events-none", screenOn ? "bg-primary text-primary-foreground" : "bg-surface-2 border border-border text-foreground hover:bg-surface-3")}>
                 <MonitorUp className="w-5 h-5" />
               </button>
+              {!mediaPlaying ? (
+                <button onClick={handlePlayMedia} title="Play pre-recorded media" className="w-11 h-11 rounded-full flex items-center justify-center bg-surface-2 border border-border text-foreground hover:bg-surface-3 transition-colors">
+                  <Film className="w-5 h-5" />
+                </button>
+              ) : (
+                <button onClick={stopMedia} className="inline-flex items-center gap-1.5 px-4 h-11 rounded-full bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-colors">
+                  <Square className="w-3.5 h-3.5 fill-current" /> Stop Media
+                </button>
+              )}
               <div className="w-px h-8 bg-border mx-2" />
               <button onClick={handleStop} className="inline-flex items-center gap-2 px-5 h-11 rounded-full bg-sl-red text-white text-sm font-semibold hover:bg-sl-red/90 transition-colors">
                 <Square className="w-4 h-4 fill-current" /> End Broadcast
@@ -347,6 +527,9 @@ export default function BroadcastStudio() {
           </div>
         )}
       </div>
+
+      {/* Hidden file input for pre-recorded media */}
+      <input ref={fileInputRef} type="file" accept="video/*,audio/*" onChange={onFileSelected} className="hidden" />
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { Phone } from "lucide-react";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import { listEduEvents, computeEduEventStatus } from "../state/eduEvents";
 import {
@@ -10,6 +11,8 @@ import {
   type EduPerson,
   type EduPersonRole,
 } from "../api/people";
+import { getEduCallTokenDM } from "../api/callToken";
+import EduCallModal from "../components/CallModal";
 
 type TabId = "students" | "staff";
 
@@ -214,6 +217,7 @@ export default function People() {
   const [editBusy, setEditBusy] = useState(false);
 
   const [drawerTarget, setDrawerTarget] = useState<EduPerson | null>(null);
+  const [callTarget, setCallTarget] = useState<EduPerson | null>(null);
   const allEvents = listEduEvents();
 
   useEffect(() => {
@@ -321,7 +325,29 @@ export default function People() {
   if (!canSee) {
     return <div className="p-6 text-slate-300">You don’t have access to this page.</div>;
   }
+  /** Extract the Firebase uid from a member doc id (format: orgId_uid). */
+  function extractUid(personId: string): string {
+    const orgId = me?.orgId || "";
+    if (orgId && personId.startsWith(orgId + "_")) {
+      return personId.slice(orgId.length + 1);
+    }
+    // Fallback: take everything after first underscore
+    const idx = personId.indexOf("_");
+    return idx >= 0 ? personId.slice(idx + 1) : personId;
+  }
 
+  /** Can the current user call this person? */
+  function canCall(p: EduPerson): boolean {
+    // Can't call yourself
+    if (extractUid(p.id) === me?.uid) return false;
+    // Disabled / invited members can't be called
+    if (p.status !== "active") return false;
+    // Only faculty + producers can make calls (already gated above), but we also
+    // restrict calling to/between active producers & faculty only — talent/viewer can be targets for faculty
+    if (isFacultyAdmin) return true;
+    // Student producers can call faculty + other producers
+    return p.role === "faculty_admin" || p.role === "student_producer" || p.role === "student_producer_assigned";
+  }
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -425,6 +451,16 @@ export default function People() {
                       <td className="px-5 py-4 text-sm text-slate-300">{p.assignedEventsCount ?? 0}</td>
                       <td className="px-5 py-4">
                         <div className="flex items-center justify-end gap-2">
+                          {canCall(p) && (
+                            <button
+                              type="button"
+                              onClick={() => setCallTarget(p)}
+                              title={`Call ${p.name || "member"}`}
+                              className="rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-green-400 transition-colors"
+                            >
+                              <Phone className="h-4 w-4" />
+                            </button>
+                          )}
                           {!isFacultyAdmin ? (
                             <button
                               type="button"
@@ -630,6 +666,14 @@ export default function People() {
             </div>
           </div>
         </DrawerShell>
+      ) : null}
+
+      {callTarget ? (
+        <EduCallModal
+          label={callTarget.name || callTarget.email || "Call"}
+          getToken={() => getEduCallTokenDM(extractUid(callTarget.id))}
+          onClose={() => setCallTarget(null)}
+        />
       ) : null}
     </div>
   );

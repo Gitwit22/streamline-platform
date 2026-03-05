@@ -1,10 +1,12 @@
 import { useEffect, useState, useCallback, useRef } from "react";
-import { Hash, Lock, Volume2, Send, Paperclip, Smile, Loader2, Plus } from "lucide-react";
+import { Hash, Lock, Volume2, Send, Paperclip, Smile, Loader2, Plus, Phone } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { demoSeedId } from "@/lib/demoPaths";
 import { fetchChatRooms, fetchMessages, sendMessage, createChatRoom, type ChatRoom, type ChatMessage } from "../api/chat";
+import { getCallTokenChannel } from "../api/callToken";
 import { useCorporateMe } from "../layout/CorporateProtectedRoute";
 import { isCorporateBypassEnabled } from "../state/corporateMode";
+import CallModal from "../components/CallModal";
 
 const demoRooms: ChatRoom[] = [
   { id: demoSeedId("corporate", "chat", 1), name: "general", section: "department", isPrivate: false, unreadCount: 12, lastMessage: "Sarah K: Did everyone get the policy update?", lastMessageAt: Date.now(), memberCount: 120, createdAt: Date.now() },
@@ -47,6 +49,7 @@ export default function Chat() {
   const [sending, setSending] = useState(false);
   const [showNewRoom, setShowNewRoom] = useState(false);
   const [newRoomName, setNewRoomName] = useState("");
+  const [channelCallId, setChannelCallId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const loadRooms = useCallback(async () => {
@@ -169,6 +172,17 @@ export default function Chat() {
           {currentRoom?.isPrivate ? <Lock className="w-4 h-4 text-muted-foreground" /> : <Hash className="w-4 h-4 text-muted-foreground" />}
           <span className="text-[14px] font-semibold text-foreground">{currentRoom?.name || "Select a room"}</span>
           {currentRoom && <span className="text-xs text-muted-foreground ml-2">{currentRoom.memberCount} members</span>}
+          {currentRoom && (
+            <button
+              onClick={() => setChannelCallId(currentRoom.id)}
+              className="ml-auto inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[12px] font-medium transition-colors"
+              style={{ background: "hsl(142 60% 55% / 0.12)", color: "hsl(142 60% 55%)", border: "1px solid hsl(142 60% 55% / 0.25)" }}
+              onMouseEnter={(e) => { e.currentTarget.style.background = "hsl(142 60% 55% / 0.2)"; }}
+              onMouseLeave={(e) => { e.currentTarget.style.background = "hsl(142 60% 55% / 0.12)"; }}
+            >
+              <Phone className="w-3.5 h-3.5" /> Start Call
+            </button>
+          )}
         </div>
 
         <div className="flex-1 overflow-y-auto p-5 flex flex-col gap-4">
@@ -203,6 +217,15 @@ export default function Chat() {
           </div>
         </div>
       </div>
+
+      {/* Channel call modal */}
+      {channelCallId && (
+        <CallModal
+          label={`#${rooms.find(r => r.id === channelCallId)?.name || "channel"}`}
+          getToken={() => getCallTokenChannel(channelCallId)}
+          onClose={() => setChannelCallId(null)}
+        />
+      )}
     </div>
   );
 }

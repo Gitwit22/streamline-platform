@@ -12,10 +12,11 @@ import {
   removeMember,
   type OrgMember,
 } from "../api/orgs";
+import { setManager } from "../api/directory";
 import { demoSeedId } from "@/lib/demoPaths";
 
 const demoMembers: OrgMember[] = [
-  { uid: demoSeedId("corporate", "usr", 1), email: "sarah.kim@corp.io", displayName: "Sarah Kim", role: "leader", status: "active", joinedAt: Date.now() - 365 * 86400_000 },
+  { uid: demoSeedId("corporate", "usr", 1), email: "sarah.kim@corp.io", displayName: "Sarah Kim", role: "owner", status: "active", joinedAt: Date.now() - 365 * 86400_000 },
   { uid: demoSeedId("corporate", "usr", 2), email: "dev.patel@corp.io", displayName: "Dev Patel", role: "employee", status: "active", joinedAt: Date.now() - 200 * 86400_000 },
   { uid: demoSeedId("corporate", "usr", 3), email: "marcus.j@corp.io", displayName: "Marcus Johnson", role: "employee", status: "active", joinedAt: Date.now() - 150 * 86400_000 },
   { uid: demoSeedId("corporate", "usr", 4), email: "lisa.chen@corp.io", displayName: "Lisa Chen", role: "employee", status: "active", joinedAt: Date.now() - 90 * 86400_000 },
@@ -29,6 +30,7 @@ export default function Members() {
   const [loading, setLoading] = useState(false);
   const [members, setMembers] = useState<OrgMember[]>([]);
   const [removingUid, setRemovingUid] = useState<string | null>(null);
+  const [settingManager, setSettingManager] = useState<string | null>(null);
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
@@ -67,6 +69,20 @@ export default function Members() {
   const formatDate = (ms: number | null) =>
     ms ? new Date(ms).toLocaleDateString([], { month: "short", day: "numeric", year: "numeric" }) : "—";
 
+  const handleSetManager = async (targetUid: string, managerUid: string | null) => {
+    setSettingManager(targetUid);
+    try {
+      if (!bypass) await setManager(targetUid, managerUid);
+      setMembers((prev) =>
+        prev.map((m) => (m.uid === targetUid ? { ...m, managerUserId: managerUid } : m)),
+      );
+    } catch (e: any) {
+      setError(e.message || "Failed to set manager");
+    } finally {
+      setSettingManager(null);
+    }
+  };
+
   return (
     <div className="flex flex-col h-full animate-fade-in">
       <div className="flex-1 p-6 flex flex-col gap-5 overflow-y-auto">
@@ -104,10 +120,11 @@ export default function Members() {
             </div>
 
             {/* Header */}
-            <div className="grid grid-cols-[1fr_180px_90px_100px_60px] gap-3 px-5 py-2.5 text-[10px] font-semibold tracking-[1px] uppercase" style={{ borderTop: "1px solid hsl(215 35% 20%)", borderBottom: "1px solid hsl(215 35% 20%)", color: "hsl(214 25% 45%)", background: "hsl(218 35% 10%)" }}>
+            <div className="grid grid-cols-[1fr_180px_90px_140px_100px_60px] gap-3 px-5 py-2.5 text-[10px] font-semibold tracking-[1px] uppercase" style={{ borderTop: "1px solid hsl(215 35% 20%)", borderBottom: "1px solid hsl(215 35% 20%)", color: "hsl(214 25% 45%)", background: "hsl(218 35% 10%)" }}>
               <span>Name</span>
               <span>Email</span>
               <span>Role</span>
+              <span>Manager</span>
               <span>Joined</span>
               <span />
             </div>
@@ -121,7 +138,7 @@ export default function Members() {
             {members.map((m) => (
               <div
                 key={m.uid}
-                className="grid grid-cols-[1fr_180px_90px_100px_60px] gap-3 items-center px-5 py-3 transition-colors"
+                className="grid grid-cols-[1fr_180px_90px_140px_100px_60px] gap-3 items-center px-5 py-3 transition-colors"
                 style={{ borderBottom: "1px solid hsl(215 35% 20% / 0.5)", color: "#fff" }}
                 onMouseEnter={(e) => { e.currentTarget.style.background = "hsl(215 28% 18% / 0.4)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
@@ -136,12 +153,32 @@ export default function Members() {
                 <span
                   className="text-xs font-mono px-2 py-0.5 rounded-full w-fit"
                   style={{
-                    background: m.role === "leader" ? "hsl(197 89% 66% / 0.15)" : m.role === "external" ? "hsl(40 90% 50% / 0.12)" : "hsl(215 28% 18%)",
-                    color: m.role === "leader" ? "hsl(197 89% 66%)" : m.role === "external" ? "hsl(40 90% 60%)" : "hsl(214 25% 55%)",
+                    background: m.role === "owner" ? "hsl(40 90% 50% / 0.12)" : m.role === "admin" ? "hsl(197 89% 66% / 0.15)" : "hsl(215 28% 18%)",
+                    color: m.role === "owner" ? "hsl(40 90% 60%)" : m.role === "admin" ? "hsl(197 89% 66%)" : "hsl(214 25% 55%)",
                   }}
                 >
                   {m.role}
                 </span>
+                {/* Manager dropdown */}
+                <div className="relative">
+                  <select
+                    value={m.managerUserId || ""}
+                    onChange={(e) => handleSetManager(m.uid, e.target.value || null)}
+                    disabled={settingManager === m.uid}
+                    className="appearance-none w-full pr-6 pl-2 py-1.5 rounded text-xs outline-none cursor-pointer truncate disabled:opacity-50"
+                    style={{
+                      background: "hsl(218 35% 10%)",
+                      border: "1px solid hsl(215 35% 20%)",
+                      color: m.managerUserId ? "#fff" : "hsl(214 25% 50%)",
+                    }}
+                  >
+                    <option value="">None</option>
+                    {members.filter((o) => o.uid !== m.uid).map((o) => (
+                      <option key={o.uid} value={o.uid}>{o.displayName || o.email}</option>
+                    ))}
+                  </select>
+                  <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 pointer-events-none" style={{ color: "hsl(214 25% 50%)" }} />
+                </div>
                 <span className="text-xs" style={{ color: "hsl(214 25% 55%)" }}>{formatDate(m.joinedAt)}</span>
                 <div>
                   {m.uid !== me?.uid && (

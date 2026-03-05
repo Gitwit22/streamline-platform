@@ -1,6 +1,6 @@
 import { apiFetchAuth } from "@/lib/api";
 
-export type CorpRole = "leader" | "employee" | "external";
+export type CorpRole = "owner" | "admin" | "employee";
 
 export interface CorporateMe {
   uid: string;
@@ -13,9 +13,9 @@ export interface CorporateMe {
   email: string;
 }
 
-/** Helper: true when the user has the "leader" role */
-export function isCorporateLeader(me: CorporateMe | null): boolean {
-  return me?.orgRole === "leader";
+/** Helper: true when the user has owner or admin role */
+export function isCorporateAdmin(me: CorporateMe | null): boolean {
+  return me?.orgRole === "owner" || me?.orgRole === "admin";
 }
 
 /** Sentinel returned when user is authenticated but has no org yet. */

@@ -93,7 +93,7 @@ router.post("/orgs/create", requireAuth, async (req, res) => {
       uid,
       email: asString(userData.email),
       displayName: asString(userData.displayName || userData.name || ""),
-      role: "leader" as CorpOrgRole,
+      role: "owner" as CorpOrgRole,
       status: "active",
       joinedAt: now,
       createdAt: now,
@@ -108,7 +108,7 @@ router.post("/orgs/create", requireAuth, async (req, res) => {
       name: orgName,
       slug,
       joinCode,
-      role: "leader",
+      role: "owner",
     });
   } catch (err: any) {
     console.error("[corpOrgs] create error:", err?.message || err);
@@ -244,7 +244,7 @@ router.get("/orgs/info", requireAuth, async (req, res) => {
       name: asString(org.name),
       slug: asString(org.slug),
       joinCode: asString(org.joinCode),
-      defaultRole: asString(org.defaultRole || "member"),
+      defaultRole: asString(org.defaultRole || "employee"),
     });
   } catch (err: any) {
     console.error("[corpOrgs] info error:", err?.message || err);
@@ -269,8 +269,8 @@ router.get("/orgs/members", requireAuth, async (req, res) => {
       .doc(`${orgId}_${uid}`)
       .get();
     const callerRole = callerMember.exists ? (callerMember.data() as any).role : null;
-    if (callerRole !== "leader" && callerRole !== "admin") {
-      return res.status(403).json({ error: "leader_only" });
+    if (callerRole !== "owner" && callerRole !== "admin") {
+      return res.status(403).json({ error: "admin_required" });
     }
 
     const membersSnap = await tenantCol("orgMembers", undefined, "corporate")
@@ -286,6 +286,10 @@ router.get("/orgs/members", requireAuth, async (req, res) => {
         displayName: asString(m.displayName),
         role: asString(m.role),
         status: asString(m.status || "active"),
+        jobTitle: asString(m.jobTitle || ""),
+        department: asString(m.department || ""),
+        location: asString(m.location || ""),
+        managerUserId: m.managerUserId ? asString(m.managerUserId) : null,
         joinedAt: m.joinedAt || null,
       };
     });
@@ -314,8 +318,8 @@ router.post("/orgs/regenerate-code", requireAuth, async (req, res) => {
       .doc(`${orgId}_${uid}`)
       .get();
     const callerRole = callerMember.exists ? (callerMember.data() as any).role : null;
-    if (callerRole !== "leader" && callerRole !== "admin") {
-      return res.status(403).json({ error: "leader_only" });
+    if (callerRole !== "owner" && callerRole !== "admin") {
+      return res.status(403).json({ error: "admin_required" });
     }
 
     const orgSnap = await tenantCol("orgs", undefined, "corporate").doc(orgId).get();
@@ -362,8 +366,8 @@ router.post("/orgs/remove-member", requireAuth, async (req, res) => {
       .doc(`${orgId}_${uid}`)
       .get();
     const callerRole = callerMember.exists ? (callerMember.data() as any).role : null;
-    if (callerRole !== "leader" && callerRole !== "admin") {
-      return res.status(403).json({ error: "leader_only" });
+    if (callerRole !== "owner" && callerRole !== "admin") {
+      return res.status(403).json({ error: "admin_required" });
     }
 
     // Delete member + clear user's orgId
@@ -378,6 +382,257 @@ router.post("/orgs/remove-member", requireAuth, async (req, res) => {
     return res.json({ removed: target });
   } catch (err: any) {
     console.error("[corpOrgs] remove-member error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── POST /orgs/change-role — change a member's role (owner/admin) ── */
+router.post("/orgs/change-role", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+  try {
+    const { targetUid, newRole } = req.body || ({} as any);
+    const target = asString(targetUid).trim();
+    const role = coerceCorpRole(newRole);
+    if (!target) return res.status(400).json({ error: "target_uid_required" });
+    if (!role) return res.status(400).json({ error: "invalid_role" });
+
+    const userSnap = await globalCol("users").doc(uid).get();
+    const userData = userSnap.exists ? (userSnap.data() as any) : null;
+    if (!userData?.orgId) return res.status(404).json({ error: "no_org" });
+
+    const orgId = userData.orgId;
+
+    // Verify caller is owner or admin
+    const callerMember = await tenantCol("orgMembers", undefined, "corporate")
+      .doc(`${orgId}_${uid}`)
+      .get();
+    const callerRole = callerMember.exists ? (callerMember.data() as any).role : null;
+    if (callerRole !== "owner" && callerRole !== "admin") {
+      return res.status(403).json({ error: "admin_required" });
+    }
+
+    // Cannot change own role
+    if (target === uid) {
+      return res.status(400).json({ error: "cannot_change_own_role" });
+    }
+
+    // Only owner can promote to admin or owner
+    if ((role === "owner" || role === "admin") && callerRole !== "owner") {
+      return res.status(403).json({ error: "owner_only" });
+    }
+
+    // Verify target is in the same org
+    const targetMember = await tenantCol("orgMembers", undefined, "corporate")
+      .doc(`${orgId}_${target}`)
+      .get();
+    if (!targetMember.exists) {
+      return res.status(404).json({ error: "member_not_found" });
+    }
+
+    // Cannot demote the owner
+    const targetRole = (targetMember.data() as any).role;
+    if (targetRole === "owner" && callerRole !== "owner") {
+      return res.status(403).json({ error: "cannot_demote_owner" });
+    }
+
+    await tenantCol("orgMembers", undefined, "corporate")
+      .doc(`${orgId}_${target}`)
+      .update({ role, updatedAt: Date.now() });
+
+    return res.json({ uid: target, role });
+  } catch (err: any) {
+    console.error("[corpOrgs] change-role error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── GET /orgs/directory — all org members (any authenticated member) */
+router.get("/orgs/directory", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+  try {
+    const userSnap = await globalCol("users").doc(uid).get();
+    const userData = userSnap.exists ? (userSnap.data() as any) : null;
+    if (!userData?.orgId) return res.status(404).json({ error: "no_org" });
+
+    const orgId = userData.orgId;
+
+    // Verify caller is a member of this org
+    const callerMember = await tenantCol("orgMembers", undefined, "corporate")
+      .doc(`${orgId}_${uid}`)
+      .get();
+    if (!callerMember.exists) {
+      return res.status(403).json({ error: "not_a_member" });
+    }
+
+    const membersSnap = await tenantCol("orgMembers", undefined, "corporate")
+      .where("orgId", "==", orgId)
+      .orderBy("displayName", "asc")
+      .get();
+
+    const members = membersSnap.docs.map((d) => {
+      const m = d.data() as any;
+      return {
+        uid: asString(m.uid),
+        email: asString(m.email),
+        displayName: asString(m.displayName),
+        role: asString(m.role),
+        status: asString(m.status || "active"),
+        jobTitle: asString(m.jobTitle || ""),
+        department: asString(m.department || ""),
+        location: asString(m.location || ""),
+        photoURL: asString(m.photoURL || ""),
+        bio: asString(m.bio || ""),
+        managerUserId: m.managerUserId ? asString(m.managerUserId) : null,
+        joinedAt: m.joinedAt || null,
+      };
+    });
+
+    // Collect unique departments for filter dropdown
+    const departments = [...new Set(members.map((m) => m.department).filter(Boolean))].sort();
+
+    return res.json({ members, departments });
+  } catch (err: any) {
+    console.error("[corpOrgs] directory error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── PATCH /orgs/profile — update directory profile fields ─────── */
+router.patch("/orgs/profile", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+  try {
+    const userSnap = await globalCol("users").doc(uid).get();
+    const userData = userSnap.exists ? (userSnap.data() as any) : null;
+    if (!userData?.orgId) return res.status(404).json({ error: "no_org" });
+
+    const orgId = userData.orgId;
+
+    // Determine target (self or another member if admin)
+    let targetUid = uid;
+    const rawTarget = asString(req.body?.targetUid).trim();
+    if (rawTarget && rawTarget !== uid) {
+      // Must be admin to edit another user's profile
+      const callerMember = await tenantCol("orgMembers", undefined, "corporate")
+        .doc(`${orgId}_${uid}`)
+        .get();
+      const callerRole = callerMember.exists ? (callerMember.data() as any).role : null;
+      if (callerRole !== "owner" && callerRole !== "admin") {
+        return res.status(403).json({ error: "admin_required" });
+      }
+      targetUid = rawTarget;
+    }
+
+    const memberId = `${orgId}_${targetUid}`;
+    const memberRef = tenantCol("orgMembers", undefined, "corporate").doc(memberId);
+    const memberSnap = await memberRef.get();
+    if (!memberSnap.exists) {
+      return res.status(404).json({ error: "member_not_found" });
+    }
+
+    // Allowlisted profile fields
+    const allowedFields = ["jobTitle", "department", "location", "bio", "photoURL", "displayName"];
+    const patch: Record<string, any> = {};
+    for (const field of allowedFields) {
+      if (req.body?.[field] !== undefined) {
+        patch[field] = asString(req.body[field]).slice(0, field === "bio" ? 500 : 200);
+      }
+    }
+
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ error: "no_fields" });
+    }
+
+    patch.updatedAt = Date.now();
+    await memberRef.update(patch);
+
+    return res.json({ uid: targetUid, ...patch });
+  } catch (err: any) {
+    console.error("[corpOrgs] profile error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── POST /orgs/set-manager — assign a manager (admin only) ────── */
+router.post("/orgs/set-manager", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+  try {
+    const { targetUid, managerUserId } = req.body || ({} as any);
+    const target = asString(targetUid).trim();
+    const manager = managerUserId === null ? null : asString(managerUserId).trim() || null;
+
+    if (!target) return res.status(400).json({ error: "target_uid_required" });
+
+    const userSnap = await globalCol("users").doc(uid).get();
+    const userData = userSnap.exists ? (userSnap.data() as any) : null;
+    if (!userData?.orgId) return res.status(404).json({ error: "no_org" });
+
+    const orgId = userData.orgId;
+
+    // Verify caller is admin
+    const callerMember = await tenantCol("orgMembers", undefined, "corporate")
+      .doc(`${orgId}_${uid}`)
+      .get();
+    const callerRole = callerMember.exists ? (callerMember.data() as any).role : null;
+    if (callerRole !== "owner" && callerRole !== "admin") {
+      return res.status(403).json({ error: "admin_required" });
+    }
+
+    // Cannot be own manager
+    if (manager && manager === target) {
+      return res.status(400).json({ error: "cannot_be_own_manager" });
+    }
+
+    // Verify target exists in org
+    const targetRef = tenantCol("orgMembers", undefined, "corporate").doc(`${orgId}_${target}`);
+    const targetSnap = await targetRef.get();
+    if (!targetSnap.exists) {
+      return res.status(404).json({ error: "member_not_found" });
+    }
+
+    // If setting a manager, verify manager exists in the same org
+    if (manager) {
+      const managerSnap = await tenantCol("orgMembers", undefined, "corporate")
+        .doc(`${orgId}_${manager}`)
+        .get();
+      if (!managerSnap.exists) {
+        return res.status(404).json({ error: "manager_not_found" });
+      }
+
+      // Cycle detection: walk the manager chain from `manager` upward.
+      // If we encounter `target`, that would create a cycle.
+      const visited = new Set<string>();
+      let current: string | null = manager;
+      while (current) {
+        if (current === target) {
+          return res.status(400).json({ error: "circular_manager", message: "This assignment would create a circular reporting chain." });
+        }
+        if (visited.has(current)) break; // already visited = existing cycle in data, stop
+        visited.add(current);
+        const snap = await tenantCol("orgMembers", undefined, "corporate")
+          .doc(`${orgId}_${current}`)
+          .get();
+        const data = snap.exists ? (snap.data() as any) : null;
+        current = data?.managerUserId ? asString(data.managerUserId) : null;
+      }
+    }
+
+    // Apply the update
+    await targetRef.update({
+      managerUserId: manager || admin.firestore.FieldValue.delete(),
+      updatedAt: Date.now(),
+    });
+
+    return res.json({ uid: target, managerUserId: manager });
+  } catch (err: any) {
+    console.error("[corpOrgs] set-manager error:", err?.message || err);
     return res.status(500).json({ error: "internal" });
   }
 });

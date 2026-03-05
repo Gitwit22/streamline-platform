@@ -26,6 +26,7 @@ import EduEmbed from "./edu/pages/Embed";
 import EduEmbedEventPlayer from "./edu/pages/EmbedEventPlayer";
 import EduSettings from "./edu/pages/Settings";
 import EduOnboarding from "./edu/pages/Onboarding";
+import EduDirectory from "./edu/pages/Directory";
 
 import CorporateLanding from "./corporate/entry/CorporateLanding";
 import CorporateLogin from "./corporate/entry/CorporateLogin";
@@ -46,6 +47,8 @@ import CorporateMembers from "./corporate/pages/Members";
 import CorporateBroadcastStudio from "./corporate/pages/BroadcastStudio";
 import CorporateBroadcastViewer from "./corporate/pages/BroadcastViewer";
 import CorporateRoleGuard from "./corporate/layout/CorporateRoleGuard";
+import CorporateDirectory from "./corporate/pages/Directory";
+import CorporateOrgChart from "./corporate/pages/OrgChart";
 
 import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
@@ -258,10 +261,12 @@ function App() {
           <Route path="chat" element={<CorporateChat />} />
           <Route path="training" element={<CorporateTraining />} />
           <Route path="documents" element={<CorporateDocuments />} />
-          <Route path="analytics" element={<CorporateRoleGuard allow={["leader"]}><CorporateAnalytics /></CorporateRoleGuard>} />
-          <Route path="admin" element={<CorporateRoleGuard allow={["leader"]}><CorporateAdmin /></CorporateRoleGuard>} />
-          <Route path="company" element={<CorporateRoleGuard allow={["leader"]}><CorporateCompany /></CorporateRoleGuard>} />
-          <Route path="members" element={<CorporateRoleGuard allow={["leader"]}><CorporateMembers /></CorporateRoleGuard>} />
+          <Route path="directory" element={<CorporateDirectory />} />
+          <Route path="org-chart" element={<CorporateOrgChart />} />
+          <Route path="analytics" element={<CorporateRoleGuard allow={["owner", "admin"]}><CorporateAnalytics /></CorporateRoleGuard>} />
+          <Route path="admin" element={<CorporateRoleGuard allow={["owner", "admin"]}><CorporateAdmin /></CorporateRoleGuard>} />
+          <Route path="company" element={<CorporateRoleGuard allow={["owner", "admin"]}><CorporateCompany /></CorporateRoleGuard>} />
+          <Route path="members" element={<CorporateRoleGuard allow={["owner", "admin"]}><CorporateMembers /></CorporateRoleGuard>} />
           <Route path="settings" element={<CorporateSettings />} />
           <Route path="*" element={<Navigate to="/streamline/corporate/dashboard" replace />} />
         </Route>
@@ -287,6 +292,7 @@ function App() {
           <Route path="broadcast" element={<EduBroadcast />} />
           <Route path="events" element={<EduEvents />} />
           <Route path="archive" element={<EduArchive />} />
+          <Route path="directory" element={<EduDirectory />} />
           <Route
             path="people"
             element={

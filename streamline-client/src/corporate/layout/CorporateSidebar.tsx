@@ -14,24 +14,19 @@ export default function CorporateSidebar() {
 
   const role = String(me?.orgRole || me?.role || "employee");
   const orgName = String(me?.orgName || "Your Organization");
-  const isLeader = role === "leader";
-  const isExternal = role === "external";
+  const isAdmin = role === "owner" || role === "admin";
 
   const items = useMemo<NavItem[]>(
     () => [
       { id: "dashboard", label: "Dashboard", path: "/streamline/corporate/dashboard" },
       { id: "chat", label: "Chat", path: "/streamline/corporate/chat" },
-      ...(isExternal
-        ? [
-            { id: "documents", label: "Documents", path: "/streamline/corporate/documents" },
-          ]
-        : [
-            { id: "calls", label: "Calls", path: "/streamline/corporate/calls" },
-            { id: "broadcasts", label: "Broadcasts", path: "/streamline/corporate/broadcasts" },
-            { id: "training", label: "Training", path: "/streamline/corporate/training" },
-            { id: "documents", label: "Documents", path: "/streamline/corporate/documents" },
-          ]),
-      ...(isLeader
+      { id: "calls", label: "Calls", path: "/streamline/corporate/calls" },
+      { id: "broadcasts", label: "Broadcasts", path: "/streamline/corporate/broadcasts" },
+      { id: "training", label: "Training", path: "/streamline/corporate/training" },
+      { id: "documents", label: "Documents", path: "/streamline/corporate/documents" },
+      { id: "directory", label: "Directory", path: "/streamline/corporate/directory" },
+      { id: "org-chart", label: "Org Chart", path: "/streamline/corporate/org-chart" },
+      ...(isAdmin
         ? [
             { id: "analytics", label: "Analytics", path: "/streamline/corporate/analytics" },
             { id: "members", label: "Members", path: "/streamline/corporate/members" },
@@ -40,7 +35,7 @@ export default function CorporateSidebar() {
         : []),
       { id: "settings", label: "Settings", path: "/streamline/corporate/settings" },
     ],
-    [isLeader, isExternal],
+    [isAdmin],
   );
 
   useEffect(() => {

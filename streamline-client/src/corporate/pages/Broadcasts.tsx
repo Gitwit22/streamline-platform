@@ -31,7 +31,7 @@ function formatScheduled(ms: number | null) {
 export default function Broadcasts() {
   const bypass = isCorporateBypassEnabled();
   const me = useCorporateMe();
-  const isAdmin = me?.orgRole === "admin" || me?.orgRole === "manager";
+  const isAdmin = me?.orgRole === "owner" || me?.orgRole === "admin";
   const navigate = useNavigate();
 
   const [activeTab, setActiveTab] = useState<Tab>("Live & Upcoming");

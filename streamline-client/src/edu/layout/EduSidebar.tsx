@@ -26,6 +26,7 @@ export default function EduSidebar() {
       { id: "broadcast", label: "Broadcast", path: "/streamline/edu/broadcast" },
       { id: "events", label: "Events", path: "/streamline/edu/events" },
       { id: "archive", label: "Archive", path: "/streamline/edu/archive" },
+      { id: "directory", label: "Directory", path: "/streamline/edu/directory" },
       ...(canPeople ? [{ id: "people", label: "People", path: "/streamline/edu/people" }] : []),
       { id: "embed", label: "Website Embed", path: "/streamline/edu/embed" },
       ...(isFacultyAdmin ? [{ id: "settings", label: "Settings", path: "/streamline/edu/settings" }] : []),
