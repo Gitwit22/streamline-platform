@@ -209,7 +209,7 @@ export default function RoomView() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] flex-col">
+    <div className="flex h-full flex-col">
       {/* ── Top Bar ──────────────────────────────────────── */}
       <div className="flex items-center justify-between border-b border-slate-700 bg-slate-900 px-4 py-2">
         <div className="flex items-center gap-3">

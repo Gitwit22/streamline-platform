@@ -1,6 +1,12 @@
-import { useEffect } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
+import { apiFetch, apiFetchAuth, clearAuthStorage } from "../../lib/api";
+import { firebaseSignInWithCustomToken, isFirebaseWebConfigured } from "../../lib/firebaseClient";
 import { setEduLane, setEduBypassEnabled } from "../state/eduMode";
+
+function validateEmail(email: string): boolean {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
 
 export default function EduGetStarted() {
   const nav = useNavigate();
@@ -13,6 +19,194 @@ export default function EduGetStarted() {
     setEduLane();
     setEduBypassEnabled();
     nav("/streamline/edu/dashboard", { replace: true });
+  };
+
+  /* ── Dropdown state ──────────────────────────────────── */
+  const [openPanel, setOpenPanel] = useState<"faculty" | "student" | null>(null);
+
+  // Faculty form
+  const [facEmail, setFacEmail] = useState("");
+  const [facPassword, setFacPassword] = useState("");
+
+  // Student form
+  const [stuCode, setStuCode] = useState("");
+  const [stuEmail, setStuEmail] = useState("");
+  const [stuPassword, setStuPassword] = useState("");
+
+  // Shared
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const togglePanel = (panel: "faculty" | "student") => {
+    setError("");
+    setOpenPanel((prev) => (prev === panel ? null : panel));
+  };
+
+  /* ── Faculty login ───────────────────────────────────── */
+  const handleFacultySubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+
+    if (!validateEmail(facEmail)) {
+      setError("Please enter a valid email address.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      if (!isFirebaseWebConfigured()) {
+        const res = await apiFetch(
+          "/api/auth/login",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: facEmail, password: facPassword }),
+          },
+          { allowNonOk: true },
+        );
+
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403) clearAuthStorage();
+          const ct = res.headers.get("content-type") || "";
+          const errBody = ct.includes("application/json") ? await res.json().catch(() => ({})) : {};
+          setError((errBody as any)?.error || "Invalid credentials");
+          setLoading(false);
+          return;
+        }
+
+        const loginBody: any = await res.json().catch(() => null);
+        const token = loginBody?.token as string | undefined;
+        if (!token) {
+          clearAuthStorage();
+          setError("Login failed: missing token");
+          setLoading(false);
+          return;
+        }
+        try { localStorage.setItem("authToken", token); } catch {}
+      } else {
+        const res = await apiFetch(
+          "/api/auth/legacy-login",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: facEmail, password: facPassword }),
+          },
+          { allowNonOk: true },
+        );
+
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403) clearAuthStorage();
+          const ct = res.headers.get("content-type") || "";
+          const errBody = ct.includes("application/json") ? await res.json().catch(() => ({})) : {};
+          setError((errBody as any)?.error || "Invalid credentials");
+          setLoading(false);
+          return;
+        }
+
+        const payload: any = await res.json().catch(() => null);
+        const customToken = String(payload?.customToken || "").trim();
+        if (!customToken) {
+          setError("Login failed: missing token");
+          setLoading(false);
+          return;
+        }
+        try { localStorage.removeItem("authToken"); } catch {}
+        await firebaseSignInWithCustomToken(customToken);
+      }
+
+      try { await apiFetchAuth("/api/account/me", { cache: "no-store" }); } catch {}
+      setLoading(false);
+      nav("/streamline/edu/dashboard", { replace: true });
+    } catch (err: any) {
+      setError(err?.message || "Something went wrong.");
+      setLoading(false);
+    }
+  };
+
+  /* ── Student login ───────────────────────────────────── */
+  const handleStudentSubmit = async (e: FormEvent) => {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+
+    if (!stuCode.trim()) {
+      setError("Please enter your school code.");
+      setLoading(false);
+      return;
+    }
+    if (!validateEmail(stuEmail)) {
+      setError("Please enter a valid email address.");
+      setLoading(false);
+      return;
+    }
+
+    try {
+      if (!isFirebaseWebConfigured()) {
+        const res = await apiFetch(
+          "/api/auth/login",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: stuEmail, password: stuPassword, schoolCode: stuCode.trim() }),
+          },
+          { allowNonOk: true },
+        );
+
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403) clearAuthStorage();
+          const ct = res.headers.get("content-type") || "";
+          const errBody = ct.includes("application/json") ? await res.json().catch(() => ({})) : {};
+          setError((errBody as any)?.error || "Invalid credentials");
+          setLoading(false);
+          return;
+        }
+
+        const loginBody: any = await res.json().catch(() => null);
+        const token = loginBody?.token as string | undefined;
+        if (!token) {
+          setError("Login failed: missing token");
+          setLoading(false);
+          return;
+        }
+        try { localStorage.setItem("authToken", token); } catch {}
+      } else {
+        const res = await apiFetch(
+          "/api/auth/legacy-login",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: stuEmail, password: stuPassword }),
+          },
+          { allowNonOk: true },
+        );
+
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403) clearAuthStorage();
+          const ct = res.headers.get("content-type") || "";
+          const errBody = ct.includes("application/json") ? await res.json().catch(() => ({})) : {};
+          setError((errBody as any)?.error || "Invalid credentials");
+          setLoading(false);
+          return;
+        }
+
+        const payload: any = await res.json().catch(() => null);
+        const customToken = String(payload?.customToken || "").trim();
+        if (!customToken) {
+          setError("Login failed: missing token");
+          setLoading(false);
+          return;
+        }
+        try { localStorage.removeItem("authToken"); } catch {}
+        await firebaseSignInWithCustomToken(customToken);
+      }
+
+      setLoading(false);
+      nav("/streamline/edu/student-portal", { replace: true });
+    } catch (err: any) {
+      setError(err?.message || "Something went wrong.");
+      setLoading(false);
+    }
   };
 
   return (
@@ -176,44 +370,154 @@ export default function EduGetStarted() {
               </div>
 
               {/* ── Faculty / Admin Sign In ─────────────────────────── */}
-              <Link
-                to="/streamline/edu/login"
-                className="flex w-full items-center gap-4 rounded-xl border border-slate-600 bg-slate-800 px-5 py-4 text-left transition hover:border-slate-500 hover:bg-slate-700"
-              >
-                <div className="flex h-10 w-10 flex-none items-center justify-center rounded-lg bg-gradient-to-br from-orange-500/20 to-red-600/20 text-orange-400">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-                    <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-                    <polyline points="10 17 15 12 10 7" />
-                    <line x1="15" y1="12" x2="3" y2="12" />
+              {error && openPanel && (
+                <div className="mb-3 rounded-2xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">{error}</div>
+              )}
+
+              <div className="overflow-hidden rounded-xl border border-slate-600 bg-slate-800 transition-colors hover:border-slate-500">
+                <button
+                  type="button"
+                  onClick={() => togglePanel("faculty")}
+                  className="flex w-full items-center gap-4 px-5 py-4 text-left transition hover:bg-slate-700"
+                >
+                  <div className="flex h-10 w-10 flex-none items-center justify-center rounded-lg bg-gradient-to-br from-orange-500/20 to-red-600/20 text-orange-400">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+                      <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                      <polyline points="10 17 15 12 10 7" />
+                      <line x1="15" y1="12" x2="3" y2="12" />
+                    </svg>
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold text-white">Faculty / Admin Sign In</div>
+                    <div className="text-xs text-slate-400">Sign in with your school credentials</div>
+                  </div>
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    className={`ml-auto h-4 w-4 text-slate-500 transition-transform duration-200 ${openPanel === "faculty" ? "rotate-90" : ""}`}
+                  >
+                    <polyline points="9 18 15 12 9 6" />
                   </svg>
-                </div>
-                <div>
-                  <div className="text-sm font-semibold text-white">Faculty / Admin Sign In</div>
-                  <div className="text-xs text-slate-400">Sign in with your school credentials</div>
-                </div>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="ml-auto h-4 w-4 text-slate-500">
-                  <polyline points="9 18 15 12 9 6" />
-                </svg>
-              </Link>
+                </button>
+
+                {openPanel === "faculty" && (
+                  <form onSubmit={handleFacultySubmit} className="border-t border-slate-700 px-5 pb-5 pt-4">
+                    <div className="space-y-4">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300" htmlFor="fac-email">Email</label>
+                        <input
+                          id="fac-email"
+                          value={facEmail}
+                          onChange={(e) => setFacEmail(e.target.value)}
+                          type="email"
+                          className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/10"
+                          placeholder="you@school.edu"
+                          autoComplete="email"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300" htmlFor="fac-pass">Password</label>
+                        <input
+                          id="fac-pass"
+                          value={facPassword}
+                          onChange={(e) => setFacPassword(e.target.value)}
+                          type="password"
+                          className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/10"
+                          placeholder="••••••••"
+                          autoComplete="current-password"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={loading}
+                        className="w-full rounded-lg border border-slate-600 bg-slate-700 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-600 disabled:opacity-60"
+                      >
+                        {loading && openPanel === "faculty" ? "Signing in\u2026" : "Sign In"}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
 
               {/* ── Student Sign In ─────────────────────────────────── */}
-              <Link
-                to="/streamline/edu/student-login"
-                className="mt-3 flex w-full items-center gap-4 rounded-xl border border-slate-600 bg-slate-800 px-5 py-4 text-left transition hover:border-slate-500 hover:bg-slate-700"
-              >
-                <div className="flex h-10 w-10 flex-none items-center justify-center rounded-lg bg-gradient-to-br from-violet-500/20 to-blue-600/20 text-violet-400">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
-                    <path d="M4.26 10.147a60.436 60.436 0 0 0-.491 6.347A48.627 48.627 0 0 1 12 20.904a48.627 48.627 0 0 1 8.232-4.41 60.46 60.46 0 0 0-.491-6.347m-15.482 0a23.838 23.838 0 0 0-1.012 5.434 48.677 48.677 0 0 1 6.249 1.263m-5.237-6.697A48.236 48.236 0 0 1 12 4.118a48.18 48.18 0 0 1 7.74 3.029m0 3a23.839 23.839 0 0 1 1.012 5.434 48.677 48.677 0 0 0-6.249 1.263" />
+              <div className="mt-3 overflow-hidden rounded-xl border border-slate-600 bg-slate-800 transition-colors hover:border-slate-500">
+                <button
+                  type="button"
+                  onClick={() => togglePanel("student")}
+                  className="flex w-full items-center gap-4 px-5 py-4 text-left transition hover:bg-slate-700"
+                >
+                  <div className="flex h-10 w-10 flex-none items-center justify-center rounded-lg bg-gradient-to-br from-violet-500/20 to-blue-600/20 text-violet-400">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-5 w-5">
+                      <path d="M4.26 10.147a60.436 60.436 0 0 0-.491 6.347A48.627 48.627 0 0 1 12 20.904a48.627 48.627 0 0 1 8.232-4.41 60.46 60.46 0 0 0-.491-6.347m-15.482 0a23.838 23.838 0 0 0-1.012 5.434 48.677 48.677 0 0 1 6.249 1.263m-5.237-6.697A48.236 48.236 0 0 1 12 4.118a48.18 48.18 0 0 1 7.74 3.029m0 3a23.839 23.839 0 0 1 1.012 5.434 48.677 48.677 0 0 0-6.249 1.263" />
+                    </svg>
+                  </div>
+                  <div>
+                    <div className="text-sm font-semibold text-white">Student Sign In</div>
+                    <div className="text-xs text-slate-400">Log in with your school code</div>
+                  </div>
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    className={`ml-auto h-4 w-4 text-slate-500 transition-transform duration-200 ${openPanel === "student" ? "rotate-90" : ""}`}
+                  >
+                    <polyline points="9 18 15 12 9 6" />
                   </svg>
-                </div>
-                <div>
-                  <div className="text-sm font-semibold text-white">Student Sign In</div>
-                  <div className="text-xs text-slate-400">Log in with your school code</div>
-                </div>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="ml-auto h-4 w-4 text-slate-500">
-                  <polyline points="9 18 15 12 9 6" />
-                </svg>
-              </Link>
+                </button>
+
+                {openPanel === "student" && (
+                  <form onSubmit={handleStudentSubmit} className="border-t border-slate-700 px-5 pb-5 pt-4">
+                    <div className="space-y-4">
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300" htmlFor="stu-code">School Code</label>
+                        <input
+                          id="stu-code"
+                          value={stuCode}
+                          onChange={(e) => setStuCode(e.target.value)}
+                          type="text"
+                          className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-violet-500 focus:ring-2 focus:ring-violet-500/10"
+                          placeholder="e.g. CENTRAL-HS"
+                          autoComplete="off"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300" htmlFor="stu-email">Student Email</label>
+                        <input
+                          id="stu-email"
+                          value={stuEmail}
+                          onChange={(e) => setStuEmail(e.target.value)}
+                          type="email"
+                          className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-violet-500 focus:ring-2 focus:ring-violet-500/10"
+                          placeholder="you@student.school.edu"
+                          autoComplete="email"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-slate-300" htmlFor="stu-pass">Password</label>
+                        <input
+                          id="stu-pass"
+                          value={stuPassword}
+                          onChange={(e) => setStuPassword(e.target.value)}
+                          type="password"
+                          className="mt-1.5 w-full rounded-lg border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-violet-500 focus:ring-2 focus:ring-violet-500/10"
+                          placeholder="••••••••"
+                          autoComplete="current-password"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={loading}
+                        className="w-full rounded-lg border border-slate-600 bg-slate-700 px-4 py-3 text-sm font-semibold text-white transition hover:bg-slate-600 disabled:opacity-60"
+                      >
+                        {loading && openPanel === "student" ? "Signing in\u2026" : "Sign In"}
+                      </button>
+                    </div>
+                  </form>
+                )}
+              </div>
 
               {/* ── Onboard a School ────────────────────────────────── */}
               <Link

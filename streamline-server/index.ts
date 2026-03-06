@@ -44,6 +44,7 @@ import eduCallsRoutes from "./routes/eduCalls";
 import eduRoomsRoutes from "./routes/eduRooms";
 import eduRecordingsRoutes from "./routes/eduRecordings";
 import eduStudentsRoutes from "./routes/eduStudents";
+import eduPortalRoutes from "./routes/eduPortal";
 import corpMeRoutes from "./routes/corpMe";
 import corpBroadcastsRoutes from "./routes/corpBroadcasts";
 import corpCallsRoutes from "./routes/corpCalls";
@@ -209,6 +210,8 @@ app.use("/api/public/hls", publicHlsRoutes);
 app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
 // Public EDU embed data (no auth)
 app.use("/api/public/edu", eduPublicRoutes);
+// School portal (public — login, activation, lookup)
+app.use("/api/edu/portal", eduPortalRoutes);
 
 // Internal maintenance/admin utilities
 app.use("/api/maintenance/edu", eduBootstrapRoutes);

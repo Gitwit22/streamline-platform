@@ -4,6 +4,7 @@ import { requireAdmin } from "../middleware/adminAuth";
 import { writeEduAudit } from "../lib/eduAudit";
 import { coerceEduOrgRole, type EduOrgRole } from "../lib/eduOrgContext";
 import { tenantCol, globalCol } from "../lib/dbPaths";
+import { seedEduTestSchool } from "../scripts/seed-edu-test-school";
 
 const router = Router();
 
@@ -192,6 +193,32 @@ router.post("/members/promote", async (req, res) => {
   } catch (err: any) {
     console.error("POST /api/maintenance/edu/members/promote error", err);
     return res.status(500).json({ error: "internal" });
+  }
+});
+
+// POST /api/maintenance/edu/seed-test-school
+// Body: { adminEmail: string }
+// Seeds the internal test school with rooms, staff, students, events, recordings.
+// Idempotent — safe to re-run.
+router.post("/seed-test-school", async (req, res) => {
+  try {
+    const adminEmail = coerceEmail(req.body?.adminEmail);
+    if (!adminEmail) return res.status(400).json({ error: "adminEmail_invalid" });
+
+    const result = await seedEduTestSchool(adminEmail);
+
+    await writeEduAudit({
+      orgId: result.orgId,
+      action: "org.seed_test_school",
+      actorUid: result.adminUid || "system",
+      actorName: "Maintenance",
+      targetId: result.orgId,
+    }).catch(() => void 0);
+
+    return res.json(result);
+  } catch (err: any) {
+    console.error("POST /api/maintenance/edu/seed-test-school error", err);
+    return res.status(500).json({ error: "internal", detail: err?.message });
   }
 });
 

@@ -1,8 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { computeEduEventStatus, listEduEvents } from "../state/eduEvents";
 import { isEduBypassEnabled } from "../state/eduMode";
 import { useEduMe } from "../layout/EduProtectedRoute";
+import { apiFetchAuth } from "../../lib/api";
 import {
   DEMO_BROADCASTS,
   DEMO_RECORDINGS,
@@ -21,6 +22,59 @@ export default function Dashboard() {
   const role = String(me?.orgRole || me?.role || "faculty_admin");
   const isStudentProducer = role === "student_producer" || role === "student_producer_assigned";
 
+  /* ── Real data fetching (non-demo) ───────────────────── */
+  const [realStats, setRealStats] = useState<{
+    rooms: number; students: number; mediaStudents: number;
+    staff: number; recordings: number;
+  }>({ rooms: 0, students: 0, mediaStudents: 0, staff: 0, recordings: 0 });
+
+  const [realRecordings, setRealRecordings] = useState<
+    { id: string; title: string; duration: string; date: string }[]
+  >([]);
+
+  useEffect(() => {
+    if (isDemo) return;
+    // Fetch stats from real API endpoints in parallel
+    Promise.allSettled([
+      apiFetchAuth("/api/edu/rooms").then((r) => r.json()),
+      apiFetchAuth("/api/edu/students").then((r) => r.json()),
+      apiFetchAuth("/api/edu/people").then((r) => r.json()),
+      apiFetchAuth("/api/edu/recordings").then((r) => r.json()),
+    ]).then(([roomsRes, studentsRes, peopleRes, recordingsRes]) => {
+      const rooms = roomsRes.status === "fulfilled" ? (roomsRes.value?.rooms ?? []) : [];
+      const students = studentsRes.status === "fulfilled" ? (studentsRes.value?.students ?? []) : [];
+      const people = peopleRes.status === "fulfilled" ? (peopleRes.value?.members ?? []) : [];
+      const recordings = recordingsRes.status === "fulfilled" ? (recordingsRes.value?.recordings ?? []) : [];
+
+      setRealStats({
+        rooms: rooms.length,
+        students: students.length,
+        mediaStudents: students.filter((s: any) => s.mediaClub || s.role === "student_producer").length,
+        staff: people.filter((p: any) => p.role === "faculty_admin").length,
+        recordings: recordings.length,
+      });
+
+      // Format recent recordings
+      setRealRecordings(
+        recordings.slice(0, 4).map((r: any) => {
+          const sec = r.durationSec || 0;
+          const min = Math.floor(sec / 60);
+          const s = sec % 60;
+          const duration = sec > 3600
+            ? `${Math.floor(sec / 3600)}:${String(min % 60).padStart(2, "0")}:${String(s).padStart(2, "0")}`
+            : `${min}:${String(s).padStart(2, "0")}`;
+          const date = r.recordedAt || r.createdAt;
+          return {
+            id: r.id,
+            title: r.title || "Untitled",
+            duration,
+            date: date ? new Date(date).toLocaleDateString([], { month: "short", day: "numeric" }) : "",
+          };
+        }),
+      );
+    });
+  }, [isDemo]);
+
   /* live broadcast detection */
   const liveBroadcasts = useMemo(() => {
     if (isDemo) return DEMO_BROADCASTS.filter((b) => b.status === "live");
@@ -28,12 +82,12 @@ export default function Dashboard() {
   }, [isDemo]);
   const [isLive] = useState<boolean>(liveBroadcasts.length > 0);
 
-  /* stats */
-  const roomCount = isDemo ? DEMO_ROOMS.length : 0;
-  const studentCount = isDemo ? DEMO_STUDENTS.length : 0;
-  const mediaStudents = isDemo ? DEMO_STUDENTS.filter((s) => s.mediaClub).length : 0;
-  const staffCount = isDemo ? DEMO_USERS.filter((u) => u.role === "teacher" || u.role === "school_admin").length : 0;
-  const recordingCount = isDemo ? DEMO_RECORDINGS.length : 0;
+  /* stats — use real data when not in demo mode */
+  const roomCount = isDemo ? DEMO_ROOMS.length : realStats.rooms;
+  const studentCount = isDemo ? DEMO_STUDENTS.length : realStats.students;
+  const mediaStudents = isDemo ? DEMO_STUDENTS.filter((s) => s.mediaClub).length : realStats.mediaStudents;
+  const staffCount = isDemo ? DEMO_USERS.filter((u) => u.role === "teacher" || u.role === "school_admin").length : realStats.staff;
+  const recordingCount = isDemo ? DEMO_RECORDINGS.length : realStats.recordings;
 
   const upcomingEvents = useMemo(() => {
     const all = listEduEvents();
@@ -63,13 +117,10 @@ export default function Dashboard() {
         date: new Date(r.date).toLocaleDateString([], { month: "short", day: "numeric" }),
       }));
     }
-    return [
-      { id: "1", title: "Morning Announcements - Dec 13", duration: "12:34", date: "2 hours ago" },
-      { id: "2", title: "Band Practice Session", duration: "45:12", date: "Yesterday" },
-      { id: "3", title: "Principal Address", duration: "8:45", date: "3 days ago" },
-      { id: "4", title: "Fall Play - Act 1", duration: "1:23:45", date: "Dec 8" },
-    ];
-  }, [isDemo]);
+    // Use real data fetched from server
+    if (realRecordings.length > 0) return realRecordings;
+    return [];
+  }, [isDemo, realRecordings]);
 
   return (
     <div className="space-y-6">
