@@ -28,6 +28,8 @@ import EduSettings from "./edu/pages/Settings";
 import EduOnboarding from "./edu/pages/Onboarding";
 import EduDirectory from "./edu/pages/Directory";
 import EduRooms from "./edu/pages/Rooms";
+import EduRoomPreJoin from "./edu/pages/RoomPreJoin";
+import EduRoomView from "./edu/pages/RoomView";
 import EduRecordings from "./edu/pages/Recordings";
 import EduStudents from "./edu/pages/Students";
 import EduMediaLibrary from "./edu/pages/MediaLibrary";
@@ -36,6 +38,8 @@ import EduLearnMore from "./edu/entry/EduLearnMore";
 import EduGetStarted from "./edu/entry/EduGetStarted";
 import EduChat from "./edu/pages/Chat";
 import EduCalls from "./edu/pages/Calls";
+import SchoolPortal from "./edu/entry/SchoolPortal";
+import ChangePassword from "./edu/pages/ChangePassword";
 
 import CorporateLanding from "./corporate/entry/CorporateLanding";
 import CorporateLogin from "./corporate/entry/CorporateLogin";
@@ -294,6 +298,10 @@ function App() {
         {/* Public EDU embed players (no auth) */}
         <Route path="embed/event" element={<EduEmbedEventPlayer />} />
 
+        {/* School-specific portal: /:schoolSlug login + staff activation */}
+        <Route path="portal/:schoolSlug" element={<SchoolPortal />} />
+        <Route path="portal/:schoolSlug/change-password" element={<ChangePassword />} />
+
         <Route
           element={
             <EduProtectedRoute>
@@ -304,6 +312,8 @@ function App() {
           <Route path="dashboard" element={<EduDashboard />} />
           <Route path="broadcast" element={<EduBroadcast />} />
           <Route path="rooms" element={<EduRooms />} />
+          <Route path="rooms/:roomId/prejoin" element={<EduRoomPreJoin />} />
+          <Route path="rooms/:roomId" element={<EduRoomView />} />
           <Route path="events" element={<EduEvents />} />
           {/* Merged: Media Library (Recordings + Archive) */}
           <Route path="media-library" element={<EduMediaLibrary />} />

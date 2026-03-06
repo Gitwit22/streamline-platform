@@ -8,8 +8,18 @@ const router = express.Router();
 
 type EduOrgRole = "faculty_admin" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
 
+/** Room types: meeting (no broadcast), broadcast (always broadcasts), hybrid (optional broadcast). */
+type RoomType = "meeting" | "broadcast" | "hybrid";
+
+/** Default broadcast layout when a room goes live. */
+type DefaultLayout = "grid" | "speaker" | "single" | "custom";
+
 function asString(v: any): string {
   return typeof v === "string" ? v : "";
+}
+
+function asStringEnum<T extends string>(v: any, allowed: T[], fallback: T): T {
+  return typeof v === "string" && (allowed as string[]).includes(v) ? (v as T) : fallback;
 }
 
 async function getOrgContext(uid: string): Promise<{ orgId: string; orgRole: EduOrgRole | null } | null> {
@@ -51,6 +61,11 @@ router.get("/rooms", requireAuth as any, async (req: any, res) => {
         createdBy: data.createdBy ?? "",
         isLive: data.isLive ?? false,
         participantCount: data.participantCount ?? 0,
+        roomType: data.roomType ?? "meeting",
+        broadcastEnabled: data.broadcastEnabled ?? false,
+        recordingEnabled: data.recordingEnabled ?? false,
+        defaultLayout: data.defaultLayout ?? "grid",
+        allowedRoles: data.allowedRoles ?? [],
         createdAt: data.createdAt?.toMillis?.() ?? null,
       };
     });
@@ -58,6 +73,45 @@ router.get("/rooms", requireAuth as any, async (req: any, res) => {
     return res.json({ rooms });
   } catch (err: any) {
     console.error("[eduRooms] GET /rooms error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── GET /api/edu/rooms/:roomId ──────────────────────────────────
+// Returns a single room by ID.
+router.get("/rooms/:roomId", requireAuth as any, async (req: any, res) => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) return res.status(401).json({ error: "Unauthorized" });
+
+    const ctx = await getOrgContext(uid);
+    if (!ctx) return res.status(403).json({ error: "No org context" });
+
+    const roomId = req.params.roomId;
+    const snap = await tenantCol("rooms").doc(roomId).get();
+    if (!snap.exists) return res.status(404).json({ error: "Room not found" });
+
+    const data = snap.data() as any;
+    if (data.orgId !== ctx.orgId) return res.status(403).json({ error: "Not in your org" });
+
+    return res.json({
+      room: {
+        id: snap.id,
+        name: data.name ?? "",
+        description: data.description ?? "",
+        createdBy: data.createdBy ?? "",
+        isLive: data.isLive ?? false,
+        participantCount: data.participantCount ?? 0,
+        roomType: data.roomType ?? "meeting",
+        broadcastEnabled: data.broadcastEnabled ?? false,
+        recordingEnabled: data.recordingEnabled ?? false,
+        defaultLayout: data.defaultLayout ?? "grid",
+        allowedRoles: data.allowedRoles ?? [],
+        createdAt: data.createdAt?.toMillis?.() ?? null,
+      },
+    });
+  } catch (err: any) {
+    console.error("[eduRooms] GET /rooms/:roomId error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });
@@ -79,6 +133,14 @@ router.post("/rooms", requireAuth as any, async (req: any, res) => {
     const description = asString(req.body?.description).trim();
     if (!name) return res.status(400).json({ error: "Room name is required" });
 
+    const roomType = asStringEnum(req.body?.roomType, ["meeting", "broadcast", "hybrid"], "meeting");
+    const broadcastEnabled = roomType === "broadcast" ? true : !!req.body?.broadcastEnabled;
+    const recordingEnabled = !!req.body?.recordingEnabled;
+    const defaultLayout = asStringEnum(req.body?.defaultLayout, ["grid", "speaker", "single", "custom"], "grid");
+    const allowedRoles: string[] = Array.isArray(req.body?.allowedRoles)
+      ? req.body.allowedRoles.filter((r: any) => typeof r === "string")
+      : [];
+
     const roomRef = tenantCol("rooms").doc();
     const roomData = {
       name,
@@ -87,6 +149,11 @@ router.post("/rooms", requireAuth as any, async (req: any, res) => {
       createdBy: uid,
       isLive: false,
       participantCount: 0,
+      roomType,
+      broadcastEnabled,
+      recordingEnabled,
+      defaultLayout,
+      allowedRoles,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
@@ -101,9 +168,63 @@ router.post("/rooms", requireAuth as any, async (req: any, res) => {
       targetId: roomRef.id,
     });
 
-    return res.status(201).json({ id: roomRef.id, ...roomData, createdAt: Date.now() });
+    return res.status(201).json({ room: { id: roomRef.id, ...roomData, createdAt: Date.now() } });
   } catch (err: any) {
     console.error("[eduRooms] POST /rooms error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── PATCH /api/edu/rooms/:roomId ────────────────────────────────
+// Update room settings. Requires faculty_admin role.
+router.patch("/rooms/:roomId", requireAuth as any, async (req: any, res) => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) return res.status(401).json({ error: "Unauthorized" });
+
+    const ctx = await getOrgContext(uid);
+    if (!ctx) return res.status(403).json({ error: "No org context" });
+    if (ctx.orgRole !== "faculty_admin") {
+      return res.status(403).json({ error: "Only faculty admins can update rooms" });
+    }
+
+    const roomId = req.params.roomId;
+    const ref = tenantCol("rooms").doc(roomId);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ error: "Room not found" });
+
+    const existing = snap.data() as any;
+    if (existing.orgId !== ctx.orgId) return res.status(403).json({ error: "Not in your org" });
+
+    const patch: Record<string, any> = { updatedAt: admin.firestore.FieldValue.serverTimestamp() };
+
+    if (req.body?.name !== undefined) patch.name = asString(req.body.name).trim();
+    if (req.body?.description !== undefined) patch.description = asString(req.body.description).trim();
+    if (req.body?.roomType !== undefined) {
+      patch.roomType = asStringEnum(req.body.roomType, ["meeting", "broadcast", "hybrid"], "meeting");
+    }
+    if (req.body?.broadcastEnabled !== undefined) patch.broadcastEnabled = !!req.body.broadcastEnabled;
+    if (req.body?.recordingEnabled !== undefined) patch.recordingEnabled = !!req.body.recordingEnabled;
+    if (req.body?.defaultLayout !== undefined) {
+      patch.defaultLayout = asStringEnum(req.body.defaultLayout, ["grid", "speaker", "single", "custom"], "grid");
+    }
+    if (Array.isArray(req.body?.allowedRoles)) {
+      patch.allowedRoles = req.body.allowedRoles.filter((r: any) => typeof r === "string");
+    }
+
+    await ref.update(patch);
+
+    writeEduAudit({
+      orgId: ctx.orgId,
+      actorUid: uid,
+      actorName: "",
+      action: "room.update",
+      targetId: roomId,
+    });
+
+    return res.json({ ok: true });
+  } catch (err: any) {
+    console.error("[eduRooms] PATCH /rooms/:roomId error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

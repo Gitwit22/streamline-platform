@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import { isEduBypassEnabled } from "../state/eduMode";
 import { demoSeedId, demoDocId, demoStorageKey } from "../../lib/demoPaths";
@@ -90,6 +90,13 @@ function formatTime(ms: number | null) {
   return new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
 }
 
+function formatElapsed(ms: number) {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
 /* ── Component ─────────────────────────────────────────────────── */
 
 export default function EduCalls() {
@@ -102,6 +109,35 @@ export default function EduCalls() {
   const [creating, setCreating] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [showNew, setShowNew] = useState(false);
+
+  // Call controls state
+  const [micMuted, setMicMuted] = useState(false);
+  const [camOff, setCamOff] = useState(false);
+  const [screenSharing, setScreenSharing] = useState(false);
+  const [recording, setRecording] = useState(false);
+
+  // Elapsed time ticker
+  const [tick, setTick] = useState(0);
+  const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Add participant
+  const [showAddParticipant, setShowAddParticipant] = useState(false);
+  const [newParticipant, setNewParticipant] = useState("");
+
+  const activeCall = calls.find((c) => c.status === "active");
+
+  // Tick for elapsed time when there's an active call
+  useEffect(() => {
+    if (activeCall?.startedAt) {
+      tickRef.current = setInterval(() => setTick((t) => t + 1), 1000);
+      return () => {
+        if (tickRef.current) clearInterval(tickRef.current);
+      };
+    }
+    return () => {
+      if (tickRef.current) clearInterval(tickRef.current);
+    };
+  }, [activeCall?.id, activeCall?.startedAt]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -158,15 +194,71 @@ export default function EduCalls() {
     }
   };
 
+  const handleJoinCall = async (c: EduCall) => {
+    // Reset controls when joining
+    setMicMuted(false);
+    setCamOff(false);
+    setScreenSharing(false);
+    setRecording(false);
+    setShowAddParticipant(false);
+    setNewParticipant("");
+
+    if (isDemo) {
+      const displayName = String(me?.displayName || "You");
+      const initials = displayName.split(" ").map((w: string) => w[0]).join("").toUpperCase().slice(0, 2) || "ME";
+      setCalls((prev) =>
+        prev.map((x) =>
+          x.id === c.id
+            ? { ...x, status: "active" as const, startedAt: Date.now(), participants: [...new Set([...x.participants, initials])] }
+            : x,
+        ),
+      );
+    } else {
+      const updated = await updateEduCall(c.id, { status: "active" });
+      setCalls((prev) => prev.map((x) => (x.id === c.id ? updated : x)));
+    }
+    // Switch to Active Calls tab so the user sees the call UI
+    setActiveTab("Active Calls");
+  };
+
   const handleEndCall = async (c: EduCall) => {
     if (isDemo) {
       setCalls((prev) =>
-        prev.map((x) => (x.id === c.id ? { ...x, status: "completed" as const, endedAt: Date.now() } : x)),
+        prev.map((x) =>
+          x.id === c.id
+            ? {
+                ...x,
+                status: "completed" as const,
+                endedAt: Date.now(),
+                duration: x.startedAt ? Date.now() - x.startedAt : null,
+                hasRecording: recording,
+              }
+            : x,
+        ),
       );
     } else {
       const updated = await updateEduCall(c.id, { status: "completed" });
       setCalls((prev) => prev.map((x) => (x.id === c.id ? updated : x)));
     }
+    // Reset controls
+    setMicMuted(false);
+    setCamOff(false);
+    setScreenSharing(false);
+    setRecording(false);
+  };
+
+  const handleAddParticipant = () => {
+    if (!newParticipant.trim() || !activeCall) return;
+    const initials = newParticipant.trim().split(" ").map((w: string) => w[0]).join("").toUpperCase().slice(0, 2);
+    setCalls((prev) =>
+      prev.map((x) =>
+        x.id === activeCall.id
+          ? { ...x, participants: [...x.participants, initials] }
+          : x,
+      ),
+    );
+    setNewParticipant("");
+    setShowAddParticipant(false);
   };
 
   const filtered = calls.filter((c) => {
@@ -176,7 +268,9 @@ export default function EduCalls() {
     return true;
   });
 
-  const activeCall = calls.find((c) => c.status === "active");
+  const elapsed = activeCall?.startedAt ? formatElapsed(Date.now() - activeCall.startedAt) : "0:00";
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  void tick; // used to trigger re-render
 
   /* ── Render ──────────────────────────────────────────────── */
 
@@ -195,6 +289,9 @@ export default function EduCalls() {
             }`}
           >
             {tab}
+            {tab === "Active Calls" && activeCall ? (
+              <span className="ml-1.5 inline-flex h-2 w-2 rounded-full bg-red-500 animate-pulse" />
+            ) : null}
           </button>
         ))}
       </div>
@@ -249,18 +346,41 @@ export default function EduCalls() {
       {activeCall && activeTab === "Active Calls" && (
         <div className="overflow-hidden rounded-2xl border border-slate-700 bg-slate-800/50">
           <div className="relative flex aspect-video max-h-[300px] items-center justify-center bg-slate-950">
+            {/* Live indicator & elapsed */}
+            <div className="absolute left-4 top-4 flex items-center gap-2">
+              <div className="flex items-center gap-1.5 rounded-lg bg-red-600/90 px-2.5 py-1 text-xs font-bold text-white">
+                <span className="inline-flex h-2 w-2 rounded-full bg-white animate-pulse" />
+                LIVE
+              </div>
+              <div className="rounded-lg bg-slate-800/80 px-2.5 py-1 font-mono text-xs text-slate-300">
+                {elapsed}
+              </div>
+              {recording && (
+                <div className="flex items-center gap-1 rounded-lg bg-red-500/20 px-2 py-1 text-xs text-red-300">
+                  <span className="inline-flex h-1.5 w-1.5 rounded-full bg-red-500 animate-pulse" />
+                  REC
+                </div>
+              )}
+              {screenSharing && (
+                <div className="rounded-lg bg-blue-500/20 px-2 py-1 text-xs text-blue-300">
+                  Sharing Screen
+                </div>
+              )}
+            </div>
+
             <div className="text-center">
               <div className="mx-auto mb-3 flex h-20 w-20 items-center justify-center rounded-full bg-gradient-to-br from-orange-500/30 to-red-600/30 text-2xl font-bold text-orange-300">
                 {activeCall.title.charAt(0)}
               </div>
               <p className="font-semibold text-white">{activeCall.title}</p>
               <p className="mt-1 text-sm text-slate-400">
-                {activeCall.participants.length} participants · {activeCall.startedAt ? formatTime(activeCall.startedAt) : ""}
+                {activeCall.participants.length} participant{activeCall.participants.length !== 1 ? "s" : ""}
+                {activeCall.startedAt ? ` · Started ${formatTime(activeCall.startedAt)}` : ""}
               </p>
             </div>
             {/* Participant avatars */}
             <div className="absolute right-4 top-4 flex flex-col gap-2">
-              {activeCall.participants.slice(0, 3).map((p, i) => (
+              {activeCall.participants.slice(0, 4).map((p, i) => (
                 <div
                   key={i}
                   className="flex h-12 w-12 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 text-xs font-bold text-slate-300"
@@ -268,36 +388,145 @@ export default function EduCalls() {
                   {typeof p === "string" ? p.slice(0, 2).toUpperCase() : "?"}
                 </div>
               ))}
+              {activeCall.participants.length > 4 && (
+                <div className="flex h-12 w-12 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 text-[10px] font-medium text-slate-400">
+                  +{activeCall.participants.length - 4}
+                </div>
+              )}
+              {/* Add participant button */}
+              <button
+                onClick={() => setShowAddParticipant(!showAddParticipant)}
+                className="flex h-12 w-12 items-center justify-center rounded-lg border border-dashed border-slate-600 bg-slate-900/50 text-slate-400 transition hover:border-orange-500/40 hover:text-orange-300"
+                title="Add participant"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
+                  <path d="M12 5v14M5 12h14" />
+                </svg>
+              </button>
             </div>
+
+            {/* Add participant popover */}
+            {showAddParticipant && (
+              <div className="absolute right-20 top-4 z-10 rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-xl">
+                <div className="text-xs font-medium text-slate-300 mb-2">Add Participant</div>
+                <div className="flex items-center gap-2">
+                  <input
+                    autoFocus
+                    value={newParticipant}
+                    onChange={(e) => setNewParticipant(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleAddParticipant()}
+                    placeholder="Name…"
+                    className="w-32 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 text-xs text-white outline-none focus:border-orange-500 placeholder:text-slate-500"
+                  />
+                  <button
+                    onClick={handleAddParticipant}
+                    disabled={!newParticipant.trim()}
+                    className="rounded-lg bg-orange-500 px-2 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                  >
+                    Add
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
           {/* Call controls */}
           <div className="flex items-center justify-center gap-3 border-t border-slate-700 bg-slate-900 py-4">
-            {[
-              { label: "Mic", d: "M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3zM19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8" },
-              { label: "Camera", d: "M15.75 10.5l4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9A2.25 2.25 0 0 0 13.5 5.25h-9A2.25 2.25 0 0 0 2.25 7.5v9A2.25 2.25 0 0 0 4.5 18.75z" },
-              { label: "Share", d: "M13 2.5V5c5.523 0 10 4.477 10 10 0 .727-.078 1.436-.225 2.118l-.002.007A10 10 0 0 1 13 22v2.5l-7-5 7-5V17a7.5 7.5 0 0 0 0-15z" },
-              { label: "Record", d: "M12 12m-10 0a10 10 0 1 0 20 0a10 10 0 1 0-20 0" },
-            ].map((ctrl) => (
-              <button
-                key={ctrl.label}
-                className="flex h-10 w-10 items-center justify-center rounded-lg border border-slate-700 bg-slate-800 text-slate-300 transition hover:bg-slate-700 hover:text-white"
-                title={ctrl.label}
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
-                  <path d={ctrl.d} />
-                </svg>
-              </button>
-            ))}
+            {/* Mic toggle */}
+            <button
+              onClick={() => setMicMuted(!micMuted)}
+              className={`flex h-10 w-10 items-center justify-center rounded-lg border transition ${
+                micMuted
+                  ? "border-red-500/40 bg-red-500/20 text-red-400"
+                  : "border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white"
+              }`}
+              title={micMuted ? "Unmute" : "Mute"}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
+                {micMuted ? (
+                  <>
+                    <path d="M1 1l22 22M9 9v3a3 3 0 0 0 5.12 2.12M15 9.34V4a3 3 0 0 0-5.94-.6" />
+                    <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2c0 .56-.06 1.1-.18 1.62M12 19v4m-4 0h8" />
+                  </>
+                ) : (
+                  <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3zM19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8" />
+                )}
+              </svg>
+            </button>
+            {/* Camera toggle */}
+            <button
+              onClick={() => setCamOff(!camOff)}
+              className={`flex h-10 w-10 items-center justify-center rounded-lg border transition ${
+                camOff
+                  ? "border-red-500/40 bg-red-500/20 text-red-400"
+                  : "border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white"
+              }`}
+              title={camOff ? "Turn Camera On" : "Turn Camera Off"}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
+                {camOff ? (
+                  <>
+                    <path d="M1 1l22 22" />
+                    <path d="M15.75 10.5l4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72" />
+                    <path d="M2.25 7.5A2.25 2.25 0 0 1 4.5 5.25h6.75" />
+                    <path d="M15.75 16.5v.25A2.25 2.25 0 0 1 13.5 19H4.5a2.25 2.25 0 0 1-2.25-2.25v-4.5" />
+                  </>
+                ) : (
+                  <path d="M15.75 10.5l4.72-4.72a.75.75 0 0 1 1.28.53v11.38a.75.75 0 0 1-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 0 0 2.25-2.25v-9A2.25 2.25 0 0 0 13.5 5.25h-9A2.25 2.25 0 0 0 2.25 7.5v9A2.25 2.25 0 0 0 4.5 18.75z" />
+                )}
+              </svg>
+            </button>
+            {/* Screen share toggle */}
+            <button
+              onClick={() => setScreenSharing(!screenSharing)}
+              className={`flex h-10 w-10 items-center justify-center rounded-lg border transition ${
+                screenSharing
+                  ? "border-blue-500/40 bg-blue-500/20 text-blue-400"
+                  : "border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white"
+              }`}
+              title={screenSharing ? "Stop Sharing" : "Share Screen"}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
+                <rect x="2" y="3" width="20" height="14" rx="2" />
+                <path d="M8 21h8M12 17v4" />
+              </svg>
+            </button>
+            {/* Record toggle */}
+            <button
+              onClick={() => setRecording(!recording)}
+              className={`flex h-10 w-10 items-center justify-center rounded-lg border transition ${
+                recording
+                  ? "border-red-500/40 bg-red-500/20 text-red-400"
+                  : "border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white"
+              }`}
+              title={recording ? "Stop Recording" : "Start Recording"}
+            >
+              <svg viewBox="0 0 24 24" fill={recording ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.5" className="h-4 w-4">
+                <circle cx="12" cy="12" r="10" />
+                {recording && <circle cx="12" cy="12" r="4" fill="currentColor" />}
+              </svg>
+            </button>
+            {/* End call */}
             <button
               onClick={() => handleEndCall(activeCall)}
-              className="flex h-10 w-10 items-center justify-center rounded-lg bg-red-600 text-white transition hover:bg-red-500"
+              className="flex h-10 items-center gap-1.5 rounded-lg bg-red-600 px-4 text-sm font-semibold text-white transition hover:bg-red-500"
               title="End Call"
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
                 <path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0 1 22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72" />
                 <line x1="1" y1="1" x2="23" y2="23" />
               </svg>
+              End
             </button>
+          </div>
+          {/* Control labels */}
+          <div className="flex items-center justify-center gap-3 border-t border-slate-800/50 bg-slate-900/50 px-4 py-2">
+            <span className={`text-[10px] ${micMuted ? "text-red-400" : "text-slate-500"}`}>{micMuted ? "Muted" : "Mic On"}</span>
+            <span className="text-slate-700">·</span>
+            <span className={`text-[10px] ${camOff ? "text-red-400" : "text-slate-500"}`}>{camOff ? "Cam Off" : "Cam On"}</span>
+            <span className="text-slate-700">·</span>
+            <span className={`text-[10px] ${screenSharing ? "text-blue-400" : "text-slate-500"}`}>{screenSharing ? "Sharing" : "Not Sharing"}</span>
+            <span className="text-slate-700">·</span>
+            <span className={`text-[10px] ${recording ? "text-red-400" : "text-slate-500"}`}>{recording ? "Recording" : "Not Recording"}</span>
           </div>
         </div>
       )}
@@ -343,27 +572,20 @@ export default function EduCalls() {
               <span className="font-mono text-xs text-slate-500">{formatTime(c.scheduledAt)}</span>
               {c.status === "scheduled" && (
                 <button
-                  onClick={() => {
-                    if (isDemo) {
-                      setCalls((prev) =>
-                        prev.map((x) =>
-                          x.id === c.id ? { ...x, status: "active" as const, startedAt: Date.now() } : x,
-                        ),
-                      );
-                    } else {
-                      updateEduCall(c.id, { status: "active" }).then((u) =>
-                        setCalls((prev) => prev.map((x) => (x.id === c.id ? u : x))),
-                      );
-                    }
-                  }}
-                  className="rounded-lg bg-gradient-to-r from-orange-500 to-red-600 px-3 py-1.5 text-[11px] font-semibold text-white"
+                  onClick={() => handleJoinCall(c)}
+                  className="rounded-lg bg-gradient-to-r from-orange-500 to-red-600 px-3 py-1.5 text-[11px] font-semibold text-white transition hover:opacity-90"
                 >
                   Join
                 </button>
               )}
-              {c.hasRecording && (
+              {c.status === "completed" && c.hasRecording && (
                 <span className="rounded-full border border-orange-500/20 bg-orange-500/10 px-2 py-0.5 text-[10px] font-medium text-orange-300">
                   Recording
+                </span>
+              )}
+              {c.status === "completed" && !c.hasRecording && (
+                <span className="rounded-full border border-slate-700 bg-slate-800 px-2 py-0.5 text-[10px] font-medium text-slate-400">
+                  Completed
                 </span>
               )}
             </div>

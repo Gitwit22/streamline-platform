@@ -7,6 +7,9 @@ import { apiFetchAuth } from "../../lib/api";
 
 /* ── Types ─────────────────────────────────────────────────────── */
 
+type RoomType = "meeting" | "broadcast" | "hybrid";
+type DefaultLayout = "grid" | "speaker" | "single" | "custom";
+
 type Room = {
   id: string;
   name: string;
@@ -14,6 +17,24 @@ type Room = {
   isLive: boolean;
   participantCount: number;
   createdBy: string;
+  roomType: RoomType;
+  broadcastEnabled: boolean;
+  recordingEnabled: boolean;
+  defaultLayout: DefaultLayout;
+  allowedRoles: string[];
+};
+
+const ROOM_TYPE_META: Record<RoomType, { label: string; icon: string; color: string; bgColor: string }> = {
+  meeting: { label: "Meeting", icon: "👥", color: "text-blue-400", bgColor: "bg-blue-500/15" },
+  broadcast: { label: "Broadcast", icon: "📡", color: "text-red-400", bgColor: "bg-red-500/15" },
+  hybrid: { label: "Hybrid", icon: "⚡", color: "text-purple-400", bgColor: "bg-purple-500/15" },
+};
+
+const LAYOUT_LABELS: Record<DefaultLayout, string> = {
+  grid: "Grid",
+  speaker: "Speaker",
+  single: "Single",
+  custom: "Custom",
 };
 
 /* ── Component ─────────────────────────────────────────────────── */
@@ -29,9 +50,16 @@ export default function Rooms() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [typeFilter, setTypeFilter] = useState<RoomType | "all">("all");
   const [showCreate, setShowCreate] = useState(false);
+
+  // Create form state
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [newType, setNewType] = useState<RoomType>("meeting");
+  const [newBroadcast, setNewBroadcast] = useState(false);
+  const [newRecording, setNewRecording] = useState(false);
+  const [newLayout, setNewLayout] = useState<DefaultLayout>("grid");
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
@@ -44,6 +72,11 @@ export default function Rooms() {
           isLive: r.isLive,
           participantCount: r.participantCount,
           createdBy: r.createdBy,
+          roomType: r.roomType,
+          broadcastEnabled: r.broadcastEnabled,
+          recordingEnabled: r.recordingEnabled,
+          defaultLayout: r.defaultLayout,
+          allowedRoles: r.allowedRoles,
         })),
       );
       setLoading(false);
@@ -67,14 +100,36 @@ export default function Rooms() {
   }, [isDemo]);
 
   const filtered = useMemo(() => {
-    if (!search.trim()) return rooms;
-    const q = search.toLowerCase();
-    return rooms.filter(
-      (r) =>
-        r.name.toLowerCase().includes(q) ||
-        r.description.toLowerCase().includes(q),
-    );
-  }, [rooms, search]);
+    let list = rooms;
+    if (typeFilter !== "all") {
+      list = list.filter((r) => r.roomType === typeFilter);
+    }
+    if (search.trim()) {
+      const q = search.toLowerCase();
+      list = list.filter(
+        (r) =>
+          r.name.toLowerCase().includes(q) ||
+          r.description.toLowerCase().includes(q),
+      );
+    }
+    return list;
+  }, [rooms, search, typeFilter]);
+
+  const resetCreateForm = () => {
+    setNewName("");
+    setNewDesc("");
+    setNewType("meeting");
+    setNewBroadcast(false);
+    setNewRecording(false);
+    setNewLayout("grid");
+    setShowCreate(false);
+  };
+
+  // Auto-set broadcastEnabled when type changes
+  useEffect(() => {
+    if (newType === "broadcast") setNewBroadcast(true);
+    else if (newType === "meeting") setNewBroadcast(false);
+  }, [newType]);
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -91,11 +146,14 @@ export default function Rooms() {
           isLive: false,
           participantCount: 0,
           createdBy: me?.uid || "demo",
+          roomType: newType,
+          broadcastEnabled: newBroadcast,
+          recordingEnabled: newRecording,
+          defaultLayout: newLayout,
+          allowedRoles: [],
         },
       ]);
-      setNewName("");
-      setNewDesc("");
-      setShowCreate(false);
+      resetCreateForm();
       setCreating(false);
       return;
     }
@@ -104,14 +162,19 @@ export default function Rooms() {
       const res = await apiFetchAuth("/api/edu/rooms", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: newName.trim(), description: newDesc.trim() }),
+        body: JSON.stringify({
+          name: newName.trim(),
+          description: newDesc.trim(),
+          roomType: newType,
+          broadcastEnabled: newBroadcast,
+          recordingEnabled: newRecording,
+          defaultLayout: newLayout,
+        }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       setRooms((prev) => [...prev, data.room]);
-      setNewName("");
-      setNewDesc("");
-      setShowCreate(false);
+      resetCreateForm();
     } catch (e: any) {
       setError(e?.message || "Failed to create room");
     } finally {
@@ -119,13 +182,20 @@ export default function Rooms() {
     }
   };
 
+  // Counts by type
+  const counts = useMemo(() => {
+    const c = { all: rooms.length, meeting: 0, broadcast: 0, hybrid: 0 };
+    rooms.forEach((r) => { c[r.roomType] = (c[r.roomType] || 0) + 1; });
+    return c;
+  }, [rooms]);
+
   if (loading) {
     return (
       <div className="space-y-4">
         <div className="h-8 w-48 animate-pulse rounded bg-slate-800" />
         <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
           {[1, 2, 3].map((i) => (
-            <div key={i} className="h-40 animate-pulse rounded-2xl bg-slate-800/50" />
+            <div key={i} className="h-48 animate-pulse rounded-2xl bg-slate-800/50" />
           ))}
         </div>
       </div>
@@ -138,7 +208,9 @@ export default function Rooms() {
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-white">Rooms</h1>
-          <p className="mt-1 text-sm text-slate-400">{rooms.length} rooms total</p>
+          <p className="mt-1 text-sm text-slate-400">
+            Live spaces for meetings, broadcasts & production
+          </p>
         </div>
         <div className="flex items-center gap-3">
           <div className="relative">
@@ -163,67 +235,109 @@ export default function Rooms() {
         </div>
       </div>
 
+      {/* Type Filter Tabs */}
+      <div className="flex gap-2">
+        {(["all", "meeting", "broadcast", "hybrid"] as const).map((t) => {
+          const active = typeFilter === t;
+          const label = t === "all" ? "All" : ROOM_TYPE_META[t].label;
+          const count = counts[t];
+          return (
+            <button
+              key={t}
+              onClick={() => setTypeFilter(t)}
+              className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                active
+                  ? "bg-orange-500/15 text-orange-300"
+                  : "bg-slate-800/50 text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+              }`}
+            >
+              {label} ({count})
+            </button>
+          );
+        })}
+      </div>
+
       {error && (
         <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-300">{error}</div>
       )}
 
       {/* Room Grid */}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        {filtered.map((room) => (
-          <div
-            key={room.id}
-            className="group rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6 transition hover:border-slate-600"
-          >
-            <div className="flex items-start justify-between">
-              <div className="flex items-center gap-2">
-                {room.isLive && (
-                  <div className="h-2.5 w-2.5 animate-pulse rounded-full bg-red-500" />
-                )}
-                <h3 className="font-semibold text-white">{room.name}</h3>
-              </div>
-              {room.isLive && (
-                <span className="rounded-full bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-red-400">
-                  LIVE
+        {filtered.map((room) => {
+          const meta = ROOM_TYPE_META[room.roomType];
+          return (
+            <div
+              key={room.id}
+              onClick={() => nav(`/streamline/edu/rooms/${room.id}/prejoin`)}
+              className="group cursor-pointer rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6 transition hover:border-slate-600 hover:shadow-lg hover:shadow-orange-500/5"
+            >
+              {/* Top row: type badge + live indicator */}
+              <div className="flex items-start justify-between">
+                <span className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${meta.bgColor} ${meta.color}`}>
+                  <span>{meta.icon}</span> {meta.label}
                 </span>
-              )}
+                {room.isLive && (
+                  <span className="inline-flex items-center gap-1.5 rounded-full bg-red-500/15 px-2 py-0.5 text-[11px] font-semibold text-red-400">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" /> LIVE
+                  </span>
+                )}
+              </div>
+
+              {/* Name & description */}
+              <h3 className="mt-3 font-semibold text-white group-hover:text-orange-200">{room.name}</h3>
+              <p className="mt-1 text-sm text-slate-400 line-clamp-2">{room.description}</p>
+
+              {/* Feature pills */}
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {room.broadcastEnabled && (
+                  <span className="rounded-full bg-slate-700/60 px-2 py-0.5 text-[10px] text-slate-300">📡 Broadcast</span>
+                )}
+                {room.recordingEnabled && (
+                  <span className="rounded-full bg-slate-700/60 px-2 py-0.5 text-[10px] text-slate-300">🔴 Recording</span>
+                )}
+                <span className="rounded-full bg-slate-700/60 px-2 py-0.5 text-[10px] text-slate-300">
+                  🎬 {LAYOUT_LABELS[room.defaultLayout]}
+                </span>
+              </div>
+
+              {/* Footer */}
+              <div className="mt-4 flex items-center justify-between border-t border-slate-700/50 pt-3">
+                <span className="text-xs text-slate-500">
+                  {room.participantCount > 0 ? `${room.participantCount} in room` : "Empty"}
+                </span>
+                <span className="rounded-lg bg-slate-700/60 px-3 py-1.5 text-xs text-slate-300 transition group-hover:bg-orange-500/20 group-hover:text-orange-300">
+                  Enter Room →
+                </span>
+              </div>
             </div>
-            <p className="mt-2 text-sm text-slate-400 line-clamp-2">{room.description}</p>
-            <div className="mt-4 flex items-center justify-between">
-              <span className="text-xs text-slate-500">
-                {room.participantCount > 0 ? `${room.participantCount} participants` : "No one online"}
-              </span>
-              <button
-                onClick={() => nav(`/streamline/edu/broadcast?room=${room.id}`)}
-                className="rounded-lg bg-slate-700/60 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-700 hover:text-white"
-              >
-                Enter
-              </button>
-            </div>
-          </div>
-        ))}
+          );
+        })}
 
         {filtered.length === 0 && (
           <div className="col-span-full rounded-2xl border border-slate-700 bg-slate-800/50 p-12 text-center">
             <div className="text-4xl">🏫</div>
             <div className="mt-3 text-lg font-semibold text-slate-300">
-              {search ? "No rooms match your search" : "No rooms yet"}
+              {search || typeFilter !== "all" ? "No rooms match your filters" : "No rooms yet"}
             </div>
             <div className="mt-1 text-sm text-slate-500">
               {isFacultyAdmin
-                ? "Create a room to get started."
+                ? "Create a room to get started — meetings, broadcasts, or hybrid."
                 : "Your school admin hasn't created any rooms yet."}
             </div>
           </div>
         )}
       </div>
 
-      {/* Create Modal */}
+      {/* ── Create Room Modal ──────────────────────────────── */}
       {showCreate && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <button type="button" onClick={() => setShowCreate(false)} className="absolute inset-0 bg-black/60" aria-label="Close" />
+          <button type="button" onClick={resetCreateForm} className="absolute inset-0 bg-black/60" aria-label="Close" />
           <div className="relative w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6">
             <h2 className="text-lg font-semibold text-white">Create a Room</h2>
-            <div className="mt-4 space-y-4">
+            <p className="mt-1 text-sm text-slate-400">A room is a live space — people join, then optionally broadcast.</p>
+
+            <div className="mt-5 space-y-5">
+              {/* Name */}
               <div>
                 <label className="block text-sm font-medium text-slate-300">Room Name</label>
                 <input
@@ -233,20 +347,100 @@ export default function Rooms() {
                   placeholder="e.g. Morning Announcements"
                 />
               </div>
+
+              {/* Description */}
               <div>
                 <label className="block text-sm font-medium text-slate-300">Description</label>
                 <textarea
                   value={newDesc}
                   onChange={(e) => setNewDesc(e.target.value)}
-                  rows={3}
+                  rows={2}
                   className="mt-1 w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-3 text-white outline-none placeholder:text-slate-500 focus:border-orange-500"
                   placeholder="What is this room for?"
                 />
               </div>
+
+              {/* Room Type */}
+              <div>
+                <label className="block text-sm font-medium text-slate-300">Room Type</label>
+                <div className="mt-2 grid grid-cols-3 gap-2">
+                  {(["meeting", "broadcast", "hybrid"] as const).map((t) => {
+                    const m = ROOM_TYPE_META[t];
+                    const active = newType === t;
+                    return (
+                      <button
+                        key={t}
+                        type="button"
+                        onClick={() => setNewType(t)}
+                        className={`rounded-xl border p-3 text-center transition ${
+                          active
+                            ? "border-orange-500 bg-orange-500/10"
+                            : "border-slate-700 bg-slate-800/50 hover:border-slate-600"
+                        }`}
+                      >
+                        <div className="text-xl">{m.icon}</div>
+                        <div className="mt-1 text-xs font-medium text-white">{m.label}</div>
+                        <div className="mt-0.5 text-[10px] text-slate-400">
+                          {t === "meeting" && "No broadcast"}
+                          {t === "broadcast" && "Always broadcasts"}
+                          {t === "hybrid" && "Optional broadcast"}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Options row */}
+              <div className="grid grid-cols-2 gap-4">
+                <label className="flex items-center gap-2 text-sm text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={newBroadcast}
+                    onChange={(e) => setNewBroadcast(e.target.checked)}
+                    disabled={newType === "broadcast" || newType === "meeting"}
+                    className="rounded border-slate-600 bg-slate-800 text-orange-500 focus:ring-orange-500 disabled:opacity-40"
+                  />
+                  Broadcast
+                </label>
+                <label className="flex items-center gap-2 text-sm text-slate-300">
+                  <input
+                    type="checkbox"
+                    checked={newRecording}
+                    onChange={(e) => setNewRecording(e.target.checked)}
+                    className="rounded border-slate-600 bg-slate-800 text-orange-500 focus:ring-orange-500"
+                  />
+                  Recording
+                </label>
+              </div>
+
+              {/* Default Layout */}
+              {(newBroadcast || newType === "broadcast") && (
+                <div>
+                  <label className="block text-sm font-medium text-slate-300">Default Layout</label>
+                  <div className="mt-2 flex gap-2">
+                    {(["grid", "speaker", "single", "custom"] as const).map((l) => (
+                      <button
+                        key={l}
+                        type="button"
+                        onClick={() => setNewLayout(l)}
+                        className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
+                          newLayout === l
+                            ? "border-orange-500 bg-orange-500/10 text-orange-300"
+                            : "border-slate-700 bg-slate-800/50 text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        {LAYOUT_LABELS[l]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
+
             <div className="mt-6 flex justify-end gap-3">
               <button
-                onClick={() => setShowCreate(false)}
+                onClick={resetCreateForm}
                 className="rounded-xl border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800"
               >
                 Cancel

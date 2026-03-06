@@ -34,6 +34,11 @@ export type DemoRoom = {
   createdBy: string;
   isLive: boolean;
   participantCount: number;
+  roomType: "meeting" | "broadcast" | "hybrid";
+  broadcastEnabled: boolean;
+  recordingEnabled: boolean;
+  defaultLayout: "grid" | "speaker" | "single" | "custom";
+  allowedRoles: string[];
 };
 
 export type DemoBroadcast = {
@@ -149,6 +154,11 @@ export const DEMO_ROOMS: DemoRoom[] = [
     createdBy: "user_principal",
     isLive: false,
     participantCount: 0,
+    roomType: "broadcast",
+    broadcastEnabled: true,
+    recordingEnabled: true,
+    defaultLayout: "speaker",
+    allowedRoles: ["faculty_admin", "student_producer", "talent"],
   },
   {
     id: "room_media_studio",
@@ -157,6 +167,11 @@ export const DEMO_ROOMS: DemoRoom[] = [
     createdBy: "user_carter",
     isLive: false,
     participantCount: 0,
+    roomType: "hybrid",
+    broadcastEnabled: true,
+    recordingEnabled: true,
+    defaultLayout: "grid",
+    allowedRoles: ["faculty_admin", "student_producer"],
   },
   {
     id: "room_teacher_meeting",
@@ -165,6 +180,11 @@ export const DEMO_ROOMS: DemoRoom[] = [
     createdBy: "user_principal",
     isLive: false,
     participantCount: 0,
+    roomType: "meeting",
+    broadcastEnabled: false,
+    recordingEnabled: false,
+    defaultLayout: "grid",
+    allowedRoles: ["faculty_admin"],
   },
   {
     id: "room_football",
@@ -173,6 +193,11 @@ export const DEMO_ROOMS: DemoRoom[] = [
     createdBy: "user_carter",
     isLive: false,
     participantCount: 0,
+    roomType: "broadcast",
+    broadcastEnabled: true,
+    recordingEnabled: true,
+    defaultLayout: "custom",
+    allowedRoles: ["faculty_admin", "student_producer", "talent"],
   },
   {
     id: "room_board",
@@ -181,6 +206,11 @@ export const DEMO_ROOMS: DemoRoom[] = [
     createdBy: "user_principal",
     isLive: false,
     participantCount: 0,
+    roomType: "hybrid",
+    broadcastEnabled: true,
+    recordingEnabled: true,
+    defaultLayout: "speaker",
+    allowedRoles: ["faculty_admin"],
   },
   {
     id: "room_classroom101",
@@ -189,6 +219,11 @@ export const DEMO_ROOMS: DemoRoom[] = [
     createdBy: "user_carter",
     isLive: false,
     participantCount: 0,
+    roomType: "meeting",
+    broadcastEnabled: false,
+    recordingEnabled: false,
+    defaultLayout: "grid",
+    allowedRoles: ["faculty_admin", "student_producer", "talent"],
   },
 ];
 

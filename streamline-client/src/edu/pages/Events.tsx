@@ -441,10 +441,13 @@ export default function Events() {
   const canStartFromEvent = (ev: EduEvent) => {
     if (computeEduEventStatus(ev) === "canceled") return false;
     if (computeEduEventStatus(ev) === "ended") return false;
-    if (!isInStartWindow(ev)) return false;
 
+    // Faculty admin can start any non-canceled/non-ended event regardless of schedule
     if (isFacultyAdmin) return true;
+
+    // Student producers still require the time-window gate
     if (!isStudentProducer) return false;
+    if (!isInStartWindow(ev)) return false;
     if (!ev.studentProducerCanStart) return false;
     const displayName = String(me?.displayName || "").trim().toLowerCase();
     const producerName = String(ev.producerName || "").trim().toLowerCase();
@@ -1003,9 +1006,13 @@ function EventDetailDrawer({
 
   const canStartFromDrawer = useMemo(() => {
     if (status === "canceled" || status === "ended") return false;
-    if (!isInStartWindow(draft)) return false;
+
+    // Faculty admin can start any non-canceled/non-ended event regardless of schedule
     if (isFacultyAdmin) return true;
+
+    // Student producers still require the time-window gate
     if (!isStudentProducer) return false;
+    if (!isInStartWindow(draft)) return false;
     if (!draft.studentProducerCanStart) return false;
     const displayName = String(me?.displayName || "").trim().toLowerCase();
     const producerName = String(draft.producerName || "").trim().toLowerCase();

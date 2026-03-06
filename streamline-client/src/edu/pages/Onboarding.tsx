@@ -37,6 +37,7 @@ export default function Onboarding() {
   const [phone, setPhone] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [schoolSlug, setSchoolSlug] = useState("");
 
   useEffect(() => {
     // Keep the URL normalized so refresh/resume is stable, but don't fight user navigation.
@@ -118,6 +119,10 @@ export default function Onboarding() {
       try {
         localStorage.setItem("authToken", out.token);
       } catch {}
+
+      // capture the school slug from onboarding response (server may include it)
+      const resp = out as Record<string, unknown>;
+      if (typeof resp.slug === "string" && resp.slug) setSchoolSlug(resp.slug);
 
       await hydrateMe();
       await markProgress(3);
@@ -437,6 +442,32 @@ export default function Onboarding() {
                   <div className="rounded-xl border border-slate-800/60 bg-slate-900/30 p-4 text-sm text-slate-300">
                     Create your first event, then generate an embed code for your website.
                   </div>
+
+                  {/* School portal URL */}
+                  {schoolSlug && (
+                    <div className="rounded-xl border border-orange-500/30 bg-orange-500/5 p-4 space-y-2">
+                      <div className="text-sm font-semibold text-orange-300">Your School Portal</div>
+                      <div className="flex items-center gap-3">
+                        <code className="rounded-lg bg-slate-900 border border-slate-700 px-3 py-2 font-mono text-sm text-white">
+                          {window.location.origin}/streamline/edu/portal/{schoolSlug}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const url = `${window.location.origin}/streamline/edu/portal/${schoolSlug}`;
+                            navigator.clipboard.writeText(url).catch(() => {});
+                          }}
+                          className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700"
+                        >
+                          Copy
+                        </button>
+                      </div>
+                      <p className="text-xs text-slate-400">
+                        Share this link with staff and students. They'll use it to sign in or activate their accounts.
+                      </p>
+                    </div>
+                  )}
+
                   <div className="flex flex-wrap gap-3">
                     <Link
                       to="/streamline/edu/events"
@@ -450,6 +481,14 @@ export default function Onboarding() {
                     >
                       Open embed tools
                     </Link>
+                    {schoolSlug && (
+                      <Link
+                        to={`/streamline/edu/portal/${schoolSlug}`}
+                        className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-2 text-sm font-medium text-orange-300 hover:bg-orange-500/20"
+                      >
+                        Visit School Portal
+                      </Link>
+                    )}
                     <Link
                       to="/streamline/edu/dashboard"
                       className="rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-2 text-sm font-semibold text-white"

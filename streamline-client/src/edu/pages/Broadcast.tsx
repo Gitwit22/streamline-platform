@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useLocation } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { getEduEventById, setEduEventLive } from "../state/eduEvents";
+import { getEduEventById, setEduEventLive, listEduEvents, computeEduEventStatus, type EduEvent } from "../state/eduEvents";
 import { fetchEduOrg, postEduAudit, type EduOrgSettings } from "../api/settings";
 import { goLiveEduBroadcast, stopEduBroadcast, watchEduBroadcast, type GoLiveResponse } from "../api/broadcasts";
 import { isEduBypassEnabled } from "../state/eduMode";
@@ -176,10 +176,32 @@ export default function Broadcast() {
     return raw || null;
   }, [loc.search]);
 
+  // Manually-selected event (when navigating to Broadcast directly without ?eventId)
+  const [pickedEventId, setPickedEventId] = useState<string | null>(null);
+
+  const activeEventId = eventId || pickedEventId;
+
   const boundEvent = useMemo(() => {
-    if (!eventId) return null;
-    return getEduEventById(eventId);
-  }, [eventId]);
+    if (!activeEventId) return null;
+    return getEduEventById(activeEventId);
+  }, [activeEventId]);
+
+  // Available upcoming events for the event picker
+  const upcomingEvents = useMemo(() => {
+    const all = listEduEvents();
+    return all.filter((ev) => {
+      const st = computeEduEventStatus(ev);
+      return st !== "canceled" && st !== "ended";
+    }).sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
+  }, []);
+
+  function selectEvent(ev: EduEvent) {
+    setPickedEventId(ev.id);
+  }
+
+  function clearSelectedEvent() {
+    setPickedEventId(null);
+  }
 
   // Load org defaults/branding for Broadcast (faculty + approved student producers).
   useEffect(() => {
@@ -256,19 +278,19 @@ export default function Broadcast() {
     if (isLive) return;
     if (!org) return;
     if (appliedOrgDefaultsRef.current) return;
-    if (eventId && boundEvent) return;
+    if (activeEventId && boundEvent) return;
     appliedOrgDefaultsRef.current = true;
     setPublishHls(!!org.defaults?.publishToWebsite);
     setRecordMp4(!!org.defaults?.recordToArchive);
     setLayout(org.defaults?.defaultLayout === "speaker" ? "speaker" : "grid");
-  }, [org, isLive, eventId, boundEvent]);
+  }, [org, isLive, activeEventId, boundEvent]);
 
   // Apply template defaults when switching template (pre-live only)
   useEffect(() => {
     if (isLive) return;
-    // When opened from Events via ?eventId=..., keep the event's planned settings.
+    // When opened from Events via ?eventId=... or picked event, keep the event's planned settings.
     // Users can still change template manually after load.
-    if (eventId && boundEvent) return;
+    if (activeEventId && boundEvent) return;
     const t = templates.find((x) => x.id === templateId);
     if (!t) return;
     setLayout(t.defaults.layout);
@@ -276,7 +298,7 @@ export default function Broadcast() {
     setRecordMp4(t.defaults.recordMp4);
     setAlsoYoutube(t.defaults.youtube);
     setViewerAccess(t.defaults.viewers);
-  }, [templateId, templates, isLive, eventId, boundEvent]);
+  }, [templateId, templates, isLive, activeEventId, boundEvent]);
 
   // Live timer
   useEffect(() => {
@@ -487,7 +509,7 @@ export default function Broadcast() {
         layout,
         publishHls,
         recordMp4,
-        eventId,
+        eventId: activeEventId,
       });
       setGoLiveData(data);
       setBroadcastId(data.broadcast.id);
@@ -511,7 +533,7 @@ export default function Broadcast() {
         setYoutubeStatus(alsoYoutube ? "active" : "off");
         setViewerCount(Math.floor(5 + Math.random() * 20));
 
-        if (eventId) setEduEventLive(eventId, true);
+        if (activeEventId) setEduEventLive(activeEventId, true);
 
         // Auto-stop after 5 minutes in demo mode
         demoTimerRef.current = setTimeout(() => {
@@ -553,7 +575,7 @@ export default function Broadcast() {
       setRecordingStatus(recordMp4 ? "active" : "off");
       setYoutubeStatus(alsoYoutube ? "active" : "off");
 
-      if (eventId) setEduEventLive(eventId, true);
+      if (activeEventId) setEduEventLive(activeEventId, true);
     } catch (err: any) {
       console.error("[EduBroadcast] go-live error:", err);
       setGoLiveError(err?.message || "Failed to go live");
@@ -596,7 +618,7 @@ export default function Broadcast() {
     setRecordingStatus("off");
     setYoutubeStatus("off");
 
-    if (eventId) setEduEventLive(eventId, false);
+    if (activeEventId) setEduEventLive(activeEventId, false);
   }
 
   async function emergencyCut() {
@@ -626,13 +648,13 @@ export default function Broadcast() {
     setRecordingStatus(recordMp4 ? "error" : "off");
     setYoutubeStatus(alsoYoutube ? "error" : "off");
 
-    if (eventId) setEduEventLive(eventId, false);
+    if (activeEventId) setEduEventLive(activeEventId, false);
 
     void (async () => {
       try {
         await postEduAudit({
           action: "broadcast.emergency_cut",
-          eventId,
+          eventId: activeEventId,
           eventTitle: boundEvent?.title || null,
           targetId: broadcastId,
         });
@@ -825,15 +847,70 @@ export default function Broadcast() {
   if (!isLive) {
     return (
       <div className="space-y-6">
+        {/* Event binding — shows selected event or event picker */}
         {boundEvent ? (
           <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-5">
-            <div className="text-sm text-slate-400">Event</div>
-            <div className="mt-1 text-xl font-bold text-white">{boundEvent.title}</div>
-            <div className="mt-1 text-sm text-slate-400">
-              {new Date(boundEvent.startsAt).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+            <div className="flex items-center justify-between">
+              <div>
+                <div className="text-sm text-slate-400">Event</div>
+                <div className="mt-1 text-xl font-bold text-white">{boundEvent.title}</div>
+                <div className="mt-1 text-sm text-slate-400">
+                  {new Date(boundEvent.startsAt).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                </div>
+              </div>
+              {/* Allow clearing the picked event (not the URL-bound one) */}
+              {!eventId && pickedEventId ? (
+                <button
+                  type="button"
+                  onClick={clearSelectedEvent}
+                  className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-900"
+                >
+                  Change event
+                </button>
+              ) : null}
             </div>
           </div>
-        ) : null}
+        ) : (
+          <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
+            <div className="mb-4">
+              <h2 className="text-lg font-semibold text-white">Select an Event</h2>
+              <p className="mt-1 text-sm text-slate-400">Pick a planned event to pre-load its settings, or skip to start a fresh broadcast.</p>
+            </div>
+            {upcomingEvents.length > 0 ? (
+              <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
+                {upcomingEvents.map((ev) => {
+                  const st = computeEduEventStatus(ev);
+                  return (
+                    <button
+                      key={ev.id}
+                      type="button"
+                      onClick={() => selectEvent(ev)}
+                      className="flex w-full items-center justify-between gap-4 rounded-xl border border-slate-800/50 bg-slate-950/40 p-4 text-left transition-colors hover:border-orange-500/30 hover:bg-slate-900/40"
+                    >
+                      <div className="min-w-0">
+                        <div className="font-medium text-white truncate">{ev.title}</div>
+                        <div className="mt-0.5 text-xs text-slate-400">
+                          {new Date(ev.startsAt).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                          {" · "}
+                          <span className={st === "live" ? "text-red-400 font-semibold" : st === "ready" ? "text-emerald-400" : "text-slate-500"}>
+                            {st === "live" ? "LIVE" : st === "ready" ? "Ready" : "Scheduled"}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex-shrink-0 rounded-lg bg-orange-500/10 px-3 py-1.5 text-xs font-semibold text-orange-300">
+                        Select
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-slate-800/50 bg-slate-950/40 p-4 text-sm text-slate-400">
+                No upcoming events. You can start a fresh broadcast below.
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Section 1 — Template picker */}
         <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">

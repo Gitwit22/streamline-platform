@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import Students from "./Students";
+import StudentManagement from "./StudentManagement";
+import StaffManagement from "./StaffManagement";
 import Directory from "./Directory";
 import People from "./People";
 
@@ -64,8 +65,8 @@ export default function PeopleHub() {
 
       {/* Tab content */}
       <div>
-        {tab === "staff" && <Directory />}
-        {tab === "students" && <Students />}
+        {tab === "staff" && <StaffManagement />}
+        {tab === "students" && <StudentManagement />}
         {tab === "manage" && <People />}
       </div>
     </div>
