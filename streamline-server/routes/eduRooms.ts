@@ -1,5 +1,5 @@
 import express from "express";
-import { firestore as db } from "../firebaseAdmin";
+import admin from "firebase-admin";
 import { requireAuth } from "../middleware/requireAuth";
 import { writeEduAudit } from "../lib/eduAudit";
 import { tenantCol, globalCol } from "../lib/dbPaths";
@@ -87,8 +87,8 @@ router.post("/rooms", requireAuth as any, async (req: any, res) => {
       createdBy: uid,
       isLive: false,
       participantCount: 0,
-      createdAt: db.FieldValue.serverTimestamp(),
-      updatedAt: db.FieldValue.serverTimestamp(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
     await roomRef.set(roomData);
@@ -96,9 +96,9 @@ router.post("/rooms", requireAuth as any, async (req: any, res) => {
     writeEduAudit({
       orgId: ctx.orgId,
       actorUid: uid,
+      actorName: "",
       action: "room.create",
       targetId: roomRef.id,
-      meta: { name },
     });
 
     return res.status(201).json({ id: roomRef.id, ...roomData, createdAt: Date.now() });

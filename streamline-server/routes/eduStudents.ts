@@ -1,5 +1,5 @@
 import express from "express";
-import { firestore as db } from "../firebaseAdmin";
+import admin from "firebase-admin";
 import { requireAuth } from "../middleware/requireAuth";
 import { writeEduAudit } from "../lib/eduAudit";
 import { tenantCol, globalCol } from "../lib/dbPaths";
@@ -101,8 +101,8 @@ router.post("/students", requireAuth as any, async (req: any, res) => {
       orgId: ctx.orgId,
       orgRole: role,
       accountType: "student",
-      createdAt: db.FieldValue.serverTimestamp(),
-      updatedAt: db.FieldValue.serverTimestamp(),
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     };
 
     await studentRef.set(studentData);
@@ -110,9 +110,9 @@ router.post("/students", requireAuth as any, async (req: any, res) => {
     writeEduAudit({
       orgId: ctx.orgId,
       actorUid: uid,
+      actorName: "",
       action: "student.create",
       targetId: studentRef.id,
-      meta: { name, email },
     });
 
     return res.status(201).json({ id: studentRef.id, ...studentData, createdAt: Date.now() });
