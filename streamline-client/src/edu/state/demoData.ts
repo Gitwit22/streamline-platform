@@ -22,7 +22,7 @@ export type DemoUser = {
   email: string;
   role: "school_admin" | "teacher" | "student_media" | "student";
   /** maps to existing EDU org roles */
-  orgRole: "faculty_admin" | "student_producer" | "talent" | "viewer";
+  orgRole: "faculty_admin" | "student_producer" | "talent";
   department: string | null;
   avatar: string | null;
 };
@@ -135,24 +135,6 @@ export const DEMO_USERS: DemoUser[] = [
     role: "student_media",
     orgRole: "talent",
     department: "Drama",
-    avatar: null,
-  },
-  {
-    id: "user_student1",
-    name: "Sofia Patel",
-    email: "sofia.p@student.centralhs.edu",
-    role: "student",
-    orgRole: "viewer",
-    department: null,
-    avatar: null,
-  },
-  {
-    id: "user_student2",
-    name: "Liam O'Brien",
-    email: "liam.o@student.centralhs.edu",
-    role: "student",
-    orgRole: "viewer",
-    department: null,
     avatar: null,
   },
 ];

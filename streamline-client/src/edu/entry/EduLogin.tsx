@@ -320,7 +320,7 @@ export default function EduLogin() {
             </div>
 
             <div className="mb-8 flex items-center justify-between">
-              <Link to="/streamline/edu" className="group flex items-center gap-2 text-sm text-slate-400 hover:text-white">
+              <Link to="/streamline/edu/get-started" className="group flex items-center gap-2 text-sm text-slate-400 hover:text-white">
                 <svg
                   className="h-[18px] w-[18px] transition-transform group-hover:-translate-x-0.5"
                   viewBox="0 0 24 24"

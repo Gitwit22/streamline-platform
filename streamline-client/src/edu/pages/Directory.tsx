@@ -16,7 +16,7 @@ type DirectoryEntry = {
   avatar: string | null;
 };
 
-type EduOrgRole = "faculty_admin" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
+type EduOrgRole = "faculty_admin" | "student_producer" | "student_producer_assigned" | "talent";
 
 /* ── Helpers ──────────────────────────────────────────────────── */
 
@@ -57,15 +57,13 @@ const DEMO_ENTRIES: DirectoryEntry[] = [
   { id: "demo_004", name: "Emily Chen", role: "student_producer_assigned", department: "AV Club", avatar: null },
   { id: "demo_005", name: "Marcus Johnson", role: "talent", department: "Drama", avatar: null },
   { id: "demo_006", name: "Sofia Patel", role: "talent", department: null, avatar: null },
-  { id: "demo_007", name: "Liam O'Brien", role: "viewer", department: null, avatar: null },
-  { id: "demo_008", name: "Ava Martinez", role: "viewer", department: null, avatar: null },
 ];
 
 /* ── Component ────────────────────────────────────────────────── */
 
 export default function Directory() {
   const me = useEduMe();
-  const myRole = String(me?.orgRole || me?.role || "viewer") as EduOrgRole;
+  const myRole = String(me?.orgRole || me?.role || "faculty_admin") as EduOrgRole;
   const myUid = me?.uid || "";
   const myOrgId = String(me?.orgId || "");
 
@@ -119,8 +117,8 @@ export default function Directory() {
         return name.includes(q) || dept.includes(q);
       });
     }
-    // Sort: faculty first, then producers, then talent, then viewer
-    const order: Record<string, number> = { faculty_admin: 0, student_producer: 1, student_producer_assigned: 1, talent: 2, viewer: 3 };
+    // Sort: faculty first, then producers, then talent
+    const order: Record<string, number> = { faculty_admin: 0, student_producer: 1, student_producer_assigned: 1, talent: 2 };
     items.sort((a, b) => (order[a.role] ?? 9) - (order[b.role] ?? 9));
     return items;
   }, [entries, query, roleFilter]);
@@ -148,7 +146,6 @@ export default function Directory() {
     { value: "faculty_admin", label: "Faculty" },
     { value: "producer", label: "Producers" },
     { value: "talent", label: "Talent" },
-    { value: "viewer", label: "Viewers" },
   ];
 
   return (

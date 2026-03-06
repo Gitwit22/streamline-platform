@@ -343,7 +343,7 @@ export default function EmbedEventPlayer() {
                 />
               ) : (
                 <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 px-6 text-center">
-                  <img src="/logo.png" alt="StreamLine" className="h-12 w-auto opacity-95" />
+                  <img src="/edu_logo.png" alt="StreamLine EDU" className="h-12 w-auto opacity-95" />
 
                   {hlsUrl ? (
                     <>

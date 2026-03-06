@@ -1487,10 +1487,9 @@ export default function Broadcast() {
             </div>
           </div>
 
-          {/* Phase 2 placeholders */}
-          <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6">
-            <div className="text-sm font-medium text-white">Quick actions (Phase 2)</div>
-            <div className="mt-2 text-sm text-slate-400">Mark highlight • Send homepage banner announcement</div>
+          {/* Branding */}
+          <div className="flex items-center justify-center rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6">
+            <img src="/edu_logo.png" alt="StreamLine EDU" className="h-14 w-auto opacity-80" />
           </div>
         </div>
       </div>

@@ -19,26 +19,37 @@ export default function EduSidebar() {
   const isDemo = isEduBypassEnabled();
   const demoRole = useSyncExternalStore(subscribeDemoRole, getDemoRole, getDemoRole);
 
-  const role = String(me?.orgRole || me?.role || "viewer");
+  const role = String(me?.orgRole || me?.role || "faculty_admin");
   const schoolName = String(me?.orgName || "Your School");
   const isFacultyAdmin = role === "faculty_admin";
-  const canPeople = isFacultyAdmin || role === "student_producer" || role === "student_producer_assigned";
+  const isStudentProducer = role === "student_producer" || role === "student_producer_assigned";
 
   const items = useMemo<NavItem[]>(
-    () => [
-      { id: "dashboard", label: "Dashboard", path: "/streamline/edu/dashboard" },
-      { id: "broadcast", label: "Broadcast Studio", path: "/streamline/edu/broadcast" },
-      { id: "rooms", label: "Rooms", path: "/streamline/edu/rooms" },
-      { id: "events", label: "Events", path: "/streamline/edu/events" },
-      { id: "recordings", label: "Recordings", path: "/streamline/edu/recordings" },
-      { id: "archive", label: "Archive", path: "/streamline/edu/archive" },
-      { id: "students", label: "Students", path: "/streamline/edu/students" },
-      { id: "directory", label: "Staff Directory", path: "/streamline/edu/directory" },
-      ...(canPeople ? [{ id: "people", label: "People", path: "/streamline/edu/people" }] : []),
-      { id: "embed", label: "Website Embed", path: "/streamline/edu/embed" },
-      ...(isFacultyAdmin ? [{ id: "settings", label: "School Settings", path: "/streamline/edu/settings" }] : []),
-    ],
-    [isFacultyAdmin, canPeople]
+    () => {
+      if (isStudentProducer) {
+        return [
+          { id: "dashboard", label: "Dashboard", path: "/streamline/edu/dashboard" },
+          { id: "broadcast", label: "Broadcast Studio", path: "/streamline/edu/broadcast" },
+          { id: "media-library", label: "Recordings", path: "/streamline/edu/media-library" },
+          { id: "people", label: "Students", path: "/streamline/edu/people" },
+        ];
+      }
+      return [
+        { id: "dashboard", label: "Dashboard", path: "/streamline/edu/dashboard" },
+        { id: "broadcast", label: "Broadcast Studio", path: "/streamline/edu/broadcast" },
+        { id: "rooms", label: "Rooms", path: "/streamline/edu/rooms" },
+        { id: "events", label: "Events", path: "/streamline/edu/events" },
+        { id: "media-library", label: "Media Library", path: "/streamline/edu/media-library" },
+        { id: "people", label: "People", path: "/streamline/edu/people" },
+        ...(isFacultyAdmin ? [
+          { id: "chat", label: "Faculty Chat", path: "/streamline/edu/chat" },
+          { id: "calls", label: "Video Calls", path: "/streamline/edu/calls" },
+        ] : []),
+        { id: "embed", label: "Website Embed", path: "/streamline/edu/embed" },
+        ...(isFacultyAdmin ? [{ id: "settings", label: "School Settings", path: "/streamline/edu/settings" }] : []),
+      ];
+    },
+    [isFacultyAdmin, isStudentProducer]
   );
 
   useEffect(() => {
@@ -120,7 +131,6 @@ export default function EduSidebar() {
               { key: "admin" as DemoRoleKey, label: "Admin", desc: "Principal Johnson", color: "orange" },
               { key: "teacher" as DemoRoleKey, label: "Teacher", desc: "Mr. Carter", color: "blue" },
               { key: "student_producer" as DemoRoleKey, label: "Student Producer", desc: "Jake Thompson", color: "purple" },
-              { key: "student" as DemoRoleKey, label: "Student", desc: "Sofia Patel", color: "emerald" },
             ]).map((opt) => {
               const active = demoRole === opt.key;
               const colorMap: Record<string, string> = {

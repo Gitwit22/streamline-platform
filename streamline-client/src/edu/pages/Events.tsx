@@ -372,7 +372,7 @@ export default function Events() {
   const nav = useNavigate();
   const me = useEduMe();
 
-  const roleRaw = String(me?.orgRole || me?.role || "viewer");
+  const roleRaw = String(me?.orgRole || me?.role || "faculty_admin");
   const isFacultyAdmin = roleRaw === "faculty_admin";
   const isStudentProducer = roleRaw === "student_producer" || roleRaw === "student_producer_assigned";
 

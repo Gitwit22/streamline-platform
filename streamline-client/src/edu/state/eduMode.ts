@@ -61,7 +61,7 @@ export const clearEduBypassEnabled = () => {
 
 /* ── Demo role switcher ──────────────────────────────────────── */
 
-export type DemoRoleKey = "admin" | "teacher" | "student_producer" | "student";
+export type DemoRoleKey = "admin" | "teacher" | "student_producer";
 
 const DEMO_ROLE_KEY = "sl_edu_demo_role";
 
@@ -75,7 +75,7 @@ export function subscribeDemoRole(fn: () => void) {
 export function getDemoRole(): DemoRoleKey {
   try {
     const v = localStorage.getItem(DEMO_ROLE_KEY);
-    if (v === "admin" || v === "teacher" || v === "student_producer" || v === "student") return v;
+    if (v === "admin" || v === "teacher" || v === "student_producer") return v;
   } catch {}
   return "admin";
 }
@@ -110,13 +110,6 @@ export function getDemoPersona(role: DemoRoleKey) {
         displayName: "Jake Thompson",
         role: "student_producer" as const,
         orgRole: "student_producer" as const,
-      };
-    case "student":
-      return {
-        uid: "edu-demo-student",
-        displayName: "Sofia Patel",
-        role: "viewer" as const,
-        orgRole: "viewer" as const,
       };
   }
 }

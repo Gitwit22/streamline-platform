@@ -165,7 +165,7 @@ function writeDemoState(next: { org: EduOrgSettings; audit: EduAuditAction[]; st
 export default function Settings() {
   const nav = useNavigate();
   const me = useEduMe();
-  const roleRaw = String(me?.orgRole || me?.role || "viewer");
+  const roleRaw = String(me?.orgRole || me?.role || "faculty_admin");
   const isFacultyAdmin = roleRaw === "faculty_admin";
   const isBypass = isEduBypassEnabled();
 

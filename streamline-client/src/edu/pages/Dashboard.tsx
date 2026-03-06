@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { computeEduEventStatus, listEduEvents } from "../state/eduEvents";
 import { isEduBypassEnabled } from "../state/eduMode";
+import { useEduMe } from "../layout/EduProtectedRoute";
 import {
   DEMO_BROADCASTS,
   DEMO_RECORDINGS,
@@ -13,8 +14,12 @@ import {
 
 export default function Dashboard() {
   const nav = useNavigate();
+  const me = useEduMe();
   const isDemo = isEduBypassEnabled();
   const school = isDemo ? getDemoSchool() : null;
+
+  const role = String(me?.orgRole || me?.role || "faculty_admin");
+  const isStudentProducer = role === "student_producer" || role === "student_producer_assigned";
 
   /* live broadcast detection */
   const liveBroadcasts = useMemo(() => {
@@ -68,6 +73,123 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
+      {/* ── Student Producer: simplified dashboard ──────────── */}
+      {isStudentProducer ? (
+        <>
+          {/* Welcome banner */}
+          <div className="rounded-2xl border border-slate-700 bg-gradient-to-r from-slate-800 to-slate-800/50 p-6">
+            <h1 className="text-2xl font-bold text-white">Welcome to the Student Dashboard</h1>
+            <p className="mt-2 text-sm text-slate-400">
+              This is your hub for managing broadcasts, viewing recordings, and collaborating with other student producers.
+            </p>
+          </div>
+
+          {/* Live banner */}
+          {liveBroadcasts.length > 0 && (
+            <div className="rounded-2xl border border-red-500/40 bg-gradient-to-r from-red-900/30 to-slate-900/50 p-4">
+              <div className="flex items-center gap-3">
+                <div className="h-3 w-3 animate-pulse rounded-full bg-red-500" />
+                <span className="font-semibold text-red-400">LIVE NOW</span>
+                <span className="text-white">{liveBroadcasts[0].title}</span>
+                <span className="text-sm text-slate-400">{liveBroadcasts[0].viewers} viewers</span>
+                <button onClick={() => nav("/streamline/edu/broadcast")} className="ml-auto rounded-lg bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-500">
+                  Watch
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Stat cards: Broadcast + Recordings + Students */}
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+            <div
+              className={`rounded-2xl border p-5 ${
+                isLive
+                  ? "border-red-500/30 bg-red-500/10"
+                  : "border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50"
+              }`}
+            >
+              <div className="mb-3 flex items-center justify-between">
+                <span className="text-sm text-slate-400">Broadcast Status</span>
+                {isLive ? <div className="h-3 w-3 animate-pulse rounded-full bg-red-500" /> : null}
+              </div>
+              <div className={`text-2xl font-bold ${isLive ? "text-red-400" : "text-slate-500"}`}>{isLive ? "LIVE" : "OFF AIR"}</div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-5">
+              <div className="mb-3 text-sm text-slate-400">Recordings</div>
+              <div className="text-2xl font-bold text-white">{recordingCount}</div>
+              <div className="mt-1 text-sm text-emerald-400">this semester</div>
+            </div>
+
+            <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-5">
+              <div className="mb-3 text-sm text-slate-400">Students</div>
+              <div className="text-2xl font-bold text-white">{studentCount}</div>
+              <div className="mt-1 text-sm text-slate-400">{mediaStudents} media club</div>
+            </div>
+          </div>
+
+          {/* Quick actions: Broadcast + Recordings */}
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <button
+              onClick={() => nav("/streamline/edu/broadcast")}
+              className="group rounded-2xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 p-6 text-left transition-transform hover:-translate-y-1"
+            >
+              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-white/20 transition-transform group-hover:scale-110">
+                <svg className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+              </div>
+              <div className="text-xl font-bold text-white">Broadcast Studio</div>
+              <div className="mt-1 text-sm text-white/85">Go live to your school network</div>
+            </button>
+
+            <button
+              onClick={() => nav("/streamline/edu/media-library")}
+              className="group rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6 text-left transition-transform hover:-translate-y-1"
+            >
+              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-orange-500/10 text-orange-300 transition-transform group-hover:scale-110">
+                <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
+                </svg>
+              </div>
+              <div className="text-xl font-bold text-white">Recordings</div>
+              <div className="mt-1 text-sm text-slate-400">Browse past broadcasts</div>
+            </button>
+          </div>
+
+          {/* Recent recordings */}
+          <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6">
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-white">Recent Recordings</h3>
+              <button onClick={() => nav("/streamline/edu/media-library")} className="text-sm text-orange-400 hover:text-orange-300">
+                View All →
+              </button>
+            </div>
+            <div className="space-y-3">
+              {recentRecordings.map((recording) => (
+                <div
+                  key={recording.id}
+                  className="flex items-center gap-4 rounded-xl border border-slate-700/60 bg-slate-900/40 p-4 transition-colors hover:bg-slate-900/60"
+                >
+                  <div className="flex h-10 w-16 items-center justify-center rounded-lg bg-slate-700">
+                    <svg className="h-5 w-5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                    </svg>
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate font-medium text-white">{recording.title}</div>
+                    <div className="text-sm text-slate-400">{recording.duration} • {recording.date}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      ) : (
+      <>
+      {/* ── Faculty / Admin: full dashboard ────────────────── */}
+
       {/* School header in demo */}
       {isDemo && school && (
         <div className="flex items-center gap-3">
@@ -288,6 +410,8 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
+      </>
+      )}
     </div>
   );
 }

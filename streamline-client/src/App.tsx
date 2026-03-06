@@ -30,8 +30,12 @@ import EduDirectory from "./edu/pages/Directory";
 import EduRooms from "./edu/pages/Rooms";
 import EduRecordings from "./edu/pages/Recordings";
 import EduStudents from "./edu/pages/Students";
-import EduStudentLogin from "./edu/entry/EduStudentLogin";
-import EduStudentPortal from "./edu/pages/StudentPortal";
+import EduMediaLibrary from "./edu/pages/MediaLibrary";
+import EduPeopleHub from "./edu/pages/PeopleHub";
+import EduLearnMore from "./edu/entry/EduLearnMore";
+import EduGetStarted from "./edu/entry/EduGetStarted";
+import EduChat from "./edu/pages/Chat";
+import EduCalls from "./edu/pages/Calls";
 
 import CorporateLanding from "./corporate/entry/CorporateLanding";
 import CorporateLogin from "./corporate/entry/CorporateLogin";
@@ -92,8 +96,8 @@ function App() {
       if (
         path === "/streamline/edu" ||
         path.startsWith("/streamline/edu/login") ||
-        path.startsWith("/streamline/edu/student-login") ||
-        path.startsWith("/streamline/edu/student-portal") ||
+        path.startsWith("/streamline/edu/learn-more") ||
+        path.startsWith("/streamline/edu/get-started") ||
         path.startsWith("/streamline/edu/onboarding") ||
         path.startsWith("/streamline/edu/embed/event") ||
         path === "/streamline/corporate" ||
@@ -282,9 +286,9 @@ function App() {
       {/* EDU lane */}
       <Route path="/streamline/edu" element={<Outlet />}>
         <Route index element={<EduLanding />} />
+        <Route path="learn-more" element={<EduLearnMore />} />
+        <Route path="get-started" element={<EduGetStarted />} />
         <Route path="login" element={<EduLogin />} />
-        <Route path="student-login" element={<EduStudentLogin />} />
-        <Route path="student-portal" element={<EduStudentPortal />} />
         <Route path="onboarding" element={<EduOnboarding />} />
 
         {/* Public EDU embed players (no auth) */}
@@ -301,19 +305,32 @@ function App() {
           <Route path="broadcast" element={<EduBroadcast />} />
           <Route path="rooms" element={<EduRooms />} />
           <Route path="events" element={<EduEvents />} />
-          <Route path="recordings" element={<EduRecordings />} />
-          <Route path="archive" element={<EduArchive />} />
-          <Route path="students" element={<EduStudents />} />
-          <Route path="directory" element={<EduDirectory />} />
+          {/* Merged: Media Library (Recordings + Archive) */}
+          <Route path="media-library" element={<EduMediaLibrary />} />
+          {/* Merged: People (Staff Directory + Students + Roles) */}
+          <Route path="people" element={<EduPeopleHub />} />
+          {/* Legacy redirects for bookmarks / old links */}
+          <Route path="recordings" element={<Navigate to="/streamline/edu/media-library" replace />} />
+          <Route path="archive" element={<Navigate to="/streamline/edu/media-library" replace />} />
+          <Route path="students" element={<Navigate to="/streamline/edu/people" replace />} />
+          <Route path="directory" element={<Navigate to="/streamline/edu/people" replace />} />
+          <Route path="embed" element={<EduEmbed />} />
           <Route
-            path="people"
+            path="chat"
             element={
-              <EduRoleGuard allow={["faculty_admin", "student_producer", "student_producer_assigned"]}>
-                <EduPeople />
+              <EduRoleGuard allow={["faculty_admin"]}>
+                <EduChat />
               </EduRoleGuard>
             }
           />
-          <Route path="embed" element={<EduEmbed />} />
+          <Route
+            path="calls"
+            element={
+              <EduRoleGuard allow={["faculty_admin"]}>
+                <EduCalls />
+              </EduRoleGuard>
+            }
+          />
           <Route
             path="settings"
             element={

@@ -185,7 +185,6 @@ function RoleSelect({
       <option value="student_producer">Student Producer</option>
       {includeAssigned ? <option value="student_producer_assigned">Student Producer (Assigned)</option> : null}
       <option value="talent">Talent</option>
-      <option value="viewer">Viewer</option>
     </select>
   );
 }
@@ -193,7 +192,7 @@ function RoleSelect({
 export default function People() {
   const me = useEduMe();
 
-  const roleRaw = String(me?.orgRole || me?.role || "viewer");
+  const roleRaw = String(me?.orgRole || me?.role || "faculty_admin");
   const isFacultyAdmin = roleRaw === "faculty_admin";
   const isStudentProducer = roleRaw === "student_producer" || roleRaw === "student_producer_assigned";
 
