@@ -1,12 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { isEduBypassEnabled } from "../state/eduMode";
-import {
-  DEMO_BROADCASTS,
-  DEMO_RECORDINGS,
-  DEMO_ROOMS,
-  getDemoOrgName,
-} from "../state/demoData";
+import { apiFetchAuth } from "../../lib/api";
+import { computeEduEventStatus, listEduEvents } from "../state/eduEvents";
 
 type TabId = "live" | "upcoming" | "recordings" | "rooms" | "media";
 
@@ -21,28 +16,56 @@ function formatDate(iso: string) {
 export default function StudentPortal() {
   const nav = useNavigate();
   const [tab, setTab] = useState<TabId>("live");
-  const isDemo = isEduBypassEnabled();
-  const schoolName = isDemo ? getDemoOrgName() : "Your School";
+  const [schoolName, setSchoolName] = useState("Your School");
 
-  const liveBroadcasts = useMemo(
-    () => (isDemo ? DEMO_BROADCASTS.filter((b) => b.status === "live") : []),
-    [isDemo],
-  );
+  /* ── Fetch live data ──────────────────────────────────── */
+  const [liveBroadcasts, setLiveBroadcasts] = useState<{ id: string; title: string; viewers: number; status: string }[]>([]);
+  const [recordings, setRecordings] = useState<{ id: string; title: string; duration: string; date: string }[]>([]);
+  const [rooms, setRooms] = useState<{ id: string; name: string; description: string; isLive: boolean }[]>([]);
 
-  const upcomingEvents = useMemo(
-    () =>
-      isDemo
-        ? [
-            { id: "evt_1", title: "Morning Announcements", date: "Tomorrow • 8:00 AM" },
-            { id: "evt_2", title: "Basketball Game", date: "Friday • 7:00 PM" },
-            { id: "evt_3", title: "Media Club Show", date: "Next Monday • 3:30 PM" },
-          ]
-        : [],
-    [isDemo],
-  );
+  useEffect(() => {
+    Promise.allSettled([
+      apiFetchAuth("/api/edu/broadcasts?status=live").then((r) => r.json()),
+      apiFetchAuth("/api/edu/recordings?limit=20").then((r) => r.json()),
+      apiFetchAuth("/api/edu/rooms").then((r) => r.json()),
+      apiFetchAuth("/api/edu/org").then((r) => r.json()),
+    ]).then(([bRes, rRes, rmRes, orgRes]) => {
+      if (bRes.status === "fulfilled") setLiveBroadcasts(bRes.value?.broadcasts ?? []);
+      if (rRes.status === "fulfilled") {
+        setRecordings(
+          (rRes.value?.recordings ?? []).map((r: any) => ({
+            id: r.id,
+            title: r.title || "Untitled",
+            duration: r.duration || "",
+            date: r.recordedAt || r.createdAt || "",
+          })),
+        );
+      }
+      if (rmRes.status === "fulfilled") setRooms(rmRes.value?.rooms ?? []);
+      if (orgRes.status === "fulfilled" && orgRes.value?.org?.name) setSchoolName(orgRes.value.org.name);
+    });
+  }, []);
 
-  const recordings = useMemo(() => (isDemo ? DEMO_RECORDINGS : []), [isDemo]);
-  const rooms = useMemo(() => (isDemo ? DEMO_ROOMS : []), [isDemo]);
+  const upcomingEvents = useMemo(() => {
+    const all = listEduEvents();
+    return all
+      .filter((e) => {
+        const s = computeEduEventStatus(e);
+        return s !== "ended" && s !== "canceled";
+      })
+      .slice(0, 5)
+      .map((e) => ({
+        id: e.id,
+        title: e.title,
+        date: new Date(e.startsAt).toLocaleDateString(undefined, {
+          weekday: "short",
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        }),
+      }));
+  }, []);
 
   const tabs: { id: TabId; label: string }[] = [
     { id: "live", label: "Live Broadcasts" },
@@ -65,11 +88,6 @@ export default function StudentPortal() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            {isDemo && (
-              <span className="rounded-full border border-amber-500/20 bg-amber-500/10 px-3 py-1 text-[11px] text-amber-300">
-                DEMO
-              </span>
-            )}
             <button
               onClick={() => nav("/streamline/edu")}
               className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700"

@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useEduMe } from "./EduProtectedRoute";
 import { apiFetch, clearAuthStorage } from "../../lib/api";
 import { logout } from "../../lib/logout";
-import { isEduBypassEnabled, getDemoRole, setDemoRole, subscribeDemoRole, type DemoRoleKey } from "../state/eduMode";
 
 type NavItem = { id: string; label: string; path: string };
 
@@ -15,9 +14,6 @@ export default function EduSidebar() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
-
-  const isDemo = isEduBypassEnabled();
-  const demoRole = useSyncExternalStore(subscribeDemoRole, getDemoRole, getDemoRole);
 
   const role = String(me?.orgRole || me?.role || "faculty_admin");
   const schoolName = String(me?.orgName || "Your School");
@@ -122,38 +118,6 @@ export default function EduSidebar() {
           );
         })}
       </div>
-
-      {/* ── Demo Role Switcher ─────────────────────────────── */}
-      {isDemo && (
-        <div className="border-t border-slate-700 px-4 py-3">
-          <div className="mb-2 font-mono text-[10px] tracking-[0.2em] text-slate-500">DEMO VIEW AS</div>
-          <div className="space-y-1">
-            {([
-              { key: "admin" as DemoRoleKey, label: "Admin", desc: "Principal Johnson", color: "orange" },
-              { key: "teacher" as DemoRoleKey, label: "Teacher", desc: "Mr. Carter", color: "blue" },
-              { key: "student_producer" as DemoRoleKey, label: "Student Producer", desc: "Jake Thompson", color: "purple" },
-            ]).map((opt) => {
-              const active = demoRole === opt.key;
-              const colorMap: Record<string, string> = {
-                orange: active ? "border-orange-500 bg-orange-500/15 text-orange-300" : "border-transparent text-slate-400 hover:bg-slate-800/60 hover:text-slate-200",
-                blue: active ? "border-blue-500 bg-blue-500/15 text-blue-300" : "border-transparent text-slate-400 hover:bg-slate-800/60 hover:text-slate-200",
-                purple: active ? "border-purple-500 bg-purple-500/15 text-purple-300" : "border-transparent text-slate-400 hover:bg-slate-800/60 hover:text-slate-200",
-                emerald: active ? "border-emerald-500 bg-emerald-500/15 text-emerald-300" : "border-transparent text-slate-400 hover:bg-slate-800/60 hover:text-slate-200",
-              };
-              return (
-                <button
-                  key={opt.key}
-                  onClick={() => setDemoRole(opt.key)}
-                  className={`flex w-full items-center gap-2 rounded-lg border-l-2 px-2.5 py-1.5 text-left text-xs transition-colors ${colorMap[opt.color]}`}
-                >
-                  <span className="font-medium">{opt.label}</span>
-                  <span className="ml-auto text-[10px] opacity-60">{opt.desc}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       <div className="border-t border-slate-700 p-4">
         <div ref={menuRef} className="relative">

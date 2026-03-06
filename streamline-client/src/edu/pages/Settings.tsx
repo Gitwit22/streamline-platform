@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { isEduBypassEnabled } from "../state/eduMode";
 import {
   fetchEduAudit,
   fetchEduOrg,
@@ -91,83 +90,11 @@ function actionLabel(action: string) {
   return action || "Action";
 }
 
-// Maps to Firestore: env/test/tenants/edu/org
-const DEMO_STATE_KEY = "sl_edu_demo_settings_v1";
-
-function readDemoState(): { org: EduOrgSettings; audit: EduAuditAction[]; storage: EduStorageSummary } {
-  const now = Date.now();
-
-  const defaults: { org: EduOrgSettings; audit: EduAuditAction[]; storage: EduStorageSummary } = {
-    org: {
-      id: "test-edu-org",
-      name: "EDU Demo",
-      timezone: "America/New_York",
-      branding: {
-        logoDataUrl: null,
-        accentColor: null,
-        playerTitleText: null,
-      },
-      defaults: {
-        publishToWebsite: true,
-        recordToArchive: true,
-        defaultLayout: "grid",
-        studentProducersCanStart: false,
-        requireAssignmentToStart: true,
-      },
-      accessPolicy: {
-        embedVisibility: "public",
-        restrictedToSchoolLogin: "coming_soon",
-      },
-      retentionDays: 30,
-    },
-    audit: [],
-    storage: {
-      recordingsCount: 0,
-      storageBytes: 0,
-      updatedAt: now,
-    },
-  };
-
-  try {
-    const raw = localStorage.getItem(DEMO_STATE_KEY);
-    if (!raw) return defaults;
-    const parsed = JSON.parse(raw);
-    if (!parsed?.org) return defaults;
-    const tzRaw = (parsed.org as { timezone?: unknown })?.timezone;
-    const timezone = typeof tzRaw === "string" && tzRaw.trim() ? tzRaw.trim() : "America/New_York";
-    return {
-      org: {
-        ...(parsed.org as EduOrgSettings),
-        timezone,
-      },
-      audit: Array.isArray(parsed.audit) ? (parsed.audit as EduAuditAction[]) : [],
-      storage: parsed.storage
-        ? ({
-            recordingsCount: Number(parsed.storage.recordingsCount || 0),
-            storageBytes: Number(parsed.storage.storageBytes || 0),
-            updatedAt: Number(parsed.storage.updatedAt || now),
-          } satisfies EduStorageSummary)
-        : defaults.storage,
-    };
-  } catch {
-    return defaults;
-  }
-}
-
-function writeDemoState(next: { org: EduOrgSettings; audit: EduAuditAction[]; storage: EduStorageSummary }) {
-  try {
-    localStorage.setItem(DEMO_STATE_KEY, JSON.stringify(next));
-  } catch {
-    // ignore
-  }
-}
-
 export default function Settings() {
   const nav = useNavigate();
   const me = useEduMe();
   const roleRaw = String(me?.orgRole || me?.role || "faculty_admin");
   const isFacultyAdmin = roleRaw === "faculty_admin";
-  const isBypass = isEduBypassEnabled();
 
   if (!me || !isFacultyAdmin) {
     return (
@@ -208,35 +135,6 @@ export default function Settings() {
     let cancelled = false;
     setLoading(true);
     setLoadError(null);
-
-    if (isBypass) {
-      const demo = readDemoState();
-      setOrg(demo.org);
-      setStorage(demo.storage);
-      setAudit(demo.audit);
-
-      setName(String(demo.org.name || ""));
-      setLogoDataUrl(demo.org.branding?.logoDataUrl || null);
-      setAccentColor(demo.org.branding?.accentColor || null);
-      setPlayerTitleText(demo.org.branding?.playerTitleText || null);
-      setTimezone(String(demo.org.timezone || "America/New_York"));
-
-      setPublishToWebsite(!!demo.org.defaults?.publishToWebsite);
-      setRecordToArchive(!!demo.org.defaults?.recordToArchive);
-      setDefaultLayout(demo.org.defaults?.defaultLayout === "speaker" ? "speaker" : "grid");
-      setStudentProducersCanStart(!!demo.org.defaults?.studentProducersCanStart);
-      setRequireAssignmentToStart(!!demo.org.defaults?.requireAssignmentToStart);
-
-      setEmbedVisibility(demo.org.accessPolicy?.embedVisibility === "unlisted" ? "unlisted" : "public");
-      setRetentionDays(
-        typeof demo.org.retentionDays === "number" || demo.org.retentionDays === null ? demo.org.retentionDays : 30
-      );
-
-      setLoading(false);
-      return () => {
-        cancelled = true;
-      };
-    }
 
     (async () => {
       try {
@@ -296,60 +194,6 @@ export default function Settings() {
     setSaveError(null);
     setSaveOk(false);
     try {
-      if (isBypass) {
-        const base = org || readDemoState().org;
-        const now = Date.now();
-        const nextOrg: EduOrgSettings = {
-          ...base,
-          name: name,
-          timezone: timezone.trim() ? timezone.trim() : "America/New_York",
-          branding: {
-            logoDataUrl,
-            accentColor,
-            playerTitleText,
-          },
-          defaults: {
-            publishToWebsite,
-            recordToArchive,
-            defaultLayout,
-            studentProducersCanStart,
-            requireAssignmentToStart,
-          },
-          accessPolicy: {
-            embedVisibility,
-            restrictedToSchoolLogin: "coming_soon",
-          },
-          retentionDays,
-        };
-
-        const nextAudit: EduAuditAction[] = [
-          {
-            id: `demo_${now}`,
-            action: "org.settings_updated",
-            actorUid: String(me?.uid || "edu-demo"),
-            actorName: String(me?.displayName || "EDU Demo"),
-            eventId: null,
-            eventTitle: null,
-            targetId: null,
-            createdAt: now,
-          },
-          ...(audit || []),
-        ].slice(0, 10);
-
-        const nextStorage: EduStorageSummary = {
-          recordingsCount: Number(storage?.recordingsCount || 0),
-          storageBytes: Number(storage?.storageBytes || 0),
-          updatedAt: now,
-        };
-
-        setOrg(nextOrg);
-        setAudit(nextAudit);
-        setStorage(nextStorage);
-        writeDemoState({ org: nextOrg, audit: nextAudit, storage: nextStorage });
-        setSaveOk(true);
-        return;
-      }
-
       const next = await patchEduOrg({
         name: name,
         timezone: timezone.trim() ? timezone.trim() : "America/New_York",

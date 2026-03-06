@@ -1,40 +1,27 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { computeEduEventStatus, listEduEvents } from "../state/eduEvents";
-import { isEduBypassEnabled } from "../state/eduMode";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import { apiFetchAuth } from "../../lib/api";
-import {
-  DEMO_BROADCASTS,
-  DEMO_RECORDINGS,
-  DEMO_ROOMS,
-  DEMO_STUDENTS,
-  DEMO_USERS,
-  getDemoSchool,
-} from "../state/demoData";
 
 export default function Dashboard() {
   const nav = useNavigate();
   const me = useEduMe();
-  const isDemo = isEduBypassEnabled();
-  const school = isDemo ? getDemoSchool() : null;
 
   const role = String(me?.orgRole || me?.role || "faculty_admin");
   const isStudentProducer = role === "student_producer" || role === "student_producer_assigned";
 
-  /* ── Real data fetching (non-demo) ───────────────────── */
-  const [realStats, setRealStats] = useState<{
+  /* ── Data fetching ───────────────────────────────────── */
+  const [stats, setStats] = useState<{
     rooms: number; students: number; mediaStudents: number;
     staff: number; recordings: number;
   }>({ rooms: 0, students: 0, mediaStudents: 0, staff: 0, recordings: 0 });
 
-  const [realRecordings, setRealRecordings] = useState<
+  const [recentRecordings, setRecentRecordings] = useState<
     { id: string; title: string; duration: string; date: string }[]
   >([]);
 
   useEffect(() => {
-    if (isDemo) return;
-    // Fetch stats from real API endpoints in parallel
     Promise.allSettled([
       apiFetchAuth("/api/edu/rooms").then((r) => r.json()),
       apiFetchAuth("/api/edu/students").then((r) => r.json()),
@@ -46,7 +33,7 @@ export default function Dashboard() {
       const people = peopleRes.status === "fulfilled" ? (peopleRes.value?.members ?? []) : [];
       const recordings = recordingsRes.status === "fulfilled" ? (recordingsRes.value?.recordings ?? []) : [];
 
-      setRealStats({
+      setStats({
         rooms: rooms.length,
         students: students.length,
         mediaStudents: students.filter((s: any) => s.mediaClub || s.role === "student_producer").length,
@@ -54,8 +41,7 @@ export default function Dashboard() {
         recordings: recordings.length,
       });
 
-      // Format recent recordings
-      setRealRecordings(
+      setRecentRecordings(
         recordings.slice(0, 4).map((r: any) => {
           const sec = r.durationSec || 0;
           const min = Math.floor(sec / 60);
@@ -73,21 +59,28 @@ export default function Dashboard() {
         }),
       );
     });
-  }, [isDemo]);
+  }, []);
 
-  /* live broadcast detection */
-  const liveBroadcasts = useMemo(() => {
-    if (isDemo) return DEMO_BROADCASTS.filter((b) => b.status === "live");
-    return [];
-  }, [isDemo]);
-  const [isLive] = useState<boolean>(liveBroadcasts.length > 0);
+  const roomCount = stats.rooms;
+  const studentCount = stats.students;
+  const mediaStudents = stats.mediaStudents;
+  const staffCount = stats.staff;
+  const recordingCount = stats.recordings;
 
-  /* stats — use real data when not in demo mode */
-  const roomCount = isDemo ? DEMO_ROOMS.length : realStats.rooms;
-  const studentCount = isDemo ? DEMO_STUDENTS.length : realStats.students;
-  const mediaStudents = isDemo ? DEMO_STUDENTS.filter((s) => s.mediaClub).length : realStats.mediaStudents;
-  const staffCount = isDemo ? DEMO_USERS.filter((u) => u.role === "teacher" || u.role === "school_admin").length : realStats.staff;
-  const recordingCount = isDemo ? DEMO_RECORDINGS.length : realStats.recordings;
+  /* Live broadcast status from API */
+  const [liveBroadcasts, setLiveBroadcasts] = useState<
+    { id: string; title: string; viewers: number }[]
+  >([]);
+  useEffect(() => {
+    apiFetchAuth("/api/edu/broadcasts?status=live")
+      .then((r) => r.json())
+      .then((data) => setLiveBroadcasts(data?.broadcasts ?? []))
+      .catch(() => setLiveBroadcasts([]));
+  }, []);
+  const isLive = liveBroadcasts.length > 0;
+
+  /* True when the school is brand new — show getting-started prompts */
+  const isNewSchool = roomCount + studentCount + staffCount + recordingCount <= 4 && staffCount <= 1;
 
   const upcomingEvents = useMemo(() => {
     const all = listEduEvents();
@@ -107,20 +100,6 @@ export default function Dashboard() {
       };
     });
   }, []);
-
-  const recentRecordings = useMemo(() => {
-    if (isDemo) {
-      return DEMO_RECORDINGS.slice(0, 4).map((r) => ({
-        id: r.id,
-        title: r.title,
-        duration: r.duration,
-        date: new Date(r.date).toLocaleDateString([], { month: "short", day: "numeric" }),
-      }));
-    }
-    // Use real data fetched from server
-    if (realRecordings.length > 0) return realRecordings;
-    return [];
-  }, [isDemo, realRecordings]);
 
   return (
     <div className="space-y-6">
@@ -241,17 +220,33 @@ export default function Dashboard() {
       <>
       {/* ── Faculty / Admin: full dashboard ────────────────── */}
 
-      {/* School header in demo */}
-      {isDemo && school && (
-        <div className="flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-orange-500 to-red-600 text-lg font-bold text-white">
-            {school.name.charAt(0)}
+      {/* Getting-started guide for new schools */}
+      {isNewSchool && (
+        <div className="rounded-2xl border border-orange-500/30 bg-gradient-to-br from-orange-900/20 to-slate-900 p-6">
+          <h2 className="mb-1 text-xl font-bold text-white">Welcome to StreamLine!</h2>
+          <p className="mb-4 text-sm text-slate-400">Complete these steps to get your school broadcasting.</p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {[
+              { label: "Add a Staff Member", path: "/streamline/edu/people", icon: "M18 9v3m0 0v3m0-3h3m-3 0h-3m-2-5a4 4 0 11-8 0 4 4 0 018 0zM3 20a6 6 0 0112 0v1H3v-1z" },
+              { label: "Add a Student", path: "/streamline/edu/students", icon: "M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" },
+              { label: "Schedule a Broadcast", path: "/streamline/edu/events", icon: "M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" },
+              { label: "Customize School Branding", path: "/streamline/edu/settings", icon: "M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z M15 12a3 3 0 11-6 0 3 3 0 016 0z" },
+              { label: "Copy Website Embed Code", path: "/streamline/edu/embed", icon: "M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" },
+            ].map((step) => (
+              <button
+                key={step.label}
+                onClick={() => nav(step.path)}
+                className="flex items-center gap-3 rounded-xl border border-slate-700/60 bg-slate-800/50 p-3 text-left transition-colors hover:border-orange-500/40 hover:bg-slate-800"
+              >
+                <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-orange-500/10">
+                  <svg className="h-5 w-5 text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={step.icon} />
+                  </svg>
+                </div>
+                <span className="text-sm font-medium text-white">{step.label}</span>
+              </button>
+            ))}
           </div>
-          <div>
-            <h2 className="text-lg font-bold text-white">{school.name}</h2>
-            <p className="text-xs text-slate-400">{school.district} • {school.city}, {school.state}</p>
-          </div>
-          <span className="ml-3 rounded-full bg-orange-500/20 px-2 py-0.5 text-xs text-orange-300">Demo Mode</span>
         </div>
       )}
 
@@ -283,7 +278,7 @@ export default function Dashboard() {
             {isLive ? <div className="h-3 w-3 animate-pulse rounded-full bg-red-500" /> : null}
           </div>
           <div className={`text-2xl font-bold ${isLive ? "text-red-400" : "text-slate-500"}`}>{isLive ? "LIVE" : "OFF AIR"}</div>
-          {isLive ? <div className="mt-1 text-sm text-slate-400">127 viewers • 12:34 elapsed</div> : null}
+          {isLive && liveBroadcasts[0] ? <div className="mt-1 text-sm text-slate-400">{liveBroadcasts[0].viewers} viewers</div> : null}
         </div>
 
         <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-5">
@@ -441,26 +436,6 @@ export default function Dashboard() {
         </div>
       </div>
 
-      <div className="rounded-2xl border border-amber-500/30 bg-amber-500/10 p-4">
-        <div className="flex items-start gap-3">
-          <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-amber-500/20">
-            <svg className="h-5 w-5 text-amber-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
-              />
-            </svg>
-          </div>
-          <div>
-            <div className="font-medium text-amber-300">Storage Notice</div>
-            <div className="mt-1 text-sm text-slate-400">
-              You&apos;ve used 78% of your recording storage this month. Consider archiving older recordings.
-            </div>
-          </div>
-        </div>
-      </div>
       </>
       )}
     </div>

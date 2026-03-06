@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { isEduBypassEnabled } from "../state/eduMode";
-import { DEMO_RECORDINGS, type DemoRecording } from "../state/demoData";
 import { apiFetchAuth } from "../../lib/api";
 
 /* ── Types ─────────────────────────────────────────────────────── */
@@ -43,7 +41,6 @@ function formatDuration(sec: number) {
 
 export default function Recordings() {
   const me = useEduMe();
-  const isDemo = isEduBypassEnabled();
 
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [loading, setLoading] = useState(true);
@@ -51,17 +48,6 @@ export default function Recordings() {
   const [search, setSearch] = useState("");
 
   useEffect(() => {
-    if (isDemo) {
-      setRecordings(
-        DEMO_RECORDINGS.map((r) => ({
-          ...r,
-          status: r.status as "ready" | "processing" | "failed",
-        })),
-      );
-      setLoading(false);
-      return;
-    }
-
     let mounted = true;
     (async () => {
       try {
@@ -76,7 +62,7 @@ export default function Recordings() {
       }
     })();
     return () => { mounted = false; };
-  }, [isDemo]);
+  }, []);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return recordings;

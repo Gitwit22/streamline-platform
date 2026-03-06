@@ -378,7 +378,7 @@ export function clearAuthStorage() {
   if (typeof window === "undefined") return;
   // Keys that define the active lane/demo session — NOT auth tokens.
   // Clearing these during a 401 would destroy demo-mode and lane identity.
-  const PRESERVE = new Set(["sl_edu_bypass", "sl_entry_lane", "sl_mode"]);
+  const PRESERVE = new Set(["sl_entry_lane", "sl_mode"]);
   try {
     clearAuthToken();
     // Clear all Streamline-scoped session state (auth + cached user/session hints)

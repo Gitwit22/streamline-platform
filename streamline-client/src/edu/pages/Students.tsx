@@ -1,7 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { isEduBypassEnabled } from "../state/eduMode";
-import { DEMO_STUDENTS, type DemoStudent } from "../state/demoData";
 import { apiFetchAuth } from "../../lib/api";
 
 /* ── Types ─────────────────────────────────────────────────────── */
@@ -40,7 +38,6 @@ function initials(name: string): string {
 
 export default function Students() {
   const me = useEduMe();
-  const isDemo = isEduBypassEnabled();
   const isFacultyAdmin = String(me?.orgRole || me?.role || "") === "faculty_admin";
 
   const [students, setStudents] = useState<Student[]>([]);
@@ -50,12 +47,6 @@ export default function Students() {
   const [filterMediaClub, setFilterMediaClub] = useState(false);
 
   useEffect(() => {
-    if (isDemo) {
-      setStudents(DEMO_STUDENTS as Student[]);
-      setLoading(false);
-      return;
-    }
-
     let mounted = true;
     (async () => {
       try {
@@ -70,7 +61,7 @@ export default function Students() {
       }
     })();
     return () => { mounted = false; };
-  }, [isDemo]);
+  }, []);
 
   const filtered = useMemo(() => {
     let list = students;

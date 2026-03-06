@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { isEduBypassEnabled } from "../state/eduMode";
-import { DEMO_ROOMS } from "../state/demoData";
 import { apiFetchAuth } from "../../lib/api";
 
 /* ── Types ─────────────────────────────────────────────────────── */
@@ -36,7 +34,6 @@ export default function RoomView() {
   const [searchParams] = useSearchParams();
   const me = useEduMe();
   const nav = useNavigate();
-  const isDemo = isEduBypassEnabled();
 
   const role = String(me?.orgRole || me?.role || "");
   const isProducer = role === "faculty_admin" || role === "student_producer" || role === "student_producer_assigned";
@@ -69,36 +66,6 @@ export default function RoomView() {
   useEffect(() => {
     if (!roomId) return;
 
-    if (isDemo) {
-      const found = DEMO_ROOMS.find((r) => r.id === roomId);
-      if (found) {
-        setRoom({
-          id: found.id,
-          name: found.name,
-          description: found.description,
-          roomType: found.roomType,
-          broadcastEnabled: found.broadcastEnabled,
-          recordingEnabled: found.recordingEnabled,
-          defaultLayout: found.defaultLayout,
-        });
-        // Simulate participants in demo
-        setParticipants([
-          {
-            id: "self",
-            name: String(me?.displayName || "You"),
-            isSelf: true,
-            hasVideo: !camOffPref,
-            hasAudio: !micOffPref,
-            role: isProducer ? "producer" : "participant",
-          },
-        ]);
-      } else {
-        setError("Room not found");
-      }
-      setLoading(false);
-      return;
-    }
-
     (async () => {
       try {
         const res = await apiFetchAuth(`/api/edu/rooms/${roomId}`);
@@ -121,7 +88,7 @@ export default function RoomView() {
         setLoading(false);
       }
     })();
-  }, [roomId, isDemo]);
+  }, [roomId]);
 
   // ── Start local camera ───────────────────────────────────────
   useEffect(() => {

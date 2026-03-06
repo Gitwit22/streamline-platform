@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { ApiUnauthorizedError, apiFetchAuth } from "../../lib/api";
-import { createTopAdmin, resetDemoOrg, setOnboardingProgress } from "../api/onboarding";
+import { apiFetchAuth } from "../../lib/api";
+import { createTopAdmin, setOnboardingProgress } from "../api/onboarding";
 
 function useQueryStep(): number {
   const location = useLocation();
@@ -11,7 +11,7 @@ function useQueryStep(): number {
     const n = raw ? Number(raw) : NaN;
     if (!Number.isFinite(n)) return 1;
     const step = Math.floor(n);
-    return Math.max(1, Math.min(5, step));
+    return Math.max(1, Math.min(4, step));
   } catch {
     return 1;
   }
@@ -51,15 +51,14 @@ export default function Onboarding() {
   }, [location.search, nav, step]);
 
   const stepTitle = useMemo(() => {
-    if (step === 1) return "Reset demo (admin-only)";
-    if (step === 2) return "Create your Top Admin";
-    if (step === 3) return "School info";
-    if (step === 4) return "Add people";
+    if (step === 1) return "Create your Top Admin";
+    if (step === 2) return "School info";
+    if (step === 3) return "Add people";
     return "Events + embed";
   }, [step]);
 
   function goStep(n: number) {
-    nav(`/streamline/edu/onboarding?step=${Math.max(1, Math.min(5, n))}`);
+    nav(`/streamline/edu/onboarding?step=${Math.max(1, Math.min(4, n))}`);
   }
 
   async function hydrateMe() {
@@ -75,24 +74,6 @@ export default function Onboarding() {
       await setOnboardingProgress(nextStep);
     } catch {
       // Non-blocking; the wizard can continue even if progress persistence fails.
-    }
-  }
-
-  async function onResetDemo() {
-    setError("");
-    setInfo("");
-    setBusy(true);
-    try {
-      const out = await resetDemoOrg();
-      setInfo(`Demo reset complete. Deleted orgMembers=${out?.deleted?.orgMembers ?? 0}.`);
-    } catch (err: any) {
-      if (err instanceof ApiUnauthorizedError || err?.status === 401) {
-        setError("Reset requires a platform admin session. Sign in as admin first.");
-      } else {
-        setError(err?.body?.error || err?.message || "Reset failed");
-      }
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -125,9 +106,9 @@ export default function Onboarding() {
       if (typeof resp.slug === "string" && resp.slug) setSchoolSlug(resp.slug);
 
       await hydrateMe();
-      await markProgress(3);
+      await markProgress(2);
       setInfo("Top Admin created. You are now signed in.");
-      goStep(3);
+      goStep(2);
     } catch (err: any) {
       setError(err?.body?.error || err?.message || "Create failed");
     } finally {
@@ -156,7 +137,7 @@ export default function Onboarding() {
             <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-5">
               <div className="text-sm font-semibold text-slate-200">Progress</div>
               <div className="mt-4 space-y-2 text-sm">
-                {[1, 2, 3, 4, 5].map((n) => (
+                {[1, 2, 3, 4].map((n) => (
                   <div
                     key={n}
                     className={`flex items-center justify-between rounded-xl border px-4 py-3 ${
@@ -168,14 +149,12 @@ export default function Onboarding() {
                     <div className="font-medium">Step {n}</div>
                     <div className="text-xs text-slate-400">
                       {n === 1
-                        ? "Reset demo"
+                        ? "Top Admin"
                         : n === 2
-                          ? "Top Admin"
+                          ? "School info"
                           : n === 3
-                            ? "School info"
-                            : n === 4
-                              ? "Add people"
-                              : "Events + embed"}
+                            ? "Add people"
+                            : "Events + embed"}
                     </div>
                   </div>
                 ))}
@@ -202,31 +181,6 @@ export default function Onboarding() {
               ) : null}
 
               {step === 1 ? (
-                <div className="mt-6 space-y-4">
-                  <div className="rounded-xl border border-slate-800/60 bg-slate-900/30 p-4 text-sm text-slate-300">
-                    Optional: reset the shared demo org. This action is guarded and requires a platform admin session.
-                  </div>
-                  <div className="flex flex-wrap gap-3">
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={onResetDemo}
-                      className="rounded-xl border border-slate-700 bg-slate-900/30 px-4 py-2 text-sm text-slate-200 hover:border-slate-600 hover:bg-slate-800/40 disabled:opacity-60"
-                    >
-                      {busy ? "Resetting…" : "Reset demo org"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => goStep(2)}
-                      className="rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-2 text-sm font-semibold text-white"
-                    >
-                      Continue
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-
-              {step === 2 ? (
                 <form onSubmit={onCreateTopAdmin} className="mt-6 space-y-4">
                   <div>
                     <label className="block text-sm font-medium text-slate-300">School name</label>
@@ -362,13 +316,6 @@ export default function Onboarding() {
 
                   <div className="mt-6 flex flex-wrap gap-3">
                     <button
-                      type="button"
-                      onClick={() => goStep(1)}
-                      className="rounded-xl border border-slate-700 bg-slate-900/30 px-4 py-2 text-sm text-slate-200 hover:border-slate-600 hover:bg-slate-800/40"
-                    >
-                      Back
-                    </button>
-                    <button
                       type="submit"
                       disabled={busy}
                       className="rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
@@ -379,18 +326,35 @@ export default function Onboarding() {
                 </form>
               ) : null}
 
+              {step === 2 ? (
+                <div className="mt-6 space-y-4">
+                  <div className="rounded-xl border border-slate-800/60 bg-slate-900/30 p-4 text-sm text-slate-300">
+                    Update your school settings (branding, policies, etc.). You can configure these from the dashboard after setup.
+                  </div>
+                  <div className="flex flex-wrap gap-3">
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={async () => {
+                        setBusy(true);
+                        await markProgress(3);
+                        setBusy(false);
+                        goStep(3);
+                      }}
+                      className="rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
+                    >
+                      Continue
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+
               {step === 3 ? (
                 <div className="mt-6 space-y-4">
                   <div className="rounded-xl border border-slate-800/60 bg-slate-900/30 p-4 text-sm text-slate-300">
-                    Update your school settings (branding, policies, etc.).
+                    Invite faculty and students. You can manage people from the dashboard after setup.
                   </div>
                   <div className="flex flex-wrap gap-3">
-                    <Link
-                      to="/streamline/edu/settings"
-                      className="rounded-xl border border-slate-700 bg-slate-900/30 px-4 py-2 text-sm text-slate-200 hover:border-slate-600 hover:bg-slate-800/40"
-                    >
-                      Open settings
-                    </Link>
                     <button
                       type="button"
                       disabled={busy}
@@ -409,35 +373,6 @@ export default function Onboarding() {
               ) : null}
 
               {step === 4 ? (
-                <div className="mt-6 space-y-4">
-                  <div className="rounded-xl border border-slate-800/60 bg-slate-900/30 p-4 text-sm text-slate-300">
-                    Invite faculty and students. Faculty Admin is required for role changes.
-                  </div>
-                  <div className="flex flex-wrap gap-3">
-                    <Link
-                      to="/streamline/edu/people"
-                      className="rounded-xl border border-slate-700 bg-slate-900/30 px-4 py-2 text-sm text-slate-200 hover:border-slate-600 hover:bg-slate-800/40"
-                    >
-                      Open people
-                    </Link>
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={async () => {
-                        setBusy(true);
-                        await markProgress(5);
-                        setBusy(false);
-                        goStep(5);
-                      }}
-                      className="rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                    >
-                      Continue
-                    </button>
-                  </div>
-                </div>
-              ) : null}
-
-              {step === 5 ? (
                 <div className="mt-6 space-y-4">
                   <div className="rounded-xl border border-slate-800/60 bg-slate-900/30 p-4 text-sm text-slate-300">
                     Create your first event, then generate an embed code for your website.
@@ -470,36 +405,16 @@ export default function Onboarding() {
 
                   <div className="flex flex-wrap gap-3">
                     <Link
-                      to="/streamline/edu/events"
-                      className="rounded-xl border border-slate-700 bg-slate-900/30 px-4 py-2 text-sm text-slate-200 hover:border-slate-600 hover:bg-slate-800/40"
-                    >
-                      Open events
-                    </Link>
-                    <Link
-                      to="/streamline/edu/embed"
-                      className="rounded-xl border border-slate-700 bg-slate-900/30 px-4 py-2 text-sm text-slate-200 hover:border-slate-600 hover:bg-slate-800/40"
-                    >
-                      Open embed tools
-                    </Link>
-                    {schoolSlug && (
-                      <Link
-                        to={`/streamline/edu/portal/${schoolSlug}`}
-                        className="rounded-xl border border-orange-500/30 bg-orange-500/10 px-4 py-2 text-sm font-medium text-orange-300 hover:bg-orange-500/20"
-                      >
-                        Visit School Portal
-                      </Link>
-                    )}
-                    <Link
                       to="/streamline/edu/dashboard"
                       className="rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-2 text-sm font-semibold text-white"
                     >
-                      Finish
+                      Finish &amp; go to Dashboard
                     </Link>
                   </div>
                 </div>
               ) : null}
 
-              {step !== 1 && step !== 2 && step !== 3 && step !== 4 && step !== 5 ? (
+              {step !== 1 && step !== 2 && step !== 3 && step !== 4 ? (
                 <div className="mt-6 flex flex-wrap gap-3">
                   <button
                     type="button"
@@ -520,7 +435,7 @@ export default function Onboarding() {
             </div>
 
             <div className="mt-4 rounded-2xl border border-slate-800/60 bg-slate-900/30 p-5 text-sm text-slate-300">
-              Guardrail: onboarding/reset will be per-org (no global wipes).
+              Onboarding is per-org scoped.
             </div>
           </div>
         </div>

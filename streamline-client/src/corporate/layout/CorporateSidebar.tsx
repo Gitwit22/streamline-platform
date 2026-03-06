@@ -54,8 +54,9 @@ export default function CorporateSidebar() {
     };
   }, [menuOpen]);
 
-  function onLogout() {
-    // TODO: wire real logout
+  async function onLogout() {
+    const { logout } = await import("../../lib/logout");
+    await logout();
     nav("/streamline/corporate/login", { replace: true });
   }
 

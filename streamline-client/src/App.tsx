@@ -66,7 +66,6 @@ import CorporateOrgChart from "./corporate/pages/OrgChart";
 import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
 import { clearPlatformFlagsCache } from "./lib/platformFlagsCache";
-import { isEduBypassEnabled } from "./edu/state/eduMode";
 
 
 function App() {
@@ -111,14 +110,6 @@ function App() {
         return;
       }
       if (DEMO_LANDING_ENABLED && path === "/") {
-        return;
-      }
-
-      // ── EDU demo/bypass mode: suppress everything ───────────────────
-      // In demo mode there is no real auth token, so every API call will
-      // 401.  We must NOT clear storage or flash the banner — the bypass
-      // flag *is* the auth for this session.
-      if (isEduBypassEnabled() && path.startsWith("/streamline/edu")) {
         return;
       }
 

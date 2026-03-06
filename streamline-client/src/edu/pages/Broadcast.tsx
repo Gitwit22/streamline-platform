@@ -4,9 +4,6 @@ import { useEduMe } from "../layout/EduProtectedRoute";
 import { getEduEventById, setEduEventLive, listEduEvents, computeEduEventStatus, type EduEvent } from "../state/eduEvents";
 import { fetchEduOrg, postEduAudit, type EduOrgSettings } from "../api/settings";
 import { goLiveEduBroadcast, stopEduBroadcast, watchEduBroadcast, type GoLiveResponse } from "../api/broadcasts";
-import { isEduBypassEnabled } from "../state/eduMode";
-
-const DEMO_MAX_BROADCAST_MS = 5 * 60 * 1000; // 5 minutes
 
 type BroadcastTemplateId = "announcements" | "event" | "principal";
 type LayoutMode = "grid" | "speaker" | "single";
@@ -489,9 +486,6 @@ export default function Broadcast() {
   const canMute = isFacultyAdmin || isStudentProducer;
   const canChangeLayout = isFacultyAdmin || isStudentProducer;
 
-  // Demo mode auto-stop timer ref
-  const demoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   async function startBroadcast() {
     if (!canStartStop) return;
     setGoLiveError(null);
@@ -513,34 +507,6 @@ export default function Broadcast() {
       });
       setGoLiveData(data);
       setBroadcastId(data.broadcast.id);
-
-      // ── Demo bypass: use local camera preview, skip LiveKit ──────
-      if (isEduBypassEnabled()) {
-        // Reuse the device-check camera stream or grab a fresh one
-        await ensureCameraStream();
-        const cam = streamsRef.current?.cam;
-        if (cam && liveVideoRef.current) {
-          liveVideoRef.current.srcObject = cam;
-          liveVideoRef.current.muted = true;
-          liveVideoRef.current.playsInline = true;
-          await liveVideoRef.current.play().catch(() => void 0);
-        }
-
-        setIsLive(true);
-        setStartedAt(Date.now());
-        setWebsiteStatus(publishHls ? "active" : "off");
-        setRecordingStatus(recordMp4 ? "active" : "off");
-        setYoutubeStatus(alsoYoutube ? "active" : "off");
-        setViewerCount(Math.floor(5 + Math.random() * 20));
-
-        if (activeEventId) setEduEventLive(activeEventId, true);
-
-        // Auto-stop after 5 minutes in demo mode
-        demoTimerRef.current = setTimeout(() => {
-          void endBroadcast();
-        }, DEMO_MAX_BROADCAST_MS);
-        return;
-      }
 
       // 2) Connect to LiveKit room and publish camera/mic
       const { Room, RoomEvent, Track } = await import("livekit-client");
@@ -591,18 +557,10 @@ export default function Broadcast() {
     // Stop any pre-recorded media playback first
     if (mediaPlaying) { await stopMedia().catch(() => void 0); }
 
-    // Clear demo auto-stop timer
-    if (demoTimerRef.current) { clearTimeout(demoTimerRef.current); demoTimerRef.current = null; }
-
     // Disconnect LiveKit
     if (lkRoomRef.current) {
       try { lkRoomRef.current.disconnect(); } catch {}
       lkRoomRef.current = null;
-    }
-
-    // In demo mode, stop local camera streams
-    if (isEduBypassEnabled()) {
-      void stopDeviceStreams();
     }
 
     // Stop server-side
@@ -683,8 +641,8 @@ export default function Broadcast() {
       mediaVideoRef.current.load();
     }
 
-    // Re-attach camera/mic (only in real LiveKit mode, not demo bypass)
-    if (room && !isEduBypassEnabled()) {
+    // Re-attach camera/mic
+    if (room) {
       try {
         const { Track } = await import("livekit-client");
 
@@ -761,7 +719,7 @@ export default function Broadcast() {
 
     // Capture stream from the hidden video element & publish to LiveKit
     const room = lkRoomRef.current;
-    if (room && !isEduBypassEnabled()) {
+    if (room) {
       try {
         const { LocalVideoTrack, LocalAudioTrack } = await import("livekit-client");
 
@@ -797,14 +755,6 @@ export default function Broadcast() {
         }
       } catch (err) {
         console.warn("[EduBroadcast] media publish error:", err);
-      }
-    } else if (isEduBypassEnabled()) {
-      // Demo mode: just show the media in the live preview
-      if (liveVideoRef.current) {
-        liveVideoRef.current.srcObject = null;
-        liveVideoRef.current.src = url;
-        liveVideoRef.current.muted = false;
-        await liveVideoRef.current.play().catch(() => void 0);
       }
     }
   }

@@ -1,7 +1,7 @@
 import React, { FormEvent, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { apiFetch, apiFetchAuth, clearAuthStorage } from "../lib/api";
-import { isEduBypassEnabled } from "../edu/state/eduMode";
+
 import { firebaseSendPasswordReset, firebaseSignInWithCustomToken, isFirebaseWebConfigured } from "../lib/firebaseClient";
 
 // Email validation function
@@ -186,7 +186,7 @@ export const LoginPage: React.FC = () => {
       // ── Lane router: send EDU / Corporate users to their own dashboard ──
       try {
         const lane = localStorage.getItem("sl_entry_lane");
-        if (me?.orgType === "edu" || (lane === "edu" && isEduBypassEnabled())) {
+        if (me?.orgType === "edu") {
           nav("/streamline/edu/dashboard", { replace: true });
           return;
         }

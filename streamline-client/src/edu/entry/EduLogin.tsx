@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { apiFetch, apiFetchAuth, clearAuthStorage } from "../../lib/api";
 import { firebaseSendPasswordReset, firebaseSignInWithCustomToken, isFirebaseWebConfigured } from "../../lib/firebaseClient";
-import { setEduBypassEnabled, setEduLane } from "../state/eduMode";
+import { setEduLane } from "../state/eduMode";
 import { fetchOnboardingConfig } from "../api/onboarding";
 
 function ModalShell({ title, body, onContinue, onCancel }: { title: string; body: string; onContinue: () => void; onCancel: () => void }) {
@@ -56,12 +56,6 @@ export default function EduLogin() {
   const [showOnboardingWarn, setShowOnboardingWarn] = useState(false);
   const [canSelfServeOnboarding, setCanSelfServeOnboarding] = useState(false);
   const [showCredentials, setShowCredentials] = useState(false);
-
-  const handleDemo = () => {
-    setEduLane();
-    setEduBypassEnabled();
-    nav("/streamline/edu/dashboard", { replace: true });
-  };
 
   const returnTo = useMemo(() => {
     try {
@@ -351,48 +345,7 @@ export default function EduLogin() {
                 </div>
               )}
 
-              {/* ── Demo button (primary CTA) ──────────────────────── */}
-              <button
-                type="button"
-                onClick={handleDemo}
-                className="group relative mt-8 w-full overflow-hidden rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-4 text-base font-semibold text-white shadow-none transition-transform hover:-translate-y-0.5 hover:shadow-[0_15px_30px_-10px_rgba(245,158,11,0.4)]"
-              >
-                <span
-                  aria-hidden
-                  className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent transition-transform duration-500 group-hover:translate-x-full"
-                />
-                <span className="relative flex items-center justify-center gap-2">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-5 w-5">
-                    <polygon points="5 3 19 12 5 21 5 3" />
-                  </svg>
-                  Explore Demo
-                </span>
-              </button>
-              <p className="mt-2 text-center text-xs text-slate-500">
-                No account needed — browse with sample data, go live, and test every feature.
-              </p>
-
-              {/* ── Credentials toggle ─────────────────────────────── */}
-              <div className="mt-8">
-                <button
-                  type="button"
-                  onClick={() => setShowCredentials(!showCredentials)}
-                  className="flex w-full items-center justify-center gap-2 text-sm text-slate-400 hover:text-white"
-                >
-                  <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    className={`h-4 w-4 transition-transform ${showCredentials ? "rotate-90" : ""}`}
-                  >
-                    <polyline points="9 18 15 12 9 6" />
-                  </svg>
-                  Sign in with school credentials
-                </button>
-              </div>
-
-              {showCredentials && <form onSubmit={handleSubmit} className="mt-6">
+              <form onSubmit={handleSubmit} className="mt-8">
                 <div className="space-y-6">
                   <div>
                     <label className="block text-sm font-medium text-slate-300" htmlFor="edu-email">
@@ -447,7 +400,7 @@ export default function EduLogin() {
                 <p className="mt-6 border-t border-slate-700 pt-6 text-center text-xs text-slate-500">
                   Tip: If you don’t have a school EDU role yet, ask your Faculty Admin.
                 </p>
-              </form>}
+              </form>
 
               {canSelfServeOnboarding ? (
                 <div className="mt-6">

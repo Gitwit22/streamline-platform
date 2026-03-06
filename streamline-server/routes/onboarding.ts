@@ -9,6 +9,7 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { writeEduAudit } from "../lib/eduAudit";
 import { buildNewUserDoc } from "../lib/newUserDefaults";
 import { tenantCol, globalCol } from "../lib/dbPaths";
+import { initializeSchool } from "../lib/initializeSchool";
 
 const router = Router();
 
@@ -348,6 +349,7 @@ router.post("/create-top-admin", async (req, res) => {
         name: displayName,
         orgId,
         orgType: "edu",
+        orgRole: "faculty_admin",
         orgName,
         phone: phone || null,
         updatedAt: now,
@@ -382,11 +384,24 @@ router.post("/create-top-admin", async (req, res) => {
       targetId: memberId,
     }).catch(() => void 0);
 
+    // Initialize the school with default rooms, roles, permissions, etc.
+    // This is idempotent — safe even if called again.
+    // BLOCKING: if this fails the endpoint returns 500 so the client can retry.
+    const schoolSlug = orgName.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "").slice(0, 48);
+    await initializeSchool({
+      orgId,
+      orgName,
+      slug: schoolSlug,
+      foundingAdminUid: uid,
+      foundingAdminName: displayName,
+    });
+
     return res.json({
       ok: true,
       token,
       orgId,
       userId: uid,
+      slug: schoolSlug,
     });
   } catch (err: any) {
     console.error("POST /api/onboarding/create-top-admin error", err);

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState } from "react";
 import { Phone, Search, Users } from "lucide-react";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import { apiFetchAuth } from "@/lib/api";
-import { isEduBypassEnabled } from "../state/eduMode";
 import { getEduCallTokenDM } from "../api/callToken";
 import EduCallModal from "../components/CallModal";
 
@@ -48,16 +47,6 @@ const CALL_CAPABLE_ROLES: EduOrgRole[] = [
   "student_producer_assigned",
 ];
 
-/* ── Demo data ────────────────────────────────────────────────── */
-
-const DEMO_ENTRIES: DirectoryEntry[] = [
-  { id: "demo_001", name: "Dr. Williams", role: "faculty_admin", department: "Administration", avatar: null },
-  { id: "demo_002", name: "Ms. Rivera", role: "faculty_admin", department: "Media Arts", avatar: null },
-  { id: "demo_003", name: "Jake Thompson", role: "student_producer", department: "AV Club", avatar: null },
-  { id: "demo_004", name: "Emily Chen", role: "student_producer_assigned", department: "AV Club", avatar: null },
-  { id: "demo_005", name: "Marcus Johnson", role: "talent", department: "Drama", avatar: null },
-  { id: "demo_006", name: "Sofia Patel", role: "talent", department: null, avatar: null },
-];
 
 /* ── Component ────────────────────────────────────────────────── */
 
@@ -77,12 +66,6 @@ export default function Directory() {
   // Fetch directory
   useEffect(() => {
     let mounted = true;
-
-    if (isEduBypassEnabled()) {
-      setEntries(DEMO_ENTRIES);
-      setLoading(false);
-      return;
-    }
 
     (async () => {
       try {

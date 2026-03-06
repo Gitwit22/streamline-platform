@@ -1,6 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { isEduBypassEnabled } from "../state/eduMode";
 import {
   fetchPendingStaff,
   createPendingStaff,
@@ -29,13 +28,6 @@ const inputCls =
   "mt-1.5 w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-sm text-white outline-none placeholder:text-slate-500 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/10";
 const labelCls = "block text-sm font-medium text-slate-300";
 
-/* ── Demo data ──────────────────────────────────────────────────── */
-
-const DEMO_STAFF: PendingStaffRecord[] = [
-  { id: "s1", orgId: "demo", fullName: "Alex Turner", role: "faculty_admin", positionTitle: "Media Arts Director", email: "alex.turner@school.edu", onboardingCode: "DSA-001", status: "active", createdBy: "admin", createdAt: Date.now() - 86400000, usedAt: Date.now() - 40000000 },
-  { id: "s2", orgId: "demo", fullName: "Jamie Park", role: "staff", positionTitle: "IT Coordinator", email: "jamie.park@school.edu", onboardingCode: "DSA-002", status: "pending", createdBy: "admin", createdAt: Date.now() - 50000000, usedAt: null },
-  { id: "s3", orgId: "demo", fullName: "Taylor Morgan", role: "staff", positionTitle: "Teacher", email: null, onboardingCode: "DSA-003", status: "inactive", createdBy: "admin", createdAt: Date.now() - 100000000, usedAt: null },
-];
 
 /* ================================================================
    StaffManagement — manage pending & active staff accounts
@@ -44,7 +36,6 @@ const DEMO_STAFF: PendingStaffRecord[] = [
 
 export default function StaffManagement() {
   const me = useEduMe();
-  const isDemo = isEduBypassEnabled();
   const isFacultyAdmin = String(me?.orgRole || me?.role || "") === "faculty_admin";
 
   const [staff, setStaff] = useState<PendingStaffRecord[]>([]);
@@ -57,11 +48,6 @@ export default function StaffManagement() {
 
   /* ── Fetch ─────────────────────────────────────────────────── */
   const loadStaff = useCallback(async () => {
-    if (isDemo) {
-      setStaff(DEMO_STAFF);
-      setLoading(false);
-      return;
-    }
     try {
       setLoading(true);
       const list = await fetchPendingStaff();
@@ -71,23 +57,21 @@ export default function StaffManagement() {
     } finally {
       setLoading(false);
     }
-  }, [isDemo]);
+  }, []);
 
   useEffect(() => { loadStaff(); }, [loadStaff]);
 
   /* ── Actions ───────────────────────────────────────────────── */
   const handleRegenerate = useCallback(async (id: string) => {
-    if (isDemo) return;
     setActionBusy(id);
     try {
       const result = await regenerateStaffCode(id);
       setStaff((prev) => prev.map((s) => (s.id === id ? { ...s, onboardingCode: result.onboardingCode } : s)));
     } catch {}
     setActionBusy(null);
-  }, [isDemo]);
+  }, []);
 
   const handleStatusToggle = useCallback(async (id: string, current: string) => {
-    if (isDemo) return;
     const next: "active" | "inactive" = current === "inactive" ? "active" : "inactive";
     setActionBusy(id);
     try {
@@ -95,7 +79,7 @@ export default function StaffManagement() {
       setStaff((prev) => prev.map((s) => (s.id === id ? { ...s, status: next as any } : s)));
     } catch {}
     setActionBusy(null);
-  }, [isDemo]);
+  }, []);
 
   const copyCode = useCallback((code: string, id: string) => {
     navigator.clipboard.writeText(code).catch(() => {});
@@ -174,7 +158,6 @@ export default function StaffManagement() {
             setShowAdd(false);
           }}
           onCancel={() => setShowAdd(false)}
-          isDemo={isDemo}
         />
       )}
 
@@ -276,11 +259,9 @@ export default function StaffManagement() {
 function AddStaffForm({
   onCreated,
   onCancel,
-  isDemo,
 }: {
   onCreated: (rec: PendingStaffRecord) => void;
   onCancel: () => void;
-  isDemo: boolean;
 }) {
   const [fullName, setFullName] = useState("");
   const [role, setRole] = useState<"faculty_admin" | "staff">("staff");
@@ -298,23 +279,6 @@ function AddStaffForm({
 
       setBusy(true);
       try {
-        if (isDemo) {
-          const rec: PendingStaffRecord = {
-            id: `demo-${Date.now()}`,
-            orgId: "demo",
-            fullName: fullName.trim(),
-            role,
-            positionTitle: position.trim(),
-            email: email.trim() || null,
-            onboardingCode: `DEMO-${Math.random().toString(36).slice(2, 5).toUpperCase()}`,
-            status: "pending",
-            createdBy: "demo",
-            createdAt: Date.now(),
-            usedAt: null,
-          };
-          setCreatedRecord(rec);
-          return;
-        }
         const rec = await createPendingStaff({
           fullName: fullName.trim(),
           role,
@@ -328,7 +292,7 @@ function AddStaffForm({
         setBusy(false);
       }
     },
-    [fullName, role, position, email, isDemo],
+    [fullName, role, position, email],
   );
 
   /* ── Show activation code after creation ─────────────────── */

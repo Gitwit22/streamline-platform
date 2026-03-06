@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { apiFetch, clearAuthStorage } from "../../lib/api";
 import { firebaseSignInWithCustomToken, isFirebaseWebConfigured } from "../../lib/firebaseClient";
-import { setEduBypassEnabled, setEduLane } from "../state/eduMode";
+import { setEduLane } from "../state/eduMode";
 
 function validateEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -19,12 +19,6 @@ export default function EduStudentLogin() {
   useEffect(() => {
     setEduLane();
   }, []);
-
-  const handleDemo = () => {
-    setEduLane();
-    setEduBypassEnabled();
-    nav("/streamline/edu/student-portal", { replace: true });
-  };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -142,32 +136,8 @@ export default function EduStudentLogin() {
               <div className="mt-6 rounded-2xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">{error}</div>
             )}
 
-            {/* Demo button */}
-            <button
-              type="button"
-              onClick={handleDemo}
-              className="group relative mt-8 w-full overflow-hidden rounded-xl bg-gradient-to-r from-blue-500 via-cyan-500 to-violet-500 px-4 py-4 text-base font-semibold text-white transition-transform hover:-translate-y-0.5"
-            >
-              <span className="relative flex items-center justify-center gap-2">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-5 w-5">
-                  <polygon points="5 3 19 12 5 21 5 3" />
-                </svg>
-                Explore Student Demo
-              </span>
-            </button>
-            <p className="mt-2 text-center text-xs text-slate-500">
-              View as a sample student — no account needed.
-            </p>
-
-            {/* Divider */}
-            <div className="my-8 flex items-center gap-3">
-              <div className="h-px flex-1 bg-slate-700" />
-              <span className="text-xs text-slate-500">or sign in</span>
-              <div className="h-px flex-1 bg-slate-700" />
-            </div>
-
             {/* Login Form */}
-            <form onSubmit={handleSubmit} className="space-y-5">
+            <form onSubmit={handleSubmit} className="mt-8 space-y-5">
               <div>
                 <label className="block text-sm font-medium text-slate-300" htmlFor="stu-code">School Code</label>
                 <input

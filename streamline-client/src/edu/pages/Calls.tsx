@@ -1,7 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { isEduBypassEnabled } from "../state/eduMode";
-import { demoSeedId, demoDocId, demoStorageKey } from "../../lib/demoPaths";
 import {
   fetchEduCalls,
   createEduCall,
@@ -13,75 +11,6 @@ import {
 
 const tabs = ["Active Calls", "Scheduled", "Recordings"] as const;
 type Tab = (typeof tabs)[number];
-
-/* ── Demo data ─────────────────────────────────────────────────── */
-
-const demoCalls: EduCall[] = [
-  {
-    id: demoSeedId("edu", "call", 1),
-    title: "Morning Broadcast Prep",
-    status: "active",
-    scheduledAt: Date.now() - 720_000,
-    startedAt: Date.now() - 720_000,
-    endedAt: null,
-    duration: null,
-    participants: ["PJ", "MC", "MR"],
-    department: "Media Arts",
-    hasRecording: true,
-    hasTranscript: false,
-    recordingUrl: demoStorageKey("edu", "recordings", "demo-admin", "call-1", "recording.mp4"),
-    createdAt: Date.now(),
-    createdBy: "",
-  },
-  {
-    id: demoSeedId("edu", "call", 2),
-    title: "Faculty Meeting",
-    status: "scheduled",
-    scheduledAt: Date.now() + 3_600_000,
-    startedAt: null,
-    endedAt: null,
-    duration: null,
-    participants: ["PJ", "MC", "MR", "DP", "LK", "JB"],
-    department: "Administration",
-    hasRecording: false,
-    hasTranscript: false,
-    recordingUrl: "",
-    createdAt: Date.now(),
-    createdBy: "",
-  },
-  {
-    id: demoSeedId("edu", "call", 3),
-    title: "Event Planning Sync",
-    status: "scheduled",
-    scheduledAt: Date.now() + 7_200_000,
-    startedAt: null,
-    endedAt: null,
-    duration: null,
-    participants: ["MC", "MR", "JT"],
-    department: "Events",
-    hasRecording: false,
-    hasTranscript: false,
-    recordingUrl: "",
-    createdAt: Date.now(),
-    createdBy: "",
-  },
-  {
-    id: demoSeedId("edu", "call", 4),
-    title: "Homecoming Broadcast Review",
-    status: "completed",
-    scheduledAt: Date.now() - 86400_000,
-    startedAt: Date.now() - 86400_000,
-    endedAt: Date.now() - 86400_000 + 2700_000,
-    duration: 2700_000,
-    participants: [],
-    department: "Media Arts",
-    hasRecording: true,
-    hasTranscript: false,
-    recordingUrl: demoStorageKey("edu", "recordings", "demo-admin", "call-4", "recording.mp4"),
-    createdAt: Date.now() - 86400_000,
-    createdBy: "",
-  },
-];
 
 /* ── Helpers ────────────────────────────────────────────────────── */
 
@@ -101,7 +30,6 @@ function formatElapsed(ms: number) {
 
 export default function EduCalls() {
   const me = useEduMe();
-  const isDemo = isEduBypassEnabled();
 
   const [activeTab, setActiveTab] = useState<Tab>("Active Calls");
   const [calls, setCalls] = useState<EduCall[]>([]);
@@ -142,18 +70,14 @@ export default function EduCalls() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      if (isDemo) {
-        setCalls(demoCalls);
-      } else {
-        const data = await fetchEduCalls({ limit: 50 });
-        setCalls(data);
-      }
+      const data = await fetchEduCalls({ limit: 50 });
+      setCalls(data);
     } catch {
       setCalls([]);
     } finally {
       setLoading(false);
     }
-  }, [isDemo]);
+  }, []);
 
   useEffect(() => {
     load();
@@ -163,30 +87,8 @@ export default function EduCalls() {
     if (!newTitle.trim()) return;
     setCreating(true);
     try {
-      if (isDemo) {
-        setCalls((prev) => [
-          {
-            id: demoDocId("edu", "call"),
-            title: newTitle.trim(),
-            status: "scheduled",
-            scheduledAt: Date.now() + 3600_000,
-            startedAt: null,
-            endedAt: null,
-            duration: null,
-            participants: [],
-            department: "",
-            hasRecording: false,
-            hasTranscript: false,
-            recordingUrl: "",
-            createdAt: Date.now(),
-            createdBy: "",
-          },
-          ...prev,
-        ]);
-      } else {
-        const c = await createEduCall({ title: newTitle.trim() });
-        setCalls((prev) => [c, ...prev]);
-      }
+      const c = await createEduCall({ title: newTitle.trim() });
+      setCalls((prev) => [c, ...prev]);
       setNewTitle("");
       setShowNew(false);
     } finally {
@@ -203,43 +105,15 @@ export default function EduCalls() {
     setShowAddParticipant(false);
     setNewParticipant("");
 
-    if (isDemo) {
-      const displayName = String(me?.displayName || "You");
-      const initials = displayName.split(" ").map((w: string) => w[0]).join("").toUpperCase().slice(0, 2) || "ME";
-      setCalls((prev) =>
-        prev.map((x) =>
-          x.id === c.id
-            ? { ...x, status: "active" as const, startedAt: Date.now(), participants: [...new Set([...x.participants, initials])] }
-            : x,
-        ),
-      );
-    } else {
-      const updated = await updateEduCall(c.id, { status: "active" });
-      setCalls((prev) => prev.map((x) => (x.id === c.id ? updated : x)));
-    }
+    const updated = await updateEduCall(c.id, { status: "active" });
+    setCalls((prev) => prev.map((x) => (x.id === c.id ? updated : x)));
     // Switch to Active Calls tab so the user sees the call UI
     setActiveTab("Active Calls");
   };
 
   const handleEndCall = async (c: EduCall) => {
-    if (isDemo) {
-      setCalls((prev) =>
-        prev.map((x) =>
-          x.id === c.id
-            ? {
-                ...x,
-                status: "completed" as const,
-                endedAt: Date.now(),
-                duration: x.startedAt ? Date.now() - x.startedAt : null,
-                hasRecording: recording,
-              }
-            : x,
-        ),
-      );
-    } else {
-      const updated = await updateEduCall(c.id, { status: "completed" });
-      setCalls((prev) => prev.map((x) => (x.id === c.id ? updated : x)));
-    }
+    const updated = await updateEduCall(c.id, { status: "completed" });
+    setCalls((prev) => prev.map((x) => (x.id === c.id ? updated : x)));
     // Reset controls
     setMicMuted(false);
     setCamOff(false);

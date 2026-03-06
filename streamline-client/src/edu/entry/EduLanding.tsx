@@ -1,6 +1,6 @@
 import { useEffect } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { setEduLane, setEduBypassEnabled } from "../state/eduMode";
+import { Link } from "react-router-dom";
+import { setEduLane } from "../state/eduMode";
 
 /* ── Feature data for the showcase grid ─────────────────────────── */
 const features = [
@@ -80,17 +80,9 @@ const features = [
 ];
 
 export default function EduLanding() {
-  const nav = useNavigate();
-
   useEffect(() => {
     setEduLane();
   }, []);
-
-  const handleDemo = () => {
-    setEduLane();
-    setEduBypassEnabled();
-    nav("/streamline/edu/dashboard", { replace: true });
-  };
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-slate-900 text-white">
@@ -181,25 +173,7 @@ export default function EduLanding() {
             Learn More
           </Link>
 
-          {/* Launch Demo */}
-          <button
-            type="button"
-            onClick={handleDemo}
-            className="flex w-64 items-center justify-center gap-2 rounded-xl border border-orange-500/30 bg-orange-500/10 px-8 py-4 text-base font-semibold text-orange-300 transition hover:bg-orange-500/20"
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-5 w-5">
-              <polygon points="5 3 19 12 5 21 5 3" />
-            </svg>
-            Launch Demo
-          </button>
         </div>
-
-        <p
-          className="mt-3 max-w-sm text-center text-sm text-slate-500"
-          style={{ animation: "slEduFadeUp 0.8s ease-out 0.25s both" }}
-        >
-          Try the demo with sample school data — no account needed.
-        </p>
 
         {/* ── Feature Grid ─────────────────────────────────────── */}
         <div

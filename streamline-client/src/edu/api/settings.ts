@@ -1,5 +1,4 @@
 import { apiFetchAuth } from "../../lib/api";
-import { isEduBypassEnabled } from "../state/eduMode";
 
 export type EduOrgSettings = {
   id: string;
@@ -47,23 +46,6 @@ async function readJson<T>(res: Response): Promise<T> {
 }
 
 export async function fetchEduOrg(): Promise<EduOrgSettings> {
-  if (isEduBypassEnabled()) {
-    return {
-      id: "demo-org",
-      name: "EDU Demo School",
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || "America/New_York",
-      branding: { logoDataUrl: null, accentColor: null, playerTitleText: null },
-      defaults: {
-        publishToWebsite: true,
-        recordToArchive: false,
-        defaultLayout: "speaker",
-        studentProducersCanStart: true,
-        requireAssignmentToStart: false,
-      },
-      accessPolicy: { embedVisibility: "public", restrictedToSchoolLogin: "coming_soon" },
-      retentionDays: 90,
-    };
-  }
   const res = await apiFetchAuth("/api/edu/org", {}, { allowNonOk: true });
   if (!res.ok) {
     const body: any = await readJson(res);
@@ -75,9 +57,6 @@ export async function fetchEduOrg(): Promise<EduOrgSettings> {
 }
 
 export async function patchEduOrg(patch: Partial<EduOrgSettings>): Promise<EduOrgSettings> {
-  if (isEduBypassEnabled()) {
-    return { ...(await fetchEduOrg()), ...patch } as EduOrgSettings;
-  }
   const res = await apiFetchAuth(
     "/api/edu/org",
     {
@@ -98,9 +77,6 @@ export async function patchEduOrg(patch: Partial<EduOrgSettings>): Promise<EduOr
 }
 
 export async function fetchEduStorageSummary(): Promise<EduStorageSummary> {
-  if (isEduBypassEnabled()) {
-    return { recordingsCount: 24, storageBytes: 1_073_741_824, updatedAt: Date.now() };
-  }
   const res = await apiFetchAuth("/api/edu/storage-summary", {}, { allowNonOk: true });
   if (!res.ok) {
     const body: any = await readJson(res);
@@ -116,12 +92,6 @@ export async function fetchEduStorageSummary(): Promise<EduStorageSummary> {
 }
 
 export async function fetchEduAudit(limit = 10): Promise<EduAuditAction[]> {
-  if (isEduBypassEnabled()) {
-    return [
-      { id: "demo-1", action: "broadcast.start", actorUid: "edu-demo", actorName: "Demo Admin", eventId: null, eventTitle: null, targetId: null, createdAt: Date.now() - 3_600_000 },
-      { id: "demo-2", action: "broadcast.stop", actorUid: "edu-demo", actorName: "Demo Admin", eventId: null, eventTitle: null, targetId: null, createdAt: Date.now() - 7_200_000 },
-    ];
-  }
   const res = await apiFetchAuth(`/api/edu/audit?limit=${encodeURIComponent(String(limit))}`, {}, { allowNonOk: true });
   if (!res.ok) {
     const body: any = await readJson(res);
@@ -138,7 +108,6 @@ export async function postEduAudit(input: {
   eventTitle?: string | null;
   targetId?: string | null;
 }): Promise<void> {
-  if (isEduBypassEnabled()) return;
   const res = await apiFetchAuth(
     "/api/edu/audit",
     {

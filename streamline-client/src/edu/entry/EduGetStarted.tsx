@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { apiFetch, apiFetchAuth, clearAuthStorage } from "../../lib/api";
 import { firebaseSignInWithCustomToken, isFirebaseWebConfigured } from "../../lib/firebaseClient";
-import { setEduLane, setEduBypassEnabled } from "../state/eduMode";
+import { setEduLane } from "../state/eduMode";
 
 function validateEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
@@ -14,12 +14,6 @@ export default function EduGetStarted() {
   useEffect(() => {
     setEduLane();
   }, []);
-
-  const handleDemo = () => {
-    setEduLane();
-    setEduBypassEnabled();
-    nav("/streamline/edu/dashboard", { replace: true });
-  };
 
   /* ── Dropdown state ──────────────────────────────────── */
   const [openPanel, setOpenPanel] = useState<"faculty" | "student" | null>(null);
@@ -340,34 +334,6 @@ export default function EduGetStarted() {
               <p className="mt-1 text-sm text-slate-400">
                 Choose how you'd like to enter StreamLine EDU.
               </p>
-
-              {/* ── Demo CTA (primary) ─────────────────────────────── */}
-              <button
-                type="button"
-                onClick={handleDemo}
-                className="group relative mt-8 w-full overflow-hidden rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-4 text-base font-semibold text-white shadow-none transition-transform hover:-translate-y-0.5 hover:shadow-[0_15px_30px_-10px_rgba(245,158,11,0.4)]"
-              >
-                <span
-                  aria-hidden
-                  className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent transition-transform duration-500 group-hover:translate-x-full"
-                />
-                <span className="relative flex items-center justify-center gap-2">
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-5 w-5">
-                    <polygon points="5 3 19 12 5 21 5 3" />
-                  </svg>
-                  Explore Demo
-                </span>
-              </button>
-              <p className="mt-2 text-center text-xs text-slate-500">
-                No account needed — browse with sample data, go live, and test every feature.
-              </p>
-
-              {/* ── Divider ────────────────────────────────────────── */}
-              <div className="my-8 flex items-center gap-3">
-                <div className="h-px flex-1 bg-slate-700" />
-                <span className="text-xs text-slate-500">or sign in</span>
-                <div className="h-px flex-1 bg-slate-700" />
-              </div>
 
               {/* ── Faculty / Admin Sign In ─────────────────────────── */}
               {error && openPanel && (

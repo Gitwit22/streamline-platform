@@ -1,6 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { isEduBypassEnabled } from "../state/eduMode";
 import {
   fetchStudents,
   createStudent,
@@ -38,14 +37,6 @@ function suggestUsername(name: string): string {
     .slice(0, 30);
 }
 
-/* ── Demo data ──────────────────────────────────────────────────── */
-
-const DEMO_STUDENTS: StudentRecord[] = [
-  { id: "st1", orgId: "demo", fullName: "Maya Chen", username: "maya.chen", grade: "10", classHomeroom: "Room 304", role: "student_producer", mediaClubMember: true, status: "active", mustChangePassword: false, createdBy: "admin", createdAt: Date.now() - 86400000, lastLoginAt: Date.now() - 3600000 },
-  { id: "st2", orgId: "demo", fullName: "Ethan Brooks", username: "ethan.brooks", grade: "11", classHomeroom: "Room 210", role: "student_producer", mediaClubMember: false, status: "active", mustChangePassword: true, createdBy: "admin", createdAt: Date.now() - 100000000, lastLoginAt: null },
-  { id: "st3", orgId: "demo", fullName: "Sofia Martinez", username: "sofia.martinez", grade: "9", classHomeroom: "Room 102", role: "student_producer", mediaClubMember: true, status: "inactive", mustChangePassword: false, createdBy: "admin", createdAt: Date.now() - 200000000, lastLoginAt: Date.now() - 50000000 },
-];
-
 /* ================================================================
    StudentManagement — create & manage student accounts
    Rendered inside PeopleHub "Students" tab
@@ -53,7 +44,6 @@ const DEMO_STUDENTS: StudentRecord[] = [
 
 export default function StudentManagement() {
   const me = useEduMe();
-  const isDemo = isEduBypassEnabled();
   const isFacultyAdmin = String(me?.orgRole || me?.role || "") === "faculty_admin";
 
   const [students, setStudents] = useState<StudentRecord[]>([]);
@@ -66,11 +56,6 @@ export default function StudentManagement() {
 
   /* ── Fetch ─────────────────────────────────────────────────── */
   const loadStudents = useCallback(async () => {
-    if (isDemo) {
-      setStudents(DEMO_STUDENTS);
-      setLoading(false);
-      return;
-    }
     try {
       setLoading(true);
       const list = await fetchStudents();
@@ -80,26 +65,21 @@ export default function StudentManagement() {
     } finally {
       setLoading(false);
     }
-  }, [isDemo]);
+  }, []);
 
   useEffect(() => { loadStudents(); }, [loadStudents]);
 
   /* ── Actions ───────────────────────────────────────────────── */
   const handleResetPassword = useCallback(async (id: string) => {
-    if (isDemo) {
-      setResetResult({ id, password: "Demo1234" });
-      return;
-    }
     setActionBusy(id);
     try {
       const result = await resetStudentPassword(id);
       setResetResult({ id, password: result.tempPassword });
     } catch {}
     setActionBusy(null);
-  }, [isDemo]);
+  }, []);
 
   const handleStatusToggle = useCallback(async (id: string, current: string) => {
-    if (isDemo) return;
     const next = current === "inactive" ? "active" : "inactive";
     setActionBusy(id);
     try {
@@ -107,7 +87,7 @@ export default function StudentManagement() {
       setStudents((prev) => prev.map((s) => (s.id === id ? { ...s, status: next as any } : s)));
     } catch {}
     setActionBusy(null);
-  }, [isDemo]);
+  }, []);
 
   /* ── Filter ────────────────────────────────────────────────── */
   const filtered = useMemo(() => {
@@ -203,7 +183,6 @@ export default function StudentManagement() {
             setShowAdd(false);
           }}
           onCancel={() => setShowAdd(false)}
-          isDemo={isDemo}
         />
       )}
 
@@ -295,11 +274,9 @@ export default function StudentManagement() {
 function CreateStudentForm({
   onCreated,
   onCancel,
-  isDemo,
 }: {
   onCreated: (rec: StudentRecord, tempPassword: string) => void;
   onCancel: () => void;
-  isDemo: boolean;
 }) {
   const [fullName, setFullName] = useState("");
   const [username, setUsername] = useState("");
@@ -335,25 +312,6 @@ function CreateStudentForm({
 
       setBusy(true);
       try {
-        if (isDemo) {
-          const rec: StudentRecord = {
-            id: `demo-stu-${Date.now()}`,
-            orgId: "demo",
-            fullName: fullName.trim(),
-            username: username.trim(),
-            grade: grade.trim(),
-            classHomeroom: homeroom.trim(),
-            role: "student_producer",
-            mediaClubMember: mediaClub,
-            status: "active",
-            mustChangePassword: true,
-            createdBy: "demo",
-            createdAt: Date.now(),
-            lastLoginAt: null,
-          };
-          onCreated(rec, "Demo1234");
-          return;
-        }
         const result = await createStudent({
           fullName: fullName.trim(),
           username: username.trim(),
@@ -369,7 +327,7 @@ function CreateStudentForm({
         setBusy(false);
       }
     },
-    [fullName, username, grade, homeroom, mediaClub, isDemo, onCreated],
+    [fullName, username, grade, homeroom, mediaClub, onCreated],
   );
 
   return (

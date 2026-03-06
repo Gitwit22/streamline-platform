@@ -1,8 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { isEduBypassEnabled } from "../state/eduMode";
-import { DEMO_USERS } from "../state/demoData";
-import { demoSeedId } from "../../lib/demoPaths";
 import {
   fetchEduChatRooms,
   fetchEduMessages,
@@ -12,25 +9,6 @@ import {
   type EduChatMessage,
 } from "../api/chat";
 import { getEduCallTokenDM } from "../api/callToken";
-
-/* ── Demo data ─────────────────────────────────────────────────── */
-
-const demoRooms: EduChatRoom[] = [
-  { id: demoSeedId("edu", "chat", 1), name: "staff-lounge", section: "general", isPrivate: false, unreadCount: 5, lastMessage: "Mr. Carter: Morning announcements script is ready for review", lastMessageAt: Date.now() - 180_000, memberCount: 7, createdAt: Date.now() },
-  { id: demoSeedId("edu", "chat", 2), name: "broadcast-crew", section: "department", isPrivate: false, unreadCount: 2, lastMessage: "Principal Johnson: Let's test the new cameras before Friday", lastMessageAt: Date.now() - 600_000, memberCount: 4, createdAt: Date.now() },
-  { id: demoSeedId("edu", "chat", 3), name: "media-arts", section: "department", isPrivate: false, unreadCount: 0, lastMessage: "Ms. Rivera: Updated the recording schedule for next week", lastMessageAt: Date.now() - 1200_000, memberCount: 3, createdAt: Date.now() },
-  { id: demoSeedId("edu", "chat", 4), name: "admin-only", section: "staff", isPrivate: true, unreadCount: 1, lastMessage: "Principal Johnson: Budget meeting moved to 3 PM", lastMessageAt: Date.now() - 3600_000, memberCount: 2, createdAt: Date.now() },
-  { id: demoSeedId("edu", "chat", 5), name: "event-planning", section: "department", isPrivate: false, unreadCount: 0, lastMessage: "Mr. Carter: Homecoming broadcast schedule is confirmed", lastMessageAt: Date.now() - 7200_000, memberCount: 5, createdAt: Date.now() },
-];
-
-const DEMO_ROOM_1 = demoSeedId("edu", "chat", 1);
-
-const demoMessages: EduChatMessage[] = [
-  { id: demoSeedId("edu", "msg", 1), roomId: DEMO_ROOM_1, senderUid: "user_principal", senderName: "Principal Johnson", content: "Good morning everyone! Just a reminder — we have the assembly broadcast at 10 AM today.", type: "text", attachmentUrl: "", createdAt: Date.now() - 900_000 },
-  { id: demoSeedId("edu", "msg", 2), roomId: DEMO_ROOM_1, senderUid: "user_carter", senderName: "Mr. Carter", content: "Morning announcements script is ready for review. I'll have the broadcast crew set up by 9:30.", type: "text", attachmentUrl: "", createdAt: Date.now() - 600_000 },
-  { id: demoSeedId("edu", "msg", 3), roomId: DEMO_ROOM_1, senderUid: "user_rivera", senderName: "Ms. Rivera", content: "Camera 2 had some issues yesterday — I'll check it before the broadcast.", type: "text", attachmentUrl: "", createdAt: Date.now() - 300_000 },
-  { id: demoSeedId("edu", "msg", 4), roomId: DEMO_ROOM_1, senderUid: "user_principal", senderName: "Principal Johnson", content: "Thanks team. Let's make sure the HLS embed is working on the website too.", type: "text", attachmentUrl: "", createdAt: Date.now() - 180_000 },
-];
 
 /* ── Helpers ────────────────────────────────────────────────────── */
 
@@ -52,7 +30,6 @@ function formatMsgTime(ms: number | null) {
 
 export default function EduChat() {
   const me = useEduMe();
-  const isDemo = isEduBypassEnabled();
 
   const [rooms, setRooms] = useState<EduChatRoom[]>([]);
   const [messages, setMessages] = useState<EduChatMessage[]>([]);
@@ -70,20 +47,15 @@ export default function EduChat() {
   const loadRooms = useCallback(async () => {
     setLoading(true);
     try {
-      if (isDemo) {
-        setRooms(demoRooms);
-        setSelectedRoom(DEMO_ROOM_1);
-      } else {
-        const data = await fetchEduChatRooms();
-        setRooms(data);
-        if (data.length > 0) setSelectedRoom(data[0].id);
-      }
+      const data = await fetchEduChatRooms();
+      setRooms(data);
+      if (data.length > 0) setSelectedRoom(data[0].id);
     } catch {
       setRooms([]);
     } finally {
       setLoading(false);
     }
-  }, [isDemo]);
+  }, []);
 
   useEffect(() => {
     loadRooms();
@@ -95,19 +67,15 @@ export default function EduChat() {
       if (!roomId) return;
       setMsgLoading(true);
       try {
-        if (isDemo) {
-          setMessages(demoMessages.filter((m) => m.roomId === roomId));
-        } else {
-          const data = await fetchEduMessages(roomId, { limit: 50 });
-          setMessages(data);
-        }
+        const data = await fetchEduMessages(roomId, { limit: 50 });
+        setMessages(data);
       } catch {
         setMessages([]);
       } finally {
         setMsgLoading(false);
       }
     },
-    [isDemo],
+    [],
   );
 
   useEffect(() => {
@@ -123,22 +91,8 @@ export default function EduChat() {
     if (!input.trim() || !selectedRoom) return;
     setSending(true);
     try {
-      if (isDemo) {
-        const msg: EduChatMessage = {
-          id: `m-${Date.now()}`,
-          roomId: selectedRoom,
-          senderUid: me?.uid || "",
-          senderName: me?.displayName || "You",
-          content: input.trim(),
-          type: "text",
-          attachmentUrl: "",
-          createdAt: Date.now(),
-        };
-        setMessages((prev) => [...prev, msg]);
-      } else {
-        const msg = await sendEduMessage(selectedRoom, input.trim());
-        setMessages((prev) => [...prev, msg]);
-      }
+      const msg = await sendEduMessage(selectedRoom, input.trim());
+      setMessages((prev) => [...prev, msg]);
       setInput("");
     } finally {
       setSending(false);
@@ -149,28 +103,9 @@ export default function EduChat() {
   const handleCreateRoom = async () => {
     if (!newRoomName.trim()) return;
     try {
-      if (isDemo) {
-        const room: EduChatRoom = {
-          id: `room-${Date.now()}`,
-          name: newRoomName
-            .trim()
-            .toLowerCase()
-            .replace(/\s+/g, "-"),
-          section: "staff",
-          isPrivate: false,
-          unreadCount: 0,
-          lastMessage: "",
-          lastMessageAt: Date.now(),
-          memberCount: 1,
-          createdAt: Date.now(),
-        };
-        setRooms((prev) => [room, ...prev]);
-        setSelectedRoom(room.id);
-      } else {
-        const room = await createEduChatRoom({ name: newRoomName.trim() });
-        setRooms((prev) => [room, ...prev]);
-        setSelectedRoom(room.id);
-      }
+      const room = await createEduChatRoom({ name: newRoomName.trim() });
+      setRooms((prev) => [room, ...prev]);
+      setSelectedRoom(room.id);
       setNewRoomName("");
       setShowNewRoom(false);
     } catch {
@@ -312,7 +247,7 @@ export default function EduChat() {
             <div className="py-12 text-center text-sm text-slate-400">No messages yet. Start the conversation!</div>
           )}
           {messages.map((msg) => {
-            const isMe = msg.senderUid === me?.uid || (isDemo && msg.senderName === "You");
+            const isMe = msg.senderUid === me?.uid;
             return (
               <div key={msg.id} className="flex gap-3">
                 <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-slate-700 to-slate-800 text-[11px] font-bold text-white">
@@ -373,7 +308,7 @@ export default function EduChat() {
               Calling <span className="text-orange-300">#{rooms.find((r) => r.id === callTarget)?.name || "channel"}</span>
             </p>
             <p className="mt-3 text-xs text-slate-500">
-              {isDemo ? "Calls are simulated in demo mode." : "A LiveKit video room will be created for all channel members."}
+              A LiveKit video room will be created for all channel members.
             </p>
             <div className="mt-6 flex gap-3">
               <button
@@ -384,10 +319,7 @@ export default function EduChat() {
               </button>
               <button
                 onClick={() => {
-                  if (!isDemo) {
-                    // Real call would use getEduCallTokenDM or a channel call endpoint
-                    void getEduCallTokenDM(callTarget);
-                  }
+                  void getEduCallTokenDM(callTarget);
                   setCallTarget(null);
                 }}
                 className="flex-1 rounded-xl bg-gradient-to-r from-orange-500 to-red-600 px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90"

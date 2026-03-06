@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { isEduBypassEnabled } from "../state/eduMode";
-import { DEMO_ROOMS } from "../state/demoData";
 import { apiFetchAuth } from "../../lib/api";
 
 /* ── Types ─────────────────────────────────────────────────────── */
@@ -22,7 +20,6 @@ export default function RoomPreJoin() {
   const { roomId } = useParams<{ roomId: string }>();
   const me = useEduMe();
   const nav = useNavigate();
-  const isDemo = isEduBypassEnabled();
 
   const [room, setRoom] = useState<Room | null>(null);
   const [loading, setLoading] = useState(true);
@@ -47,24 +44,6 @@ export default function RoomPreJoin() {
   useEffect(() => {
     if (!roomId) return;
 
-    if (isDemo) {
-      const found = DEMO_ROOMS.find((r) => r.id === roomId);
-      if (found) {
-        setRoom({
-          id: found.id,
-          name: found.name,
-          description: found.description,
-          roomType: found.roomType,
-          broadcastEnabled: found.broadcastEnabled,
-          recordingEnabled: found.recordingEnabled,
-        });
-      } else {
-        setError("Room not found");
-      }
-      setLoading(false);
-      return;
-    }
-
     (async () => {
       try {
         const res = await apiFetchAuth(`/api/edu/rooms/${roomId}`);
@@ -77,7 +56,7 @@ export default function RoomPreJoin() {
         setLoading(false);
       }
     })();
-  }, [roomId, isDemo]);
+  }, [roomId]);
 
   // ── Enumerate devices ────────────────────────────────────────
   useEffect(() => {

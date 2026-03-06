@@ -9,7 +9,7 @@ services:
     runtime: node
     plan: free
     repo: https://github.com/Gitwit22/streamline-platform
-    branch: test
+    branch: edu-corp
     rootDir: streamline-server
     buildCommand: npm install && npm run build
     startCommand: npm run start
@@ -19,6 +19,8 @@ services:
         value: production
       - key: PORT
         value: 10000
+      - key: APP_ENV
+        value: prod
 
       # LiveKit (backend uses HTTPS URL)
       - key: LIVEKIT_URL
@@ -63,7 +65,7 @@ services:
     name: streamline-platform-test
     runtime: static
     repo: https://github.com/Gitwit22/streamline-platform
-    branch: test
+    branch: edu-corp
     rootDir: streamline-client
     buildCommand: npm install && npm run build
     staticPublishPath: dist
@@ -90,7 +92,7 @@ services:
     runtime: node
     plan: free
     repo: https://github.com/Gitwit22/streamline-platform
-    branch: test
+    branch: edu-corp
     rootDir: streamline-server
     buildCommand: npm install && npm run build
     schedule: "*/10 * * * *"

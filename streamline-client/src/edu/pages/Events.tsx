@@ -4,7 +4,6 @@ import { useEduMe } from "../layout/EduProtectedRoute";
 import { createEduSavedEmbed } from "../api/savedEmbeds";
 import { fetchEduOrg } from "../api/settings";
 import { fetchDestinations, type DestinationItem } from "../../services/destinations";
-import { isEduBypassEnabled } from "../state/eduMode";
 import {
   cancelEduEvent,
   computeEduEventStatus,
@@ -18,21 +17,6 @@ import {
 } from "../state/eduEvents";
 
 type TabId = "upcoming" | "past";
-
-// Maps to Firestore: env/test/tenants/edu/org (settings doc)
-const DEMO_STATE_KEY = "sl_edu_demo_settings_v1";
-
-function readDemoTimezone(): string | null {
-  try {
-    const raw = localStorage.getItem(DEMO_STATE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    const tz = String(parsed?.org?.timezone || "").trim();
-    return tz || null;
-  } catch {
-    return null;
-  }
-}
 
 function formatDateTime(iso: string, tz?: string) {
   const d = new Date(iso);
@@ -387,12 +371,6 @@ export default function Events() {
 
   useEffect(() => {
     let cancelled = false;
-    const isBypass = isEduBypassEnabled();
-
-    if (isBypass) {
-      const tz = readDemoTimezone();
-      if (tz && !cancelled) setOrgTimezone(tz);
-    }
 
     fetchEduOrg()
       .then((o) => {
@@ -401,7 +379,7 @@ export default function Events() {
         setOrgTimezone(tz || "America/New_York");
       })
       .catch(() => {
-        // ignore; keep default/demo
+        // ignore; keep default
       });
 
     return () => {

@@ -31,7 +31,14 @@ async function getOrgContext(uid: string): Promise<{ orgId: string; orgRole: Edu
   const orgId = typeof rawOrgId === "string" && rawOrgId.trim() ? rawOrgId.trim() : "";
   if (!orgId) return null;
 
-  const rawRole = user?.orgRole ?? user?.org?.role;
+  // Try user doc first, then fall back to orgMembers collection
+  let rawRole = user?.orgRole ?? user?.org?.role;
+  if (typeof rawRole !== "string" || !rawRole) {
+    const memberId = `${orgId}_${uid}`;
+    const memberSnap = await tenantCol("orgMembers").doc(memberId).get().catch(() => null as any);
+    const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
+    if (member?.role) rawRole = member.role;
+  }
   const orgRole = (typeof rawRole === "string" ? rawRole : null) as EduOrgRole | null;
   return { orgId, orgRole };
 }

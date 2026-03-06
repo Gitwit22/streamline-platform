@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { isEduBypassEnabled } from "../state/eduMode";
-import { DEMO_ROOMS, type DemoRoom } from "../state/demoData";
 import { apiFetchAuth } from "../../lib/api";
 
 /* ── Types ─────────────────────────────────────────────────────── */
@@ -42,7 +40,6 @@ const LAYOUT_LABELS: Record<DefaultLayout, string> = {
 export default function Rooms() {
   const me = useEduMe();
   const nav = useNavigate();
-  const isDemo = isEduBypassEnabled();
   const isFacultyAdmin =
     String(me?.orgRole || me?.role || "") === "faculty_admin";
 
@@ -63,26 +60,6 @@ export default function Rooms() {
   const [creating, setCreating] = useState(false);
 
   useEffect(() => {
-    if (isDemo) {
-      setRooms(
-        DEMO_ROOMS.map((r) => ({
-          id: r.id,
-          name: r.name,
-          description: r.description,
-          isLive: r.isLive,
-          participantCount: r.participantCount,
-          createdBy: r.createdBy,
-          roomType: r.roomType,
-          broadcastEnabled: r.broadcastEnabled,
-          recordingEnabled: r.recordingEnabled,
-          defaultLayout: r.defaultLayout,
-          allowedRoles: r.allowedRoles,
-        })),
-      );
-      setLoading(false);
-      return;
-    }
-
     let mounted = true;
     (async () => {
       try {
@@ -97,7 +74,7 @@ export default function Rooms() {
       }
     })();
     return () => { mounted = false; };
-  }, [isDemo]);
+  }, []);
 
   const filtered = useMemo(() => {
     let list = rooms;
@@ -134,29 +111,6 @@ export default function Rooms() {
   const handleCreate = async () => {
     if (!newName.trim()) return;
     setCreating(true);
-
-    if (isDemo) {
-      const id = `room_${Date.now()}`;
-      setRooms((prev) => [
-        ...prev,
-        {
-          id,
-          name: newName.trim(),
-          description: newDesc.trim(),
-          isLive: false,
-          participantCount: 0,
-          createdBy: me?.uid || "demo",
-          roomType: newType,
-          broadcastEnabled: newBroadcast,
-          recordingEnabled: newRecording,
-          defaultLayout: newLayout,
-          allowedRoles: [],
-        },
-      ]);
-      resetCreateForm();
-      setCreating(false);
-      return;
-    }
 
     try {
       const res = await apiFetchAuth("/api/edu/rooms", {

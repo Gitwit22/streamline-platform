@@ -1,10 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { isEduBypassEnabled } from "../state/eduMode";
-import { DEMO_RECORDINGS, type DemoRecording } from "../state/demoData";
 import { apiFetchAuth } from "../../lib/api";
 import { editingApi, type Recording as ArchiveRecording } from "../../lib/editingApi";
-import { demoSeedId, demoStorageKey } from "../../lib/demoPaths";
 
 /* ── Types ─────────────────────────────────────────────────────── */
 
@@ -64,7 +61,6 @@ function normalizeStatus(raw: unknown): "ready" | "processing" | "failed" {
 
 export default function MediaLibrary() {
   const me = useEduMe();
-  const isDemo = isEduBypassEnabled();
   const role = String(me?.orgRole || me?.role || "faculty_admin");
   const isFacultyAdmin = role === "faculty_admin";
 
@@ -80,30 +76,6 @@ export default function MediaLibrary() {
 
   useEffect(() => {
     let cancelled = false;
-
-    if (isDemo) {
-      // Combine demo recordings list (recent) and archive-style entries (older)
-      const recent: LibraryItem[] = DEMO_RECORDINGS.map((r) => ({
-        id: r.id,
-        title: r.title,
-        duration: r.duration,
-        durationSec: r.durationSec,
-        date: r.date,
-        status: r.status as "ready" | "processing" | "failed",
-        roomId: r.roomId,
-        archived: false,
-      }));
-
-      // Mark older ones as "archived" for demo purposes
-      const withArchive = recent.map((r, i) => ({
-        ...r,
-        archived: i >= 4, // last 2 are older → archived
-      }));
-
-      setItems(withArchive);
-      setLoading(false);
-      return;
-    }
 
     (async () => {
       try {
@@ -169,7 +141,7 @@ export default function MediaLibrary() {
     return () => {
       cancelled = true;
     };
-  }, [isDemo]);
+  }, []);
 
   /* ── Filtering ─────────────────────────────────────────────── */
 
@@ -225,20 +197,12 @@ export default function MediaLibrary() {
 
   const handlePlay = (item: LibraryItem) => {
     if (item.status !== "ready") return;
-    if (isDemo) {
-      showToast("Playback is simulated in demo mode.", "info");
-      return;
-    }
     const url = (item._raw as any)?.videoUrl || (item._raw as any)?.url;
     if (url) window.open(String(url), "_blank", "noopener,noreferrer");
   };
 
   const handleDelete = async (item: LibraryItem) => {
     if (!isFacultyAdmin) return;
-    if (isDemo) {
-      setItems((cur) => cur.filter((x) => x.id !== item.id));
-      return;
-    }
     const ok = window.confirm("Delete this recording? This cannot be undone.");
     if (!ok) return;
     try {

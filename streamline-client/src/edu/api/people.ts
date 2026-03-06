@@ -1,6 +1,4 @@
 import { apiFetchAuth } from "../../lib/api";
-import { demoSeedId, demoDbPath } from "../../lib/demoPaths";
-import { isEduBypassEnabled } from "../state/eduMode";
 
 export type EduPersonRole = "faculty_admin" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
 export type EduPersonStatus = "active" | "invited" | "disabled";
@@ -15,30 +13,6 @@ export type EduPerson = {
   assignedEventsCount: number;
   assignedEventIds?: string[];
 };
-
-// Seed IDs map to: env/test/tenants/edu/people/{id}
-const SEED_PEOPLE: EduPerson[] = [
-  { id: demoSeedId("edu", "ppl", 1), name: "Alex Martinez", email: "alex@edu-demo.local", role: "student_producer", status: "active", lastActiveAt: new Date().toISOString(), assignedEventsCount: 2 },
-  { id: demoSeedId("edu", "ppl", 2), name: "Jordan Kim", email: "jordan@edu-demo.local", role: "talent", status: "active", lastActiveAt: new Date().toISOString(), assignedEventsCount: 0 },
-  { id: demoSeedId("edu", "ppl", 3), name: "Sam Lee", email: "sam@edu-demo.local", role: "viewer", status: "active", lastActiveAt: null, assignedEventsCount: 0 },
-];
-
-/* ── Session-scoped mutable store for demo mode ────────────────── */
-// Maps to Firestore: env/test/tenants/edu/people
-const DEMO_STORE_KEY = "sl_edu_demo_people_v1";
-
-function loadDemoPeople(): EduPerson[] {
-  try {
-    const raw = sessionStorage.getItem(DEMO_STORE_KEY);
-    if (raw) return JSON.parse(raw) as EduPerson[];
-  } catch { /* seed on first access */ }
-  saveDemoPeople(SEED_PEOPLE);
-  return [...SEED_PEOPLE];
-}
-
-function saveDemoPeople(list: EduPerson[]) {
-  try { sessionStorage.setItem(DEMO_STORE_KEY, JSON.stringify(list)); } catch {}
-}
 
 function asString(v: any): string {
   return typeof v === "string" ? v : "";
@@ -78,7 +52,6 @@ function normalizePerson(x: any): EduPerson | null {
 }
 
 export async function listEduPeopleFromApi(opts?: { limit?: number }): Promise<EduPerson[]> {
-  if (isEduBypassEnabled()) return loadDemoPeople();
   const sp = new URLSearchParams();
   if (typeof opts?.limit === "number" && Number.isFinite(opts.limit)) {
     sp.set("limit", String(Math.max(1, Math.min(200, Math.floor(opts.limit)))));
@@ -91,13 +64,6 @@ export async function listEduPeopleFromApi(opts?: { limit?: number }): Promise<E
 }
 
 export async function inviteEduPerson(input: { email: string; role: Exclude<EduPersonRole, "faculty_admin">; assignEventId?: string | null }) {
-  if (isEduBypassEnabled()) {
-    const person: EduPerson = { id: `demo-${Date.now()}`, name: input.email.split("@")[0], email: input.email, role: input.role, status: "invited", lastActiveAt: null, assignedEventsCount: 0 };
-    const list = loadDemoPeople();
-    list.unshift(person);
-    saveDemoPeople(list);
-    return { ok: true, person };
-  }
   const res = await apiFetchAuth(`/api/edu/people/invite`, {
     method: "POST",
     body: JSON.stringify({
@@ -114,12 +80,6 @@ export async function inviteEduPerson(input: { email: string; role: Exclude<EduP
 }
 
 export async function setEduPersonRole(memberId: string, role: EduPersonRole) {
-  if (isEduBypassEnabled()) {
-    const list = loadDemoPeople();
-    const idx = list.findIndex(d => d.id === memberId);
-    if (idx >= 0) { list[idx] = { ...list[idx], role }; saveDemoPeople(list); }
-    return { ok: true, person: idx >= 0 ? list[idx] : null };
-  }
   const res = await apiFetchAuth(`/api/edu/people/${encodeURIComponent(memberId)}/role`, {
     method: "PATCH",
     body: JSON.stringify({ role }),
@@ -132,12 +92,6 @@ export async function setEduPersonRole(memberId: string, role: EduPersonRole) {
 }
 
 export async function disableEduPerson(memberId: string) {
-  if (isEduBypassEnabled()) {
-    const list = loadDemoPeople();
-    const idx = list.findIndex(d => d.id === memberId);
-    if (idx >= 0) { list[idx] = { ...list[idx], status: "disabled" }; saveDemoPeople(list); }
-    return { ok: true, person: idx >= 0 ? list[idx] : null };
-  }
   const res = await apiFetchAuth(`/api/edu/people/${encodeURIComponent(memberId)}/disable`, {
     method: "POST",
     body: JSON.stringify({}),
@@ -150,7 +104,6 @@ export async function disableEduPerson(memberId: string) {
 }
 
 export async function resendEduInvite(memberId: string) {
-  if (isEduBypassEnabled()) return { ok: true, person: null };
   const res = await apiFetchAuth(`/api/edu/people/${encodeURIComponent(memberId)}/resend`, {
     method: "POST",
     body: JSON.stringify({}),
