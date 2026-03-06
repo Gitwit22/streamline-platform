@@ -27,6 +27,10 @@ export default function Onboarding() {
   const [info, setInfo] = useState<string>("");
 
   const [orgName, setOrgName] = useState("");
+  const [district, setDistrict] = useState("");
+  const [city, setCity] = useState("");
+  const [state, setState] = useState("");
+  const [schoolType, setSchoolType] = useState<"k12" | "high_school" | "district_office">("high_school");
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [email, setEmail] = useState("");
@@ -99,6 +103,10 @@ export default function Onboarding() {
     try {
       const out = await createTopAdmin({
         orgName: orgName.trim() || "Your School",
+        district: district.trim() || undefined,
+        city: city.trim() || undefined,
+        state: state.trim() || undefined,
+        schoolType: schoolType || undefined,
         firstName: firstName.trim(),
         lastName: lastName.trim(),
         email: email.trim(),
@@ -224,6 +232,58 @@ export default function Onboarding() {
                       placeholder="Example High School"
                       autoComplete="organization"
                     />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300">District</label>
+                    <input
+                      value={district}
+                      onChange={(e) => setDistrict(e.target.value)}
+                      className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/10"
+                      placeholder="School District Name"
+                      autoComplete="off"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="block text-sm font-medium text-slate-300">City</label>
+                      <input
+                        value={city}
+                        onChange={(e) => setCity(e.target.value)}
+                        className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/10"
+                        placeholder="City"
+                        autoComplete="address-level2"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-sm font-medium text-slate-300">State</label>
+                      <input
+                        value={state}
+                        onChange={(e) => setState(e.target.value)}
+                        className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/10"
+                        placeholder="MI"
+                        autoComplete="address-level1"
+                        maxLength={2}
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300">School Type</label>
+                    <select
+                      value={schoolType}
+                      onChange={(e) => setSchoolType(e.target.value as any)}
+                      className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-white outline-none focus:border-orange-500 focus:ring-2 focus:ring-orange-500/10"
+                    >
+                      <option value="high_school">High School</option>
+                      <option value="k12">K-12</option>
+                      <option value="district_office">District Office</option>
+                    </select>
+                  </div>
+
+                  <div className="mt-4 border-t border-slate-700 pt-4">
+                    <div className="text-sm font-medium text-slate-200 mb-3">Admin Account</div>
                   </div>
 
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

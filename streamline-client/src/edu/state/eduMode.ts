@@ -55,5 +55,68 @@ export const setEduBypassEnabled = () => {
 export const clearEduBypassEnabled = () => {
   try {
     localStorage.removeItem("sl_edu_bypass");
+    localStorage.removeItem("sl_edu_demo_role");
   } catch {}
 };
+
+/* ── Demo role switcher ──────────────────────────────────────── */
+
+export type DemoRoleKey = "admin" | "teacher" | "student_producer" | "student";
+
+const DEMO_ROLE_KEY = "sl_edu_demo_role";
+
+const demoRoleListeners = new Set<() => void>();
+
+export function subscribeDemoRole(fn: () => void) {
+  demoRoleListeners.add(fn);
+  return () => { demoRoleListeners.delete(fn); };
+}
+
+export function getDemoRole(): DemoRoleKey {
+  try {
+    const v = localStorage.getItem(DEMO_ROLE_KEY);
+    if (v === "admin" || v === "teacher" || v === "student_producer" || v === "student") return v;
+  } catch {}
+  return "admin";
+}
+
+export function setDemoRole(role: DemoRoleKey) {
+  try {
+    localStorage.setItem(DEMO_ROLE_KEY, role);
+  } catch {}
+  demoRoleListeners.forEach((fn) => fn());
+}
+
+/** Map DemoRoleKey to the EduMe-compatible fields used by EduProtectedRoute */
+export function getDemoPersona(role: DemoRoleKey) {
+  switch (role) {
+    case "admin":
+      return {
+        uid: "edu-demo-admin",
+        displayName: "Principal Johnson",
+        role: "faculty_admin" as const,
+        orgRole: "faculty_admin" as const,
+      };
+    case "teacher":
+      return {
+        uid: "edu-demo-teacher",
+        displayName: "Mr. Carter",
+        role: "faculty_admin" as const,
+        orgRole: "faculty_admin" as const,
+      };
+    case "student_producer":
+      return {
+        uid: "edu-demo-producer",
+        displayName: "Jake Thompson",
+        role: "student_producer" as const,
+        orgRole: "student_producer" as const,
+      };
+    case "student":
+      return {
+        uid: "edu-demo-student",
+        displayName: "Sofia Patel",
+        role: "viewer" as const,
+        orgRole: "viewer" as const,
+      };
+  }
+}

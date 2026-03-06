@@ -52,6 +52,12 @@ router.post("/bootstrap", async (req, res) => {
     const adminEmail = coerceEmail(req.body?.adminEmail);
     if (!adminEmail) return res.status(400).json({ error: "adminEmail_invalid" });
 
+    // School onboarding fields (optional, added for EDU onboarding flow)
+    const district = asString(req.body?.district).trim();
+    const city = asString(req.body?.city).trim();
+    const state = asString(req.body?.state).trim();
+    const schoolType = asString(req.body?.schoolType).trim();
+
     const orgId = asString(req.body?.orgId).trim() || tenantCol("orgs").doc().id;
     const orgRef = tenantCol("orgs").doc(orgId);
     const now = Date.now();
@@ -61,6 +67,10 @@ router.post("/bootstrap", async (req, res) => {
         id: orgId,
         name: orgName,
         orgType: "edu",
+        ...(district ? { district } : {}),
+        ...(city ? { city } : {}),
+        ...(state ? { state } : {}),
+        ...(schoolType ? { schoolType } : {}),
         updatedAt: now,
         createdAt: now,
       },

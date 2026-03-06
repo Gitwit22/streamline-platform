@@ -27,6 +27,11 @@ import EduEmbedEventPlayer from "./edu/pages/EmbedEventPlayer";
 import EduSettings from "./edu/pages/Settings";
 import EduOnboarding from "./edu/pages/Onboarding";
 import EduDirectory from "./edu/pages/Directory";
+import EduRooms from "./edu/pages/Rooms";
+import EduRecordings from "./edu/pages/Recordings";
+import EduStudents from "./edu/pages/Students";
+import EduStudentLogin from "./edu/entry/EduStudentLogin";
+import EduStudentPortal from "./edu/pages/StudentPortal";
 
 import CorporateLanding from "./corporate/entry/CorporateLanding";
 import CorporateLogin from "./corporate/entry/CorporateLogin";
@@ -87,6 +92,8 @@ function App() {
       if (
         path === "/streamline/edu" ||
         path.startsWith("/streamline/edu/login") ||
+        path.startsWith("/streamline/edu/student-login") ||
+        path.startsWith("/streamline/edu/student-portal") ||
         path.startsWith("/streamline/edu/onboarding") ||
         path.startsWith("/streamline/edu/embed/event") ||
         path === "/streamline/corporate" ||
@@ -276,6 +283,8 @@ function App() {
       <Route path="/streamline/edu" element={<Outlet />}>
         <Route index element={<EduLanding />} />
         <Route path="login" element={<EduLogin />} />
+        <Route path="student-login" element={<EduStudentLogin />} />
+        <Route path="student-portal" element={<EduStudentPortal />} />
         <Route path="onboarding" element={<EduOnboarding />} />
 
         {/* Public EDU embed players (no auth) */}
@@ -290,8 +299,11 @@ function App() {
         >
           <Route path="dashboard" element={<EduDashboard />} />
           <Route path="broadcast" element={<EduBroadcast />} />
+          <Route path="rooms" element={<EduRooms />} />
           <Route path="events" element={<EduEvents />} />
+          <Route path="recordings" element={<EduRecordings />} />
           <Route path="archive" element={<EduArchive />} />
+          <Route path="students" element={<EduStudents />} />
           <Route path="directory" element={<EduDirectory />} />
           <Route
             path="people"

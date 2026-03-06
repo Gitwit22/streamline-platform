@@ -1,9 +1,9 @@
-import { ReactNode, createContext, useContext, useEffect, useMemo, useState } from "react";
+import { ReactNode, createContext, useContext, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Navigate, useLocation } from "react-router-dom";
 import { getAuthToken } from "../../lib/api";
 import { onFirebaseAuthStateChanged } from "../../lib/firebaseClient";
 import { fetchEduMe, type EduMe } from "../api/me";
-import { isEduBypassEnabled, setEduLane } from "../state/eduMode";
+import { isEduBypassEnabled, setEduLane, getDemoRole, getDemoPersona, subscribeDemoRole } from "../state/eduMode";
 
 type EduAuthState = {
   me: EduMe;
@@ -21,6 +21,9 @@ export default function EduProtectedRoute({ children }: { children: ReactNode })
   const [me, setMe] = useState<EduMe | null>(null);
   const [loading, setLoading] = useState(true);
   const [firebaseAuthed, setFirebaseAuthed] = useState(false);
+
+  // Subscribe to demo role changes so the component re-renders when the user switches roles
+  const demoRole = useSyncExternalStore(subscribeDemoRole, getDemoRole, getDemoRole);
 
   useEffect(() => {
     return onFirebaseAuthStateChanged((user) => {
@@ -47,12 +50,14 @@ export default function EduProtectedRoute({ children }: { children: ReactNode })
     }
 
     if (isEduBypassEnabled()) {
+      const persona = getDemoPersona(demoRole);
       setMe({
-        uid: "edu-demo",
+        uid: persona.uid,
+        displayName: persona.displayName,
         orgType: "edu",
-        role: "faculty_admin",
-        orgRole: "faculty_admin",
-        orgName: "EDU Demo",
+        role: persona.role,
+        orgRole: persona.orgRole,
+        orgName: "Detroit Central High School",
       });
       setLoading(false);
       return;
@@ -75,7 +80,7 @@ export default function EduProtectedRoute({ children }: { children: ReactNode })
     return () => {
       mounted = false;
     };
-  }, [authed]);
+  }, [authed, demoRole]);
 
   if (loading) {
     return <div className="min-h-screen bg-slate-950 p-6 text-slate-300">Loading…</div>;

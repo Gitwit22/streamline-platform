@@ -41,6 +41,9 @@ import eduPublicRoutes from "./routes/eduPublic";
 import eduBootstrapRoutes from "./routes/eduBootstrap";
 import eduBroadcastsRoutes from "./routes/eduBroadcasts";
 import eduCallsRoutes from "./routes/eduCalls";
+import eduRoomsRoutes from "./routes/eduRooms";
+import eduRecordingsRoutes from "./routes/eduRecordings";
+import eduStudentsRoutes from "./routes/eduStudents";
 import corpMeRoutes from "./routes/corpMe";
 import corpBroadcastsRoutes from "./routes/corpBroadcasts";
 import corpCallsRoutes from "./routes/corpCalls";
@@ -278,6 +281,12 @@ app.use("/api/edu", eduEmbedsRoutes);
 app.use("/api/edu", eduBroadcastsRoutes);
 // EDU calls (WebRTC token minting)
 app.use("/api/edu", eduCallsRoutes);
+// EDU rooms (create, list)
+app.use("/api/edu", eduRoomsRoutes);
+// EDU recordings (list)
+app.use("/api/edu", eduRecordingsRoutes);
+// EDU students (list, add)
+app.use("/api/edu", eduStudentsRoutes);
 
 // Corporate lane routes
 app.use("/api/corp", corpMeRoutes);

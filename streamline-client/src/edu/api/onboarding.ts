@@ -25,6 +25,10 @@ export type CreateTopAdminInput = {
   password: string;
   confirmPassword: string;
   phone?: string;
+  district?: string;
+  city?: string;
+  state?: string;
+  schoolType?: string;
 };
 
 export async function createTopAdmin(input: CreateTopAdminInput): Promise<{ ok: true; token: string; orgId: string; userId: string }> {

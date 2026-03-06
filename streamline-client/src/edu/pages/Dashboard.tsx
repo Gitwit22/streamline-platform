@@ -1,10 +1,34 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { computeEduEventStatus, listEduEvents } from "../state/eduEvents";
+import { isEduBypassEnabled } from "../state/eduMode";
+import {
+  DEMO_BROADCASTS,
+  DEMO_RECORDINGS,
+  DEMO_ROOMS,
+  DEMO_STUDENTS,
+  DEMO_USERS,
+  getDemoSchool,
+} from "../state/demoData";
 
 export default function Dashboard() {
   const nav = useNavigate();
-  const [isLive] = useState<boolean>(false);
+  const isDemo = isEduBypassEnabled();
+  const school = isDemo ? getDemoSchool() : null;
+
+  /* live broadcast detection */
+  const liveBroadcasts = useMemo(() => {
+    if (isDemo) return DEMO_BROADCASTS.filter((b) => b.status === "live");
+    return [];
+  }, [isDemo]);
+  const [isLive] = useState<boolean>(liveBroadcasts.length > 0);
+
+  /* stats */
+  const roomCount = isDemo ? DEMO_ROOMS.length : 0;
+  const studentCount = isDemo ? DEMO_STUDENTS.length : 0;
+  const mediaStudents = isDemo ? DEMO_STUDENTS.filter((s) => s.mediaClub).length : 0;
+  const staffCount = isDemo ? DEMO_USERS.filter((u) => u.role === "teacher" || u.role === "school_admin").length : 0;
+  const recordingCount = isDemo ? DEMO_RECORDINGS.length : 0;
 
   const upcomingEvents = useMemo(() => {
     const all = listEduEvents();
@@ -25,19 +49,55 @@ export default function Dashboard() {
     });
   }, []);
 
-  const recentRecordings = useMemo(
-    () => [
-      { id: 1, title: "Morning Announcements - Dec 13", duration: "12:34", date: "2 hours ago" },
-      { id: 2, title: "Band Practice Session", duration: "45:12", date: "Yesterday" },
-      { id: 3, title: "Principal Address", duration: "8:45", date: "3 days ago" },
-      { id: 4, title: "Fall Play - Act 1", duration: "1:23:45", date: "Dec 8" },
-    ],
-    []
-  );
+  const recentRecordings = useMemo(() => {
+    if (isDemo) {
+      return DEMO_RECORDINGS.slice(0, 4).map((r) => ({
+        id: r.id,
+        title: r.title,
+        duration: r.duration,
+        date: new Date(r.date).toLocaleDateString([], { month: "short", day: "numeric" }),
+      }));
+    }
+    return [
+      { id: "1", title: "Morning Announcements - Dec 13", duration: "12:34", date: "2 hours ago" },
+      { id: "2", title: "Band Practice Session", duration: "45:12", date: "Yesterday" },
+      { id: "3", title: "Principal Address", duration: "8:45", date: "3 days ago" },
+      { id: "4", title: "Fall Play - Act 1", duration: "1:23:45", date: "Dec 8" },
+    ];
+  }, [isDemo]);
 
   return (
     <div className="space-y-6">
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+      {/* School header in demo */}
+      {isDemo && school && (
+        <div className="flex items-center gap-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-orange-500 to-red-600 text-lg font-bold text-white">
+            {school.name.charAt(0)}
+          </div>
+          <div>
+            <h2 className="text-lg font-bold text-white">{school.name}</h2>
+            <p className="text-xs text-slate-400">{school.district} • {school.city}, {school.state}</p>
+          </div>
+          <span className="ml-3 rounded-full bg-orange-500/20 px-2 py-0.5 text-xs text-orange-300">Demo Mode</span>
+        </div>
+      )}
+
+      {/* Live banner when broadcasting */}
+      {liveBroadcasts.length > 0 && (
+        <div className="rounded-2xl border border-red-500/40 bg-gradient-to-r from-red-900/30 to-slate-900/50 p-4">
+          <div className="flex items-center gap-3">
+            <div className="h-3 w-3 animate-pulse rounded-full bg-red-500" />
+            <span className="font-semibold text-red-400">LIVE NOW</span>
+            <span className="text-white">{liveBroadcasts[0].title}</span>
+            <span className="text-sm text-slate-400">{liveBroadcasts[0].viewers} viewers</span>
+            <button onClick={() => nav("/streamline/edu/broadcast")} className="ml-auto rounded-lg bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-500">
+              Watch
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-5">
         <div
           className={`rounded-2xl border p-5 ${
             isLive
@@ -54,21 +114,27 @@ export default function Dashboard() {
         </div>
 
         <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-5">
-          <div className="mb-3 text-sm text-slate-400">Next Scheduled</div>
-          <div className="text-xl font-bold text-white">School Network (Morning Announcements)</div>
-          <div className="mt-1 text-sm text-orange-400">Tomorrow • 8:00 AM</div>
+          <div className="mb-3 text-sm text-slate-400">Rooms</div>
+          <div className="text-2xl font-bold text-white">{roomCount}</div>
+          <div className="mt-1 text-sm text-slate-400">broadcast rooms</div>
         </div>
 
         <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-5">
-          <div className="mb-3 text-sm text-slate-400">Recordings This Month</div>
-          <div className="text-2xl font-bold text-white">24</div>
-          <div className="mt-1 text-sm text-emerald-400">↑ 8 from last month</div>
+          <div className="mb-3 text-sm text-slate-400">Recordings</div>
+          <div className="text-2xl font-bold text-white">{recordingCount}</div>
+          <div className="mt-1 text-sm text-emerald-400">this semester</div>
         </div>
 
         <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-5">
-          <div className="mb-3 text-sm text-slate-400">Active Students</div>
-          <div className="text-2xl font-bold text-white">12</div>
-          <div className="mt-1 text-sm text-slate-400">3 producers • 9 talent</div>
+          <div className="mb-3 text-sm text-slate-400">Students</div>
+          <div className="text-2xl font-bold text-white">{studentCount}</div>
+          <div className="mt-1 text-sm text-slate-400">{mediaStudents} media club</div>
+        </div>
+
+        <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-5">
+          <div className="mb-3 text-sm text-slate-400">Staff</div>
+          <div className="text-2xl font-bold text-white">{staffCount}</div>
+          <div className="mt-1 text-sm text-slate-400">faculty &amp; admin</div>
         </div>
       </div>
 
@@ -160,7 +226,7 @@ export default function Dashboard() {
         <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6">
           <div className="mb-4 flex items-center justify-between">
             <h3 className="text-lg font-semibold text-white">Recent Recordings</h3>
-            <button onClick={() => nav("/streamline/edu/archive")} className="text-sm text-orange-400 hover:text-orange-300">
+            <button onClick={() => nav("/streamline/edu/recordings")} className="text-sm text-orange-400 hover:text-orange-300">
               View All →
             </button>
           </div>
