@@ -123,7 +123,9 @@ router.post("/:slug/login", async (req, res) => {
       const studentDoc = snap.docs[0];
       const student = studentDoc.data() as any;
 
-      const valid = await bcrypt.compare(password, asString(student.password));
+      const hash = asString(student.passwordHash || student.password);
+      if (!hash) return res.status(401).json({ error: "Account not yet set up. Contact your teacher." });
+      const valid = await bcrypt.compare(password, hash);
       if (!valid) return res.status(401).json({ error: "Invalid credentials" });
 
       // Update lastLoginAt
@@ -214,12 +216,13 @@ router.post("/:slug/change-password", async (req, res) => {
       const stuDoc = stuSnap.docs[0];
       const student = stuDoc.data() as any;
 
-      const valid = await bcrypt.compare(currentPassword, asString(student.password));
+      const hash = asString(student.passwordHash || student.password);
+      const valid = await bcrypt.compare(currentPassword, hash);
       if (!valid) return res.status(401).json({ error: "Current password is incorrect" });
 
       const newHash = await bcrypt.hash(newPassword, 10);
       await stuDoc.ref.set(
-        { password: newHash, mustChangePassword: false, updatedAt: Date.now() },
+        { passwordHash: newHash, mustChangePassword: false, updatedAt: Date.now() },
         { merge: true },
       );
 

@@ -52,6 +52,7 @@ export async function goLiveEduBroadcast(body: {
   publishHls: boolean;
   recordMp4: boolean;
   eventId?: string | null;
+  assignedRoomId?: string | null;
 }): Promise<GoLiveResponse> {
   const res = await apiFetchAuth("/api/edu/broadcasts/go-live", {
     method: "POST",

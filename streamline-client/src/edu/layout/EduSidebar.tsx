@@ -25,17 +25,17 @@ export default function EduSidebar() {
       if (isStudentProducer) {
         return [
           { id: "dashboard", label: "Dashboard", path: "/streamline/edu/dashboard" },
-          { id: "rooms", label: "Rooms", path: "/streamline/edu/rooms" },
           { id: "broadcast", label: "Broadcast Studio", path: "/streamline/edu/broadcast" },
+          { id: "rooms", label: "Broadcast Rooms", path: "/streamline/edu/rooms" },
           { id: "media-library", label: "Recordings", path: "/streamline/edu/media-library" },
           { id: "people", label: "Students", path: "/streamline/edu/people" },
         ];
       }
       return [
         { id: "dashboard", label: "Dashboard", path: "/streamline/edu/dashboard" },
-        { id: "rooms", label: "Rooms", path: "/streamline/edu/rooms" },
         { id: "broadcast", label: "Broadcast Studio", path: "/streamline/edu/broadcast" },
         { id: "events", label: "Events", path: "/streamline/edu/events" },
+        { id: "rooms", label: "Broadcast Rooms", path: "/streamline/edu/rooms" },
         { id: "media-library", label: "Media Library", path: "/streamline/edu/media-library" },
         { id: "people", label: "People", path: "/streamline/edu/people" },
         ...(isFacultyAdmin ? [

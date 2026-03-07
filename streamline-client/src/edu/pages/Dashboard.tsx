@@ -94,13 +94,20 @@ export default function Dashboard() {
   /* True when the school is brand new — show getting-started prompts */
   const isNewSchool = roomCount + studentCount + staffCount + recordingCount <= 4 && staffCount <= 1;
 
+  const [allEventsList, setAllEventsList] = useState<import("../state/eduEvents").EduEvent[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    listEduEvents().then((all) => {
+      if (!cancelled) setAllEventsList(all);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
   const upcomingEvents = useMemo(() => {
-    const all = listEduEvents();
-    const next = all.filter((e) => {
+    return allEventsList.filter((e) => {
       const s = computeEduEventStatus(e);
       return s !== "ended" && s !== "canceled";
-    });
-    return next.slice(0, 3).map((e) => {
+    }).slice(0, 3).map((e) => {
       const d = new Date(e.startsAt);
       return {
         id: e.id,
@@ -111,7 +118,7 @@ export default function Dashboard() {
         crew: [e.producerName].filter(Boolean) as string[],
       };
     });
-  }, []);
+  }, [allEventsList]);
 
   return (
     <div className="space-y-6">

@@ -4,6 +4,7 @@ import { useEduMe } from "../layout/EduProtectedRoute";
 import { getEduEventById, setEduEventLive, listEduEvents, computeEduEventStatus, type EduEvent } from "../state/eduEvents";
 import { fetchEduOrg, postEduAudit, type EduOrgSettings } from "../api/settings";
 import { goLiveEduBroadcast, stopEduBroadcast, watchEduBroadcast, type GoLiveResponse } from "../api/broadcasts";
+import { apiFetchAuth } from "../../lib/api";
 
 type BroadcastTemplateId = "announcements" | "event" | "principal";
 type LayoutMode = "grid" | "speaker" | "single";
@@ -178,18 +179,62 @@ export default function Broadcast() {
 
   const activeEventId = eventId || pickedEventId;
 
-  const boundEvent = useMemo(() => {
-    if (!activeEventId) return null;
-    return getEduEventById(activeEventId);
+  const [boundEvent, setBoundEvent] = useState<EduEvent | null>(null);
+  useEffect(() => {
+    if (!activeEventId) { setBoundEvent(null); return; }
+    let cancelled = false;
+    getEduEventById(activeEventId).then((ev) => {
+      if (!cancelled) setBoundEvent(ev);
+    }).catch(() => { if (!cancelled) setBoundEvent(null); });
+    return () => { cancelled = true; };
   }, [activeEventId]);
 
+  // Fetch assigned broadcast room info when event has one
+  const [assignedRoom, setAssignedRoom] = useState<{
+    id: string; name: string; roomType: string;
+    broadcastEnabled?: boolean; recordingEnabled?: boolean; defaultLayout?: string;
+  } | null>(null);
+  useEffect(() => {
+    if (!boundEvent?.assignedRoomId) {
+      setAssignedRoom(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetchAuth(`/api/edu/rooms/${encodeURIComponent(boundEvent.assignedRoomId!)}`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && data.room) {
+          setAssignedRoom({
+            id: data.room.id,
+            name: data.room.name,
+            roomType: data.room.roomType || "broadcast",
+            broadcastEnabled: !!data.room.broadcastEnabled,
+            recordingEnabled: !!data.room.recordingEnabled,
+            defaultLayout: data.room.defaultLayout || undefined,
+          });
+        }
+      } catch {
+        // ignore
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [boundEvent?.assignedRoomId]);
+
   // Available upcoming events for the event picker
-  const upcomingEvents = useMemo(() => {
-    const all = listEduEvents();
-    return all.filter((ev) => {
-      const st = computeEduEventStatus(ev);
-      return st !== "canceled" && st !== "ended";
-    }).sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
+  const [upcomingEvents, setUpcomingEvents] = useState<EduEvent[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    listEduEvents().then((all) => {
+      if (cancelled) return;
+      const filtered = all.filter((ev) => {
+        const st = computeEduEventStatus(ev);
+        return st !== "canceled" && st !== "ended";
+      }).sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
+      setUpcomingEvents(filtered);
+    }).catch(() => {});
+    return () => { cancelled = true; };
   }, []);
 
   function selectEvent(ev: EduEvent) {
@@ -226,6 +271,22 @@ export default function Broadcast() {
   const [youtubeDestinationId, setYoutubeDestinationId] = useState<string>("default");
 
   const [layout, setLayout] = useState<LayoutMode>("speaker");
+
+  // Apply defaults from the bound event + assigned room when they load
+  useEffect(() => {
+    if (isLive) return; // don't change outputs while live
+    if (boundEvent) {
+      setPublishHls(boundEvent.outputs.publishHls);
+      setRecordMp4(boundEvent.outputs.recordMp4);
+      if (boundEvent.outputs.youtube) setAlsoYoutube(true);
+    }
+    if (assignedRoom) {
+      const dl = assignedRoom.defaultLayout;
+      if (dl === "speaker" || dl === "grid" || dl === "single") setLayout(dl as LayoutMode);
+      if (typeof assignedRoom.broadcastEnabled === "boolean") setPublishHls(assignedRoom.broadcastEnabled);
+      if (typeof assignedRoom.recordingEnabled === "boolean") setRecordMp4(assignedRoom.recordingEnabled);
+    }
+  }, [boundEvent?.id, assignedRoom?.id]);
 
   const [producer, setProducer] = useState<string>(displayName);
   const [talent, setTalent] = useState<Talent[]>([]);
@@ -346,10 +407,6 @@ export default function Broadcast() {
 
   useEffect(() => {
     refreshDevices()
-      .then(() => {
-        // Auto-start camera/mic preview so the user sees video immediately
-        testDevices().catch(() => void 0);
-      })
       .catch(() => {
         // ignore
       });
@@ -506,6 +563,7 @@ export default function Broadcast() {
         publishHls,
         recordMp4,
         eventId: activeEventId,
+        assignedRoomId: boundEvent?.assignedRoomId || null,
       });
       setGoLiveData(data);
       setBroadcastId(data.broadcast.id);
@@ -543,7 +601,7 @@ export default function Broadcast() {
       setRecordingStatus(recordMp4 ? "active" : "off");
       setYoutubeStatus(alsoYoutube ? "active" : "off");
 
-      if (activeEventId) setEduEventLive(activeEventId, true);
+      if (activeEventId) await setEduEventLive(activeEventId, true).catch(() => {});
     } catch (err: any) {
       console.error("[EduBroadcast] go-live error:", err);
       setGoLiveError(err?.message || "Failed to go live");
@@ -578,7 +636,7 @@ export default function Broadcast() {
     setRecordingStatus("off");
     setYoutubeStatus("off");
 
-    if (activeEventId) setEduEventLive(activeEventId, false);
+    if (activeEventId) await setEduEventLive(activeEventId, false).catch(() => {});
   }
 
   async function emergencyCut() {
@@ -608,7 +666,7 @@ export default function Broadcast() {
     setRecordingStatus(recordMp4 ? "error" : "off");
     setYoutubeStatus(alsoYoutube ? "error" : "off");
 
-    if (activeEventId) setEduEventLive(activeEventId, false);
+    if (activeEventId) await setEduEventLive(activeEventId, false).catch(() => {});
 
     void (async () => {
       try {
@@ -809,6 +867,11 @@ export default function Broadcast() {
                 <div className="mt-1 text-sm text-slate-400">
                   {new Date(boundEvent.startsAt).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
                 </div>
+                {assignedRoom ? (
+                  <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-orange-500/10 px-2.5 py-0.5 text-xs font-medium text-orange-300">
+                    📡 {assignedRoom.name}
+                  </div>
+                ) : null}
               </div>
               {/* Allow clearing the picked event (not the URL-bound one) */}
               {!eventId && pickedEventId ? (
@@ -1512,7 +1575,7 @@ export default function Broadcast() {
                   Add talent
                 </button>
               </div>
-              <div className="mt-3 text-xs text-slate-500">Talent should join via a separate Studio link/page (Phase 2).</div>
+              <div className="mt-3 text-xs text-slate-500">Talent should join via a separate Studio page (Phase 2).</div>
             </div>
           </div>
 

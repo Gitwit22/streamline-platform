@@ -46,25 +46,32 @@ export default function StudentPortal() {
     });
   }, []);
 
-  const upcomingEvents = useMemo(() => {
-    const all = listEduEvents();
-    return all
-      .filter((e) => {
-        const s = computeEduEventStatus(e);
-        return s !== "ended" && s !== "canceled";
-      })
-      .slice(0, 5)
-      .map((e) => ({
-        id: e.id,
-        title: e.title,
-        date: new Date(e.startsAt).toLocaleDateString(undefined, {
-          weekday: "short",
-          month: "short",
-          day: "numeric",
-          hour: "numeric",
-          minute: "2-digit",
-        }),
-      }));
+  const [upcomingEvents, setUpcomingEvents] = useState<{ id: string; title: string; date: string }[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    listEduEvents().then((all) => {
+      if (cancelled) return;
+      setUpcomingEvents(
+        all
+          .filter((e) => {
+            const s = computeEduEventStatus(e);
+            return s !== "ended" && s !== "canceled";
+          })
+          .slice(0, 5)
+          .map((e) => ({
+            id: e.id,
+            title: e.title,
+            date: new Date(e.startsAt).toLocaleDateString(undefined, {
+              weekday: "short",
+              month: "short",
+              day: "numeric",
+              hour: "numeric",
+              minute: "2-digit",
+            }),
+          })),
+      );
+    }).catch(() => {});
+    return () => { cancelled = true; };
   }, []);
 
   const tabs: { id: TabId; label: string }[] = [

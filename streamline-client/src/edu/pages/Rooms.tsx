@@ -161,9 +161,15 @@ export default function Rooms() {
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-white">Rooms</h1>
+          <h1 className="text-2xl font-bold text-white">Broadcast Rooms</h1>
           <p className="mt-1 text-sm text-slate-400">
-            Live spaces for meetings, broadcasts & production
+            Reusable internal production spaces for your school
+          </p>
+          <p className="mt-1 text-xs text-slate-500">
+            Rooms define crew spaces &amp; defaults. Broadcasts go live from{" "}
+            <button type="button" onClick={() => nav("/streamline/edu/broadcast")} className="text-orange-400 hover:text-orange-300 underline underline-offset-2">
+              Broadcast Studio
+            </button>.
           </p>
         </div>
         <div className="flex items-center gap-3">
@@ -174,7 +180,7 @@ export default function Rooms() {
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search rooms..."
+              placeholder="Search broadcast rooms..."
               className="rounded-xl border border-slate-700 bg-slate-800/50 py-2.5 pl-10 pr-4 text-sm text-white outline-none placeholder:text-slate-500 focus:border-orange-500"
             />
           </div>
@@ -183,7 +189,7 @@ export default function Rooms() {
               onClick={() => setShowCreate(true)}
               className="rounded-xl bg-gradient-to-r from-orange-500 to-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:opacity-90"
             >
-              + Create Room
+              + Create Broadcast Room
             </button>
           )}
         </div>
@@ -271,12 +277,12 @@ export default function Rooms() {
           <div className="col-span-full rounded-2xl border border-slate-700 bg-slate-800/50 p-12 text-center">
             <div className="text-4xl">🏫</div>
             <div className="mt-3 text-lg font-semibold text-slate-300">
-              {search || typeFilter !== "all" ? "No rooms match your filters" : "No rooms yet"}
+              {search || typeFilter !== "all" ? "No broadcast rooms match your filters" : "No broadcast rooms yet"}
             </div>
             <div className="mt-1 text-sm text-slate-500">
               {isFacultyAdmin
-                ? "Create a room to get started — meetings, broadcasts, or hybrid."
-                : "Your school admin hasn't created any rooms yet."}
+                ? "Create a broadcast room to get started — meetings, broadcasts, or hybrid."
+                : "Your school admin hasn't created any broadcast rooms yet."}
             </div>
           </div>
         )}
@@ -287,8 +293,8 @@ export default function Rooms() {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <button type="button" onClick={resetCreateForm} className="absolute inset-0 bg-black/60" aria-label="Close" />
           <div className="relative w-full max-w-lg rounded-2xl border border-slate-700 bg-slate-900 p-6">
-            <h2 className="text-lg font-semibold text-white">Create a Room</h2>
-            <p className="mt-1 text-sm text-slate-400">A room is a live space — people join, then optionally broadcast.</p>
+            <h2 className="text-lg font-semibold text-white">Create a Broadcast Room</h2>
+            <p className="mt-1 text-sm text-slate-400">A broadcast room is a persistent internal space — your crew joins here, then goes live when ready.</p>
 
             <div className="mt-5 space-y-5">
               {/* Name */}
@@ -404,7 +410,7 @@ export default function Rooms() {
                 disabled={creating || !newName.trim()}
                 className="rounded-xl bg-gradient-to-r from-orange-500 to-red-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-50"
               >
-                {creating ? "Creating..." : "Create Room"}
+                {creating ? "Creating..." : "Create Broadcast Room"}
               </button>
             </div>
           </div>

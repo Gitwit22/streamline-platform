@@ -217,7 +217,12 @@ export default function People() {
 
   const [drawerTarget, setDrawerTarget] = useState<EduPerson | null>(null);
   const [callTarget, setCallTarget] = useState<EduPerson | null>(null);
-  const allEvents = listEduEvents();
+  const [allEvents, setAllEvents] = useState<import("../state/eduEvents").EduEvent[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    listEduEvents().then((evs) => { if (!cancelled) setAllEvents(evs); }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     let mounted = true;

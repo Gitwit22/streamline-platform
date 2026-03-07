@@ -25,6 +25,9 @@ export type EduEvent = {
 
   outputs: EduEventOutputs;
 
+  // Room assignment
+  assignedRoomId: string | null;
+
   // Links
   savedEmbedId: string | null; // /live/:savedEmbedId
 
@@ -37,12 +40,9 @@ export type EduEvent = {
   updatedAt: string;
 };
 
-// Maps to Firestore: env/test/tenants/edu/events
-const EVENTS_KEY = "sl_edu_events_v1";
+import { apiFetchAuth } from "../../lib/api";
 
-function nowIso() {
-  return new Date().toISOString();
-}
+/* ── Helpers ──────────────────────────────────────────────────── */
 
 function addMinutesIso(iso: string, minutes: number): string {
   try {
@@ -51,25 +51,6 @@ function addMinutesIso(iso: string, minutes: number): string {
     return new Date(base + minutes * 60_000).toISOString();
   } catch {
     return iso;
-  }
-}
-
-export function randomId(prefix: string) {
-  try {
-    const id = crypto?.randomUUID?.();
-    if (id) return `${prefix}_${id.slice(0, 12)}`;
-  } catch {
-    // ignore
-  }
-  return `${prefix}_${Math.random().toString(16).slice(2, 14)}`;
-}
-
-function safeParse(raw: string | null): unknown {
-  try {
-    if (!raw) return null;
-    return JSON.parse(raw);
-  } catch {
-    return null;
   }
 }
 
@@ -95,7 +76,7 @@ function normalizeEvent(x: any): EduEvent | null {
 
   const talent = Array.isArray(x.talent) ? x.talent.filter((t: any) => typeof t === "string" && t.trim()).map((t: string) => t.trim()) : [];
 
-  const createdAt = typeof x.createdAt === "string" ? x.createdAt : nowIso();
+  const createdAt = typeof x.createdAt === "string" ? x.createdAt : new Date().toISOString();
   const updatedAt = typeof x.updatedAt === "string" ? x.updatedAt : createdAt;
 
   return {
@@ -110,6 +91,7 @@ function normalizeEvent(x: any): EduEvent | null {
     talent,
     studentProducerCanStart: !!x.studentProducerCanStart,
     outputs,
+    assignedRoomId: typeof x.assignedRoomId === "string" ? x.assignedRoomId : null,
     savedEmbedId: typeof x.savedEmbedId === "string" ? x.savedEmbedId : null,
     isLive: !!x.isLive,
     endedAt: typeof x.endedAt === "string" ? x.endedAt : null,
@@ -119,45 +101,24 @@ function normalizeEvent(x: any): EduEvent | null {
   };
 }
 
-function loadAll(): EduEvent[] {
-  try {
-    if (typeof window === "undefined") return [];
-    const parsed = safeParse(window.localStorage.getItem(EVENTS_KEY));
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map(normalizeEvent).filter(Boolean) as EduEvent[];
-  } catch {
-    return [];
-  }
+/* ── API-backed CRUD ──────────────────────────────────────────── */
+
+export async function listEduEvents(): Promise<EduEvent[]> {
+  const res = await apiFetchAuth("/api/edu/events?limit=200");
+  if (!res.ok) throw new Error(`Failed to list events: ${res.status}`);
+  const data = await res.json();
+  const raw = Array.isArray(data?.events) ? data.events : [];
+  return raw.map(normalizeEvent).filter(Boolean) as EduEvent[];
 }
 
-function saveAll(events: EduEvent[]) {
-  try {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(EVENTS_KEY, JSON.stringify(events));
-  } catch {
-    // ignore
-  }
+export async function getEduEventById(id: string): Promise<EduEvent | null> {
+  const res = await apiFetchAuth(`/api/edu/events/${encodeURIComponent(id)}`);
+  if (!res.ok) return null;
+  const data = await res.json();
+  return normalizeEvent(data?.event) || null;
 }
 
-export function listEduEvents(): EduEvent[] {
-  return loadAll().sort((a, b) => new Date(a.startsAt).getTime() - new Date(b.startsAt).getTime());
-}
-
-export function getEduEventById(id: string): EduEvent | null {
-  const all = loadAll();
-  return all.find((e) => e.id === id) || null;
-}
-
-export function upsertEduEvent(event: EduEvent) {
-  const all = loadAll();
-  const idx = all.findIndex((e) => e.id === event.id);
-  const next: EduEvent = { ...event, updatedAt: nowIso() };
-  if (idx >= 0) all[idx] = next;
-  else all.push(next);
-  saveAll(all);
-}
-
-export function createEduEvent(params: {
+export async function createEduEvent(params: {
   title: string;
   type: EduEventType;
   startsAt: string;
@@ -167,73 +128,90 @@ export function createEduEvent(params: {
   talent?: string[];
   studentProducerCanStart?: boolean;
   outputs?: Partial<EduEventOutputs>;
-}): EduEvent {
-  const createdAt = nowIso();
-  const timezone = (params.timezone || "").trim() ? String(params.timezone).trim() : "America/New_York";
-  const endsAt = typeof params.endsAt === "string" && params.endsAt ? params.endsAt : addMinutesIso(params.startsAt, 60);
-  const ev: EduEvent = {
-    id: randomId("edu_event"),
-    title: params.title.trim(),
-    type: params.type,
-    startsAt: params.startsAt,
-    endsAt,
-    timezone,
-    notes: "",
-    producerName: (params.producerName || "").trim() ? String(params.producerName).trim() : null,
-    talent: (params.talent || []).filter(Boolean).map((s) => String(s).trim()).filter(Boolean),
-    studentProducerCanStart: !!params.studentProducerCanStart,
-    outputs: {
-      publishHls: params.outputs?.publishHls ?? true,
-      recordMp4: params.outputs?.recordMp4 ?? true,
-      youtube: params.outputs?.youtube ?? false,
-      youtubeDestinationId: typeof params.outputs?.youtubeDestinationId === "string" ? params.outputs?.youtubeDestinationId : null,
-    },
-    savedEmbedId: null,
-    isLive: false,
-    endedAt: null,
-    canceledAt: null,
-    createdAt,
-    updatedAt: createdAt,
-  };
-  upsertEduEvent(ev);
-  return ev;
-}
-
-export function duplicateEduEvent(sourceId: string): EduEvent | null {
-  const src = getEduEventById(sourceId);
-  if (!src) return null;
-  const createdAt = nowIso();
-  const ev: EduEvent = {
-    ...src,
-    id: randomId("edu_event"),
-    title: `${src.title} (Copy)`,
-    isLive: false,
-    endedAt: null,
-    canceledAt: null,
-    createdAt,
-    updatedAt: createdAt,
-  };
-  upsertEduEvent(ev);
-  return ev;
-}
-
-export function cancelEduEvent(id: string) {
-  const ev = getEduEventById(id);
-  if (!ev) return;
-  if (ev.canceledAt) return;
-  upsertEduEvent({ ...ev, isLive: false, endedAt: ev.endedAt, canceledAt: nowIso() });
-}
-
-export function setEduEventLive(id: string, live: boolean) {
-  const ev = getEduEventById(id);
-  if (!ev) return;
-  if (ev.canceledAt) return;
-  if (live) {
-    upsertEduEvent({ ...ev, isLive: true, endedAt: null });
-  } else {
-    upsertEduEvent({ ...ev, isLive: false, endedAt: ev.endedAt || nowIso() });
+  assignedRoomId?: string | null;
+}): Promise<EduEvent> {
+  const res = await apiFetchAuth("/api/edu/events", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: params.title.trim(),
+      type: params.type,
+      startsAt: params.startsAt,
+      endsAt: params.endsAt || undefined,
+      timezone: params.timezone || undefined,
+      producerName: params.producerName || null,
+      talent: params.talent || [],
+      studentProducerCanStart: !!params.studentProducerCanStart,
+      outputs: {
+        publishHls: params.outputs?.publishHls ?? true,
+        recordMp4: params.outputs?.recordMp4 ?? true,
+        youtube: params.outputs?.youtube ?? false,
+        youtubeDestinationId: params.outputs?.youtubeDestinationId ?? null,
+      },
+      assignedRoomId: params.assignedRoomId || null,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any)?.error || `Failed to create event: ${res.status}`);
   }
+  const data = await res.json();
+  const ev = normalizeEvent(data?.event);
+  if (!ev) throw new Error("Invalid event returned from server");
+  return ev;
 }
+
+export async function upsertEduEvent(event: EduEvent): Promise<EduEvent> {
+  const res = await apiFetchAuth(`/api/edu/events/${encodeURIComponent(event.id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: event.title,
+      type: event.type,
+      startsAt: event.startsAt,
+      endsAt: event.endsAt,
+      timezone: event.timezone,
+      notes: event.notes || "",
+      producerName: event.producerName,
+      talent: event.talent,
+      studentProducerCanStart: event.studentProducerCanStart,
+      outputs: event.outputs,
+      assignedRoomId: event.assignedRoomId,
+      savedEmbedId: event.savedEmbedId,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any)?.error || `Failed to update event: ${res.status}`);
+  }
+  const data = await res.json();
+  return normalizeEvent(data?.event) || event;
+}
+
+export async function duplicateEduEvent(sourceId: string): Promise<EduEvent | null> {
+  const res = await apiFetchAuth(`/api/edu/events/${encodeURIComponent(sourceId)}/duplicate`, {
+    method: "POST",
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return normalizeEvent(data?.event) || null;
+}
+
+export async function cancelEduEvent(id: string): Promise<void> {
+  await apiFetchAuth(`/api/edu/events/${encodeURIComponent(id)}/cancel`, {
+    method: "POST",
+  });
+}
+
+export async function setEduEventLive(id: string, live: boolean): Promise<void> {
+  await apiFetchAuth(`/api/edu/events/${encodeURIComponent(id)}/set-live`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ live }),
+  });
+}
+
+/* ── Pure helpers (no API needed) ─────────────────────────────── */
 
 export function computeEduEventStatus(ev: EduEvent): EduEventStatus {
   if (ev.canceledAt) return "canceled";

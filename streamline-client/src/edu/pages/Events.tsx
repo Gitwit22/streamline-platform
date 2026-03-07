@@ -15,8 +15,15 @@ import {
   type EduEventType,
   upsertEduEvent,
 } from "../state/eduEvents";
+import { apiFetchAuth } from "../../lib/api";
 
 type TabId = "upcoming" | "past";
+
+type BroadcastRoom = {
+  id: string;
+  name: string;
+  roomType: string;
+};
 
 function formatDateTime(iso: string, tz?: string) {
   const d = new Date(iso);
@@ -368,6 +375,7 @@ export default function Events() {
   const [detailId, setDetailId] = useState<string | null>(null);
 
   const [orgTimezone, setOrgTimezone] = useState<string>("America/New_York");
+  const [broadcastRooms, setBroadcastRooms] = useState<BroadcastRoom[]>([]);
 
   useEffect(() => {
     let cancelled = false;
@@ -387,11 +395,46 @@ export default function Events() {
     };
   }, []);
 
+  // Fetch broadcast rooms for the room picker
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetchAuth("/api/edu/rooms?limit=100");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data.rooms)) {
+          setBroadcastRooms(data.rooms.map((r: any) => ({ id: r.id, name: r.name, roomType: r.roomType || "broadcast" })));
+        }
+      } catch {
+        // ignore
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const [allEvents, setAllEvents] = useState<EduEvent[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setEventsLoading(true);
+    listEduEvents()
+      .then((all) => {
+        if (!cancelled) setAllEvents(all);
+      })
+      .catch(() => {
+        if (!cancelled) setAllEvents([]);
+      })
+      .finally(() => {
+        if (!cancelled) setEventsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [eventsVersion]);
+
   const events = useMemo(() => {
-    void eventsVersion;
-    const all = listEduEvents();
     const q = query.trim().toLowerCase();
-    const filtered = q ? all.filter((e) => e.title.toLowerCase().includes(q)) : all;
+    const filtered = q ? allEvents.filter((e) => e.title.toLowerCase().includes(q)) : allEvents;
     const now = Date.now();
     const upcoming = filtered.filter((e) => {
       const status = computeEduEventStatus(e);
@@ -405,7 +448,7 @@ export default function Events() {
       return status === "ended" || status === "canceled";
     });
     return { upcoming, past };
-  }, [eventsVersion, query]);
+  }, [allEvents, query]);
 
   function refreshEvents() {
     setEventsVersion((x) => x + 1);
@@ -413,8 +456,8 @@ export default function Events() {
 
   const selectedEvent = useMemo(() => {
     if (!detailId) return null;
-    return listEduEvents().find((e) => e.id === detailId) || null;
-  }, [detailId, eventsVersion]);
+    return allEvents.find((e) => e.id === detailId) || null;
+  }, [detailId, allEvents]);
 
   const canStartFromEvent = (ev: EduEvent) => {
     if (computeEduEventStatus(ev) === "canceled") return false;
@@ -499,6 +542,7 @@ export default function Events() {
           const showYoutube = !!ev.outputs.youtube;
 
           const crewLine = ev.producerName ? "Producer assigned" : "No producer assigned";
+          const roomName = ev.assignedRoomId ? broadcastRooms.find((r) => r.id === ev.assignedRoomId)?.name : null;
 
           const canStart = canStartFromEvent(ev);
 
@@ -515,6 +559,11 @@ export default function Events() {
                   <div className="mt-2 text-sm text-slate-300">
                     <span className="text-slate-400">Crew:</span> {crewLine}
                   </div>
+                  {roomName ? (
+                    <div className="mt-1 text-sm text-slate-300">
+                      <span className="text-slate-400">Room:</span> {roomName}
+                    </div>
+                  ) : null}
                   <div className="mt-3 flex items-center gap-3 text-slate-400">
                     {ev.outputs.publishHls ? (
                       <div className="flex items-center gap-1 text-slate-300" title="Website (HLS)">
@@ -556,12 +605,12 @@ export default function Events() {
                   ) : null}
                   <DotsMenu
                     onEdit={() => setDetailId(ev.id)}
-                    onDuplicate={() => {
-                      duplicateEduEvent(ev.id);
+                    onDuplicate={async () => {
+                      await duplicateEduEvent(ev.id);
                       refreshEvents();
                     }}
-                    onCancel={() => {
-                      cancelEduEvent(ev.id);
+                    onCancel={async () => {
+                      await cancelEduEvent(ev.id);
                       refreshEvents();
                     }}
                     disabledCancel={status === "canceled" || status === "ended"}
@@ -585,6 +634,7 @@ export default function Events() {
         <ScheduleEventModal
           isFacultyAdmin={isFacultyAdmin}
           orgTimezone={orgTimezone}
+          broadcastRooms={broadcastRooms}
           onClose={() => setScheduleOpen(false)}
           onCreated={async (ev) => {
             setScheduleOpen(false);
@@ -603,8 +653,7 @@ export default function Events() {
                     enabled: true,
                   },
                 });
-                upsertEduEvent({ ...ev, savedEmbedId: embed.embedId });
-                refreshEvents();
+                upsertEduEvent({ ...ev, savedEmbedId: embed.embedId }).then(() => refreshEvents()).catch(() => {});
               } catch {
                 // ignore
               }
@@ -621,13 +670,14 @@ export default function Events() {
           isStudentProducer={isStudentProducer}
           event={selectedEvent}
           orgTimezone={orgTimezone}
+          broadcastRooms={broadcastRooms}
           onClose={() => setDetailId(null)}
-          onChange={(next) => {
-            upsertEduEvent(next);
+          onChange={async (next) => {
+            await upsertEduEvent(next);
             refreshEvents();
           }}
-          onCancel={() => {
-            cancelEduEvent(selectedEvent.id);
+          onCancel={async () => {
+            await cancelEduEvent(selectedEvent.id);
             refreshEvents();
             setDetailId(null);
           }}
@@ -645,11 +695,13 @@ export default function Events() {
 function ScheduleEventModal({
   isFacultyAdmin,
   orgTimezone,
+  broadcastRooms,
   onClose,
   onCreated,
 }: {
   isFacultyAdmin: boolean;
   orgTimezone: string;
+  broadcastRooms: BroadcastRoom[];
   onClose: () => void;
   onCreated: (ev: EduEvent) => void | Promise<void>;
 }) {
@@ -667,6 +719,7 @@ function ScheduleEventModal({
 
   const [producerName, setProducerName] = useState<string>("");
   const [talentCsv, setTalentCsv] = useState<string>("");
+  const [assignedRoomId, setAssignedRoomId] = useState<string>("");
 
   const [publishHls, setPublishHls] = useState(true);
   const [recordMp4, setRecordMp4] = useState(true);
@@ -719,7 +772,7 @@ function ScheduleEventModal({
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const ev = createEduEvent({
+    const ev = await createEduEvent({
       title: title.trim(),
       type,
       startsAt: startsAtIso,
@@ -728,6 +781,7 @@ function ScheduleEventModal({
       producerName: producerName.trim() || null,
       talent,
       studentProducerCanStart: false,
+      assignedRoomId: assignedRoomId || null,
       outputs: {
         publishHls,
         recordMp4,
@@ -828,6 +882,20 @@ function ScheduleEventModal({
         {step === 2 ? (
           <div className="space-y-4">
             <div>
+              <label className="text-sm font-medium text-slate-200">Broadcast Room (optional)</label>
+              <select
+                value={assignedRoomId}
+                onChange={(e) => setAssignedRoomId(e.target.value)}
+                className="mt-2 w-full rounded-xl border border-slate-800/50 bg-slate-950 px-4 py-2 text-sm text-white focus:outline-none"
+              >
+                <option value="">No room assigned</option>
+                {broadcastRooms.map((r) => (
+                  <option key={r.id} value={r.id}>{r.name}</option>
+                ))}
+              </select>
+              <div className="mt-1 text-xs text-slate-500">Assign a persistent broadcast room for this event's production crew.</div>
+            </div>
+            <div>
               <label className="text-sm font-medium text-slate-200">Producer (optional at create)</label>
               <input
                 value={producerName}
@@ -911,6 +979,7 @@ function EventDetailDrawer({
   isStudentProducer,
   event,
   orgTimezone,
+  broadcastRooms,
   onClose,
   onChange,
   onCancel,
@@ -922,6 +991,7 @@ function EventDetailDrawer({
   isStudentProducer: boolean;
   event: EduEvent;
   orgTimezone: string;
+  broadcastRooms: BroadcastRoom[];
   onClose: () => void;
   onChange: (next: EduEvent) => void;
   onCancel: () => void;
@@ -1111,6 +1181,20 @@ function EventDetailDrawer({
                 rows={3}
               />
             </div>
+            <div>
+              <label className="text-sm font-medium text-slate-200">Broadcast Room</label>
+              <select
+                value={draft.assignedRoomId || ""}
+                onChange={(e) => setDraft((d) => ({ ...d, assignedRoomId: e.target.value || null }))}
+                className="mt-2 w-full rounded-xl border border-slate-800/50 bg-slate-950 px-4 py-2 text-sm text-white focus:outline-none"
+              >
+                <option value="">No room assigned</option>
+                {broadcastRooms.map((r) => (
+                  <option key={r.id} value={r.id}>{r.name}</option>
+                ))}
+              </select>
+              <div className="mt-1 text-xs text-slate-500">The persistent production space for this event's crew.</div>
+            </div>
           </div>
         </section>
 
@@ -1230,7 +1314,7 @@ function EventDetailDrawer({
         <section className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-5">
           <div className="mb-3 text-sm font-semibold text-white">Links</div>
           <div className="space-y-3">
-            <LinkRow label="Event Studio Link" value={studioUrl} onCopy={() => void doCopy("Studio link", studioUrl)} />
+            <LinkRow label="Open in Studio" value={studioUrl} onCopy={() => void doCopy("Studio URL", studioUrl)} />
             <LinkRow
               label="Event Viewer Link"
               value={viewerUrl || "(not generated yet)"}
