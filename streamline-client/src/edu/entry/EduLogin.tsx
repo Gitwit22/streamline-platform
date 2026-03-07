@@ -75,21 +75,8 @@ export default function EduLogin() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        // Default to hidden unless explicitly enabled (or dev/localhost).
-        const isDevOrLocal = import.meta.env.DEV;
-        const cfg = await fetchOnboardingConfig().catch(() => null);
-        const allow = !!cfg?.systemState?.allowSelfServeOrgCreation;
-        if (!cancelled) setCanSelfServeOnboarding(isDevOrLocal || allow);
-      } catch {
-        if (!cancelled) setCanSelfServeOnboarding(!!import.meta.env.DEV);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    // School onboarding is always available — no server flag needed.
+    setCanSelfServeOnboarding(true);
   }, []);
 
   const handleSubmit = async (e: FormEvent) => {
