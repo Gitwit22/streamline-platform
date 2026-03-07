@@ -270,11 +270,9 @@ async function orgAlreadyHasFacultyAdmin(orgId: string): Promise<boolean> {
 
 // POST /api/onboarding/create-top-admin
 // Creates a brand-new org (edu) and the first Faculty Admin user.
+// Self-service: no auth required (the user is being created here).
 router.post("/create-top-admin", async (req, res) => {
   try {
-    if (!canRunUnauthedOnboarding() && !checkOnboardingKey(req)) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
 
     const firstName = asString(req.body?.firstName).trim();
     const lastName = asString(req.body?.lastName).trim();
