@@ -664,6 +664,16 @@ export default function Broadcast() {
     if (!canStartStop) return;
     setGoLiveError(null);
 
+    // Block re-broadcasting ended or canceled events
+    if (boundEvent?.endedAt) {
+      setGoLiveError("This event has already ended. Duplicate it from the Events page to broadcast again.");
+      return;
+    }
+    if (boundEvent?.canceledAt) {
+      setGoLiveError("This event was canceled and cannot be started.");
+      return;
+    }
+
     // Show optimistic loading states
     setWebsiteStatus(publishHls ? "starting" : "off");
     setRecordingStatus(recordMp4 ? "starting" : "off");

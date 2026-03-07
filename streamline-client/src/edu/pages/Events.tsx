@@ -1070,6 +1070,7 @@ function EventDetailDrawer({
 
   const canStartFromDrawer = useMemo(() => {
     if (status === "canceled" || status === "ended") return false;
+    if (draft.endedAt || draft.canceledAt) return false;
 
     // Faculty admin can start any non-canceled/non-ended event regardless of schedule
     if (isFacultyAdmin) return true;

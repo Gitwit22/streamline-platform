@@ -315,6 +315,17 @@ router.post("/broadcasts/:id/stop", requireAuth, async (req, res) => {
       playlistUrl: null,
     }, { merge: true });
 
+    // Also reset the linked event's isLive flag so it doesn't stay "live" in the UI
+    const eventId = existing.eventId;
+    if (typeof eventId === "string" && eventId) {
+      const nowIso = new Date(now).toISOString();
+      tenantCol("events").doc(eventId).update({
+        isLive: false,
+        endedAt: nowIso,
+        updatedAt: nowIso,
+      }).catch((e: any) => console.warn("[edu/broadcasts] event isLive reset failed:", e?.message));
+    }
+
     await writeEduAudit({
       orgId: ctx.orgId,
       action: "broadcast.stop",

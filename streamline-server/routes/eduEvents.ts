@@ -83,6 +83,48 @@ router.get("/events", requireAuth as any, async (req: any, res) => {
 
     const events = snap.docs.map((d) => serializeEvent(d.id, d.data()));
 
+    // ── Stale-live auto-cleanup ─────────────────────────────────────
+    // If an event claims isLive but has no corresponding live broadcast,
+    // it was orphaned (browser crash, network drop, etc.). Reset it.
+    const staleIds: string[] = [];
+    const MAX_LIVE_HOURS = 8; // no real broadcast runs longer than 8h
+    const now = Date.now();
+    for (const ev of events) {
+      if (!ev.isLive) continue;
+      // Check if there is actually a live broadcast for this event
+      const bcSnap = await tenantCol("eduBroadcasts")
+        .where("orgId", "==", ctx.orgId)
+        .where("eventId", "==", ev.id)
+        .where("status", "==", "live")
+        .limit(1)
+        .get();
+      if (bcSnap.empty) {
+        // No active broadcast — this is stale
+        staleIds.push(ev.id);
+        ev.isLive = false;
+        ev.endedAt = ev.endedAt || new Date().toISOString();
+      } else {
+        // Safety net: if the broadcast started more than MAX_LIVE_HOURS ago reset it
+        const bcData = bcSnap.docs[0].data() as any;
+        const started = typeof bcData.startedAt === "number" ? bcData.startedAt : 0;
+        if (started > 0 && now - started > MAX_LIVE_HOURS * 3600_000) {
+          staleIds.push(ev.id);
+          ev.isLive = false;
+          ev.endedAt = ev.endedAt || new Date().toISOString();
+        }
+      }
+    }
+    // Fire-and-forget cleanup writes
+    if (staleIds.length) {
+      const nowIso = new Date().toISOString();
+      for (const id of staleIds) {
+        tenantCol("events").doc(id).update({ isLive: false, endedAt: nowIso, updatedAt: nowIso }).catch((e: any) =>
+          console.warn("[eduEvents] stale-live cleanup failed for", id, e?.message)
+        );
+      }
+      console.log(`[eduEvents] Auto-cleared stale isLive on ${staleIds.length} event(s):`, staleIds);
+    }
+
     // Sort by startsAt ascending in-memory (avoids composite index)
     events.sort((a, b) => {
       const ta = new Date(a.startsAt).getTime() || 0;
@@ -253,13 +295,8 @@ router.patch("/events/:eventId", requireAuth as any, async (req: any, res) => {
     if (req.body?.savedEmbedId !== undefined) {
       patch.savedEmbedId = typeof req.body.savedEmbedId === "string" ? req.body.savedEmbedId : null;
     }
-    if (req.body?.isLive !== undefined) patch.isLive = !!req.body.isLive;
-    if (req.body?.endedAt !== undefined) {
-      patch.endedAt = typeof req.body.endedAt === "string" ? req.body.endedAt : null;
-    }
-    if (req.body?.canceledAt !== undefined) {
-      patch.canceledAt = typeof req.body.canceledAt === "string" ? req.body.canceledAt : null;
-    }
+    // Note: isLive, endedAt, canceledAt are NOT accepted here.
+    // They are only set by their dedicated endpoints (set-live, cancel, broadcast stop).
 
     await ref.update(patch);
 
@@ -336,6 +373,15 @@ router.post("/events/:eventId/set-live", requireAuth as any, async (req: any, re
     if (existing.canceledAt) return res.status(400).json({ error: "Event is canceled" });
 
     const live = !!req.body?.live;
+
+    // Block restarting an ended event — once over, it stays over
+    if (live && existing.endedAt) {
+      return res.status(409).json({
+        error: "event_ended",
+        message: "This event has already ended and cannot be restarted. Duplicate it to broadcast again.",
+      });
+    }
+
     const now = new Date().toISOString();
     const patch: Record<string, any> = { updatedAt: now };
 
