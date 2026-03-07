@@ -32,7 +32,7 @@ export type PendingStaffRecord = {
   id: string;
   orgId: string;
   fullName: string;
-  role: "faculty_admin" | "staff";
+  role: "faculty_admin" | "faculty_teacher" | "staff";
   positionTitle: string;
   email: string | null;
   onboardingCode: string;
@@ -174,7 +174,7 @@ export async function fetchPendingStaff(): Promise<PendingStaffRecord[]> {
 
 export async function createPendingStaff(body: {
   fullName: string;
-  role: "faculty_admin" | "staff";
+  role: "faculty_admin" | "faculty_teacher";
   positionTitle: string;
   email?: string;
 }): Promise<PendingStaffRecord> {

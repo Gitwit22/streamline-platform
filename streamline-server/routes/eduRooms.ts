@@ -6,7 +6,7 @@ import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
-type EduOrgRole = "faculty_admin" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
+type EduOrgRole = "faculty_admin" | "faculty_teacher" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
 
 /** Room types: meeting (no broadcast), broadcast (always broadcasts), hybrid (optional broadcast). */
 type RoomType = "meeting" | "broadcast" | "hybrid";

@@ -7,7 +7,7 @@ import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
-type EduOrgRole = "faculty_admin" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
+type EduOrgRole = "faculty_admin" | "faculty_teacher" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
 
 function asString(v: any): string {
   return typeof v === "string" ? v : "";

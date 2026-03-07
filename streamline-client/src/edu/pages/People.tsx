@@ -18,6 +18,7 @@ type TabId = "students" | "staff";
 
 function roleLabel(role: EduPersonRole): string {
   if (role === "faculty_admin") return "Faculty Admin";
+  if (role === "faculty_teacher") return "Teacher";
   if (role === "student_producer" || role === "student_producer_assigned") return "Student Producer";
   if (role === "talent") return "Talent";
   return "Viewer";
@@ -25,6 +26,7 @@ function roleLabel(role: EduPersonRole): string {
 
 function roleBadgeClass(role: EduPersonRole): string {
   if (role === "faculty_admin") return "border-orange-500/30 bg-orange-500/15 text-orange-300";
+  if (role === "faculty_teacher") return "border-blue-500/30 bg-blue-500/15 text-blue-300";
   if (role === "student_producer" || role === "student_producer_assigned") return "border-blue-500/30 bg-blue-500/15 text-blue-300";
   if (role === "talent") return "border-purple-500/30 bg-purple-500/15 text-purple-300";
   return "border-slate-700/30 bg-slate-800/40 text-slate-300";
@@ -44,7 +46,7 @@ function formatLastActive(iso: string | null): string {
 }
 
 function isStaffRole(role: EduPersonRole): boolean {
-  return role === "faculty_admin";
+  return role === "faculty_admin" || role === "faculty_teacher";
 }
 
 function ModalShell({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {

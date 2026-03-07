@@ -36,7 +36,7 @@ export default function RoomView() {
   const nav = useNavigate();
 
   const role = String(me?.orgRole || me?.role || "");
-  const isProducer = role === "faculty_admin" || role === "student_producer" || role === "student_producer_assigned";
+  const isProducer = role === "faculty_admin" || role === "faculty_teacher" || role === "student_producer" || role === "student_producer_assigned";
 
   // Device preferences from PreJoin
   const prefCam = searchParams.get("cam") || "";

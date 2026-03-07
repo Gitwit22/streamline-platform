@@ -4,10 +4,11 @@ import { requireAuth } from "../middleware/requireAuth";
 import { writeEduAudit } from "../lib/eduAudit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { tenantCol, globalCol } from "../lib/dbPaths";
+import { coerceTeacherPermissions, TEACHER_PERMISSION_KEYS, DEFAULT_TEACHER_PERMISSIONS, type TeacherPermissions } from "../lib/teacherPermissions";
 
 const router = express.Router();
 
-type EduOrgRole = "faculty_admin" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
+type EduOrgRole = "faculty_admin" | "faculty_teacher" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
 
 function asString(v: any): string {
   return typeof v === "string" ? v : "";
@@ -24,6 +25,7 @@ function coerceEmail(value: any): string | null {
 function coerceRole(value: any): EduOrgRole | null {
   const r = asString(value).trim();
   if (r === "faculty_admin") return "faculty_admin";
+  if (r === "faculty_teacher" || r === "staff") return "faculty_teacher";
   if (r === "student_producer") return "student_producer";
   if (r === "student_producer_assigned") return "student_producer_assigned";
   if (r === "talent") return "talent";
@@ -69,6 +71,20 @@ async function getOrgContext(uid: string): Promise<{ orgId: string; orgRole: Edu
 function assertRole(orgRole: EduOrgRole | null, allow: EduOrgRole[]): boolean {
   if (!orgRole) return false;
   return allow.includes(orgRole);
+}
+
+/** Count active faculty_admin members in the org (status !== "disabled"). */
+async function countActiveAdmins(orgId: string): Promise<number> {
+  const snaps = await tenantCol("orgMembers")
+    .where("orgId", "==", orgId)
+    .where("role", "==", "faculty_admin")
+    .get();
+  let count = 0;
+  snaps.forEach((d) => {
+    const data = d.data() as any;
+    if (data?.status !== "disabled") count++;
+  });
+  return count;
 }
 
 function normalizeMemberDoc(docId: string, data: any) {
@@ -339,7 +355,22 @@ router.patch("/people/:memberId/role", requireAuth, async (req, res) => {
     if (existingOrgId && existingOrgId !== ctx.orgId) return res.status(404).json({ error: "not_found" });
     if (!existingOrgId && !memberId.startsWith(`${ctx.orgId}_`)) return res.status(404).json({ error: "not_found" });
 
-    await docRef.set({ role: nextRole, updatedAt: Date.now() }, { merge: true });
+    // Safety: prevent removing the last admin
+    const currentRole = coerceRole((existing as any).role);
+    if (currentRole === "faculty_admin" && nextRole !== "faculty_admin") {
+      const adminCount = await countActiveAdmins(ctx.orgId);
+      if (adminCount <= 1) {
+        return res.status(409).json({ error: "last_admin", message: "Cannot remove admin access from the last active admin." });
+      }
+    }
+
+    // When demoting admin → teacher, seed default permissions
+    const patch: Record<string, any> = { role: nextRole, updatedAt: Date.now() };
+    if (currentRole === "faculty_admin" && nextRole === "faculty_teacher") {
+      patch.permissions = { ...DEFAULT_TEACHER_PERMISSIONS };
+    }
+
+    await docRef.set(patch, { merge: true });
 
     await writeEduAudit({
       orgId: ctx.orgId,
@@ -377,6 +408,15 @@ router.post("/people/:memberId/disable", requireAuth, async (req, res) => {
     const existingOrgId = typeof (existing as any).orgId === "string" ? String((existing as any).orgId) : "";
     if (existingOrgId && existingOrgId !== ctx.orgId) return res.status(404).json({ error: "not_found" });
     if (!existingOrgId && !memberId.startsWith(`${ctx.orgId}_`)) return res.status(404).json({ error: "not_found" });
+
+    // Safety: prevent disabling the last admin
+    const disabledRole = coerceRole((existing as any).role);
+    if (disabledRole === "faculty_admin") {
+      const adminCount = await countActiveAdmins(ctx.orgId);
+      if (adminCount <= 1) {
+        return res.status(409).json({ error: "last_admin", message: "Cannot disable the last active admin." });
+      }
+    }
 
     await docRef.set({ status: "disabled", disabledAt: Date.now(), updatedAt: Date.now() }, { merge: true });
 
@@ -436,6 +476,81 @@ router.post("/people/:memberId/resend", requireAuth, async (req, res) => {
     return res.json({ ok: true, person: normalizeMemberDoc(memberId, after) });
   } catch (err: any) {
     console.error("POST /api/edu/people/:memberId/resend error", err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+// ── GET /api/edu/people/:memberId/permissions ─────────────────
+router.get("/people/:memberId/permissions", requireAuth, async (req, res) => {
+  try {
+    const uid = String((req as any).user?.uid || "").trim();
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    const ctx = await getOrgContext(uid);
+    if (!ctx) return res.status(403).json({ error: "org_required" });
+    if (!assertRole(ctx.orgRole, ["faculty_admin"])) return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+
+    const memberId = asString(req.params.memberId).trim();
+    if (!memberId) return res.status(400).json({ error: "memberId_required" });
+
+    const docRef = tenantCol("orgMembers").doc(memberId);
+    const snap = await docRef.get();
+    if (!snap.exists) return res.status(404).json({ error: "not_found" });
+    const data = snap.data() || {};
+    const existingOrgId = typeof (data as any).orgId === "string" ? String((data as any).orgId) : "";
+    if (existingOrgId && existingOrgId !== ctx.orgId) return res.status(404).json({ error: "not_found" });
+
+    const role = coerceRole((data as any).role);
+    if (role !== "faculty_teacher") return res.status(400).json({ error: "not_a_teacher" });
+
+    const permissions = coerceTeacherPermissions((data as any).permissions);
+    return res.json({ ok: true, permissions });
+  } catch (err: any) {
+    console.error("GET /api/edu/people/:memberId/permissions error", err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+// ── PATCH /api/edu/people/:memberId/permissions ────────────────
+router.patch("/people/:memberId/permissions", requireAuth, async (req, res) => {
+  try {
+    const uid = String((req as any).user?.uid || "").trim();
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    const ctx = await getOrgContext(uid);
+    if (!ctx) return res.status(403).json({ error: "org_required" });
+    if (!assertRole(ctx.orgRole, ["faculty_admin"])) return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+
+    const memberId = asString(req.params.memberId).trim();
+    if (!memberId) return res.status(400).json({ error: "memberId_required" });
+
+    const docRef = tenantCol("orgMembers").doc(memberId);
+    const snap = await docRef.get();
+    if (!snap.exists) return res.status(404).json({ error: "not_found" });
+    const data = snap.data() || {};
+    const existingOrgId = typeof (data as any).orgId === "string" ? String((data as any).orgId) : "";
+    if (existingOrgId && existingOrgId !== ctx.orgId) return res.status(404).json({ error: "not_found" });
+
+    const role = coerceRole((data as any).role);
+    if (role !== "faculty_teacher") return res.status(400).json({ error: "not_a_teacher" });
+
+    const rawPerms = req.body?.permissions;
+    if (!rawPerms || typeof rawPerms !== "object") return res.status(400).json({ error: "permissions_required" });
+
+    const permissions = coerceTeacherPermissions(rawPerms);
+    await docRef.set({ permissions, updatedAt: Date.now() }, { merge: true });
+
+    await writeEduAudit({
+      orgId: ctx.orgId,
+      action: "org.teacher_permissions_updated",
+      actorUid: uid,
+      actorName: "Faculty Admin",
+      targetId: memberId,
+    }).catch(() => void 0);
+
+    return res.json({ ok: true, permissions });
+  } catch (err: any) {
+    console.error("PATCH /api/edu/people/:memberId/permissions error", err);
     return res.status(500).json({ error: "internal" });
   }
 });

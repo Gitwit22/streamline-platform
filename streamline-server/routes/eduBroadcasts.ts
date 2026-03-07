@@ -133,8 +133,8 @@ router.post("/broadcasts/go-live", requireAuth, async (req, res) => {
   try {
     const ctx = await loadEduOrgSettingsForUid(uid);
     if (!ctx) return res.status(403).json({ error: "not_edu_member" });
-    // Only faculty_admin and student_producer(_assigned) can go live
-    if (!assertEduRole(ctx.orgRole, ["faculty_admin", "student_producer", "student_producer_assigned"])) {
+    // Only faculty_admin, faculty_teacher and student_producer(_assigned) can go live
+    if (!assertEduRole(ctx.orgRole, ["faculty_admin", "faculty_teacher", "student_producer", "student_producer_assigned"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -276,7 +276,7 @@ router.post("/broadcasts/:id/stop", requireAuth, async (req, res) => {
   try {
     const ctx = await loadEduOrgSettingsForUid(uid);
     if (!ctx) return res.status(403).json({ error: "not_edu_member" });
-    if (!assertEduRole(ctx.orgRole, ["faculty_admin", "student_producer", "student_producer_assigned"])) {
+    if (!assertEduRole(ctx.orgRole, ["faculty_admin", "faculty_teacher", "student_producer", "student_producer_assigned"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 

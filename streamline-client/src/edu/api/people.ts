@@ -1,6 +1,6 @@
 import { apiFetchAuth } from "../../lib/api";
 
-export type EduPersonRole = "faculty_admin" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
+export type EduPersonRole = "faculty_admin" | "faculty_teacher" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
 export type EduPersonStatus = "active" | "invited" | "disabled";
 
 export type EduPerson = {
@@ -21,6 +21,7 @@ function asString(v: any): string {
 function coerceRole(v: any): EduPersonRole {
   const r = asString(v).trim();
   if (r === "faculty_admin") return "faculty_admin";
+  if (r === "faculty_teacher" || r === "staff") return "faculty_teacher";
   if (r === "student_producer") return "student_producer";
   if (r === "student_producer_assigned") return "student_producer_assigned";
   if (r === "talent") return "talent";

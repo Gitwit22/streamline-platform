@@ -4,7 +4,7 @@ import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
-type EduOrgRole = "faculty_admin" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
+type EduOrgRole = "faculty_admin" | "faculty_teacher" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
 
 async function getOrgContext(uid: string): Promise<{ orgId: string; orgRole: EduOrgRole | null } | null> {
   const userSnap = await globalCol("users").doc(uid).get().catch(() => null as any);

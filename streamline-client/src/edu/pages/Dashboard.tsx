@@ -53,7 +53,7 @@ export default function Dashboard() {
         rooms: rooms.length,
         students: students.length,
         mediaStudents: students.filter((s: any) => s.mediaClub || s.role === "student_producer").length,
-        staff: people.filter((p: any) => p.role === "faculty_admin").length,
+        staff: people.filter((p: any) => p.role === "faculty_admin" || p.role === "faculty_teacher").length,
         recordings: recordings.length,
       });
 

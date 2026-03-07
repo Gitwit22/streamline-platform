@@ -21,6 +21,8 @@ export default function EduSidebar() {
   const role = String(me?.orgRole || me?.role || "faculty_admin");
   const schoolName = branding.schoolName || String(me?.orgName || "Your School");
   const isFacultyAdmin = role === "faculty_admin";
+  const isFacultyTeacher = role === "faculty_teacher";
+  const isStaff = isFacultyAdmin || isFacultyTeacher;
   const isStudentProducer = role === "student_producer" || role === "student_producer_assigned";
 
   const items = useMemo<NavItem[]>(
@@ -29,7 +31,7 @@ export default function EduSidebar() {
         return [
           { id: "dashboard", label: "Dashboard", path: "/streamline/edu/dashboard" },
           { id: "broadcast", label: "Broadcast Studio", path: "/streamline/edu/broadcast" },
-          { id: "rooms", label: "Broadcast Rooms", path: "/streamline/edu/rooms" },
+          { id: "rooms", label: "Rooms", path: "/streamline/edu/rooms" },
           { id: "media-library", label: "Recordings", path: "/streamline/edu/media-library" },
           { id: "people", label: "Students", path: "/streamline/edu/people" },
         ];
@@ -38,10 +40,10 @@ export default function EduSidebar() {
         { id: "dashboard", label: "Dashboard", path: "/streamline/edu/dashboard" },
         { id: "broadcast", label: "Broadcast Studio", path: "/streamline/edu/broadcast" },
         { id: "events", label: "Events", path: "/streamline/edu/events" },
-        { id: "embed", label: "Website Embed", path: "/streamline/edu/embed" },
-        { id: "rooms", label: "Broadcast Rooms", path: "/streamline/edu/rooms" },
+        ...(isFacultyAdmin ? [{ id: "embed", label: "Website Embed", path: "/streamline/edu/embed" }] : []),
+        { id: "rooms", label: "Rooms", path: "/streamline/edu/rooms" },
         { id: "people", label: "People", path: "/streamline/edu/people" },
-        ...(isFacultyAdmin ? [
+        ...(isStaff ? [
           { id: "chat", label: "Faculty Chat", path: "/streamline/edu/chat" },
           { id: "calls", label: "Video Calls", path: "/streamline/edu/calls" },
         ] : []),
@@ -49,7 +51,7 @@ export default function EduSidebar() {
         ...(isFacultyAdmin ? [{ id: "settings", label: "School Settings", path: "/streamline/edu/settings" }] : []),
       ];
     },
-    [isFacultyAdmin, isStudentProducer]
+    [isFacultyAdmin, isFacultyTeacher, isStaff, isStudentProducer]
   );
 
   useEffect(() => {

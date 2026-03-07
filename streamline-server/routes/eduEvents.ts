@@ -7,7 +7,7 @@ import { writeEduAudit } from "../lib/eduAudit";
 
 const router = express.Router();
 
-type EduOrgRole = "faculty_admin" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
+type EduOrgRole = "faculty_admin" | "faculty_teacher" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
 
 const EVENT_TYPES = ["concert", "game", "assembly", "address"] as const;
 
@@ -131,7 +131,7 @@ router.post("/events", requireAuth as any, async (req: any, res) => {
     if (!ctx) return res.status(403).json({ error: "No org context" });
 
     // Faculty admin and student producers can create events
-    const allowedRoles: string[] = ["faculty_admin", "student_producer", "student_producer_assigned"];
+    const allowedRoles: string[] = ["faculty_admin", "faculty_teacher", "student_producer", "student_producer_assigned"];
     if (ctx.orgRole && !allowedRoles.includes(ctx.orgRole)) {
       return res.status(403).json({ error: "Insufficient role" });
     }

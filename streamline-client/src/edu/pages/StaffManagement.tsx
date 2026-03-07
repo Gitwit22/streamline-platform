@@ -264,7 +264,7 @@ function AddStaffForm({
   onCancel: () => void;
 }) {
   const [fullName, setFullName] = useState("");
-  const [role, setRole] = useState<"faculty_admin" | "staff">("staff");
+  const [role, setRole] = useState<"faculty_admin" | "faculty_teacher">("faculty_teacher");
   const [position, setPosition] = useState("");
   const [email, setEmail] = useState("");
   const [error, setError] = useState("");
@@ -363,8 +363,8 @@ function AddStaffForm({
             onChange={(e) => setRole(e.target.value as any)}
             className={inputCls + " appearance-none"}
           >
-            <option value="staff">Staff (Standard)</option>
-            <option value="faculty_admin">Faculty Admin</option>
+            <option value="faculty_teacher">Teacher</option>
+            <option value="faculty_admin">Admin</option>
           </select>
         </div>
         <div>

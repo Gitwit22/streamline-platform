@@ -3,6 +3,7 @@ import { tenantCol, globalCol } from "./dbPaths";
 
 export type EduOrgRole =
   | "faculty_admin"
+  | "faculty_teacher"
   | "student_producer"
   | "student_producer_assigned"
   | "talent"
@@ -15,6 +16,7 @@ function asString(v: any): string {
 export function coerceEduOrgRole(value: any): EduOrgRole | null {
   const r = asString(value).trim();
   if (r === "faculty_admin") return "faculty_admin";
+  if (r === "faculty_teacher" || r === "staff") return "faculty_teacher";
   if (r === "student_producer") return "student_producer";
   if (r === "student_producer_assigned") return "student_producer_assigned";
   if (r === "talent") return "talent";

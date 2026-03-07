@@ -6,7 +6,7 @@ import { tenantCol, globalCol } from "../lib/dbPaths";
 
 const router = express.Router();
 
-type EduOrgRole = "faculty_admin" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
+type EduOrgRole = "faculty_admin" | "faculty_teacher" | "student_producer" | "student_producer_assigned" | "talent" | "viewer";
 
 type OrgDoc = {
   name: string;
@@ -50,6 +50,7 @@ function asString(v: any): string {
 function coerceRole(value: any): EduOrgRole | null {
   const r = asString(value).trim();
   if (r === "faculty_admin") return "faculty_admin";
+  if (r === "faculty_teacher" || r === "staff") return "faculty_teacher";
   if (r === "student_producer") return "student_producer";
   if (r === "student_producer_assigned") return "student_producer_assigned";
   if (r === "talent") return "talent";
@@ -181,7 +182,7 @@ router.get("/org", requireAuth, async (req, res) => {
     const ctx = await getOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "org_required" });
     // Read-only: allow broadcast-capable roles to load defaults/branding.
-    if (!assertRole(ctx.orgRole, ["faculty_admin", "student_producer", "student_producer_assigned"])) {
+    if (!assertRole(ctx.orgRole, ["faculty_admin", "faculty_teacher", "student_producer", "student_producer_assigned"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -382,7 +383,7 @@ router.post("/audit", requireAuth, async (req, res) => {
     const ctx = await getOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "org_required" });
     // Broadcast start/stop can be done by approved Student Producers.
-    if (!assertRole(ctx.orgRole, ["faculty_admin", "student_producer", "student_producer_assigned"])) {
+    if (!assertRole(ctx.orgRole, ["faculty_admin", "faculty_teacher", "student_producer", "student_producer_assigned"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 

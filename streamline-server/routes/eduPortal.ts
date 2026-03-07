@@ -17,6 +17,7 @@ import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 import { tenantCol, globalCol } from "../lib/dbPaths";
+import { DEFAULT_TEACHER_PERMISSIONS } from "../lib/teacherPermissions";
 
 const router = express.Router();
 
@@ -306,6 +307,11 @@ router.post("/:slug/activate-staff", async (req, res) => {
     const now = Date.now();
     const passwordHash = await bcrypt.hash(password, 10);
 
+    // Normalize role: map legacy "staff" to "faculty_teacher"
+    const resolvedRole = (pending.role === "staff" || pending.role === "faculty_teacher")
+      ? "faculty_teacher"
+      : (pending.role || "faculty_admin");
+
     // Create the user account in global users collection
     const userRef = globalCol("users").doc();
     const uid = userRef.id;
@@ -318,7 +324,7 @@ router.post("/:slug/activate-staff", async (req, res) => {
       orgId,
       orgType: "edu",
       orgName: org.name || "",
-      orgRole: pending.role || "faculty_admin",
+      orgRole: resolvedRole,
       positionTitle: positionTitle || pending.positionTitle || "",
       createdAt: now,
       updatedAt: now,
@@ -326,16 +332,23 @@ router.post("/:slug/activate-staff", async (req, res) => {
 
     // Create membership
     const memberId = `${orgId}_${uid}`;
-    await tenantCol("orgMembers").doc(memberId).set({
+    const memberDoc: any = {
       orgId,
       uid,
       email: username,
       name: fullName,
-      role: pending.role || "faculty_admin",
+      role: resolvedRole,
       status: "active",
       createdAt: now,
       updatedAt: now,
-    });
+    };
+
+    // Seed default permissions for teachers
+    if (resolvedRole === "faculty_teacher") {
+      memberDoc.permissions = { ...DEFAULT_TEACHER_PERMISSIONS };
+    }
+
+    await tenantCol("orgMembers").doc(memberId).set(memberDoc);
 
     // Mark pending staff as used
     await staffDoc.ref.set(
@@ -350,7 +363,7 @@ router.post("/:slug/activate-staff", async (req, res) => {
       ok: true,
       token,
       userId: uid,
-      role: pending.role || "faculty_admin",
+      role: resolvedRole,
     });
   } catch (err: any) {
     console.error("[eduPortal] POST /:slug/activate-staff error:", err);

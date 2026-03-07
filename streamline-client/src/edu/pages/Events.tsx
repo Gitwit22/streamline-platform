@@ -364,7 +364,7 @@ export default function Events() {
   const me = useEduMe();
 
   const roleRaw = String(me?.orgRole || me?.role || "faculty_admin");
-  const isFacultyAdmin = roleRaw === "faculty_admin";
+  const isFacultyAdmin = roleRaw === "faculty_admin" || roleRaw === "faculty_teacher";
   const isStudentProducer = roleRaw === "student_producer" || roleRaw === "student_producer_assigned";
 
   /* Deep-link params: ?editEventId=X&returnTo=broadcast */
@@ -449,16 +449,25 @@ export default function Events() {
     const q = query.trim().toLowerCase();
     const filtered = q ? allEvents.filter((e) => e.title.toLowerCase().includes(q)) : allEvents;
     const now = Date.now();
+    // Grace period: events stay in "upcoming" for up to 4 hours past their
+    // start time so they don't vanish while a producer is still working.
+    const UPCOMING_GRACE_MS = 4 * 60 * 60_000;
     const upcoming = filtered.filter((e) => {
       const status = computeEduEventStatus(e);
       if (status === "ended" || status === "canceled") return false;
       if (status === "live") return true;
       const start = new Date(e.startsAt).getTime();
-      return !Number.isFinite(start) || start >= now - 60 * 60_000;
+      return !Number.isFinite(start) || start >= now - UPCOMING_GRACE_MS;
     });
     const past = filtered.filter((e) => {
       const status = computeEduEventStatus(e);
-      return status === "ended" || status === "canceled";
+      // Explicitly ended/canceled events always show in past
+      if (status === "ended" || status === "canceled") return true;
+      // Events whose start time passed the grace window but were never started
+      // also belong in "past" so they don't disappear entirely.
+      const start = new Date(e.startsAt).getTime();
+      if (Number.isFinite(start) && start < now - UPCOMING_GRACE_MS) return true;
+      return false;
     });
     return { upcoming, past };
   }, [allEvents, query]);

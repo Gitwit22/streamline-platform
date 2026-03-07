@@ -15,12 +15,13 @@ type DirectoryEntry = {
   avatar: string | null;
 };
 
-type EduOrgRole = "faculty_admin" | "student_producer" | "student_producer_assigned" | "talent";
+type EduOrgRole = "faculty_admin" | "faculty_teacher" | "student_producer" | "student_producer_assigned" | "talent";
 
 /* ── Helpers ──────────────────────────────────────────────────── */
 
 function roleLabel(role: string): string {
-  if (role === "faculty_admin") return "Faculty";
+  if (role === "faculty_admin") return "Admin";
+  if (role === "faculty_teacher") return "Teacher";
   if (role === "student_producer" || role === "student_producer_assigned") return "Producer";
   if (role === "talent") return "Talent";
   return "Viewer";
@@ -28,6 +29,7 @@ function roleLabel(role: string): string {
 
 function roleBadgeClass(role: string): string {
   if (role === "faculty_admin") return "border-orange-500/30 bg-orange-500/15 text-orange-300";
+  if (role === "faculty_teacher") return "border-blue-500/30 bg-blue-500/15 text-blue-300";
   if (role === "student_producer" || role === "student_producer_assigned") return "border-blue-500/30 bg-blue-500/15 text-blue-300";
   if (role === "talent") return "border-purple-500/30 bg-purple-500/15 text-purple-300";
   return "border-slate-700/30 bg-slate-800/40 text-slate-300";
@@ -43,6 +45,7 @@ function initials(name: string): string {
 
 const CALL_CAPABLE_ROLES: EduOrgRole[] = [
   "faculty_admin",
+  "faculty_teacher",
   "student_producer",
   "student_producer_assigned",
 ];
@@ -100,8 +103,8 @@ export default function Directory() {
         return name.includes(q) || dept.includes(q);
       });
     }
-    // Sort: faculty first, then producers, then talent
-    const order: Record<string, number> = { faculty_admin: 0, student_producer: 1, student_producer_assigned: 1, talent: 2 };
+    // Sort: admin first, then teachers, then producers, then talent
+    const order: Record<string, number> = { faculty_admin: 0, faculty_teacher: 0, student_producer: 1, student_producer_assigned: 1, talent: 2 };
     items.sort((a, b) => (order[a.role] ?? 9) - (order[b.role] ?? 9));
     return items;
   }, [entries, query, roleFilter]);
@@ -119,14 +122,15 @@ export default function Directory() {
   function canCall(e: DirectoryEntry): boolean {
     if (extractUid(e.id) === myUid) return false;
     if (!CALL_CAPABLE_ROLES.includes(myRole)) return false;
-    // Faculty can call anyone; producers can call faculty + other producers
-    if (myRole === "faculty_admin") return true;
-    return e.role === "faculty_admin" || e.role === "student_producer" || e.role === "student_producer_assigned";
+    // Faculty/teachers can call anyone; producers can call faculty + teachers + other producers
+    if (myRole === "faculty_admin" || myRole === "faculty_teacher") return true;
+    return e.role === "faculty_admin" || e.role === "faculty_teacher" || e.role === "student_producer" || e.role === "student_producer_assigned";
   }
 
   const roleOptions = [
     { value: "all", label: "All" },
-    { value: "faculty_admin", label: "Faculty" },
+    { value: "faculty_admin", label: "Admin" },
+    { value: "faculty_teacher", label: "Teacher" },
     { value: "producer", label: "Producers" },
     { value: "talent", label: "Talent" },
   ];

@@ -18,7 +18,7 @@ const router = express.Router();
 
 /* ── Types ─────────────────────────────────────────────────────── */
 
-type EduOrgRole = "faculty_admin" | "staff";
+type EduOrgRole = "faculty_admin" | "faculty_teacher" | "staff";
 
 /* ── Helpers ───────────────────────────────────────────────────── */
 
@@ -29,7 +29,8 @@ function asString(v: any): string {
 function coerceStaffRole(v: any): EduOrgRole | null {
   const r = asString(v).trim();
   if (r === "faculty_admin") return "faculty_admin";
-  if (r === "staff") return "staff";
+  if (r === "faculty_teacher") return "faculty_teacher";
+  if (r === "staff") return "faculty_teacher"; // map legacy "staff" → "faculty_teacher"
   return null;
 }
 
@@ -59,7 +60,7 @@ async function getOrgContext(uid: string): Promise<{ orgId: string; orgRole: str
   const memberId = `${orgId}_${uid}`;
   const memberSnap = await tenantCol("orgMembers").doc(memberId).get().catch(() => null as any);
   const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
-  const orgRole = asString(member?.role || user?.orgRole).trim() || "staff";
+  const orgRole = asString(member?.role || user?.orgRole).trim() || "faculty_teacher";
 
   return { orgId, orgRole };
 }
@@ -70,7 +71,7 @@ function normalizeStaffDoc(docId: string, data: any) {
     id: docId,
     orgId: asString(data?.orgId),
     fullName: asString(data?.fullName),
-    role: coerceStaffRole(data?.role) || "staff",
+    role: coerceStaffRole(data?.role) || "faculty_teacher",
     positionTitle: asString(data?.positionTitle),
     email: typeof data?.email === "string" ? data.email : null,
     onboardingCode: asString(data?.onboardingCode),
@@ -115,7 +116,7 @@ router.post("/staff", requireAuth, async (req, res) => {
     }
 
     const fullName = asString(req.body?.fullName).trim();
-    const role = coerceStaffRole(req.body?.role) || "staff";
+    const role = coerceStaffRole(req.body?.role) || "faculty_teacher";
     const positionTitle = asString(req.body?.positionTitle).trim();
     const email = asString(req.body?.email).trim().toLowerCase() || null;
 

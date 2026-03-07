@@ -2,17 +2,18 @@ import { useState } from "react";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import StudentManagement from "./StudentManagement";
 import StaffManagement from "./StaffManagement";
-import Directory from "./Directory";
 import People from "./People";
+import RolesPermissions from "./RolesPermissions";
 
 /* ── Sub-tab definitions ─────────────────────────────────────── */
 
-type TabId = "staff" | "students" | "manage";
+type TabId = "staff" | "students" | "manage" | "permissions";
 
 const TABS: { id: TabId; label: string; adminOnly?: boolean }[] = [
   { id: "staff", label: "Staff" },
   { id: "students", label: "Students" },
-  { id: "manage", label: "Roles & Permissions", adminOnly: true },
+  { id: "manage", label: "Manage Users", adminOnly: true },
+  { id: "permissions", label: "Roles & Permissions", adminOnly: true },
 ];
 
 /* ── Component ─────────────────────────────────────────────────── */
@@ -21,15 +22,18 @@ export default function PeopleHub() {
   const me = useEduMe();
   const role = String(me?.orgRole || me?.role || "faculty_admin");
   const isFacultyAdmin = role === "faculty_admin";
+  const isFacultyTeacher = role === "faculty_teacher";
+  const isStaff = isFacultyAdmin || isFacultyTeacher;
   const canManage =
-    isFacultyAdmin ||
+    isStaff ||
     role === "student_producer" ||
     role === "student_producer_assigned";
 
   const [tab, setTab] = useState<TabId>("staff");
 
   const visibleTabs = TABS.filter((t) => {
-    if (t.adminOnly && !canManage) return false;
+    if (t.adminOnly && !isFacultyAdmin) return false;
+    if (!t.adminOnly && !canManage) return false;
     return true;
   });
 
@@ -68,6 +72,7 @@ export default function PeopleHub() {
         {tab === "staff" && <StaffManagement />}
         {tab === "students" && <StudentManagement />}
         {tab === "manage" && <People />}
+        {tab === "permissions" && <RolesPermissions />}
       </div>
     </div>
   );

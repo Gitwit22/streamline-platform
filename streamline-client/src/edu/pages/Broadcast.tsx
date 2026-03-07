@@ -153,7 +153,7 @@ export default function Broadcast() {
   /* ── Key to force-refresh bound event after returning from edit ── */
   const [eventRefreshKey, setEventRefreshKey] = useState(0);
 
-  const isFacultyAdmin = roleRaw === "faculty_admin";
+  const isFacultyAdmin = roleRaw === "faculty_admin" || roleRaw === "faculty_teacher";
   const isStudentProducer = roleRaw === "student_producer" || roleRaw === "student_producer_assigned";
   const isTalent = roleRaw === "talent";
   const isViewer = roleRaw === "viewer";
