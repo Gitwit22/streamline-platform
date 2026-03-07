@@ -211,11 +211,11 @@ export default function RoomView() {
       </div>
 
       {/* ── Main Area ────────────────────────────────────── */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 min-h-0 overflow-hidden">
         {/* Video grid area */}
-        <div className="flex flex-1 flex-col">
+        <div className="flex flex-1 flex-col min-h-0">
           {/* Participant video grid */}
-          <div className="flex-1 p-4">
+          <div className="flex-1 min-h-0 overflow-y-auto p-4">
             <div className={`grid h-full gap-3 ${
               participants.length <= 1 ? "grid-cols-1" :
               participants.length <= 4 ? "grid-cols-2" :

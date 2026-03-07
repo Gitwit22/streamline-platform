@@ -228,10 +228,7 @@ export default function Broadcast() {
   const [layout, setLayout] = useState<LayoutMode>("speaker");
 
   const [producer, setProducer] = useState<string>(displayName);
-  const [talent, setTalent] = useState<Talent[]>([
-    { id: randomId("tal"), name: "Alex M.", micMuted: false, camOff: false },
-    { id: randomId("tal"), name: "Jordan K.", micMuted: false, camOff: false },
-  ]);
+  const [talent, setTalent] = useState<Talent[]>([]);
   const [newTalentName, setNewTalentName] = useState<string>("");
 
   const [viewerAccess, setViewerAccess] = useState<"school" | "link">("school");
@@ -348,9 +345,14 @@ export default function Broadcast() {
   }
 
   useEffect(() => {
-    refreshDevices().catch(() => {
-      // ignore
-    });
+    refreshDevices()
+      .then(() => {
+        // Auto-start camera/mic preview so the user sees video immediately
+        testDevices().catch(() => void 0);
+      })
+      .catch(() => {
+        // ignore
+      });
 
     if (!navigator.mediaDevices?.addEventListener) return;
     const handler = () => refreshDevices().catch(() => void 0);
@@ -1258,7 +1260,7 @@ export default function Broadcast() {
   return (
     <div className="space-y-6">
       {/* Top bar */}
-      <div className="sticky top-16 z-30 rounded-2xl border border-slate-700 bg-slate-900/70 p-4 backdrop-blur-xl">
+      <div className="sticky top-0 z-30 rounded-2xl border border-slate-700 bg-slate-900/70 p-4 backdrop-blur-xl">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 rounded-full bg-red-500/15 px-3 py-1 text-sm font-semibold text-red-300">

@@ -321,6 +321,7 @@ router.post("/create-top-admin", async (req, res) => {
           name: orgName,
           orgType: "edu",
           isDemo: false,
+          status: "active",
           contactEmail: email,
           primaryContactEmail: email,
           phone: phone || null,

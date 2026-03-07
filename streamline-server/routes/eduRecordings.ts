@@ -39,7 +39,6 @@ router.get("/recordings", requireAuth as any, async (req: any, res) => {
 
     const snap = await tenantCol("recordings")
       .where("orgId", "==", ctx.orgId)
-      .orderBy("createdAt", "desc")
       .limit(100)
       .get();
 
@@ -55,6 +54,13 @@ router.get("/recordings", requireAuth as any, async (req: any, res) => {
         roomId: data.roomId ?? "",
         url: data.url ?? null,
       };
+    });
+
+    // Sort in-memory (avoids composite index requirement)
+    recordings.sort((a, b) => {
+      const ta = a.date ? new Date(a.date).getTime() : 0;
+      const tb = b.date ? new Date(b.date).getTime() : 0;
+      return tb - ta;
     });
 
     return res.json({ recordings });

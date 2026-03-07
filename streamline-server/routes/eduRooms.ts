@@ -51,13 +51,19 @@ router.get("/rooms", requireAuth as any, async (req: any, res) => {
     if (!uid) return res.status(401).json({ error: "Unauthorized" });
 
     const ctx = await getOrgContext(uid);
-    if (!ctx) return res.status(403).json({ error: "No org context" });
+    if (!ctx) {
+      console.warn("[eduRooms] GET /rooms — no org context for uid:", uid);
+      return res.status(403).json({ error: "No org context" });
+    }
+
+    console.log("[eduRooms] GET /rooms — uid:", uid, "orgId:", ctx.orgId, "orgRole:", ctx.orgRole);
 
     const snap = await tenantCol("rooms")
       .where("orgId", "==", ctx.orgId)
-      .orderBy("createdAt", "desc")
       .limit(100)
       .get();
+
+    console.log("[eduRooms] GET /rooms — found", snap.docs.length, "rooms for orgId:", ctx.orgId);
 
     const rooms = snap.docs.map((d) => {
       const data = d.data() as any;
@@ -76,6 +82,9 @@ router.get("/rooms", requireAuth as any, async (req: any, res) => {
         createdAt: data.createdAt?.toMillis?.() ?? null,
       };
     });
+
+    // Sort in-memory (avoids composite index requirement)
+    rooms.sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
 
     return res.json({ rooms });
   } catch (err: any) {
@@ -167,6 +176,8 @@ router.post("/rooms", requireAuth as any, async (req: any, res) => {
 
     await roomRef.set(roomData);
 
+    console.log("[eduRooms] Room created:", { id: roomRef.id, name, orgId: ctx.orgId, createdBy: uid });
+
     writeEduAudit({
       orgId: ctx.orgId,
       actorUid: uid,
@@ -233,6 +244,60 @@ router.patch("/rooms/:roomId", requireAuth as any, async (req: any, res) => {
   } catch (err: any) {
     console.error("[eduRooms] PATCH /rooms/:roomId error:", err);
     return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── POST /api/edu/admin/patch-orgs ──────────────────────────────
+// TEMPORARY diagnostic: patches all orgs missing `status` field and returns room counts.
+// Requires faculty_admin auth. Remove after data is clean.
+router.post("/admin/patch-orgs", requireAuth as any, async (req: any, res) => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) return res.status(401).json({ error: "Unauthorized" });
+
+    const ctx = await getOrgContext(uid);
+    if (!ctx) return res.status(403).json({ error: "No org context" });
+    if (ctx.orgRole !== "faculty_admin") {
+      return res.status(403).json({ error: "Only faculty admins" });
+    }
+
+    // Patch all orgs missing status
+    const orgsSnap = await tenantCol("orgs").get();
+    const orgResults: any[] = [];
+    for (const doc of orgsSnap.docs) {
+      const data = doc.data() as any;
+      const patched = !data.status;
+      if (patched) {
+        await tenantCol("orgs").doc(doc.id).set({ status: "active" }, { merge: true });
+      }
+      orgResults.push({
+        id: doc.id,
+        name: data.name || "?",
+        slug: data.slug || "?",
+        status: data.status || "(was missing → patched to active)",
+        patched,
+      });
+    }
+
+    // Count rooms for this org
+    const roomsSnap = await tenantCol("rooms")
+      .where("orgId", "==", ctx.orgId)
+      .get();
+    const rooms = roomsSnap.docs.map((d) => {
+      const data = d.data() as any;
+      return { id: d.id, name: data.name, orgId: data.orgId, createdBy: data.createdBy };
+    });
+
+    return res.json({
+      yourOrgId: ctx.orgId,
+      yourUid: uid,
+      orgs: orgResults,
+      roomCount: rooms.length,
+      rooms,
+    });
+  } catch (err: any) {
+    console.error("[eduRooms] POST /admin/patch-orgs error:", err);
+    return res.status(500).json({ error: "Internal server error", detail: err?.message });
   }
 });
 

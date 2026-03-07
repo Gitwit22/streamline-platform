@@ -384,11 +384,16 @@ router.get("/broadcasts", requireAuth, async (req, res) => {
 
     const snap = await tenantCol("eduBroadcasts")
       .where("orgId", "==", ctx.orgId)
-      .orderBy("createdAt", "desc")
       .limit(limit)
       .get();
 
     const broadcasts = snap.docs.map(d => normalizeBroadcast(d.id, d.data()));
+    // Sort in-memory (avoids composite index requirement)
+    broadcasts.sort((a: any, b: any) => {
+      const ta = typeof a.createdAt === "number" ? a.createdAt : 0;
+      const tb = typeof b.createdAt === "number" ? b.createdAt : 0;
+      return tb - ta;
+    });
     return res.json({ broadcasts });
   } catch (err: any) {
     console.error("[edu/broadcasts] list error:", err?.message || err);

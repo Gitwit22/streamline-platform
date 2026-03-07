@@ -197,6 +197,7 @@ export async function initializeSchool(input: InitializeSchoolInput): Promise<In
   await orgRef.set({
     name: orgName,
     slug: orgSlug,
+    status: "active",
     timezone: timezone || "America/New_York",
     plan: "edu_starter",
     planStatus: "active",
