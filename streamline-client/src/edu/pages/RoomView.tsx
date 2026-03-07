@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import { apiFetchAuth } from "../../lib/api";
+import { goLiveEduBroadcast, stopEduBroadcast, type EduBroadcast } from "../api/broadcasts";
+import { apiStartRecording, apiStopRecording } from "../../lib/api";
 
 /* ── Types ─────────────────────────────────────────────────────── */
 
@@ -57,6 +59,17 @@ export default function RoomView() {
 
   // Demo participants
   const [participants, setParticipants] = useState<Participant[]>([]);
+
+  // Broadcast state
+  const [broadcastBusy, setBroadcastBusy] = useState(false);
+  const [activeBroadcast, setActiveBroadcast] = useState<EduBroadcast | null>(null);
+  const [roomAccessToken, setRoomAccessToken] = useState<string | null>(null);
+  const [broadcastError, setBroadcastError] = useState<string | null>(null);
+
+  // Recording state
+  const [recordingBusy, setRecordingBusy] = useState(false);
+  const [activeRecordingId, setActiveRecordingId] = useState<string | null>(null);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
 
   // Local video
   const localVideoRef = useRef<HTMLVideoElement>(null);
@@ -129,13 +142,20 @@ export default function RoomView() {
   }, []);
 
   // ── Leave room ───────────────────────────────────────────────
-  const handleLeave = useCallback(() => {
+  const handleLeave = useCallback(async () => {
+    // Stop recording first, then broadcast
+    if (activeRecordingId && roomAccessToken) {
+      try { await apiStopRecording(activeRecordingId, roomAccessToken); } catch { /* best effort */ }
+    }
+    if (activeBroadcast) {
+      try { await stopEduBroadcast(activeBroadcast.id); } catch { /* best effort */ }
+    }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((t) => t.stop());
       streamRef.current = null;
     }
     nav("/streamline/edu/rooms");
-  }, [nav]);
+  }, [nav, activeRecordingId, roomAccessToken, activeBroadcast]);
 
   // ── Screen share toggle ──────────────────────────────────────
   const toggleScreenShare = useCallback(async () => {
@@ -150,6 +170,78 @@ export default function RoomView() {
       // user cancelled
     }
   }, [screenSharing]);
+
+  // ── Start / Stop Broadcast ───────────────────────────────────
+  const handleStartBroadcast = useCallback(async () => {
+    if (!room || broadcastBusy || activeBroadcast) return;
+    setBroadcastBusy(true);
+    setBroadcastError(null);
+    try {
+      const res = await goLiveEduBroadcast({
+        title: room.name,
+        templateId: "room",
+        layout: room.defaultLayout === "grid" ? "grid" : "speaker",
+        publishHls: true,
+        recordMp4: room.recordingEnabled,
+        assignedRoomId: room.id,
+      });
+      setActiveBroadcast(res.broadcast);
+      setRoomAccessToken(res.roomAccessToken);
+    } catch (e: any) {
+      setBroadcastError(e?.message || "Failed to start broadcast");
+    } finally {
+      setBroadcastBusy(false);
+    }
+  }, [room, broadcastBusy, activeBroadcast]);
+
+  const handleStopBroadcast = useCallback(async () => {
+    if (!activeBroadcast || broadcastBusy) return;
+    setBroadcastBusy(true);
+    setBroadcastError(null);
+    try {
+      await stopEduBroadcast(activeBroadcast.id);
+      setActiveBroadcast(null);
+      setRoomAccessToken(null);
+    } catch (e: any) {
+      setBroadcastError(e?.message || "Failed to stop broadcast");
+    } finally {
+      setBroadcastBusy(false);
+    }
+  }, [activeBroadcast, broadcastBusy]);
+
+  // ── Start / Stop Recording ───────────────────────────────────
+  const handleStartRecording = useCallback(async () => {
+    if (recordingBusy || activeRecordingId) return;
+    // Recording requires an active broadcast (to have a LiveKit room)
+    if (!activeBroadcast?.roomId || !roomAccessToken) {
+      setRecordingError("Start a broadcast first to enable recording");
+      return;
+    }
+    setRecordingBusy(true);
+    setRecordingError(null);
+    try {
+      const data = await apiStartRecording(activeBroadcast.roomId, "cloud", undefined, roomAccessToken);
+      setActiveRecordingId(data.recordingId || data.id || null);
+    } catch (e: any) {
+      setRecordingError(e?.message || "Failed to start recording");
+    } finally {
+      setRecordingBusy(false);
+    }
+  }, [recordingBusy, activeRecordingId, activeBroadcast, roomAccessToken]);
+
+  const handleStopRecording = useCallback(async () => {
+    if (!activeRecordingId || recordingBusy) return;
+    setRecordingBusy(true);
+    setRecordingError(null);
+    try {
+      await apiStopRecording(activeRecordingId, roomAccessToken);
+      setActiveRecordingId(null);
+    } catch (e: any) {
+      setRecordingError(e?.message || "Failed to stop recording");
+    } finally {
+      setRecordingBusy(false);
+    }
+  }, [activeRecordingId, recordingBusy, roomAccessToken]);
 
   // ── Render ───────────────────────────────────────────────────
   if (loading) {
@@ -189,6 +281,11 @@ export default function RoomView() {
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {activeBroadcast && (
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-red-500/15 px-2.5 py-1 text-xs font-semibold text-red-400">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" /> LIVE
+            </span>
+          )}
           {isProducer && room.broadcastEnabled && (
             <button
               onClick={() => setShowStudio((v) => !v)}
@@ -441,12 +538,39 @@ export default function RoomView() {
               <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
                 <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Broadcast</h4>
                 <div className="mt-3 space-y-2">
-                  <button className="w-full rounded-xl bg-gradient-to-r from-red-600 to-red-700 px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90">
-                    📡 Start Broadcast
-                  </button>
-                  <p className="text-center text-[11px] text-slate-500">
-                    Viewers will see the broadcast output
-                  </p>
+                  {activeBroadcast ? (
+                    <button
+                      onClick={handleStopBroadcast}
+                      disabled={broadcastBusy}
+                      className="w-full rounded-xl border border-red-500/30 bg-red-600/20 px-4 py-3 text-sm font-semibold text-red-300 transition hover:bg-red-600/30 disabled:opacity-50"
+                    >
+                      {broadcastBusy ? "Stopping…" : "⏹ Stop Broadcast"}
+                    </button>
+                  ) : (
+                    <button
+                      onClick={handleStartBroadcast}
+                      disabled={broadcastBusy}
+                      className="w-full rounded-xl bg-gradient-to-r from-red-600 to-red-700 px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-50"
+                    >
+                      {broadcastBusy ? "Starting…" : "📡 Start Broadcast"}
+                    </button>
+                  )}
+                  {activeBroadcast && (
+                    <div className="flex items-center justify-center gap-1.5 text-[11px] text-emerald-400">
+                      <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />
+                      HLS is live
+                    </div>
+                  )}
+                  {!activeBroadcast && (
+                    <p className="text-center text-[11px] text-slate-500">
+                      Viewers will see the broadcast output
+                    </p>
+                  )}
+                  {broadcastError && (
+                    <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-2 py-1.5 text-[11px] text-red-300">
+                      {broadcastError}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -477,10 +601,40 @@ export default function RoomView() {
               {room.recordingEnabled && (
                 <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
                   <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Recording</h4>
-                  <div className="mt-3">
-                    <button className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm text-slate-300 transition hover:bg-slate-700">
-                      🔴 Start Recording
-                    </button>
+                  <div className="mt-3 space-y-2">
+                    {activeRecordingId ? (
+                      <button
+                        onClick={handleStopRecording}
+                        disabled={recordingBusy}
+                        className="w-full rounded-xl border border-red-500/30 bg-red-600/20 px-4 py-2.5 text-sm font-semibold text-red-300 transition hover:bg-red-600/30 disabled:opacity-50"
+                      >
+                        {recordingBusy ? "Stopping…" : "⏹ Stop Recording"}
+                      </button>
+                    ) : (
+                      <button
+                        onClick={handleStartRecording}
+                        disabled={recordingBusy || !activeBroadcast}
+                        className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm text-slate-300 transition hover:bg-slate-700 disabled:opacity-50"
+                      >
+                        {recordingBusy ? "Starting…" : "🔴 Start Recording"}
+                      </button>
+                    )}
+                    {activeRecordingId && (
+                      <div className="flex items-center justify-center gap-1.5 text-[11px] text-red-400">
+                        <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
+                        Recording in progress
+                      </div>
+                    )}
+                    {!activeBroadcast && !activeRecordingId && (
+                      <p className="text-center text-[11px] text-slate-500">
+                        Start a broadcast first to enable recording
+                      </p>
+                    )}
+                    {recordingError && (
+                      <div className="rounded-lg border border-red-500/20 bg-red-500/10 px-2 py-1.5 text-[11px] text-red-300">
+                        {recordingError}
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
@@ -515,7 +669,9 @@ export default function RoomView() {
                 <div className="mt-3 space-y-2">
                   <div className="flex items-center justify-between rounded-lg bg-slate-800/60 px-3 py-2 text-xs text-slate-400">
                     <span>HLS Stream</span>
-                    <span className="rounded-full bg-slate-700/60 px-1.5 py-0.5 text-[9px]">Ready</span>
+                    <span className={`rounded-full px-1.5 py-0.5 text-[9px] ${activeBroadcast ? "bg-emerald-500/20 text-emerald-300" : "bg-slate-700/60"}`}>
+                      {activeBroadcast ? "Live" : "Idle"}
+                    </span>
                   </div>
                   <div className="flex items-center justify-between rounded-lg bg-slate-800/60 px-3 py-2 text-xs text-slate-400">
                     <span>YouTube RTMP</span>

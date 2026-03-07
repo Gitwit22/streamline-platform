@@ -1,9 +1,10 @@
 import express from "express";
 import jwt from "jsonwebtoken";
+import admin from "firebase-admin";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { loadEduOrgSettingsForUid, type EduOrgRole } from "../lib/eduOrgContext";
-import { ensureRoomDoc, setHlsStarting, setHlsLive, setHlsIdle } from "../services/rooms";
+import { ensureRoomDoc, getRoom, setHlsStarting, setHlsLive, setHlsIdle } from "../services/rooms";
 import { startHlsEgress, stopEgress } from "../services/livekitEgress";
 import { deletePrefix } from "../lib/storageClient";
 import { getLiveKitSdk } from "../lib/livekit";
@@ -154,6 +155,21 @@ router.post("/broadcasts/go-live", requireAuth, async (req, res) => {
     const publishHls = req.body.publishHls !== false;
     const recordMp4 = !!req.body.recordMp4;
     const eventId = asString(req.body.eventId).trim() || null;
+    const assignedRoomId = asString(req.body.assignedRoomId).trim() || null;
+
+    // If an assignedRoomId is provided, look up its savedEmbedId so
+    // we can bind the new broadcast room to the same embed.
+    let savedEmbedId: string | undefined;
+    if (assignedRoomId) {
+      try {
+        const { data: srcRoom } = await getRoom(assignedRoomId);
+        if ((srcRoom as any).savedEmbedId) {
+          savedEmbedId = (srcRoom as any).savedEmbedId;
+        }
+      } catch {
+        // Non-fatal — assigned room may not exist yet.
+      }
+    }
 
     const now = Date.now();
     const broadcastId = `edu_bc_${ctx.orgId}_${now}_${Math.random().toString(36).slice(2, 8)}`;
@@ -188,6 +204,7 @@ router.post("/broadcasts/go-live", requireAuth, async (req, res) => {
       initialStatus: "live",
       visibility: "unlisted",
       requiresAuth: false, // HLS viewers don't need auth
+      ...(savedEmbedId ? { savedEmbedId } : {}),
     });
 
     doc.roomId = roomId;
@@ -227,6 +244,22 @@ router.post("/broadcasts/go-live", requireAuth, async (req, res) => {
         });
         egressId = result.egressId;
         await setHlsLive(roomRef, { egressId: result.egressId, playlistUrl });
+
+        // Sync the saved embed's activeRoomId so /live/:savedEmbedId resolves
+        // to this broadcast room for public HLS viewers.
+        if (savedEmbedId) {
+          try {
+            await tenantCol("savedEmbeds").doc(savedEmbedId).set(
+              {
+                activeRoomId: roomId,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              },
+              { merge: true },
+            );
+          } catch (embedErr: any) {
+            console.warn("[edu/broadcasts] embed activeRoomId sync failed:", embedErr?.message);
+          }
+        }
       } catch (egressErr: any) {
         console.error("[edu/broadcasts] egress start error:", egressErr?.message || egressErr);
         // Proceed — host can still be in room
@@ -234,6 +267,7 @@ router.post("/broadcasts/go-live", requireAuth, async (req, res) => {
     }
 
     doc.playlistUrl = playlistUrl;
+    doc.savedEmbedId = savedEmbedId || null;
     doc.egressId = egressId;
 
     await tenantCol("eduBroadcasts").doc(broadcastId).set(doc, { merge: true });
@@ -302,6 +336,23 @@ router.post("/broadcasts/:id/stop", requireAuth, async (req, res) => {
       const roomSnap = await roomRef.get();
       if (roomSnap.exists) {
         await setHlsIdle(roomRef);
+
+        // Reset the saved embed's activeRoomId so the public viewer
+        // shows "offline" instead of pointing at a dead room.
+        const embedId = (roomSnap.data() as any)?.savedEmbedId as string | undefined;
+        if (embedId) {
+          try {
+            await tenantCol("savedEmbeds").doc(embedId).set(
+              {
+                activeRoomId: null,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              },
+              { merge: true },
+            );
+          } catch (embedErr: any) {
+            console.warn("[edu/broadcasts] embed activeRoomId reset failed:", embedErr?.message);
+          }
+        }
       }
     }
 
@@ -374,6 +425,17 @@ router.delete("/broadcasts/:id", requireAuth, async (req, res) => {
       const roomSnap = await roomRef.get();
       if (roomSnap.exists) {
         await setHlsIdle(roomRef);
+
+        // Reset embed link
+        const embedId = (roomSnap.data() as any)?.savedEmbedId as string | undefined;
+        if (embedId) {
+          try {
+            await tenantCol("savedEmbeds").doc(embedId).set(
+              { activeRoomId: null, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+              { merge: true },
+            );
+          } catch {}
+        }
       }
     }
 

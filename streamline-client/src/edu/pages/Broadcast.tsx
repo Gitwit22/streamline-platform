@@ -4,7 +4,7 @@ import { useEduMe } from "../layout/EduProtectedRoute";
 import { getEduEventById, setEduEventLive, listEduEvents, computeEduEventStatus, type EduEvent } from "../state/eduEvents";
 import { fetchEduOrg, postEduAudit, type EduOrgSettings } from "../api/settings";
 import { goLiveEduBroadcast, stopEduBroadcast, watchEduBroadcast, type GoLiveResponse } from "../api/broadcasts";
-import { apiFetchAuth } from "../../lib/api";
+import { apiFetchAuth, apiStartRecording, apiStopRecording } from "../../lib/api";
 import { useSchoolBranding } from "../state/schoolBranding";
 import SchoolLogo from "../components/SchoolLogo";
 
@@ -354,6 +354,8 @@ export default function Broadcast() {
 
   const [websiteStatus, setWebsiteStatus] = useState<OutputStatus>("off");
   const [recordingStatus, setRecordingStatus] = useState<OutputStatus>("off");
+  const [activeRecordingId, setActiveRecordingId] = useState<string | null>(null);
+  const [recordingBusy, setRecordingBusy] = useState(false);
   const [youtubeStatus, setYoutubeStatus] = useState<OutputStatus>("off");
 
   // If opened via /broadcast?eventId=..., preload settings/crew/title.
@@ -676,7 +678,7 @@ export default function Broadcast() {
 
     // Show optimistic loading states
     setWebsiteStatus(publishHls ? "starting" : "off");
-    setRecordingStatus(recordMp4 ? "starting" : "off");
+    setRecordingStatus("off"); // recording is started manually via the button
     setYoutubeStatus(alsoYoutube ? "starting" : "off");
 
     try {
@@ -742,7 +744,7 @@ export default function Broadcast() {
 
       // Update output statuses
       setWebsiteStatus(publishHls ? "active" : "off");
-      setRecordingStatus(recordMp4 ? "active" : "off");
+      setRecordingStatus("off"); // user clicks Start Recording
       setYoutubeStatus(alsoYoutube ? "active" : "off");
 
       if (activeEventId) await setEduEventLive(activeEventId, true).catch(() => {});
@@ -750,7 +752,7 @@ export default function Broadcast() {
       console.error("[EduBroadcast] go-live error:", err);
       setGoLiveError(err?.message || "Failed to go live");
       setWebsiteStatus(publishHls ? "error" : "off");
-      setRecordingStatus(recordMp4 ? "error" : "off");
+      setRecordingStatus("off");
       setYoutubeStatus("off");
     }
   }
@@ -760,6 +762,12 @@ export default function Broadcast() {
 
     // Stop any pre-recorded media playback first
     if (mediaPlaying) { await stopMedia().catch(() => void 0); }
+
+    // Stop active recording before ending the broadcast
+    if (activeRecordingId && goLiveData) {
+      try { await apiStopRecording(activeRecordingId, goLiveData.roomAccessToken); } catch {}
+      setActiveRecordingId(null);
+    }
 
     // Disconnect LiveKit (intentional)
     intentionalDisconnectRef.current = true;
@@ -782,13 +790,58 @@ export default function Broadcast() {
     setLocalScreenOn(false);
     setWebsiteStatus("off");
     setRecordingStatus("off");
+    setActiveRecordingId(null);
     setYoutubeStatus("off");
 
     if (activeEventId) await setEduEventLive(activeEventId, false).catch(() => {});
   }
 
+  /* ── Recording start / stop during live broadcast ─────────── */
+
+  async function handleStartRecording() {
+    if (recordingBusy || !goLiveData?.broadcast?.roomId) return;
+    setRecordingBusy(true);
+    setRecordingStatus("starting");
+    try {
+      const data = await apiStartRecording(
+        goLiveData.broadcast.roomId,
+        "cloud",
+        undefined,
+        goLiveData.roomAccessToken,
+      );
+      setActiveRecordingId(data.recordingId || data.id || null);
+      setRecordingStatus("active");
+    } catch (err: any) {
+      console.error("[EduBroadcast] start recording error:", err);
+      setRecordingStatus("error");
+    } finally {
+      setRecordingBusy(false);
+    }
+  }
+
+  async function handleStopRecording() {
+    if (recordingBusy || !activeRecordingId) return;
+    setRecordingBusy(true);
+    try {
+      await apiStopRecording(activeRecordingId, goLiveData?.roomAccessToken ?? null);
+      setActiveRecordingId(null);
+      setRecordingStatus("off");
+    } catch (err: any) {
+      console.error("[EduBroadcast] stop recording error:", err);
+      setRecordingStatus("error");
+    } finally {
+      setRecordingBusy(false);
+    }
+  }
+
   async function emergencyCut() {
     if (!isFacultyAdmin) return;
+
+    // Stop active recording
+    if (activeRecordingId && goLiveData) {
+      try { await apiStopRecording(activeRecordingId, goLiveData.roomAccessToken); } catch {}
+      setActiveRecordingId(null);
+    }
 
     // Stop any pre-recorded media playback
     if (mediaCleanupRef.current) { mediaCleanupRef.current(); mediaCleanupRef.current = null; }
@@ -816,6 +869,7 @@ export default function Broadcast() {
     setLocalScreenOn(false);
     setWebsiteStatus(publishHls ? "error" : "off");
     setRecordingStatus(recordMp4 ? "error" : "off");
+    setActiveRecordingId(null);
     setYoutubeStatus(alsoYoutube ? "error" : "off");
 
     if (activeEventId) await setEduEventLive(activeEventId, false).catch(() => {});
@@ -1773,6 +1827,43 @@ export default function Broadcast() {
               <StatusChip label="Recording" status={recordMp4 ? recordingStatus : "off"} />
               {alsoYoutube ? <StatusChip label="YouTube" status={youtubeStatus} /> : <StatusChip label="YouTube" status="off" />}
             </div>
+
+            {/* Recording toggle — visible when recording is enabled */}
+            {recordMp4 && (
+              <div className="mt-4 flex items-center gap-3">
+                {recordingStatus === "active" || recordingStatus === "starting" ? (
+                  <button
+                    type="button"
+                    disabled={recordingBusy || recordingStatus === "starting"}
+                    onClick={handleStopRecording}
+                    className={`flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold text-white transition-colors ${
+                      recordingBusy || recordingStatus === "starting"
+                        ? "cursor-not-allowed bg-slate-700"
+                        : "bg-red-600 hover:bg-red-500"
+                    }`}
+                  >
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-white" />
+                    {recordingBusy ? "Stopping…" : "Stop Recording"}
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={recordingBusy}
+                    onClick={handleStartRecording}
+                    className={`flex items-center gap-2 rounded-xl px-4 py-3 text-sm font-semibold transition-colors ${
+                      recordingBusy
+                        ? "cursor-not-allowed bg-slate-700 text-slate-400"
+                        : "bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 text-white hover:from-orange-400 hover:via-red-500 hover:to-violet-500"
+                    }`}
+                  >
+                    {recordingBusy ? "Starting…" : "Start Recording"}
+                  </button>
+                )}
+                {recordingStatus === "error" && (
+                  <span className="text-xs text-red-400">Recording failed — try again</span>
+                )}
+              </div>
+            )}
           </div>
         </div>
 
