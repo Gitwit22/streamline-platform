@@ -14,6 +14,7 @@ type OrgDoc = {
   branding?: {
     logoDataUrl?: string | null;
     accentColor?: string | null;
+    secondaryColor?: string | null;
     playerTitleText?: string | null;
   };
   defaults?: {
@@ -129,6 +130,7 @@ function normalizeOrgDoc(docId: string, data: any): any {
     branding: {
       logoDataUrl: typeof d.branding?.logoDataUrl === "string" ? d.branding?.logoDataUrl : null,
       accentColor: typeof d.branding?.accentColor === "string" ? d.branding?.accentColor : null,
+      secondaryColor: typeof d.branding?.secondaryColor === "string" ? d.branding?.secondaryColor : null,
       playerTitleText: typeof d.branding?.playerTitleText === "string" ? d.branding?.playerTitleText : null,
     },
     defaults: {
@@ -193,6 +195,7 @@ router.get("/org", requireAuth, async (req, res) => {
         branding: {
           logoDataUrl: null,
           accentColor: null,
+          secondaryColor: null,
           playerTitleText: null,
         },
         defaults: {
@@ -242,6 +245,10 @@ router.patch("/org", requireAuth, async (req, res) => {
         accentColor:
           typeof patch?.branding?.accentColor === "string" && String(patch.branding.accentColor).trim()
             ? String(patch.branding.accentColor).trim()
+            : null,
+        secondaryColor:
+          typeof patch?.branding?.secondaryColor === "string" && String(patch.branding.secondaryColor).trim()
+            ? String(patch.branding.secondaryColor).trim()
             : null,
         playerTitleText:
           typeof patch?.branding?.playerTitleText === "string" && String(patch.branding.playerTitleText).trim()

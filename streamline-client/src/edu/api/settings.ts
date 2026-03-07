@@ -7,6 +7,7 @@ export type EduOrgSettings = {
   branding: {
     logoDataUrl: string | null;
     accentColor: string | null;
+    secondaryColor: string | null;
     playerTitleText: string | null;
   };
   defaults: {

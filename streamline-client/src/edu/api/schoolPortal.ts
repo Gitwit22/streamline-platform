@@ -95,6 +95,53 @@ export async function portalChangePassword(slug: string, body: { username: strin
   return res.json();
 }
 
+/* ── Student Activation (2-step) ─────────────────────────────────── */
+
+export type StudentValidationResult = {
+  ok: true;
+  studentId: string;
+  fullName: string;
+};
+
+export type StudentActivationResult = {
+  ok: true;
+  token: string;
+  role: string;
+};
+
+/** Step 1 — check that the username exists & is eligible for activation */
+export async function validateStudentForActivation(slug: string, username: string): Promise<StudentValidationResult> {
+  const res = await apiFetch(`/api/edu/portal/${encodeURIComponent(slug)}/validate-student`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username }),
+  }, { allowNonOk: true });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any)?.error || "Username not found or not eligible for activation.");
+  }
+  return res.json();
+}
+
+/** Step 2 — set password and activate the student account */
+export async function activateStudentAccount(slug: string, body: {
+  studentId: string;
+  username: string;
+  password: string;
+  confirmPassword: string;
+}): Promise<StudentActivationResult> {
+  const res = await apiFetch(`/api/edu/portal/${encodeURIComponent(slug)}/activate-student`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  }, { allowNonOk: true });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any)?.error || "Activation failed");
+  }
+  return res.json();
+}
+
 /* ── Staff Activation ───────────────────────────────────────────── */
 
 export async function activateStaffAccount(slug: string, body: {

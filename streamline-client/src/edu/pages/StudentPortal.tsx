@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { apiFetchAuth } from "../../lib/api";
 import { computeEduEventStatus, listEduEvents } from "../state/eduEvents";
+import { useSchoolBranding } from "../state/schoolBranding";
+import SchoolLogo from "../components/SchoolLogo";
 
 type TabId = "live" | "upcoming" | "recordings" | "rooms" | "media";
 
@@ -16,7 +18,8 @@ function formatDate(iso: string) {
 export default function StudentPortal() {
   const nav = useNavigate();
   const [tab, setTab] = useState<TabId>("live");
-  const [schoolName, setSchoolName] = useState("Your School");
+  const { branding } = useSchoolBranding();
+  const schoolName = branding.schoolName || "Your School";
 
   /* ── Fetch live data ──────────────────────────────────── */
   const [liveBroadcasts, setLiveBroadcasts] = useState<{ id: string; title: string; viewers: number; status: string }[]>([]);
@@ -28,8 +31,7 @@ export default function StudentPortal() {
       apiFetchAuth("/api/edu/broadcasts?status=live").then((r) => r.json()),
       apiFetchAuth("/api/edu/recordings?limit=20").then((r) => r.json()),
       apiFetchAuth("/api/edu/rooms").then((r) => r.json()),
-      apiFetchAuth("/api/edu/org").then((r) => r.json()),
-    ]).then(([bRes, rRes, rmRes, orgRes]) => {
+    ]).then(([bRes, rRes, rmRes]) => {
       if (bRes.status === "fulfilled") setLiveBroadcasts(bRes.value?.broadcasts ?? []);
       if (rRes.status === "fulfilled") {
         setRecordings(
@@ -42,7 +44,6 @@ export default function StudentPortal() {
         );
       }
       if (rmRes.status === "fulfilled") setRooms(rmRes.value?.rooms ?? []);
-      if (orgRes.status === "fulfilled" && orgRes.value?.org?.name) setSchoolName(orgRes.value.org.name);
     });
   }, []);
 
@@ -88,7 +89,7 @@ export default function StudentPortal() {
       <header className="border-b border-slate-700 bg-slate-900/80 backdrop-blur-sm">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <div className="flex items-center gap-3">
-            <img src="/edu_logo.png" alt="EDU" className="h-8 w-8 object-contain" />
+            <SchoolLogo size="sm" />
             <div>
               <div className="text-sm font-bold text-white">{schoolName}</div>
               <div className="text-[11px] text-slate-500">Student Portal</div>

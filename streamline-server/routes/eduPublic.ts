@@ -227,6 +227,7 @@ router.get("/embed/meta", async (req, res) => {
         embedId,
         accessMode,
         requiresPassword: accessMode === "password" && hasPassword,
+        orgId: asString((embed as any).orgId).trim() || null,
       },
       event: payload.event,
       broadcast: b,
@@ -322,12 +323,97 @@ router.get("/embed", async (req, res) => {
       embed: {
         embedId,
         accessMode,
+        orgId: asString((embed as any).orgId).trim() || null,
       },
       event: payload.event,
       broadcast: payload.broadcast,
     });
   } catch (err: any) {
     console.error("GET /api/public/edu/embed error", err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Public branding endpoint — no authentication required.
+// Used by embed players, HLS viewers, and public watch pages so they can show
+// the school's logo, name, and accent colour without requiring a login.
+//
+// GET /api/public/edu/branding/:orgId
+// Returns only viewer-safe branding fields (no secrets, no internal settings).
+// ---------------------------------------------------------------------------
+router.get("/branding/:orgId", async (req, res) => {
+  try {
+    const orgId = asString(req.params.orgId).trim();
+    if (!orgId) return res.status(400).json({ error: "orgId_required" });
+
+    const ip = getClientIp(req);
+    if (hitEmbedRateLimit(`branding:${ip}`, 120)) {
+      return res.status(429).json({ error: "rate_limited" });
+    }
+
+    const orgSnap = await tenantCol("orgs").doc(orgId).get();
+    if (!orgSnap.exists) return res.status(404).json({ error: "org_not_found" });
+
+    const data = orgSnap.data() as any;
+
+    // Return ONLY public-safe branding fields
+    return res.json({
+      branding: {
+        orgId: orgSnap.id,
+        schoolName: typeof data?.name === "string" ? data.name : "",
+        logoUrl: typeof data?.branding?.logoDataUrl === "string" ? data.branding.logoDataUrl : null,
+        accentColor: typeof data?.branding?.accentColor === "string" ? data.branding.accentColor : null,
+        playerTitleText: typeof data?.branding?.playerTitleText === "string" ? data.branding.playerTitleText : null,
+        showSchoolBranding: true,
+        // Include an updatedAt so clients can cache-bust images
+        updatedAt: typeof data?.updatedAt === "number" ? data.updatedAt : null,
+      },
+    });
+  } catch (err: any) {
+    console.error("GET /api/public/edu/branding/:orgId error", err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+// GET /api/public/edu/branding/slug/:slug
+// Same as above but looked up by school slug (for public portal pages).
+router.get("/branding/slug/:slug", async (req, res) => {
+  try {
+    const slug = asString(req.params.slug).toLowerCase().trim();
+    if (!slug || slug.length < 2) return res.status(400).json({ error: "invalid_slug" });
+
+    const ip = getClientIp(req);
+    if (hitEmbedRateLimit(`branding-slug:${ip}`, 120)) {
+      return res.status(429).json({ error: "rate_limited" });
+    }
+
+    const snap = await tenantCol("orgs")
+      .where("slug", "==", slug)
+      .limit(1)
+      .get();
+    if (snap.empty) return res.status(404).json({ error: "org_not_found" });
+
+    const doc = snap.docs[0];
+    const data = doc.data() as any;
+    const status = data.status || "active";
+    if (status === "suspended" || status === "deleted") {
+      return res.status(404).json({ error: "org_not_found" });
+    }
+
+    return res.json({
+      branding: {
+        orgId: doc.id,
+        schoolName: typeof data?.name === "string" ? data.name : "",
+        logoUrl: typeof data?.branding?.logoDataUrl === "string" ? data.branding.logoDataUrl : null,
+        accentColor: typeof data?.branding?.accentColor === "string" ? data.branding.accentColor : null,
+        playerTitleText: typeof data?.branding?.playerTitleText === "string" ? data.branding.playerTitleText : null,
+        showSchoolBranding: true,
+        updatedAt: typeof data?.updatedAt === "number" ? data.updatedAt : null,
+      },
+    });
+  } catch (err: any) {
+    console.error("GET /api/public/edu/branding/slug/:slug error", err);
     return res.status(500).json({ error: "internal" });
   }
 });

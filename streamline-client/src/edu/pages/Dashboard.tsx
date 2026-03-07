@@ -3,10 +3,15 @@ import { useNavigate } from "react-router-dom";
 import { computeEduEventStatus, listEduEvents } from "../state/eduEvents";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import { apiFetchAuth } from "../../lib/api";
+import { useSchoolBranding } from "../state/schoolBranding";
+import SchoolLogo from "../components/SchoolLogo";
 
 export default function Dashboard() {
   const nav = useNavigate();
   const me = useEduMe();
+  const { branding } = useSchoolBranding();
+  const primary = branding.accentColor;
+  const secondary = branding.secondaryColor;
 
   const role = String(me?.orgRole || me?.role || "faculty_admin");
   const isStudentProducer = role === "student_producer" || role === "student_producer_assigned";
@@ -16,6 +21,17 @@ export default function Dashboard() {
     rooms: number; students: number; mediaStudents: number;
     staff: number; recordings: number;
   }>({ rooms: 0, students: 0, mediaStudents: 0, staff: 0, recordings: 0 });
+  const [statsLoaded, setStatsLoaded] = useState(false);
+
+  /* ── "Don't show again" for the welcome banner ──── */
+  const WELCOME_DISMISS_KEY = "sl_edu_welcome_dismissed";
+  const [welcomeDismissed, setWelcomeDismissed] = useState(() => {
+    try { return localStorage.getItem(WELCOME_DISMISS_KEY) === "1"; } catch { return false; }
+  });
+  const dismissWelcomeForever = () => {
+    setWelcomeDismissed(true);
+    try { localStorage.setItem(WELCOME_DISMISS_KEY, "1"); } catch { /* ignore */ }
+  };
 
   const [recentRecordings, setRecentRecordings] = useState<
     { id: string; title: string; duration: string; date: string }[]
@@ -58,6 +74,7 @@ export default function Dashboard() {
           };
         }),
       );
+      setStatsLoaded(true);
     });
   }, []);
 
@@ -91,8 +108,10 @@ export default function Dashboard() {
     setLiveBroadcasts((prev) => prev.filter((b) => b.id !== id));
   };
 
-  /* True when the school is brand new — show getting-started prompts */
-  const isNewSchool = roomCount + studentCount + staffCount + recordingCount <= 4 && staffCount <= 1;
+  /* True when the school is brand new — show getting-started prompts.
+     Only evaluate after stats have loaded so the banner doesn't flash then vanish. */
+  const isNewSchool = statsLoaded && !welcomeDismissed
+    && roomCount + studentCount + staffCount + recordingCount <= 4 && staffCount <= 1;
 
   const [allEventsList, setAllEventsList] = useState<import("../state/eduEvents").EduEvent[]>([]);
   useEffect(() => {
@@ -122,6 +141,15 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
+      {/* ── School identity banner ────────────────────────── */}
+      <div className="flex items-center gap-4 rounded-2xl border border-slate-700 bg-gradient-to-r from-slate-800 to-slate-800/50 px-6 py-4">
+        <SchoolLogo size="lg" />
+        <div>
+          <h2 className="text-lg font-bold text-white">{me?.orgName || "Your School"}</h2>
+          <p className="text-xs text-slate-400">Powered by StreamLine EDU</p>
+        </div>
+      </div>
+
       {/* ── Student Producer: simplified dashboard ──────────── */}
       {isStudentProducer ? (
         <>
@@ -188,7 +216,8 @@ export default function Dashboard() {
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <button
               onClick={() => nav("/streamline/edu/broadcast")}
-              className="group rounded-2xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 p-6 text-left transition-transform hover:-translate-y-1"
+              className="group rounded-2xl p-6 text-left transition-transform hover:-translate-y-1"
+              style={{ background: `linear-gradient(to right, ${primary}, ${secondary})` }}
             >
               <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-white/20 transition-transform group-hover:scale-110">
                 <svg className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -204,7 +233,7 @@ export default function Dashboard() {
               onClick={() => nav("/streamline/edu/media-library")}
               className="group rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6 text-left transition-transform hover:-translate-y-1"
             >
-              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-orange-500/10 text-orange-300 transition-transform group-hover:scale-110">
+              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl transition-transform group-hover:scale-110" style={{ backgroundColor: `${primary}1a`, color: primary }}>
                 <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 4v16M17 4v16M3 8h4m10 0h4M3 12h18M3 16h4m10 0h4M4 20h16a1 1 0 001-1V5a1 1 0 00-1-1H4a1 1 0 00-1 1v14a1 1 0 001 1z" />
                 </svg>
@@ -218,7 +247,7 @@ export default function Dashboard() {
           <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6">
             <div className="mb-4 flex items-center justify-between">
               <h3 className="text-lg font-semibold text-white">Recent Recordings</h3>
-              <button onClick={() => nav("/streamline/edu/media-library")} className="text-sm text-orange-400 hover:text-orange-300">
+              <button onClick={() => nav("/streamline/edu/media-library")} className="text-sm" style={{ color: primary }}>
                 View All →
               </button>
             </div>
@@ -248,7 +277,15 @@ export default function Dashboard() {
 
       {/* Getting-started guide for new schools */}
       {isNewSchool && (
-        <div className="rounded-2xl border border-orange-500/30 bg-gradient-to-br from-orange-900/20 to-slate-900 p-6">
+        <div className="rounded-2xl border bg-gradient-to-br to-slate-900 p-6 relative" style={{ borderColor: `${primary}4d`, backgroundImage: `linear-gradient(to bottom right, ${primary}33, var(--tw-gradient-to, rgb(15 23 42)))` }}>
+          {/* Dismiss forever */}
+          <button
+            onClick={dismissWelcomeForever}
+            className="absolute top-3 right-3 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+            title="Don't show this again"
+          >
+            Don&apos;t show again &times;
+          </button>
           <h2 className="mb-1 text-xl font-bold text-white">Welcome to StreamLine!</h2>
           <p className="mb-4 text-sm text-slate-400">Complete these steps to get your school broadcasting.</p>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -262,10 +299,13 @@ export default function Dashboard() {
               <button
                 key={step.label}
                 onClick={() => nav(step.path)}
-                className="flex items-center gap-3 rounded-xl border border-slate-700/60 bg-slate-800/50 p-3 text-left transition-colors hover:border-orange-500/40 hover:bg-slate-800"
+                className="flex items-center gap-3 rounded-xl border border-slate-700/60 bg-slate-800/50 p-3 text-left transition-colors hover:bg-slate-800"
+                style={{ ['--hover-border' as any]: `${primary}66` }}
+                onMouseEnter={e => (e.currentTarget.style.borderColor = `${primary}66`)}
+                onMouseLeave={e => (e.currentTarget.style.borderColor = '')}
               >
-                <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg bg-orange-500/10">
-                  <svg className="h-5 w-5 text-orange-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg" style={{ backgroundColor: `${primary}1a` }}>
+                  <svg className="h-5 w-5" style={{ color: primary }} fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d={step.icon} />
                   </svg>
                 </div>
@@ -339,29 +379,10 @@ export default function Dashboard() {
 
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         <button
-          onClick={() => nav("/streamline/edu/broadcast")}
-          className="group rounded-2xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 p-6 text-left transition-transform hover:-translate-y-1"
-        >
-          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-white/20 transition-transform group-hover:scale-110">
-            <svg className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"
-              />
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-            </svg>
-          </div>
-          <div className="text-xl font-bold text-white">Start Broadcast</div>
-          <div className="mt-1 text-sm text-white/85">Go live to your school network</div>
-        </button>
-
-        <button
           onClick={() => nav("/streamline/edu/events")}
           className="group rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6 text-left transition-transform hover:-translate-y-1"
         >
-          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-orange-500/10 text-orange-300 transition-transform group-hover:scale-110">
+          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl transition-transform group-hover:scale-110" style={{ backgroundColor: `${primary}1a`, color: primary }}>
             <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path
                 strokeLinecap="round"
@@ -379,7 +400,7 @@ export default function Dashboard() {
           onClick={() => nav("/streamline/edu/embed")}
           className="group rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6 text-left transition-transform hover:-translate-y-1"
         >
-          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-orange-500/10 text-orange-300 transition-transform group-hover:scale-110">
+          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl transition-transform group-hover:scale-110" style={{ backgroundColor: `${primary}1a`, color: primary }}>
             <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
             </svg>
@@ -387,13 +408,33 @@ export default function Dashboard() {
           <div className="text-xl font-bold text-white">Website Embed</div>
           <div className="mt-1 text-sm text-slate-400">Get code for your site</div>
         </button>
+
+        <button
+          onClick={() => nav("/streamline/edu/broadcast")}
+          className="group rounded-2xl p-6 text-left transition-transform hover:-translate-y-1"
+          style={{ background: `linear-gradient(to right, ${primary}, ${secondary})` }}
+        >
+          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-white/20 transition-transform group-hover:scale-110">
+            <svg className="h-6 w-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z"
+              />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+          </div>
+          <div className="text-xl font-bold text-white">Start Broadcast</div>
+          <div className="mt-1 text-sm text-white/85">Go live to your school network</div>
+        </button>
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6">
           <div className="mb-4 flex items-center justify-between">
             <h3 className="text-lg font-semibold text-white">Upcoming Events</h3>
-            <button onClick={() => nav("/streamline/edu/events")} className="text-sm text-orange-400 hover:text-orange-300">
+            <button onClick={() => nav("/streamline/edu/events")} className="text-sm" style={{ color: primary }}>
               View All →
             </button>
           </div>
@@ -407,7 +448,7 @@ export default function Dashboard() {
                       {event.date} • {event.time}
                     </div>
                     <div className="mt-2 flex items-center gap-2">
-                      <span className="rounded-full bg-purple-500/20 px-2 py-0.5 text-xs text-purple-300">Event</span>
+                      <span className="rounded-full px-2 py-0.5 text-xs" style={{ backgroundColor: `${secondary}33`, color: secondary }}>Event</span>
                       <span className="text-xs text-slate-500">{event.crew.length ? "Producer assigned" : "No producer assigned"}</span>
                     </div>
                   </div>
@@ -425,7 +466,7 @@ export default function Dashboard() {
         <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6">
           <div className="mb-4 flex items-center justify-between">
             <h3 className="text-lg font-semibold text-white">Recent Recordings</h3>
-            <button onClick={() => nav("/streamline/edu/recordings")} className="text-sm text-orange-400 hover:text-orange-300">
+            <button onClick={() => nav("/streamline/edu/recordings")} className="text-sm" style={{ color: primary }}>
               View All →
             </button>
           </div>

@@ -3,6 +3,8 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { useEduMe } from "./EduProtectedRoute";
 import { apiFetch, clearAuthStorage } from "../../lib/api";
 import { logout } from "../../lib/logout";
+import { useSchoolBranding } from "../state/schoolBranding";
+import SchoolLogo from "../components/SchoolLogo";
 
 type NavItem = { id: string; label: string; path: string };
 
@@ -15,8 +17,9 @@ export default function EduSidebar() {
   const [loggingOut, setLoggingOut] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
+  const { branding } = useSchoolBranding();
   const role = String(me?.orgRole || me?.role || "faculty_admin");
-  const schoolName = String(me?.orgName || "Your School");
+  const schoolName = branding.schoolName || String(me?.orgName || "Your School");
   const isFacultyAdmin = role === "faculty_admin";
   const isStudentProducer = role === "student_producer" || role === "student_producer_assigned";
 
@@ -35,14 +38,14 @@ export default function EduSidebar() {
         { id: "dashboard", label: "Dashboard", path: "/streamline/edu/dashboard" },
         { id: "broadcast", label: "Broadcast Studio", path: "/streamline/edu/broadcast" },
         { id: "events", label: "Events", path: "/streamline/edu/events" },
+        { id: "embed", label: "Website Embed", path: "/streamline/edu/embed" },
         { id: "rooms", label: "Broadcast Rooms", path: "/streamline/edu/rooms" },
-        { id: "media-library", label: "Media Library", path: "/streamline/edu/media-library" },
         { id: "people", label: "People", path: "/streamline/edu/people" },
         ...(isFacultyAdmin ? [
           { id: "chat", label: "Faculty Chat", path: "/streamline/edu/chat" },
           { id: "calls", label: "Video Calls", path: "/streamline/edu/calls" },
         ] : []),
-        { id: "embed", label: "Website Embed", path: "/streamline/edu/embed" },
+        { id: "media-library", label: "Media Library", path: "/streamline/edu/media-library" },
         ...(isFacultyAdmin ? [{ id: "settings", label: "School Settings", path: "/streamline/edu/settings" }] : []),
       ];
     },
@@ -85,33 +88,32 @@ export default function EduSidebar() {
     <nav className="fixed left-0 top-0 z-50 flex h-full w-64 flex-col border-r border-slate-700 bg-slate-900">
       <div className="border-b border-slate-700 bg-slate-900 p-6">
         <div className="flex items-center gap-3">
-          <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-slate-700/60 bg-slate-950/40">
-            <img src="/edu_logo.png" alt="EDU" className="h-10 w-10 object-contain" />
-          </div>
-          <div>
-            <div className="font-bold tracking-tight text-white">StreamLine</div>
-            <div className="font-mono text-xs tracking-[0.2em] text-orange-300">EDU</div>
+          <SchoolLogo size="lg" />
+          <div className="min-w-0">
+            <div className="truncate font-bold tracking-tight text-white">{schoolName}</div>
+            <div className="font-mono text-[10px] tracking-[0.2em] text-slate-500">Powered by <span className="text-orange-300">StreamLine EDU</span></div>
           </div>
         </div>
-      </div>
-
-      <div className="border-b border-slate-700 bg-slate-900/50 px-6 py-4">
-        <div className="mb-1 font-mono text-[11px] tracking-[0.2em] text-slate-500">SCHOOL</div>
-        <div className="text-sm font-medium text-white">{schoolName}</div>
       </div>
 
       <div className="flex-1 overflow-y-auto py-4">
         {items.map((item) => {
           const active = loc.pathname === item.path;
+          const accent = branding.accentColor || "#f97316";
           return (
             <button
               key={item.id}
               onClick={() => nav(item.path)}
               className={`w-full px-6 py-3 text-left transition-colors ${
                 active
-                  ? "border-r-2 border-orange-500 bg-orange-500/10 text-orange-300"
+                  ? "border-r-2"
                   : "text-slate-300 hover:bg-slate-800/60 hover:text-white"
               }`}
+              style={active ? {
+                borderColor: accent,
+                backgroundColor: `${accent}1a`,
+                color: accent,
+              } : undefined}
             >
               <span className="font-medium">{item.label}</span>
             </button>

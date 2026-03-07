@@ -9,6 +9,7 @@ import {
   type PublicEduBroadcast,
   type PublicEduEvent,
 } from "../api/publicEmbed";
+import { fetchPublicBranding, type PublicSchoolBranding } from "../api/publicBranding";
 import { setEduLane } from "../state/eduMode";
 import { useHlsReadiness } from "../../hooks/useHlsReadiness";
 
@@ -73,6 +74,9 @@ export default function EmbedEventPlayer() {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
 
+  // ── School branding for the embed viewer ──
+  const [schoolBranding, setSchoolBranding] = useState<PublicSchoolBranding | null>(null);
+
   const grantStorageKey = useMemo(() => {
     if (!embedId) return null;
     return `sl_edu_embed_grant_${embedId}`;
@@ -114,6 +118,14 @@ export default function EmbedEventPlayer() {
         setEvent(meta.event);
         setBroadcast((meta.broadcast as any) || null);
         setRequiresPassword(meta.embed.requiresPassword);
+
+        // Fetch school branding for this embed's org
+        const orgId = (meta.embed as any).orgId;
+        if (orgId) {
+          fetchPublicBranding(orgId).then((b) => {
+            if (!cancelled && b) setSchoolBranding(b);
+          }).catch(() => {});
+        }
 
         // If no password required, or we already have a saved grant, fetch full payload.
         if (!meta.embed.requiresPassword) {
@@ -267,11 +279,31 @@ export default function EmbedEventPlayer() {
   return (
     <div className="min-h-screen bg-slate-950 text-white">
       <div className="mx-auto flex max-w-5xl flex-col gap-4 px-4 py-6">
+        {/* School branding header */}
         <div className="rounded-2xl border border-slate-800/50 bg-slate-900/40 p-4">
-          <div className="text-lg font-semibold tracking-tight">{title}</div>
-          <div className="mt-1 text-sm text-slate-400">
-            {loading ? "Loading…" : error ? error : computedState === "live" ? "Live" : computedState === "offair" ? "Off-air" : "Scheduled"}
-            {embedId ? <span className="text-slate-600"> · {embedId}</span> : null}
+          <div className="flex items-center gap-3">
+            {schoolBranding?.logoUrl ? (
+              <div className="h-10 w-10 flex-shrink-0 overflow-hidden rounded-xl border border-slate-700/60 bg-slate-950/40">
+                <img src={schoolBranding.logoUrl} alt={schoolBranding.schoolName} className="h-10 w-10 object-contain" loading="eager" />
+              </div>
+            ) : (
+              <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-orange-500 to-red-600 text-sm font-bold text-white">
+                {(schoolBranding?.schoolName || "S").charAt(0).toUpperCase()}
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
+              <div className="text-lg font-semibold tracking-tight">{title}</div>
+              <div className="mt-0.5 flex items-center gap-2 text-sm text-slate-400">
+                {schoolBranding?.schoolName ? (
+                  <span className="text-slate-300">{schoolBranding.schoolName}</span>
+                ) : null}
+                <span className="text-slate-600">·</span>
+                {loading ? "Loading…" : error ? error : computedState === "live" ? "Live" : computedState === "offair" ? "Off-air" : "Scheduled"}
+              </div>
+            </div>
+            <div className="font-mono text-[9px] tracking-[0.15em] text-slate-600">
+              Powered by StreamLine EDU
+            </div>
           </div>
         </div>
 
@@ -343,7 +375,13 @@ export default function EmbedEventPlayer() {
                 />
               ) : (
                 <div className="flex aspect-video w-full flex-col items-center justify-center gap-3 px-6 text-center">
-                  <img src="/edu_logo.png" alt="StreamLine EDU" className="h-12 w-auto opacity-95" />
+                  {schoolBranding?.logoUrl ? (
+                    <div className="h-14 w-14 overflow-hidden rounded-xl border border-slate-700/60 bg-slate-950/40">
+                      <img src={schoolBranding.logoUrl} alt={schoolBranding.schoolName} className="h-14 w-14 object-contain" />
+                    </div>
+                  ) : (
+                    <img src="/edu_logo.png" alt="StreamLine EDU" className="h-12 w-auto opacity-95" />
+                  )}
 
                   {hlsUrl ? (
                     <>

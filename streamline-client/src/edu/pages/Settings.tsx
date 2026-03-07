@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
+import { useSchoolBranding } from "../state/schoolBranding";
 import {
   fetchEduAudit,
   fetchEduOrg,
@@ -42,8 +43,9 @@ function Toggle({
       <div
         aria-hidden
         className={`relative h-6 w-11 flex-shrink-0 rounded-full transition-colors ${
-          checked ? "bg-orange-500" : "bg-slate-700"
+          checked ? "" : "bg-slate-700"
         }`}
+        style={checked ? { backgroundColor: "var(--sl-school-primary, #f97316)" } : undefined}
       >
         <div
           className={`absolute top-0.5 h-5 w-5 rounded-full bg-white transition-transform ${
@@ -93,6 +95,7 @@ function actionLabel(action: string) {
 export default function Settings() {
   const nav = useNavigate();
   const me = useEduMe();
+  const { refreshBranding } = useSchoolBranding();
   const roleRaw = String(me?.orgRole || me?.role || "faculty_admin");
   const isFacultyAdmin = roleRaw === "faculty_admin";
 
@@ -119,6 +122,7 @@ export default function Settings() {
   const [name, setName] = useState<string>("");
   const [logoDataUrl, setLogoDataUrl] = useState<string | null>(null);
   const [accentColor, setAccentColor] = useState<string | null>(null);
+  const [secondaryColor, setSecondaryColor] = useState<string | null>(null);
   const [playerTitleText, setPlayerTitleText] = useState<string | null>(null);
   const [timezone, setTimezone] = useState<string>("America/New_York");
 
@@ -152,6 +156,7 @@ export default function Settings() {
         setName(String(orgRes.name || ""));
         setLogoDataUrl(orgRes.branding?.logoDataUrl || null);
         setAccentColor(orgRes.branding?.accentColor || null);
+        setSecondaryColor(orgRes.branding?.secondaryColor || null);
         setPlayerTitleText(orgRes.branding?.playerTitleText || null);
         setTimezone(String(orgRes.timezone || "America/New_York"));
 
@@ -200,6 +205,7 @@ export default function Settings() {
         branding: {
           logoDataUrl,
           accentColor,
+          secondaryColor,
           playerTitleText,
         },
         defaults: {
@@ -217,6 +223,11 @@ export default function Settings() {
       });
       setOrg(next);
       setSaveOk(true);
+
+      // ── Instant branding propagation ──
+      // Refresh the global branding context so sidebar, topbar, and every
+      // school-scoped page picks up the new logo / name / colours NOW.
+      await refreshBranding();
 
       // Refresh audit and storage summary (best-effort)
       try {
@@ -366,28 +377,101 @@ export default function Settings() {
           </div>
 
           <div className="rounded-xl border border-slate-800/50 bg-slate-950/40 p-4">
-            <div className="text-sm font-medium text-white">Accent color</div>
-            <div className="mt-1 text-sm text-slate-400">Used for highlights and accents.</div>
-            <div className="mt-3 flex items-center gap-3">
-              <input
-                type="color"
-                value={accentColor || "#f97316"}
-                onChange={(e) => setAccentColor(e.target.value || null)}
-                className="h-10 w-14 rounded-lg border border-slate-800 bg-slate-950"
-              />
-              <input
-                value={accentColor || ""}
-                onChange={(e) => setAccentColor(e.target.value.trim() ? e.target.value.trim() : null)}
-                placeholder="#f97316"
-                className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
-              />
-              <button
-                type="button"
-                onClick={() => setAccentColor(null)}
-                className="rounded-lg border border-slate-800 px-3 py-2 text-sm text-slate-200 hover:bg-slate-800"
-              >
-                Reset
-              </button>
+            <div className="text-sm font-medium text-white">School Colors</div>
+            <div className="mt-1 text-sm text-slate-400">Your school's primary and secondary colors.</div>
+
+            {/* Primary color */}
+            <div className="mt-4">
+              <label className="text-xs font-medium text-slate-300">Primary Color</label>
+              <div className="mt-1.5 flex items-center gap-3">
+                <input
+                  type="color"
+                  value={accentColor || "#f97316"}
+                  onChange={(e) => setAccentColor(e.target.value || null)}
+                  className="h-10 w-14 rounded-lg border border-slate-800 bg-slate-950 cursor-pointer"
+                />
+                <input
+                  value={accentColor || ""}
+                  onChange={(e) => setAccentColor(e.target.value.trim() ? e.target.value.trim() : null)}
+                  placeholder="#f97316"
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
+                />
+                <button
+                  type="button"
+                  onClick={() => setAccentColor(null)}
+                  className="rounded-lg border border-slate-800 px-3 py-2 text-xs text-slate-400 hover:bg-slate-800 whitespace-nowrap"
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+
+            {/* Secondary color */}
+            <div className="mt-4">
+              <label className="text-xs font-medium text-slate-300">Secondary Color</label>
+              <div className="mt-1.5 flex items-center gap-3">
+                <input
+                  type="color"
+                  value={secondaryColor || "#7c3aed"}
+                  onChange={(e) => setSecondaryColor(e.target.value || null)}
+                  className="h-10 w-14 rounded-lg border border-slate-800 bg-slate-950 cursor-pointer"
+                />
+                <input
+                  value={secondaryColor || ""}
+                  onChange={(e) => setSecondaryColor(e.target.value.trim() ? e.target.value.trim() : null)}
+                  placeholder="#7c3aed"
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
+                />
+                <button
+                  type="button"
+                  onClick={() => setSecondaryColor(null)}
+                  className="rounded-lg border border-slate-800 px-3 py-2 text-xs text-slate-400 hover:bg-slate-800 whitespace-nowrap"
+                >
+                  Reset
+                </button>
+              </div>
+            </div>
+
+            {/* Live preview */}
+            <div className="mt-5 rounded-xl border border-slate-700/60 bg-slate-900/60 p-4">
+              <div className="mb-2 text-[11px] font-semibold tracking-wider text-slate-500 uppercase">Live Preview — What These Colors Change</div>
+              <div className="space-y-3">
+                {/* Sidebar active item */}
+                <div className="flex items-center gap-3">
+                  <div className="w-3 h-8 rounded-sm" style={{ backgroundColor: accentColor || "#f97316" }} />
+                  <div className="flex-1 rounded-lg px-3 py-2 text-sm font-medium" style={{ backgroundColor: `${accentColor || "#f97316"}1a`, color: accentColor || "#f97316" }}>
+                    Dashboard (active sidebar item)
+                  </div>
+                </div>
+                {/* Button sample */}
+                <div className="flex items-center gap-3">
+                  <div className="rounded-lg px-4 py-2 text-sm font-semibold text-white" style={{ background: `linear-gradient(to right, ${accentColor || "#f97316"}, ${secondaryColor || "#7c3aed"})` }}>
+                    Start Broadcast
+                  </div>
+                  <span className="text-xs text-slate-500">Action buttons &amp; gradients</span>
+                </div>
+                {/* Toggle */}
+                <div className="flex items-center gap-3">
+                  <div className="relative h-6 w-11 rounded-full" style={{ backgroundColor: accentColor || "#f97316" }}>
+                    <div className="absolute top-0.5 h-5 w-5 translate-x-5 rounded-full bg-white" />
+                  </div>
+                  <span className="text-xs text-slate-500">Toggle switches</span>
+                </div>
+                {/* Badge */}
+                <div className="flex items-center gap-3">
+                  <span className="rounded-full px-2.5 py-0.5 text-xs font-semibold" style={{ backgroundColor: `${secondaryColor || "#7c3aed"}33`, color: secondaryColor || "#7c3aed" }}>Event</span>
+                  <span className="text-xs text-slate-500">Badges &amp; tags</span>
+                </div>
+                {/* Welcome banner gradient */}
+                <div className="flex items-center gap-3">
+                  <div className="h-8 flex-1 rounded-lg" style={{ background: `linear-gradient(135deg, ${accentColor || "#f97316"}33, ${secondaryColor || "#7c3aed"}22)`, border: `1px solid ${accentColor || "#f97316"}4d` }} />
+                  <span className="text-xs text-slate-500">Welcome banner</span>
+                </div>
+              </div>
+              <div className="mt-3 text-[10px] text-slate-500 leading-relaxed">
+                <strong>Primary</strong> — sidebar active state, toggle switches, focus rings, links<br />
+                <strong>Secondary</strong> — badges, event tags, button gradients, banner accents
+              </div>
             </div>
           </div>
         </div>

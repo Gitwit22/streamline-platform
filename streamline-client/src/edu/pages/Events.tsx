@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useLocation } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
-import { createEduSavedEmbed } from "../api/savedEmbeds";
 import { fetchEduOrg } from "../api/settings";
 import { fetchDestinations, type DestinationItem } from "../../services/destinations";
 import {
@@ -361,11 +360,17 @@ function DrawerShell({ title, onClose, children }: { title: string; onClose: () 
 
 export default function Events() {
   const nav = useNavigate();
+  const loc = useLocation();
   const me = useEduMe();
 
   const roleRaw = String(me?.orgRole || me?.role || "faculty_admin");
   const isFacultyAdmin = roleRaw === "faculty_admin";
   const isStudentProducer = roleRaw === "student_producer" || roleRaw === "student_producer_assigned";
+
+  /* Deep-link params: ?editEventId=X&returnTo=broadcast */
+  const searchParams = new URLSearchParams(loc.search);
+  const editEventIdParam = searchParams.get("editEventId");
+  const returnToBroadcast = searchParams.get("returnTo") === "broadcast";
 
   const [tab, setTab] = useState<TabId>("upcoming");
   const [query, setQuery] = useState<string>("");
@@ -373,6 +378,14 @@ export default function Events() {
 
   const [scheduleOpen, setScheduleOpen] = useState(false);
   const [detailId, setDetailId] = useState<string | null>(null);
+
+  /* Auto-open detail drawer when arriving with ?editEventId=... */
+  useEffect(() => {
+    if (editEventIdParam && !detailId) {
+      setDetailId(editEventIdParam);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editEventIdParam]);
 
   const [orgTimezone, setOrgTimezone] = useState<string>("America/New_York");
   const [broadcastRooms, setBroadcastRooms] = useState<BroadcastRoom[]>([]);
@@ -636,28 +649,9 @@ export default function Events() {
           orgTimezone={orgTimezone}
           broadcastRooms={broadcastRooms}
           onClose={() => setScheduleOpen(false)}
-          onCreated={async (ev) => {
+          onCreated={(ev) => {
             setScheduleOpen(false);
             refreshEvents();
-
-            // Try to create a viewer embed for this event (best-effort)
-            if (ev.outputs.publishHls) {
-              try {
-                const embed = await createEduSavedEmbed({
-                  name: `${ev.title} (Viewer)`,
-                  description: "Event viewer link",
-                  hlsConfig: {
-                    title: ev.title,
-                    offlineMessage: "Off Air",
-                    theme: "dark",
-                    enabled: true,
-                  },
-                });
-                upsertEduEvent({ ...ev, savedEmbedId: embed.embedId }).then(() => refreshEvents()).catch(() => {});
-              } catch {
-                // ignore
-              }
-            }
           }}
         />
       ) : null}
@@ -671,10 +665,21 @@ export default function Events() {
           event={selectedEvent}
           orgTimezone={orgTimezone}
           broadcastRooms={broadcastRooms}
-          onClose={() => setDetailId(null)}
+          onClose={() => {
+            setDetailId(null);
+            if (returnToBroadcast && editEventIdParam) {
+              nav(`/streamline/edu/broadcast?eventId=${encodeURIComponent(editEventIdParam)}`, { replace: true });
+            }
+          }}
           onChange={async (next) => {
             await upsertEduEvent(next);
             refreshEvents();
+            if (returnToBroadcast && editEventIdParam) {
+              nav(`/streamline/edu/broadcast?eventId=${encodeURIComponent(editEventIdParam)}`, {
+                replace: true,
+                state: { eventUpdated: true },
+              });
+            }
           }}
           onCancel={async () => {
             await cancelEduEvent(selectedEvent.id);
@@ -1041,17 +1046,6 @@ function EventDetailDrawer({
     return `${origin}/streamline/edu/broadcast?eventId=${encodeURIComponent(draft.id)}`;
   }, [draft.id]);
 
-  const viewerUrl = useMemo(() => {
-    const origin = typeof window !== "undefined" ? window.location.origin : "";
-    if (!draft.savedEmbedId) return "";
-    return `${origin}/live/${encodeURIComponent(draft.savedEmbedId)}`;
-  }, [draft.savedEmbedId]);
-
-  const embedCode = useMemo(() => {
-    if (!viewerUrl) return "";
-    return `<iframe src=\"${viewerUrl}\" style=\"width:100%;height:100%;border:0;\" allow=\"autoplay; encrypted-media\" allowfullscreen></iframe>`;
-  }, [viewerUrl]);
-
   const canStartFromDrawer = useMemo(() => {
     if (status === "canceled" || status === "ended") return false;
 
@@ -1315,19 +1309,13 @@ function EventDetailDrawer({
           <div className="mb-3 text-sm font-semibold text-white">Links</div>
           <div className="space-y-3">
             <LinkRow label="Open in Studio" value={studioUrl} onCopy={() => void doCopy("Studio URL", studioUrl)} />
-            <LinkRow
-              label="Event Viewer Link"
-              value={viewerUrl || "(not generated yet)"}
-              onCopy={() => void doCopy("Viewer link", viewerUrl)}
-              disabled={!viewerUrl}
-            />
-            <LinkRow
-              label="Embed Code (iframe)"
-              value={embedCode || "(not generated yet)"}
-              onCopy={() => void doCopy("Embed code", embedCode)}
-              disabled={!embedCode}
-              multiline
-            />
+            <div className="rounded-xl border border-slate-800/50 bg-slate-950/40 p-4">
+              <div className="text-sm font-medium text-slate-200">Viewer Link &amp; Embed Code</div>
+              <div className="mt-2 text-xs text-slate-400">
+                Generate viewer links and iframe embed code from the{" "}
+                <span className="text-orange-400 font-medium">Website Embed</span> page.
+              </div>
+            </div>
           </div>
         </section>
 

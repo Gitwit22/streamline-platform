@@ -2,6 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import { apiFetchAuth } from "../../lib/api";
+import { useSchoolBranding } from "../state/schoolBranding";
+import SchoolLogo from "../components/SchoolLogo";
 
 /* ── Types ─────────────────────────────────────────────────────── */
 
@@ -228,6 +230,12 @@ export default function RoomPreJoin() {
 
   return (
     <div className="mx-auto flex min-h-[70vh] max-w-3xl flex-col items-center justify-center gap-8 py-8">
+      {/* School identity */}
+      <div className="flex items-center gap-3">
+        <SchoolLogo size="md" />
+        <div className="text-sm font-medium text-slate-300">Joining as <span className="text-white">{String(me?.displayName || "User")}</span></div>
+      </div>
+
       {/* Room info */}
       <div className="text-center">
         <span className={`inline-flex items-center gap-1.5 rounded-full bg-slate-800 px-3 py-1 text-xs font-semibold ${tm.color}`}>

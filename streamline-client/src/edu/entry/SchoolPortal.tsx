@@ -4,11 +4,13 @@ import {
   lookupSchoolBySlug,
   portalLogin,
   activateStaffAccount,
+  validateStudentForActivation,
+  activateStudentAccount,
   type SchoolPublicInfo,
 } from "../api/schoolPortal";
 import { setEduLane } from "../state/eduMode";
 
-/* ── Styles shared by all form inputs ──────────────────────────── */
+/* ── Shared styles ─────────────────────────────────────────────── */
 const inputCls =
   "mt-2 w-full rounded-xl border border-slate-700 bg-slate-900 px-4 py-3 text-sm text-white outline-none placeholder:text-slate-500 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/10";
 const labelCls = "block text-sm font-medium text-slate-300";
@@ -17,12 +19,11 @@ const btnPrimary =
 const btnSecondary =
   "w-full rounded-xl border border-slate-700 bg-slate-800/60 px-4 py-3.5 text-sm font-medium text-slate-200 transition hover:bg-slate-700 disabled:opacity-50";
 
-/* ── Auth mode tabs ────────────────────────────────────────────── */
-type AuthMode = "staff" | "student" | "activate";
-const TAB_OPTIONS: { key: AuthMode; label: string }[] = [
-  { key: "staff", label: "Faculty / Staff" },
-  { key: "student", label: "Student" },
-  { key: "activate", label: "Activate Account" },
+/* ── Top-level tabs ────────────────────────────────────────────── */
+type TabId = "faculty" | "students";
+const TABS: { key: TabId; label: string }[] = [
+  { key: "faculty", label: "Faculty" },
+  { key: "students", label: "Students" },
 ];
 
 /* ── Reserved slugs ────────────────────────────────────────────── */
@@ -39,7 +40,7 @@ export default function SchoolPortal() {
   const [school, setSchool] = useState<SchoolPublicInfo | null>(null);
   const [notFound, setNotFound] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [mode, setMode] = useState<AuthMode>("staff");
+  const [tab, setTab] = useState<TabId>("faculty");
 
   /* ── Fetch school info by slug ─────────────────────────────── */
   useEffect(() => {
@@ -140,19 +141,19 @@ export default function SchoolPortal() {
 
       {/* Main card */}
       <main className="mx-auto max-w-md px-6 py-12" style={{ animation: "spFadeUp 0.6s ease-out" }}>
-        {/* Tabs */}
+        {/* Two-tab selector */}
         <div className="mb-8 flex rounded-xl border border-slate-700 bg-slate-900 p-1">
-          {TAB_OPTIONS.map((tab) => (
+          {TABS.map((t) => (
             <button
-              key={tab.key}
-              onClick={() => setMode(tab.key)}
-              className={`flex-1 rounded-lg px-3 py-2.5 text-xs font-medium transition-colors ${
-                mode === tab.key
+              key={t.key}
+              onClick={() => setTab(t.key)}
+              className={`flex-1 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+                tab === t.key
                   ? "bg-gradient-to-r from-orange-500/20 to-red-600/20 text-orange-300"
                   : "text-slate-400 hover:text-white"
               }`}
             >
-              {tab.label}
+              {t.label}
             </button>
           ))}
         </div>
@@ -161,9 +162,8 @@ export default function SchoolPortal() {
         <div className="relative overflow-hidden rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/60 p-8">
           <div aria-hidden className="absolute left-0 right-0 top-0 h-[3px] bg-gradient-to-r from-orange-500 via-red-600 to-violet-600" />
 
-          {mode === "staff" && <StaffLoginForm school={school!} slug={schoolSlug} nav={nav} />}
-          {mode === "student" && <StudentLoginForm school={school!} slug={schoolSlug} nav={nav} />}
-          {mode === "activate" && <ActivateStaffForm school={school!} slug={schoolSlug} nav={nav} />}
+          {tab === "faculty" && <FacultyPanel school={school!} slug={schoolSlug} nav={nav} />}
+          {tab === "students" && <StudentPanel school={school!} slug={schoolSlug} nav={nav} />}
         </div>
 
         {/* Footer */}
@@ -176,10 +176,26 @@ export default function SchoolPortal() {
 }
 
 /* ================================================================
-   STAFF LOGIN
+   FACULTY PANEL — sign-in + inline activate
    ================================================================ */
 
-function StaffLoginForm({ school, slug, nav }: { school: SchoolPublicInfo; slug: string; nav: ReturnType<typeof useNavigate> }) {
+type FacultyView = "login" | "activate";
+
+function FacultyPanel({ school, slug, nav }: { school: SchoolPublicInfo; slug: string; nav: ReturnType<typeof useNavigate> }) {
+  const [view, setView] = useState<FacultyView>("login");
+
+  return view === "login"
+    ? <FacultyLoginForm school={school} slug={slug} nav={nav} onActivate={() => setView("activate")} />
+    : <FacultyActivateForm school={school} slug={slug} nav={nav} onBack={() => setView("login")} />;
+}
+
+/* ── Faculty sign-in ─────────────────────────────────────────── */
+
+function FacultyLoginForm({
+  school, slug, nav, onActivate,
+}: {
+  school: SchoolPublicInfo; slug: string; nav: ReturnType<typeof useNavigate>; onActivate: () => void;
+}) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -196,9 +212,7 @@ function StaffLoginForm({ school, slug, nav }: { school: SchoolPublicInfo; slug:
       setBusy(true);
       try {
         const result = await portalLogin(slug, { username: username.trim(), password, accountType: "staff" });
-        try {
-          localStorage.setItem("authToken", result.token);
-        } catch {}
+        try { localStorage.setItem("authToken", result.token); } catch {}
         setEduLane();
         nav("/streamline/edu/dashboard", { replace: true });
       } catch (err: any) {
@@ -213,33 +227,185 @@ function StaffLoginForm({ school, slug, nav }: { school: SchoolPublicInfo; slug:
   return (
     <form onSubmit={onSubmit} className="space-y-5">
       <div>
-        <h2 className="text-xl font-bold text-white">Faculty / Staff Sign In</h2>
+        <h2 className="text-xl font-bold text-white">Faculty Sign In</h2>
         <p className="mt-1 text-sm text-slate-400">Sign in with your {school.name} credentials.</p>
       </div>
 
       {error && <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>}
 
       <div>
-        <label className={labelCls} htmlFor="staff-user">Username</label>
-        <input id="staff-user" value={username} onChange={(e) => setUsername(e.target.value)} className={inputCls} placeholder="your.username" autoComplete="username" />
+        <label className={labelCls} htmlFor="fac-user">Username</label>
+        <input id="fac-user" value={username} onChange={(e) => setUsername(e.target.value)} className={inputCls} placeholder="your.username" autoComplete="username" />
       </div>
       <div>
-        <label className={labelCls} htmlFor="staff-pass">Password</label>
-        <input id="staff-pass" value={password} onChange={(e) => setPassword(e.target.value)} type="password" className={inputCls} placeholder="••••••••" autoComplete="current-password" />
+        <label className={labelCls} htmlFor="fac-pass">Password</label>
+        <input id="fac-pass" value={password} onChange={(e) => setPassword(e.target.value)} type="password" className={inputCls} placeholder="••••••••" autoComplete="current-password" />
       </div>
 
       <button type="submit" disabled={busy} className={btnPrimary}>
         {busy ? "Signing in…" : "Sign In"}
+      </button>
+
+      <button type="button" onClick={onActivate} className={btnSecondary}>
+        Activate Account
+      </button>
+    </form>
+  );
+}
+
+/* ── Faculty activation ──────────────────────────────────────── */
+
+function FacultyActivateForm({
+  school, slug, nav, onBack,
+}: {
+  school: SchoolPublicInfo; slug: string; nav: ReturnType<typeof useNavigate>; onBack: () => void;
+}) {
+  const [code, setCode] = useState("");
+  const [fullName, setFullName] = useState("");
+  const [username, setUsername] = useState("");
+  const [position, setPosition] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const onSubmit = useCallback(
+    async (e: FormEvent) => {
+      e.preventDefault();
+      setError("");
+      if (!code.trim()) { setError("Onboarding code is required."); return; }
+      if (!fullName.trim()) { setError("Full name is required."); return; }
+      if (!username.trim()) { setError("Choose a username."); return; }
+      if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
+      if (password !== confirmPassword) { setError("Passwords do not match."); return; }
+
+      setBusy(true);
+      try {
+        const result = await activateStaffAccount(slug, {
+          onboardingCode: code.trim().toUpperCase(),
+          fullName: fullName.trim(),
+          username: username.trim(),
+          password,
+          confirmPassword,
+          positionTitle: position.trim(),
+        });
+        try { localStorage.setItem("authToken", result.token); } catch {}
+        setEduLane();
+        nav("/streamline/edu/dashboard", { replace: true });
+      } catch (err: any) {
+        setError(err?.message || "Activation failed");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [code, fullName, username, password, confirmPassword, position, slug, nav],
+  );
+
+  return (
+    <form onSubmit={onSubmit} className="space-y-5">
+      <div>
+        <button type="button" onClick={onBack} className="mb-2 text-xs text-slate-400 hover:text-orange-300">
+          ← Back to sign in
+        </button>
+        <h2 className="text-xl font-bold text-white">Activate Faculty Account</h2>
+        <p className="mt-1 text-sm text-slate-400">
+          Use the activation code your administrator gave you to set up your {school.name} account.
+        </p>
+      </div>
+
+      {error && <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>}
+
+      <div>
+        <label className={labelCls} htmlFor="fac-act-code">Activation Code</label>
+        <input
+          id="fac-act-code"
+          value={code}
+          onChange={(e) => setCode(e.target.value.toUpperCase())}
+          className={inputCls + " font-mono tracking-widest uppercase"}
+          placeholder="DSA-456"
+          autoComplete="off"
+        />
+      </div>
+
+      <div>
+        <label className={labelCls} htmlFor="fac-act-name">Full Name</label>
+        <input id="fac-act-name" value={fullName} onChange={(e) => setFullName(e.target.value)} className={inputCls} placeholder="Jordan Lee" autoComplete="name" />
+      </div>
+
+      <div>
+        <label className={labelCls} htmlFor="fac-act-title">Position / Title</label>
+        <input id="fac-act-title" value={position} onChange={(e) => setPosition(e.target.value)} className={inputCls} placeholder="Media Arts Teacher" autoComplete="organization-title" />
+      </div>
+
+      <div>
+        <label className={labelCls} htmlFor="fac-act-user">Choose Username</label>
+        <input id="fac-act-user" value={username} onChange={(e) => setUsername(e.target.value)} className={inputCls} placeholder="jordan.lee" autoComplete="username" />
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <div>
+          <label className={labelCls} htmlFor="fac-act-pass">Password</label>
+          <input id="fac-act-pass" value={password} onChange={(e) => setPassword(e.target.value)} type="password" className={inputCls} autoComplete="new-password" />
+        </div>
+        <div>
+          <label className={labelCls} htmlFor="fac-act-confirm">Confirm</label>
+          <input id="fac-act-confirm" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} type="password" className={inputCls} autoComplete="new-password" />
+        </div>
+      </div>
+
+      <button type="submit" disabled={busy} className={btnPrimary}>
+        {busy ? "Activating…" : "Activate Account"}
       </button>
     </form>
   );
 }
 
 /* ================================================================
-   STUDENT LOGIN
+   STUDENT PANEL — sign-in + inline 2-step activate
    ================================================================ */
 
-function StudentLoginForm({ school, slug, nav }: { school: SchoolPublicInfo; slug: string; nav: ReturnType<typeof useNavigate> }) {
+type StudentView = "login" | "activate-step1" | "activate-step2";
+
+function StudentPanel({ school, slug, nav }: { school: SchoolPublicInfo; slug: string; nav: ReturnType<typeof useNavigate> }) {
+  const [view, setView] = useState<StudentView>("login");
+  // Carry validated username + studentId from step 1 → step 2
+  const [activationCtx, setActivationCtx] = useState<{ username: string; studentId: string; fullName: string }>({ username: "", studentId: "", fullName: "" });
+
+  if (view === "activate-step1") {
+    return (
+      <StudentActivateStep1
+        school={school}
+        slug={slug}
+        onBack={() => setView("login")}
+        onValidated={(ctx) => { setActivationCtx(ctx); setView("activate-step2"); }}
+      />
+    );
+  }
+
+  if (view === "activate-step2") {
+    return (
+      <StudentActivateStep2
+        school={school}
+        slug={slug}
+        nav={nav}
+        studentId={activationCtx.studentId}
+        username={activationCtx.username}
+        fullName={activationCtx.fullName}
+        onBack={() => setView("activate-step1")}
+      />
+    );
+  }
+
+  return <StudentLoginForm school={school} slug={slug} nav={nav} onActivate={() => setView("activate-step1")} />;
+}
+
+/* ── Student sign-in ─────────────────────────────────────────── */
+
+function StudentLoginForm({
+  school, slug, nav, onActivate,
+}: {
+  school: SchoolPublicInfo; slug: string; nav: ReturnType<typeof useNavigate>; onActivate: () => void;
+}) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -256,9 +422,7 @@ function StudentLoginForm({ school, slug, nav }: { school: SchoolPublicInfo; slu
       setBusy(true);
       try {
         const result = await portalLogin(slug, { username: username.trim(), password, accountType: "student" });
-        try {
-          localStorage.setItem("authToken", result.token);
-        } catch {}
+        try { localStorage.setItem("authToken", result.token); } catch {}
         setEduLane();
         if (result.mustChangePassword) {
           nav(`/streamline/edu/portal/${slug}/change-password?u=${encodeURIComponent(username.trim())}`, { replace: true });
@@ -295,21 +459,25 @@ function StudentLoginForm({ school, slug, nav }: { school: SchoolPublicInfo; slu
       <button type="submit" disabled={busy} className={btnPrimary}>
         {busy ? "Signing in…" : "Sign In"}
       </button>
+
+      <button type="button" onClick={onActivate} className={btnSecondary}>
+        Activate Account
+      </button>
     </form>
   );
 }
 
-/* ================================================================
-   STAFF ACTIVATION
-   ================================================================ */
+/* ── Student activation — Step 1: enter username, validate ───── */
 
-function ActivateStaffForm({ school, slug, nav }: { school: SchoolPublicInfo; slug: string; nav: ReturnType<typeof useNavigate> }) {
-  const [code, setCode] = useState("");
-  const [fullName, setFullName] = useState("");
+function StudentActivateStep1({
+  school, slug, onBack, onValidated,
+}: {
+  school: SchoolPublicInfo;
+  slug: string;
+  onBack: () => void;
+  onValidated: (ctx: { username: string; studentId: string; fullName: string }) => void;
+}) {
   const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [position, setPosition] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
@@ -317,26 +485,81 @@ function ActivateStaffForm({ school, slug, nav }: { school: SchoolPublicInfo; sl
     async (e: FormEvent) => {
       e.preventDefault();
       setError("");
+      if (!username.trim()) { setError("Enter the username your teacher assigned you."); return; }
 
-      if (!code.trim()) { setError("Onboarding code is required."); return; }
-      if (!fullName.trim()) { setError("Full name is required."); return; }
-      if (!username.trim()) { setError("Choose a username."); return; }
+      setBusy(true);
+      try {
+        const result = await validateStudentForActivation(slug, username.trim());
+        onValidated({ username: username.trim(), studentId: result.studentId, fullName: result.fullName });
+      } catch (err: any) {
+        setError(err?.message || "Username not found or not eligible for activation.");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [username, slug, onValidated],
+  );
+
+  return (
+    <form onSubmit={onSubmit} className="space-y-5">
+      <div>
+        <button type="button" onClick={onBack} className="mb-2 text-xs text-slate-400 hover:text-orange-300">
+          ← Back to sign in
+        </button>
+        <h2 className="text-xl font-bold text-white">Activate Student Account</h2>
+        <p className="mt-1 text-sm text-slate-400">
+          Enter the username your teacher gave you to set up your account at {school.name}.
+        </p>
+      </div>
+
+      {error && <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>}
+
+      <div>
+        <label className={labelCls} htmlFor="stu-act-user">Your Assigned Username</label>
+        <input id="stu-act-user" value={username} onChange={(e) => setUsername(e.target.value)} className={inputCls} placeholder="your.username" autoComplete="username" />
+      </div>
+
+      <button type="submit" disabled={busy} className={btnPrimary}>
+        {busy ? "Checking…" : "Continue"}
+      </button>
+    </form>
+  );
+}
+
+/* ── Student activation — Step 2: create password ────────────── */
+
+function StudentActivateStep2({
+  school, slug, nav, studentId, username, fullName, onBack,
+}: {
+  school: SchoolPublicInfo;
+  slug: string;
+  nav: ReturnType<typeof useNavigate>;
+  studentId: string;
+  username: string;
+  fullName: string;
+  onBack: () => void;
+}) {
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const onSubmit = useCallback(
+    async (e: FormEvent) => {
+      e.preventDefault();
+      setError("");
       if (password.length < 8) { setError("Password must be at least 8 characters."); return; }
       if (password !== confirmPassword) { setError("Passwords do not match."); return; }
 
       setBusy(true);
       try {
-        const result = await activateStaffAccount(slug, {
-          onboardingCode: code.trim().toUpperCase(),
-          fullName: fullName.trim(),
-          username: username.trim(),
+        const result = await activateStudentAccount(slug, {
+          studentId,
+          username,
           password,
           confirmPassword,
-          positionTitle: position.trim(),
         });
-        try {
-          localStorage.setItem("authToken", result.token);
-        } catch {}
+        try { localStorage.setItem("authToken", result.token); } catch {}
         setEduLane();
         nav("/streamline/edu/dashboard", { replace: true });
       } catch (err: any) {
@@ -345,56 +568,35 @@ function ActivateStaffForm({ school, slug, nav }: { school: SchoolPublicInfo; sl
         setBusy(false);
       }
     },
-    [code, fullName, username, password, confirmPassword, position, slug, nav],
+    [password, confirmPassword, studentId, username, slug, nav],
   );
 
   return (
     <form onSubmit={onSubmit} className="space-y-5">
       <div>
-        <h2 className="text-xl font-bold text-white">Activate Staff Account</h2>
+        <button type="button" onClick={onBack} className="mb-2 text-xs text-slate-400 hover:text-orange-300">
+          ← Back
+        </button>
+        <h2 className="text-xl font-bold text-white">Create Your Password</h2>
         <p className="mt-1 text-sm text-slate-400">
-          Use the activation code your administrator gave you to set up your {school.name} account.
+          Welcome, <span className="font-medium text-white">{fullName}</span>! Choose a password for your {school.name} account.
         </p>
       </div>
 
       {error && <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{error}</div>}
 
-      <div>
-        <label className={labelCls} htmlFor="act-code">Activation Code</label>
-        <input
-          id="act-code"
-          value={code}
-          onChange={(e) => setCode(e.target.value.toUpperCase())}
-          className={inputCls + " font-mono tracking-widest uppercase"}
-          placeholder="DSA-456"
-          autoComplete="off"
-        />
+      <div className="rounded-xl border border-slate-700/60 bg-slate-900/50 p-3">
+        <div className="text-xs text-slate-400">Username</div>
+        <div className="mt-0.5 font-medium text-white">{username}</div>
       </div>
 
       <div>
-        <label className={labelCls} htmlFor="act-name">Full Name</label>
-        <input id="act-name" value={fullName} onChange={(e) => setFullName(e.target.value)} className={inputCls} placeholder="Jordan Lee" autoComplete="name" />
+        <label className={labelCls} htmlFor="stu-act-pass">Password</label>
+        <input id="stu-act-pass" value={password} onChange={(e) => setPassword(e.target.value)} type="password" className={inputCls} placeholder="At least 8 characters" autoComplete="new-password" />
       </div>
-
       <div>
-        <label className={labelCls} htmlFor="act-user">Choose Username</label>
-        <input id="act-user" value={username} onChange={(e) => setUsername(e.target.value)} className={inputCls} placeholder="jordan.lee" autoComplete="username" />
-      </div>
-
-      <div>
-        <label className={labelCls} htmlFor="act-title">Position / Title</label>
-        <input id="act-title" value={position} onChange={(e) => setPosition(e.target.value)} className={inputCls} placeholder="Media Arts Teacher" autoComplete="organization-title" />
-      </div>
-
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-        <div>
-          <label className={labelCls} htmlFor="act-pass">Password</label>
-          <input id="act-pass" value={password} onChange={(e) => setPassword(e.target.value)} type="password" className={inputCls} autoComplete="new-password" />
-        </div>
-        <div>
-          <label className={labelCls} htmlFor="act-confirm">Confirm</label>
-          <input id="act-confirm" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} type="password" className={inputCls} autoComplete="new-password" />
-        </div>
+        <label className={labelCls} htmlFor="stu-act-confirm">Confirm Password</label>
+        <input id="stu-act-confirm" value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} type="password" className={inputCls} autoComplete="new-password" />
       </div>
 
       <button type="submit" disabled={busy} className={btnPrimary}>

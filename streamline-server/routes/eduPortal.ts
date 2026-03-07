@@ -5,10 +5,12 @@
  * consumes. These are **unauthenticated** (the portal IS the login page).
  *
  * Routes (mounted at /api/edu/portal):
- *   GET  /:slug              → lookup school public info by slug
- *   POST /:slug/login        → authenticate staff or student by username+password
+ *   GET  /:slug                 → lookup school public info by slug
+ *   POST /:slug/login           → authenticate staff or student by username+password
  *   POST /:slug/change-password → student/staff first-password-change
  *   POST /:slug/activate-staff  → staff onboarding code activation
+ *   POST /:slug/validate-student → check student username is eligible for activation
+ *   POST /:slug/activate-student → student sets password & activates account
  */
 
 import express from "express";
@@ -352,6 +354,140 @@ router.post("/:slug/activate-staff", async (req, res) => {
     });
   } catch (err: any) {
     console.error("[eduPortal] POST /:slug/activate-staff error:", err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── POST /api/edu/portal/:slug/validate-student ──────────────── */
+// Step 1 of student activation: verify the username exists, belongs to the
+// school, and is eligible for account setup (no password yet or still on
+// mustChangePassword).
+router.post("/:slug/validate-student", async (req, res) => {
+  try {
+    const slug = asString(req.params.slug).toLowerCase().trim();
+    const username = asString(req.body?.username).trim().toLowerCase();
+
+    if (!slug || !username) {
+      return res.status(400).json({ error: "Username is required" });
+    }
+
+    const org = await lookupOrgBySlug(slug);
+    if (!org) return res.status(404).json({ error: "school_not_found" });
+    const orgId = org.id;
+
+    const snap = await tenantCol("students")
+      .where("orgId", "==", orgId)
+      .where("username", "==", username)
+      .where("status", "==", "active")
+      .limit(1)
+      .get();
+
+    if (snap.empty) {
+      return res.status(404).json({ error: "No student account found with that username." });
+    }
+
+    const doc = snap.docs[0];
+    const student = doc.data() as any;
+
+    // Already has a password and doesn't need a change → already activated
+    const hash = asString(student.passwordHash || student.password);
+    if (hash && student.mustChangePassword !== true) {
+      return res.status(409).json({ error: "This account has already been activated. Use Sign In instead." });
+    }
+
+    return res.json({
+      ok: true,
+      studentId: doc.id,
+      fullName: student.fullName || student.name || username,
+    });
+  } catch (err: any) {
+    console.error("[eduPortal] POST /:slug/validate-student error:", err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── POST /api/edu/portal/:slug/activate-student ──────────────── */
+// Step 2 of student activation: set a new password and activate.
+router.post("/:slug/activate-student", async (req, res) => {
+  try {
+    const slug = asString(req.params.slug).toLowerCase().trim();
+    const studentId = asString(req.body?.studentId).trim();
+    const username = asString(req.body?.username).trim().toLowerCase();
+    const password = asString(req.body?.password);
+    const confirmPassword = asString(req.body?.confirmPassword);
+
+    if (!slug || !studentId || !username || !password) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+    if (password !== confirmPassword) {
+      return res.status(400).json({ error: "Passwords do not match" });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ error: "Password must be at least 8 characters" });
+    }
+
+    const org = await lookupOrgBySlug(slug);
+    if (!org) return res.status(404).json({ error: "school_not_found" });
+    const orgId = org.id;
+
+    // Fetch the exact student document by ID
+    const docRef = tenantCol("students").doc(studentId);
+    const docSnap = await docRef.get();
+
+    if (!docSnap.exists) {
+      return res.status(404).json({ error: "Student record not found" });
+    }
+
+    const student = docSnap.data() as any;
+
+    // Defensive checks: must belong to same org and match username
+    if (student.orgId !== orgId || (student.username || "").toLowerCase() !== username) {
+      return res.status(403).json({ error: "Student does not belong to this school" });
+    }
+    if (student.status !== "active") {
+      return res.status(403).json({ error: "Account is inactive — contact your teacher" });
+    }
+
+    // Prevent re-activation of an already-fully-activated account
+    const existingHash = asString(student.passwordHash || student.password);
+    if (existingHash && student.mustChangePassword !== true) {
+      return res.status(409).json({ error: "Account already activated. Use Sign In." });
+    }
+
+    const now = Date.now();
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    await docRef.set(
+      {
+        passwordHash,
+        mustChangePassword: false,
+        activatedAt: now,
+        updatedAt: now,
+      },
+      { merge: true },
+    );
+
+    // Issue a JWT so the student is signed in immediately
+    const token = jwt.sign(
+      {
+        sub: studentId,
+        type: "edu_student",
+        orgId,
+        role: student.role || "viewer",
+      },
+      getJwtSecret(),
+      { expiresIn: "12h" },
+    );
+
+    (res as any).cookie("token", token, cookieOptions());
+
+    return res.json({
+      ok: true,
+      token,
+      role: student.role || "viewer",
+    });
+  } catch (err: any) {
+    console.error("[eduPortal] POST /:slug/activate-student error:", err);
     return res.status(500).json({ error: "internal" });
   }
 });

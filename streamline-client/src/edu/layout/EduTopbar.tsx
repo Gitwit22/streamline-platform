@@ -1,5 +1,7 @@
 import { useMemo } from "react";
 import { useLocation } from "react-router-dom";
+import { useSchoolBranding } from "../state/schoolBranding";
+import SchoolLogo from "../components/SchoolLogo";
 
 function titleForPath(pathname: string) {
   if (pathname.endsWith("/dashboard")) return { title: "Dashboard", subtitle: "Overview" };
@@ -15,6 +17,7 @@ function titleForPath(pathname: string) {
 export default function EduTopbar() {
   const loc = useLocation();
   const { title, subtitle } = useMemo(() => titleForPath(loc.pathname), [loc.pathname]);
+  const { branding } = useSchoolBranding();
 
   return (
     <header className="sticky top-0 z-40 flex h-16 items-center justify-between border-b border-slate-700 bg-slate-900/60 px-6 backdrop-blur-xl">
@@ -23,6 +26,12 @@ export default function EduTopbar() {
         {subtitle ? <p className="text-sm text-slate-400">{subtitle}</p> : null}
       </div>
       <div className="flex items-center gap-4">
+        {branding.schoolName ? (
+          <div className="flex items-center gap-2">
+            <SchoolLogo size="xs" />
+            <span className="hidden text-sm font-medium text-slate-300 md:inline">{branding.schoolName}</span>
+          </div>
+        ) : null}
         <button className="rounded-xl border border-slate-700 bg-slate-800/40 p-2 text-slate-300 transition-colors hover:bg-slate-800/70 hover:text-white">
           <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path

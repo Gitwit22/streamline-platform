@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import { getEduEventById, setEduEventLive, listEduEvents, computeEduEventStatus, type EduEvent } from "../state/eduEvents";
 import { fetchEduOrg, postEduAudit, type EduOrgSettings } from "../api/settings";
 import { goLiveEduBroadcast, stopEduBroadcast, watchEduBroadcast, type GoLiveResponse } from "../api/broadcasts";
 import { apiFetchAuth } from "../../lib/api";
+import { useSchoolBranding } from "../state/schoolBranding";
+import SchoolLogo from "../components/SchoolLogo";
 
 type BroadcastTemplateId = "announcements" | "event" | "principal";
 type LayoutMode = "grid" | "speaker" | "single";
@@ -95,10 +97,61 @@ function StatusChip({ label, status }: { label: string; status: OutputStatus }) 
   );
 }
 
+/** Read-only key/value chip used in the event summary card */
+function SummaryItem({ label, value, statusColor }: { label: string; value: string; statusColor?: "emerald" | "slate" }) {
+  const dot = statusColor === "emerald"
+    ? "bg-emerald-500"
+    : statusColor === "slate"
+      ? "bg-slate-600"
+      : null;
+  return (
+    <div className="rounded-xl border border-slate-800/50 bg-slate-950/40 p-3">
+      <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{label}</div>
+      <div className="mt-1 flex items-center gap-2 text-sm text-slate-200">
+        {dot ? <span className={`inline-block h-2 w-2 rounded-full ${dot}`} /> : null}
+        <span className="truncate">{value}</span>
+      </div>
+    </div>
+  );
+}
+
+/** Green/amber checklist row for the launch-console readiness list */
+function ChecklistRow({ label, ok, detail }: { label: string; ok: boolean; detail: string }) {
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-slate-800/50 bg-slate-950/40 p-3">
+      <span className={`flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full text-xs font-bold ${ok ? "bg-emerald-500/20 text-emerald-300" : "bg-amber-500/20 text-amber-300"}`}>
+        {ok ? "✓" : "!"}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="text-sm font-medium text-white">{label}</div>
+        <div className="mt-0.5 truncate text-xs text-slate-400">{detail}</div>
+      </div>
+    </div>
+  );
+}
+
 export default function Broadcast() {
   const me = useEduMe();
   const loc = useLocation();
+  const nav = useNavigate();
+  const { branding } = useSchoolBranding();
   const roleRaw = String(me?.orgRole || me?.role || "viewer");
+
+  /* ── "Event settings updated" toast (set via navigation state) ── */
+  const [eventUpdatedToast, setEventUpdatedToast] = useState(false);
+  useEffect(() => {
+    if ((loc.state as any)?.eventUpdated) {
+      setEventUpdatedToast(true);
+      setEventRefreshKey((k) => k + 1);
+      // Clear the state so refreshing doesn't re-show
+      window.history.replaceState({}, "");
+      const t = window.setTimeout(() => setEventUpdatedToast(false), 3500);
+      return () => window.clearTimeout(t);
+    }
+  }, [loc.state]);
+
+  /* ── Key to force-refresh bound event after returning from edit ── */
+  const [eventRefreshKey, setEventRefreshKey] = useState(0);
 
   const isFacultyAdmin = roleRaw === "faculty_admin";
   const isStudentProducer = roleRaw === "student_producer" || roleRaw === "student_producer_assigned";
@@ -187,7 +240,7 @@ export default function Broadcast() {
       if (!cancelled) setBoundEvent(ev);
     }).catch(() => { if (!cancelled) setBoundEvent(null); });
     return () => { cancelled = true; };
-  }, [activeEventId]);
+  }, [activeEventId, eventRefreshKey]);
 
   // Fetch assigned broadcast room info when event has one
   const [assignedRoom, setAssignedRoom] = useState<{
@@ -854,338 +907,414 @@ export default function Broadcast() {
     return Array.from(new Set(base));
   }, [displayName]);
 
+  /* Helper: navigate to Events page to edit the bound event, with return context */
+  function navigateToEditEvent() {
+    if (!activeEventId) return;
+    nav(`/streamline/edu/events?editEventId=${encodeURIComponent(activeEventId)}&returnTo=broadcast`);
+  }
+
+  /* Is this an event-driven session? */
+  const isEventDriven = !!(activeEventId && boundEvent);
+
   if (!isLive) {
     return (
       <div className="space-y-6">
-        {/* Event binding — shows selected event or event picker */}
-        {boundEvent ? (
-          <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-5">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-sm text-slate-400">Event</div>
-                <div className="mt-1 text-xl font-bold text-white">{boundEvent.title}</div>
-                <div className="mt-1 text-sm text-slate-400">
-                  {new Date(boundEvent.startsAt).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+        {/* Success toast */}
+        {eventUpdatedToast && (
+          <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm font-medium text-emerald-300">
+            Event settings updated &mdash; Studio reloaded.
+          </div>
+        )}
+
+        {/* School identity bar */}
+        <div className="flex items-center gap-3 rounded-xl border border-slate-700/50 bg-slate-900/50 px-4 py-3">
+          <SchoolLogo size="sm" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-semibold text-white">{org?.name || me?.orgName || "Your School"}</div>
+            <div className="text-[11px] text-slate-500">Broadcast Studio</div>
+          </div>
+        </div>
+
+        {/* ─── EVENT-DRIVEN MODE: Launch Console ─────────────────── */}
+        {isEventDriven ? (
+          <>
+            {/* Event Settings Summary Card */}
+            <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
+              <div className="mb-4 flex items-center justify-between">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-wider text-slate-500">Loaded from Event Settings</div>
+                  <div className="mt-1 text-xl font-bold text-white">{boundEvent.title}</div>
                 </div>
-                {assignedRoom ? (
-                  <div className="mt-2 inline-flex items-center gap-1.5 rounded-full bg-orange-500/10 px-2.5 py-0.5 text-xs font-medium text-orange-300">
-                    📡 {assignedRoom.name}
-                  </div>
-                ) : null}
-              </div>
-              {/* Allow clearing the picked event (not the URL-bound one) */}
-              {!eventId && pickedEventId ? (
                 <button
                   type="button"
-                  onClick={clearSelectedEvent}
-                  className="rounded-xl border border-slate-700 bg-slate-950 px-3 py-1.5 text-xs font-medium text-slate-300 hover:bg-slate-900"
+                  onClick={navigateToEditEvent}
+                  className="rounded-xl border border-slate-700 bg-slate-950 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-900 hover:text-white transition-colors"
                 >
-                  Change event
+                  Edit Event Settings
                 </button>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {/* Schedule */}
+                <SummaryItem
+                  label="Schedule"
+                  value={new Date(boundEvent.startsAt).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                />
+                {/* Room */}
+                <SummaryItem
+                  label="Room"
+                  value={assignedRoom ? assignedRoom.name : "No room assigned"}
+                />
+                {/* Layout */}
+                <SummaryItem label="Layout" value={layout === "grid" ? "Grid" : layout === "speaker" ? "Speaker" : "Single Speaker"} />
+                {/* HLS */}
+                <SummaryItem label="Publish to Website (HLS)" value={publishHls ? "Enabled" : "Disabled"} statusColor={publishHls ? "emerald" : "slate"} />
+                {/* Recording */}
+                <SummaryItem label="Recording" value={recordMp4 ? "Enabled" : "Disabled"} statusColor={recordMp4 ? "emerald" : "slate"} />
+                {/* YouTube */}
+                <SummaryItem label="YouTube" value={alsoYoutube ? "Enabled" : "Disabled"} statusColor={alsoYoutube ? "emerald" : "slate"} />
+                {/* Producer */}
+                <SummaryItem label="Producer" value={boundEvent.producerName || producer || "Unassigned"} />
+                {/* Crew / Talent */}
+                <SummaryItem label="On-Air Talent" value={talent.length > 0 ? talent.map((t) => t.name).join(", ") : "None assigned"} />
+                {/* Viewer access */}
+                <SummaryItem label="Viewers" value={viewerAccess === "school" ? "School only (private)" : "Public (anyone with link)"} />
+              </div>
+
+              {/* Allow clearing the picked event (not the URL-bound one) */}
+              {!eventId && pickedEventId ? (
+                <div className="mt-4 border-t border-slate-800/50 pt-4">
+                  <button
+                    type="button"
+                    onClick={clearSelectedEvent}
+                    className="text-xs text-slate-500 hover:text-slate-300 transition-colors"
+                  >
+                    Detach from event &amp; switch to ad-hoc mode
+                  </button>
+                </div>
               ) : null}
             </div>
-          </div>
-        ) : (
-          <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
-            <div className="mb-4">
-              <h2 className="text-lg font-semibold text-white">Select an Event</h2>
-              <p className="mt-1 text-sm text-slate-400">Pick a planned event to pre-load its settings, or skip to start a fresh broadcast.</p>
+
+            {/* Readiness checklist */}
+            <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
+              <div className="mb-4">
+                <h2 className="text-lg font-semibold text-white">Launch Checklist</h2>
+                <p className="mt-1 text-sm text-slate-400">Confirm everything is ready before going live.</p>
+              </div>
+              <div className="space-y-2">
+                <ChecklistRow label="Event configured" ok={true} detail={boundEvent.title} />
+                <ChecklistRow label="Room assigned" ok={!!assignedRoom} detail={assignedRoom?.name || "Not assigned — assign in Event Settings"} />
+                <ChecklistRow label="At least one output enabled" ok={publishHls || recordMp4 || alsoYoutube} detail={[publishHls && "HLS", recordMp4 && "Record", alsoYoutube && "YouTube"].filter(Boolean).join(", ") || "None"} />
+                <ChecklistRow label="Producer set" ok={!!(boundEvent.producerName || producer)} detail={boundEvent.producerName || producer || "—"} />
+              </div>
             </div>
-            {upcomingEvents.length > 0 ? (
-              <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
-                {upcomingEvents.map((ev) => {
-                  const st = computeEduEventStatus(ev);
+          </>
+        ) : (
+          <>
+            {/* ─── AD-HOC MODE: Full Configuration ─────────────────── */}
+
+            {/* Event picker — only in ad-hoc when no event is bound */}
+            <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
+              <div className="mb-4">
+                <h2 className="text-lg font-semibold text-white">Select an Event</h2>
+                <p className="mt-1 text-sm text-slate-400">Pick a planned event to pre-load its settings, or skip to start a fresh broadcast.</p>
+              </div>
+              {upcomingEvents.length > 0 ? (
+                <div className="space-y-3 max-h-64 overflow-y-auto pr-1">
+                  {upcomingEvents.map((ev) => {
+                    const st = computeEduEventStatus(ev);
+                    return (
+                      <button
+                        key={ev.id}
+                        type="button"
+                        onClick={() => selectEvent(ev)}
+                        className="flex w-full items-center justify-between gap-4 rounded-xl border border-slate-800/50 bg-slate-950/40 p-4 text-left transition-colors hover:border-orange-500/30 hover:bg-slate-900/40"
+                      >
+                        <div className="min-w-0">
+                          <div className="font-medium text-white truncate">{ev.title}</div>
+                          <div className="mt-0.5 text-xs text-slate-400">
+                            {new Date(ev.startsAt).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
+                            {" · "}
+                            <span className={st === "live" ? "text-red-400 font-semibold" : st === "ready" ? "text-emerald-400" : "text-slate-500"}>
+                              {st === "live" ? "LIVE" : st === "ready" ? "Ready" : "Scheduled"}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex-shrink-0 rounded-lg bg-orange-500/10 px-3 py-1.5 text-xs font-semibold text-orange-300">
+                          Select
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="rounded-xl border border-slate-800/50 bg-slate-950/40 p-4 text-sm text-slate-400">
+                  No upcoming events. You can start a fresh broadcast below.
+                </div>
+              )}
+            </div>
+
+            {/* Template picker */}
+            <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
+              <div className="mb-4">
+                <h2 className="text-lg font-semibold text-white">Broadcast Type</h2>
+                <p className="mt-1 text-sm text-slate-400">Pick a template to load sensible defaults.</p>
+              </div>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
+                {templates.map((t) => {
+                  const active = t.id === templateId;
                   return (
                     <button
-                      key={ev.id}
+                      key={t.id}
                       type="button"
-                      onClick={() => selectEvent(ev)}
-                      className="flex w-full items-center justify-between gap-4 rounded-xl border border-slate-800/50 bg-slate-950/40 p-4 text-left transition-colors hover:border-orange-500/30 hover:bg-slate-900/40"
+                      onClick={() => setTemplateId(t.id)}
+                      className={`rounded-2xl border p-5 text-left transition-colors ${
+                        active
+                          ? "border-orange-500/40 bg-orange-500/10"
+                          : "border-slate-800/50 bg-slate-950/40 hover:border-slate-700 hover:bg-slate-900/40"
+                      }`}
                     >
-                      <div className="min-w-0">
-                        <div className="font-medium text-white truncate">{ev.title}</div>
-                        <div className="mt-0.5 text-xs text-slate-400">
-                          {new Date(ev.startsAt).toLocaleString([], { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
-                          {" · "}
-                          <span className={st === "live" ? "text-red-400 font-semibold" : st === "ready" ? "text-emerald-400" : "text-slate-500"}>
-                            {st === "live" ? "LIVE" : st === "ready" ? "Ready" : "Scheduled"}
-                          </span>
-                        </div>
-                      </div>
-                      <div className="flex-shrink-0 rounded-lg bg-orange-500/10 px-3 py-1.5 text-xs font-semibold text-orange-300">
-                        Select
-                      </div>
+                      <div className="text-base font-semibold text-white">{t.title}</div>
+                      <div className="mt-1 text-sm text-slate-400">{t.desc}</div>
+                      <div className="mt-4 text-xs text-slate-500">Defaults: {t.defaults.layout} layout • {t.defaults.publishHls ? "Publish" : "No publish"} • {t.defaults.recordMp4 ? "Record" : "No record"}</div>
                     </button>
                   );
                 })}
               </div>
-            ) : (
-              <div className="rounded-xl border border-slate-800/50 bg-slate-950/40 p-4 text-sm text-slate-400">
-                No upcoming events. You can start a fresh broadcast below.
+              <div className="mt-4 rounded-xl border border-slate-800/50 bg-slate-950/40 p-4 text-sm text-slate-300">
+                <div className="font-medium text-white">Selected: {template.title}</div>
+                <div className="mt-1 text-slate-400">{allowedSummary}</div>
               </div>
-            )}
-          </div>
-        )}
+            </div>
 
-        {/* Section 1 — Template picker */}
-        <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold text-white">Broadcast Type</h2>
-            <p className="mt-1 text-sm text-slate-400">Pick a template to load sensible defaults.</p>
-          </div>
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
-            {templates.map((t) => {
-              const active = t.id === templateId;
-              return (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => setTemplateId(t.id)}
-                  className={`rounded-2xl border p-5 text-left transition-colors ${
-                    active
-                      ? "border-orange-500/40 bg-orange-500/10"
-                      : "border-slate-800/50 bg-slate-950/40 hover:border-slate-700 hover:bg-slate-900/40"
-                  }`}
-                >
-                  <div className="text-base font-semibold text-white">{t.title}</div>
-                  <div className="mt-1 text-sm text-slate-400">{t.desc}</div>
-                  <div className="mt-4 text-xs text-slate-500">Defaults: {t.defaults.layout} layout • {t.defaults.publishHls ? "Publish" : "No publish"} • {t.defaults.recordMp4 ? "Record" : "No record"}</div>
-                </button>
-              );
-            })}
-          </div>
-          <div className="mt-4 rounded-xl border border-slate-800/50 bg-slate-950/40 p-4 text-sm text-slate-300">
-            <div className="font-medium text-white">Selected: {template.title}</div>
-            <div className="mt-1 text-slate-400">{allowedSummary}</div>
-          </div>
-        </div>
-
-        {/* Section 2 — Output controls */}
-        <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold text-white">Output Controls</h2>
-            <p className="mt-1 text-sm text-slate-400">These are the only things you should need to care about.</p>
-          </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-            <Toggle
-              checked={publishHls}
-              onChange={setPublishHls}
-              label="Publish to School Website (HLS)"
-              hint="Makes the live program available to viewers"
-            />
-            <Toggle
-              checked={recordMp4}
-              onChange={setRecordMp4}
-              label="Record to Archive (MP4)"
-              hint="Saves a recording automatically"
-            />
-          </div>
-
-          <div className="mt-4 rounded-xl border border-slate-800/50 bg-slate-950/40 p-4">
-            <button
-              type="button"
-              onClick={() => setAdvancedOpen((v) => !v)}
-              className="flex w-full items-center justify-between text-left"
-            >
-              <div>
-                <div className="font-medium text-white">Advanced</div>
-                <div className="mt-0.5 text-sm text-slate-400">Optional outputs and destination selection</div>
+            {/* Output controls */}
+            <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
+              <div className="mb-4">
+                <h2 className="text-lg font-semibold text-white">Output Controls</h2>
+                <p className="mt-1 text-sm text-slate-400">Configure what gets published and recorded.</p>
               </div>
-              <div className="text-sm text-slate-400">{advancedOpen ? "Hide" : "Show"}</div>
-            </button>
-
-            {advancedOpen ? (
-              <div className="mt-4 space-y-3">
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                 <Toggle
-                  checked={alsoYoutube}
-                  onChange={setAlsoYoutube}
-                  disabled={!canUseYoutube}
-                  label="Also stream to YouTube"
-                  hint={canUseYoutube ? "Faculty/Admin only • single destination" : "Faculty/Admin only"}
+                  checked={publishHls}
+                  onChange={setPublishHls}
+                  label="Publish to School Website (HLS)"
+                  hint="Makes the live program available to viewers"
                 />
+                <Toggle
+                  checked={recordMp4}
+                  onChange={setRecordMp4}
+                  label="Record to Archive (MP4)"
+                  hint="Saves a recording automatically"
+                />
+              </div>
 
-                <div className="rounded-xl border border-slate-800/50 bg-slate-900/30 p-4">
-                  <div className="text-sm font-medium text-white">YouTube destination</div>
-                  <div className="mt-1 text-sm text-slate-400">Select a pre-saved destination (faculty only).</div>
+              <div className="mt-4 rounded-xl border border-slate-800/50 bg-slate-950/40 p-4">
+                <button
+                  type="button"
+                  onClick={() => setAdvancedOpen((v) => !v)}
+                  className="flex w-full items-center justify-between text-left"
+                >
+                  <div>
+                    <div className="font-medium text-white">Advanced</div>
+                    <div className="mt-0.5 text-sm text-slate-400">Optional outputs and destination selection</div>
+                  </div>
+                  <div className="text-sm text-slate-400">{advancedOpen ? "Hide" : "Show"}</div>
+                </button>
+
+                {advancedOpen ? (
+                  <div className="mt-4 space-y-3">
+                    <Toggle
+                      checked={alsoYoutube}
+                      onChange={setAlsoYoutube}
+                      disabled={!canUseYoutube}
+                      label="Also stream to YouTube"
+                      hint={canUseYoutube ? "Faculty/Admin only • single destination" : "Faculty/Admin only"}
+                    />
+
+                    <div className="rounded-xl border border-slate-800/50 bg-slate-900/30 p-4">
+                      <div className="text-sm font-medium text-white">YouTube destination</div>
+                      <div className="mt-1 text-sm text-slate-400">Select a pre-saved destination (faculty only).</div>
+                      <select
+                        disabled={!canUseYoutube || !alsoYoutube}
+                        value={youtubeDestinationId}
+                        onChange={(e) => setYoutubeDestinationId(e.target.value)}
+                        className="mt-3 w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
+                      >
+                        <option value="default">Default YouTube destination</option>
+                      </select>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+
+            {/* Layout picker */}
+            <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
+              <div className="mb-4">
+                <h2 className="text-lg font-semibold text-white">Layout</h2>
+                <p className="mt-1 text-sm text-slate-400">Choose a camera layout for the broadcast.</p>
+              </div>
+              <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+                {([
+                  { id: "grid" as const, title: "Grid", desc: "Great for groups" },
+                  { id: "speaker" as const, title: "Speaker", desc: "Focus on active speaker" },
+                  { id: "single" as const, title: "Single Speaker", desc: "One camera, one voice" },
+                ] as const).map((opt) => {
+                  const active = layout === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      disabled={!canChangeLayout}
+                      onClick={() => setLayout(opt.id)}
+                      className={`rounded-2xl border p-5 text-left transition-colors ${
+                        active
+                          ? "border-orange-500/40 bg-orange-500/10"
+                          : "border-slate-800/50 bg-slate-950/40 hover:border-slate-700 hover:bg-slate-900/40"
+                      } ${!canChangeLayout ? "opacity-60" : ""}`}
+                    >
+                      <div className="text-base font-semibold text-white">{opt.title}</div>
+                      <div className="mt-1 text-sm text-slate-400">{opt.desc}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Crew / Access */}
+            <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
+              <div className="mb-4">
+                <h2 className="text-lg font-semibold text-white">Crew / Access</h2>
+                <p className="mt-1 text-sm text-slate-400">Assign a producer and manage on-air talent.</p>
+              </div>
+
+              <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                <div className="rounded-xl border border-slate-800/50 bg-slate-950/40 p-4">
+                  <div className="text-sm font-medium text-white">Producer</div>
+                  <div className="mt-1 text-sm text-slate-400">
+                    {!orgStudentProducersCanStart
+                      ? "Student Producers cannot start/stop (set in Settings)."
+                      : orgRequireAssignmentToStart
+                        ? "Student Producers can start/stop only when assigned."
+                        : "Student Producers can start/stop broadcasts."}
+                  </div>
                   <select
-                    disabled={!canUseYoutube || !alsoYoutube}
-                    value={youtubeDestinationId}
-                    onChange={(e) => setYoutubeDestinationId(e.target.value)}
+                    value={producer}
+                    onChange={(e) => setProducer(e.target.value)}
                     className="mt-3 w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
                   >
-                    <option value="default">Default YouTube destination</option>
+                    {producersList.map((p) => (
+                      <option key={p} value={p}>
+                        {p === displayName ? "You" : p}
+                      </option>
+                    ))}
                   </select>
+                  {!isFacultyAdmin && isStudentProducer ? (
+                    <div className="mt-3 text-sm">
+                      {isAssignedProducer ? (
+                        <span className="text-emerald-300">You can start/stop this broadcast.</span>
+                      ) : !orgStudentProducersCanStart ? (
+                        <span className="text-amber-300">Start/stop is disabled by policy.</span>
+                      ) : (
+                        <span className="text-amber-300">You are not assigned — Start Broadcast is disabled.</span>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
-              </div>
-            ) : null}
-          </div>
-        </div>
 
-        {/* Section 3 — Layout picker */}
-        <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold text-white">Layout</h2>
-            <p className="mt-1 text-sm text-slate-400">Keep it simple.</p>
-          </div>
-          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-            {([
-              { id: "grid" as const, title: "Grid", desc: "Great for groups" },
-              { id: "speaker" as const, title: "Speaker", desc: "Focus on active speaker" },
-              { id: "single" as const, title: "Single Speaker", desc: "One camera, one voice" },
-            ] as const).map((opt) => {
-              const active = layout === opt.id;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  disabled={!canChangeLayout}
-                  onClick={() => setLayout(opt.id)}
-                  className={`rounded-2xl border p-5 text-left transition-colors ${
-                    active
-                      ? "border-orange-500/40 bg-orange-500/10"
-                      : "border-slate-800/50 bg-slate-950/40 hover:border-slate-700 hover:bg-slate-900/40"
-                  } ${!canChangeLayout ? "opacity-60" : ""}`}
-                >
-                  <div className="text-base font-semibold text-white">{opt.title}</div>
-                  <div className="mt-1 text-sm text-slate-400">{opt.desc}</div>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Section 4 — Crew / Access */}
-        <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
-          <div className="mb-4">
-            <h2 className="text-lg font-semibold text-white">Crew / Access</h2>
-            <p className="mt-1 text-sm text-slate-400">Assign a producer and manage on-air talent.</p>
-          </div>
-
-          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-            <div className="rounded-xl border border-slate-800/50 bg-slate-950/40 p-4">
-              <div className="text-sm font-medium text-white">Producer</div>
-              <div className="mt-1 text-sm text-slate-400">
-                {!orgStudentProducersCanStart
-                  ? "Student Producers cannot start/stop (set in Settings)."
-                  : orgRequireAssignmentToStart
-                    ? "Student Producers can start/stop only when assigned."
-                    : "Student Producers can start/stop broadcasts."}
-              </div>
-              <select
-                value={producer}
-                onChange={(e) => setProducer(e.target.value)}
-                className="mt-3 w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
-              >
-                {producersList.map((p) => (
-                  <option key={p} value={p}>
-                    {p === displayName ? "You" : p}
-                  </option>
-                ))}
-              </select>
-              {!isFacultyAdmin && isStudentProducer ? (
-                <div className="mt-3 text-sm">
-                  {isAssignedProducer ? (
-                    <span className="text-emerald-300">You can start/stop this broadcast.</span>
-                  ) : !orgStudentProducersCanStart ? (
-                    <span className="text-amber-300">Start/stop is disabled by policy.</span>
-                  ) : (
-                    <span className="text-amber-300">You are not assigned — Start Broadcast is disabled.</span>
-                  )}
-                </div>
-              ) : null}
-            </div>
-
-            <div className="rounded-xl border border-slate-800/50 bg-slate-950/40 p-4">
-              <div className="text-sm font-medium text-white">Viewers</div>
-              <div className="mt-1 text-sm text-slate-400">MVP: simple public/private link.</div>
-              <div className="mt-3 grid grid-cols-2 gap-3">
-                <button
-                  type="button"
-                  onClick={() => setViewerAccess("link")}
-                  className={`rounded-xl border px-4 py-3 text-left transition-colors ${
-                    viewerAccess === "link"
-                      ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
-                      : "border-slate-800/50 bg-slate-900/30 text-slate-300 hover:bg-slate-800/40"
-                  }`}
-                >
-                  <div className="text-sm font-medium">Public</div>
-                  <div className="mt-0.5 text-xs text-slate-400">Anyone with link</div>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewerAccess("school")}
-                  className={`rounded-xl border px-4 py-3 text-left transition-colors ${
-                    viewerAccess === "school"
-                      ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
-                      : "border-slate-800/50 bg-slate-900/30 text-slate-300 hover:bg-slate-800/40"
-                  }`}
-                >
-                  <div className="text-sm font-medium">Private</div>
-                  <div className="mt-0.5 text-xs text-slate-400">School only</div>
-                </button>
-              </div>
-
-              <div className="mt-4">
-                <Toggle
-                  checked={lockRoomWhenLive}
-                  onChange={setLockRoomWhenLive}
-                  disabled={!isFacultyAdmin}
-                  label="Lock room when live"
-                  hint={isFacultyAdmin ? "Prevents unexpected joins while live" : "Faculty/Admin only"}
-                />
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-4 rounded-xl border border-slate-800/50 bg-slate-950/40 p-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-sm font-medium text-white">On-Air Talent</div>
-                <div className="mt-1 text-sm text-slate-400">Add/remove names for this broadcast.</div>
-              </div>
-            </div>
-
-            <div className="mt-3 space-y-2">
-              {talent.map((p) => (
-                <div key={p.id} className="flex items-center justify-between gap-3 rounded-lg bg-slate-900/40 px-3 py-2">
-                  <div className="min-w-0">
-                    <div className="truncate text-sm font-medium text-white">{p.name}</div>
+                <div className="rounded-xl border border-slate-800/50 bg-slate-950/40 p-4">
+                  <div className="text-sm font-medium text-white">Viewers</div>
+                  <div className="mt-1 text-sm text-slate-400">MVP: simple public/private link.</div>
+                  <div className="mt-3 grid grid-cols-2 gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setViewerAccess("link")}
+                      className={`rounded-xl border px-4 py-3 text-left transition-colors ${
+                        viewerAccess === "link"
+                          ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
+                          : "border-slate-800/50 bg-slate-900/30 text-slate-300 hover:bg-slate-800/40"
+                      }`}
+                    >
+                      <div className="text-sm font-medium">Public</div>
+                      <div className="mt-0.5 text-xs text-slate-400">Anyone with link</div>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewerAccess("school")}
+                      className={`rounded-xl border px-4 py-3 text-left transition-colors ${
+                        viewerAccess === "school"
+                          ? "border-orange-500/40 bg-orange-500/10 text-orange-300"
+                          : "border-slate-800/50 bg-slate-900/30 text-slate-300 hover:bg-slate-800/40"
+                      }`}
+                    >
+                      <div className="text-sm font-medium">Private</div>
+                      <div className="mt-0.5 text-xs text-slate-400">School only</div>
+                    </button>
                   </div>
+
+                  <div className="mt-4">
+                    <Toggle
+                      checked={lockRoomWhenLive}
+                      onChange={setLockRoomWhenLive}
+                      disabled={!isFacultyAdmin}
+                      label="Lock room when live"
+                      hint={isFacultyAdmin ? "Prevents unexpected joins while live" : "Faculty/Admin only"}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-xl border border-slate-800/50 bg-slate-950/40 p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-medium text-white">On-Air Talent</div>
+                    <div className="mt-1 text-sm text-slate-400">Add/remove names for this broadcast.</div>
+                  </div>
+                </div>
+
+                <div className="mt-3 space-y-2">
+                  {talent.map((p) => (
+                    <div key={p.id} className="flex items-center justify-between gap-3 rounded-lg bg-slate-900/40 px-3 py-2">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-medium text-white">{p.name}</div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setTalent((list) => list.filter((x) => x.id !== p.id))}
+                        className="rounded-lg border border-slate-700/60 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-900/60"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-3 flex flex-col gap-3 md:flex-row">
+                  <input
+                    value={newTalentName}
+                    onChange={(e) => setNewTalentName(e.target.value)}
+                    placeholder="Add talent name"
+                    className="w-full flex-1 rounded-lg border border-slate-700/60 bg-slate-950/40 px-3 py-2 text-sm text-slate-200 outline-none focus:border-orange-500/40"
+                  />
                   <button
                     type="button"
-                    onClick={() => setTalent((list) => list.filter((x) => x.id !== p.id))}
-                    className="rounded-lg border border-slate-700/60 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-900/60"
+                    onClick={() => {
+                      const name = newTalentName.trim();
+                      if (!name) return;
+                      setTalent((list) => [...list, { id: randomId("tal"), name, micMuted: false, camOff: false }]);
+                      setNewTalentName("");
+                    }}
+                    className="rounded-lg bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-transform hover:-translate-y-0.5 hover:from-orange-400 hover:via-red-500 hover:to-violet-500"
                   >
-                    Remove
+                    Add
                   </button>
                 </div>
-              ))}
+              </div>
             </div>
+          </>
+        )}
 
-            <div className="mt-3 flex flex-col gap-3 md:flex-row">
-              <input
-                value={newTalentName}
-                onChange={(e) => setNewTalentName(e.target.value)}
-                placeholder="Add talent name"
-                className="w-full flex-1 rounded-lg border border-slate-700/60 bg-slate-950/40 px-3 py-2 text-sm text-slate-200 outline-none focus:border-orange-500/40"
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  const name = newTalentName.trim();
-                  if (!name) return;
-                  setTalent((list) => [...list, { id: randomId("tal"), name, micMuted: false, camOff: false }]);
-                  setNewTalentName("");
-                }}
-                className="rounded-lg bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-transform hover:-translate-y-0.5 hover:from-orange-400 hover:via-red-500 hover:to-violet-500"
-              >
-                Add
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Section 5 — Device check */}
+        {/* ─── SHARED: Device check (both modes) ─────────────────── */}
         <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6">
           <div className="mb-4">
             <h2 className="text-lg font-semibold text-white">Device Check</h2>
@@ -1257,7 +1386,7 @@ export default function Broadcast() {
                 <div className="h-2 w-full overflow-hidden rounded-full bg-slate-800">
                   <div className="h-full bg-emerald-500" style={{ width: `${Math.min(100, Math.round(micLevel * 100))}%` }} />
                 </div>
-                <div className="mt-3 text-xs text-slate-500">If you can’t see devices, allow permissions in your browser settings.</div>
+                <div className="mt-3 text-xs text-slate-500">If you can't see devices, allow permissions in your browser settings.</div>
               </div>
             </div>
           </div>
@@ -1279,7 +1408,7 @@ export default function Broadcast() {
           </div>
         </div>
 
-        {/* Primary CTA */}
+        {/* ─── SHARED: Primary CTA (both modes) ─────────────────── */}
         <div className="rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
@@ -1326,6 +1455,7 @@ export default function Broadcast() {
       <div className="sticky top-0 z-30 rounded-2xl border border-slate-700 bg-slate-900/70 p-4 backdrop-blur-xl">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div className="flex items-center gap-3">
+            <SchoolLogo size="sm" />
             <div className="flex items-center gap-2 rounded-full bg-red-500/15 px-3 py-1 text-sm font-semibold text-red-300">
               <span className="h-2 w-2 animate-pulse rounded-full bg-red-500" />
               LIVE
@@ -1580,8 +1710,9 @@ export default function Broadcast() {
           </div>
 
           {/* Branding */}
-          <div className="flex items-center justify-center rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6">
-            <img src="/edu_logo.png" alt="StreamLine EDU" className="h-14 w-auto opacity-80" />
+          <div className="flex items-center justify-center gap-3 rounded-2xl border border-slate-700 bg-gradient-to-br from-slate-800 to-slate-800/50 p-6">
+            <SchoolLogo size="lg" />
+            <div className="text-sm font-medium text-slate-400">{branding.schoolName || "StreamLine EDU"}</div>
           </div>
         </div>
       </div>
