@@ -764,6 +764,8 @@ function ScheduleEventModal({
     return zonedWallTimeToUtcIso({ date, time: endTime, timeZone: orgTimezone });
   }, [date, endTime, orgTimezone]);
 
+  const [creating, setCreating] = useState(false);
+
   async function create() {
     setError(null);
     if (!title.trim()) {
@@ -786,24 +788,32 @@ function ScheduleEventModal({
       .map((s) => s.trim())
       .filter(Boolean);
 
-    const ev = await createEduEvent({
-      title: title.trim(),
-      type,
-      startsAt: startsAtIso,
-      endsAt: endsAtIso,
-      timezone: orgTimezone,
-      producerName: producerName.trim() || null,
-      talent,
-      studentProducerCanStart: false,
-      assignedRoomId: assignedRoomId || null,
-      outputs: {
-        publishHls,
-        recordMp4,
-        youtube: isFacultyAdmin ? youtube : false,
-      },
-    });
+    setCreating(true);
+    try {
+      const ev = await createEduEvent({
+        title: title.trim(),
+        type,
+        startsAt: startsAtIso,
+        endsAt: endsAtIso,
+        timezone: orgTimezone,
+        producerName: producerName.trim() || null,
+        talent,
+        studentProducerCanStart: false,
+        assignedRoomId: assignedRoomId || null,
+        outputs: {
+          publishHls,
+          recordMp4,
+          youtube: isFacultyAdmin ? youtube : false,
+        },
+      });
 
-    await onCreated(ev);
+      await onCreated(ev);
+    } catch (err: any) {
+      console.error("[Events] create error:", err);
+      setError(err?.message || "Failed to create event. Please try again.");
+    } finally {
+      setCreating(false);
+    }
   }
 
   return (
@@ -975,10 +985,11 @@ function ScheduleEventModal({
           ) : (
             <button
               type="button"
+              disabled={creating}
               onClick={() => void create()}
-              className="rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-transform hover:-translate-y-0.5 hover:from-orange-400 hover:via-red-500 hover:to-violet-500"
+              className="rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-transform hover:-translate-y-0.5 hover:from-orange-400 hover:via-red-500 hover:to-violet-500 disabled:opacity-60"
             >
-              Create Event
+              {creating ? "Creating\u2026" : "Create Event"}
             </button>
           )}
         </div>
@@ -1007,7 +1018,7 @@ function EventDetailDrawer({
   orgTimezone: string;
   broadcastRooms: BroadcastRoom[];
   onClose: () => void;
-  onChange: (next: EduEvent) => void;
+  onChange: (next: EduEvent) => void | Promise<void>;
   onCancel: () => void;
   onStart: () => void;
   fetchYoutubeDestinations?: () => Promise<DestinationItem[]>;
@@ -1017,6 +1028,8 @@ function EventDetailDrawer({
   const [destinations, setDestinations] = useState<DestinationItem[]>([]);
   const [destLoading, setDestLoading] = useState(false);
   const [endTouched, setEndTouched] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   useEffect(() => {
     setDraft(event);
@@ -1081,6 +1094,7 @@ function EventDetailDrawer({
     <DrawerShell title={draft.title} onClose={onClose}>
       <div className="space-y-6">
         {copyMsg ? <div className="rounded-xl border border-slate-800/50 bg-slate-900/50 p-3 text-sm text-slate-200">{copyMsg}</div> : null}
+        {saveError ? <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-200">{saveError}</div> : null}
 
         {/* Status */}
         <div className={`rounded-xl border px-3 py-2 text-sm ${badge.cls}`}>Status: {badge.label}</div>
@@ -1334,14 +1348,23 @@ function EventDetailDrawer({
           <div className="flex flex-col gap-2">
             <button
               type="button"
-              onClick={() => {
-                onChange({ ...draft, timezone: lockedTz });
-                onClose();
+              onClick={async () => {
+                setSaveError(null);
+                setSaving(true);
+                try {
+                  await onChange({ ...draft, timezone: lockedTz });
+                  onClose();
+                } catch (err: any) {
+                  console.error("[Events] save error:", err);
+                  setSaveError(err?.message || "Failed to save event. Please try again.");
+                } finally {
+                  setSaving(false);
+                }
               }}
-              disabled={!!scheduleError}
-              className="rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-transform hover:-translate-y-0.5 hover:from-orange-400 hover:via-red-500 hover:to-violet-500"
+              disabled={!!scheduleError || saving}
+              className="rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition-transform hover:-translate-y-0.5 hover:from-orange-400 hover:via-red-500 hover:to-violet-500 disabled:opacity-60"
             >
-              Save changes
+              {saving ? "Saving\u2026" : "Save changes"}
             </button>
             <button
               type="button"

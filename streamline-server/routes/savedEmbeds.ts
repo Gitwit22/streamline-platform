@@ -10,6 +10,7 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { tenantCol, globalCol } from "../lib/dbPaths";
+import { loadEduOrgSettingsForUid, isEduOrgType } from "../lib/eduOrgContext";
 
 const router = Router();
 
@@ -28,6 +29,14 @@ async function getPlatformHlsEnabled(): Promise<boolean> {
 }
 
 async function assertHlsSetupAllowed(req: any, res: any, uid: string): Promise<boolean> {
+  // EDU org members always have HLS access — skip plan check
+  try {
+    const eduCtx = await loadEduOrgSettingsForUid(uid);
+    if (eduCtx?.org && isEduOrgType(eduCtx.org.orgType)) return true;
+  } catch {
+    // non-fatal, fall through to normal plan check
+  }
+
   const platformEnabled = await getPlatformHlsEnabled();
   if (!platformEnabled) {
     res.status(403).json({ error: LIMIT_ERRORS.FEATURE_DISABLED });

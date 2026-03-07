@@ -433,9 +433,15 @@ export default function Broadcast() {
 
   // LiveKit room + go-live state
   const lkRoomRef = useRef<any>(null);
+  const intentionalDisconnectRef = useRef(false);
   const [goLiveData, setGoLiveData] = useState<GoLiveResponse | null>(null);
   const [goLiveError, setGoLiveError] = useState<string | null>(null);
   const [viewerCount, setViewerCount] = useState(0);
+
+  // Local producer A/V controls (tracked while live)
+  const [localCamOn, setLocalCamOn] = useState(true);
+  const [localMicOn, setLocalMicOn] = useState(true);
+  const [localScreenOn, setLocalScreenOn] = useState(false);
 
   // Pre-recorded media playback state
   const [mediaPlaying, setMediaPlaying] = useState(false);
@@ -560,6 +566,62 @@ export default function Broadcast() {
     }
   }
 
+  /* ── Live A/V toggle helpers (control LiveKit tracks) ────────── */
+
+  async function toggleLocalCam() {
+    const room = lkRoomRef.current;
+    if (!room) return;
+    const next = !localCamOn;
+    try {
+      await room.localParticipant.setCameraEnabled(next);
+      setLocalCamOn(next);
+      // Re-attach preview when re-enabling
+      if (next && liveVideoRef.current) {
+        const { Track } = await import("livekit-client");
+        const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+        if (camPub?.track) camPub.track.attach(liveVideoRef.current);
+      }
+    } catch (e: any) {
+      console.warn("[Broadcast] toggleCam error:", e?.message || e);
+    }
+  }
+
+  async function toggleLocalMic() {
+    const room = lkRoomRef.current;
+    if (!room) return;
+    const next = !localMicOn;
+    try {
+      await room.localParticipant.setMicrophoneEnabled(next);
+      setLocalMicOn(next);
+    } catch (e: any) {
+      console.warn("[Broadcast] toggleMic error:", e?.message || e);
+    }
+  }
+
+  async function toggleScreenShare() {
+    const room = lkRoomRef.current;
+    if (!room) return;
+    const next = !localScreenOn;
+    try {
+      await room.localParticipant.setScreenShareEnabled(next);
+      setLocalScreenOn(next);
+      // When screen share starts, attach it to the preview element
+      if (next && liveVideoRef.current) {
+        const { Track } = await import("livekit-client");
+        const screenPub = room.localParticipant.getTrackPublication(Track.Source.ScreenShare);
+        if (screenPub?.track) screenPub.track.attach(liveVideoRef.current);
+      } else if (!next && liveVideoRef.current) {
+        // Re-attach camera when screen share stops
+        const { Track } = await import("livekit-client");
+        const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+        if (camPub?.track) camPub.track.attach(liveVideoRef.current);
+      }
+    } catch (e: any) {
+      console.warn("[Broadcast] toggleScreenShare error:", e?.message || e);
+      if (next) setLocalScreenOn(false); // User likely cancelled the picker
+    }
+  }
+
   useEffect(() => {
     if (!isLive) return;
     const el = liveVideoRef.current;
@@ -629,6 +691,25 @@ export default function Broadcast() {
       room.on(RoomEvent.ParticipantConnected, () => setViewerCount(room.remoteParticipants.size));
       room.on(RoomEvent.ParticipantDisconnected, () => setViewerCount(room.remoteParticipants.size));
 
+      // Handle unexpected disconnection (network drop, server timeout, token expiry)
+      room.on(RoomEvent.Disconnected, () => {
+        if (intentionalDisconnectRef.current) {
+          intentionalDisconnectRef.current = false;
+          return;
+        }
+        console.warn("[EduBroadcast] LiveKit disconnected unexpectedly");
+        lkRoomRef.current = null;
+        setIsLive(false);
+        setStartedAt(null);
+        setLocalCamOn(true);
+        setLocalMicOn(true);
+        setLocalScreenOn(false);
+        setGoLiveError("Connection lost \u2014 the broadcast was disconnected. Please try again.");
+        setWebsiteStatus("off");
+        setRecordingStatus("off");
+        setYoutubeStatus("off");
+      });
+
       await room.connect(data.livekitUrl, data.lkToken);
 
       // Publish local camera + mic
@@ -637,15 +718,15 @@ export default function Broadcast() {
       await room.localParticipant.setCameraEnabled(true, camOpts);
       await room.localParticipant.setMicrophoneEnabled(true, micOpts);
 
-      // Attach local camera to the live preview
-      const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
-      if (camPub?.track && liveVideoRef.current) {
-        camPub.track.attach(liveVideoRef.current);
-      }
-
       // Stop device-check streams since LiveKit owns them now
       void stopDeviceStreams();
 
+      // NOTE: Track attachment to liveVideoRef happens in a useEffect after
+      // setIsLive(true) triggers re-render and mounts the live video element.
+
+      setLocalCamOn(true);
+      setLocalMicOn(true);
+      setLocalScreenOn(false);
       setIsLive(true);
       setStartedAt(Date.now());
 
@@ -670,7 +751,8 @@ export default function Broadcast() {
     // Stop any pre-recorded media playback first
     if (mediaPlaying) { await stopMedia().catch(() => void 0); }
 
-    // Disconnect LiveKit
+    // Disconnect LiveKit (intentional)
+    intentionalDisconnectRef.current = true;
     if (lkRoomRef.current) {
       try { lkRoomRef.current.disconnect(); } catch {}
       lkRoomRef.current = null;
@@ -685,6 +767,9 @@ export default function Broadcast() {
 
     setIsLive(false);
     setStartedAt(null);
+    setLocalCamOn(true);
+    setLocalMicOn(true);
+    setLocalScreenOn(false);
     setWebsiteStatus("off");
     setRecordingStatus("off");
     setYoutubeStatus("off");
@@ -700,7 +785,8 @@ export default function Broadcast() {
     mediaTracksRef.current = [];
     setMediaPlaying(false);
 
-    // Disconnect LiveKit immediately
+    // Disconnect LiveKit immediately (intentional)
+    intentionalDisconnectRef.current = true;
     if (lkRoomRef.current) {
       try { lkRoomRef.current.disconnect(); } catch {}
       lkRoomRef.current = null;
@@ -715,6 +801,9 @@ export default function Broadcast() {
 
     setIsLive(false);
     setStartedAt(null);
+    setLocalCamOn(true);
+    setLocalMicOn(true);
+    setLocalScreenOn(false);
     setWebsiteStatus(publishHls ? "error" : "off");
     setRecordingStatus(recordMp4 ? "error" : "off");
     setYoutubeStatus(alsoYoutube ? "error" : "off");
@@ -884,9 +973,29 @@ export default function Broadcast() {
     return () => clearInterval(interval);
   }, [isLive, broadcastId]);
 
+  // Re-attach LiveKit camera track when the live video element mounts.
+  // In startBroadcast(), the track is published BEFORE setIsLive(true), so
+  // liveVideoRef.current is still null (it lives in the live-only JSX branch).
+  // This effect runs after the re-render that mounts the <video> element.
+  useEffect(() => {
+    if (!isLive) return;
+    if (!lkRoomRef.current) return;
+    const el = liveVideoRef.current;
+    if (!el) return;
+    import("livekit-client").then(({ Track }) => {
+      const room = lkRoomRef.current;
+      if (!room) return;
+      const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+      if (camPub?.track && liveVideoRef.current) {
+        camPub.track.attach(liveVideoRef.current);
+      }
+    }).catch(() => {});
+  }, [isLive]);
+
   // Cleanup LiveKit on unmount
   useEffect(() => {
     return () => {
+      intentionalDisconnectRef.current = true;
       if (lkRoomRef.current) {
         try { lkRoomRef.current.disconnect(); } catch {}
       }
@@ -1514,11 +1623,11 @@ export default function Broadcast() {
             </div>
 
             <div className="relative aspect-video w-full overflow-hidden rounded-xl border border-slate-800/50 bg-black">
-              <video ref={liveVideoRef} className="h-full w-full object-cover" />
-              {!streamsRef.current?.cam && !mediaPlaying ? (
+              <video ref={liveVideoRef} autoPlay playsInline muted className="h-full w-full object-cover" />
+              {!localCamOn && !localScreenOn && !mediaPlaying ? (
                 <div className="absolute inset-0 flex items-center justify-center p-6 text-center">
                   <div className="rounded-xl border border-slate-800/50 bg-slate-950/70 px-4 py-3 text-sm text-slate-200">
-                    No camera preview yet. Use Device Check before starting, or allow camera permissions.
+                    Camera is off. Click "Enable Camera" to show your feed.
                   </div>
                 </div>
               ) : null}
@@ -1537,6 +1646,46 @@ export default function Broadcast() {
                   </span>
                 </div>
               )}
+            </div>
+
+            {/* ── Live A/V controls ─────────────────────────────────── */}
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <button
+                type="button"
+                onClick={toggleLocalCam}
+                className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors ${
+                  localCamOn
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                    : "border-amber-500/30 bg-amber-500/10 text-amber-300"
+                }`}
+              >
+                <span className={`inline-block h-2 w-2 rounded-full ${localCamOn ? "bg-emerald-500" : "bg-amber-500"}`} />
+                {localCamOn ? "Camera On" : "Camera Off"}
+              </button>
+              <button
+                type="button"
+                onClick={toggleLocalMic}
+                className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors ${
+                  localMicOn
+                    ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-300"
+                    : "border-amber-500/30 bg-amber-500/10 text-amber-300"
+                }`}
+              >
+                <span className={`inline-block h-2 w-2 rounded-full ${localMicOn ? "bg-emerald-500" : "bg-amber-500"}`} />
+                {localMicOn ? "Mic On" : "Mic Muted"}
+              </button>
+              <button
+                type="button"
+                onClick={toggleScreenShare}
+                className={`flex items-center gap-2 rounded-xl border px-4 py-2.5 text-sm font-medium transition-colors ${
+                  localScreenOn
+                    ? "border-violet-500/30 bg-violet-500/10 text-violet-300"
+                    : "border-slate-700 bg-slate-950/40 text-slate-300 hover:bg-slate-900/40"
+                }`}
+              >
+                <span className={`inline-block h-2 w-2 rounded-full ${localScreenOn ? "bg-violet-500" : "bg-slate-600"}`} />
+                {localScreenOn ? "Stop Share" : "Share Screen"}
+              </button>
             </div>
 
             <div className="mt-4">
