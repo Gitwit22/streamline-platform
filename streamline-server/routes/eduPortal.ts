@@ -48,14 +48,19 @@ function cookieOptions() {
 }
 
 async function lookupOrgBySlug(slug: string) {
+  // Query by slug only — don't require status field to exist.
+  // Orgs without an explicit status are treated as active (legacy data).
   const snap = await tenantCol("orgs")
     .where("slug", "==", slug.toLowerCase().trim())
-    .where("status", "==", "active")
     .limit(1)
     .get();
   if (snap.empty) return null;
   const doc = snap.docs[0];
-  return { id: doc.id, ...(doc.data() as any) };
+  const data = doc.data() as any;
+  // Treat missing status as "active" (all created schools are active by default)
+  const status = data.status || "active";
+  if (status === "suspended" || status === "deleted") return null;
+  return { id: doc.id, ...data, status };
 }
 
 /* ── GET /api/edu/portal/:slug ─────────────────────────────────── */

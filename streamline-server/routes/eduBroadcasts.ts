@@ -330,6 +330,60 @@ router.post("/broadcasts/:id/stop", requireAuth, async (req, res) => {
   }
 });
 
+/* ─── DELETE /broadcasts/:id ──────────────────────────────────────────── */
+router.delete("/broadcasts/:id", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+  try {
+    const ctx = await loadEduOrgSettingsForUid(uid);
+    if (!ctx) return res.status(403).json({ error: "not_edu_member" });
+    if (!assertEduRole(ctx.orgRole, ["faculty_admin"])) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    const broadcastId = req.params.id;
+    const snap = await tenantCol("eduBroadcasts").doc(broadcastId).get();
+    if (!snap.exists) return res.status(404).json({ error: "not_found" });
+
+    const existing = snap.data() as any;
+    if (existing.orgId !== ctx.orgId) return res.status(403).json({ error: "wrong_org" });
+
+    // If still live, stop egress first
+    if (existing.status === "live" && existing.egressId) {
+      try { await stopEgress(existing.egressId); } catch (e: any) {
+        console.warn("[edu/broadcasts] egress stop warn on delete:", e?.message || e);
+      }
+    }
+
+    // Clean up HLS artifacts
+    if (existing.roomId) {
+      try { await deletePrefix(storagePrefix("hls", existing.roomId)); } catch {}
+      const roomRef = tenantCol("rooms").doc(existing.roomId);
+      const roomSnap = await roomRef.get();
+      if (roomSnap.exists) {
+        await setHlsIdle(roomRef);
+      }
+    }
+
+    // Delete the broadcast document
+    await tenantCol("eduBroadcasts").doc(broadcastId).delete();
+
+    await writeEduAudit({
+      orgId: ctx.orgId,
+      action: "broadcast.delete",
+      actorUid: uid,
+      actorName: ctx.userName || uid,
+      targetId: broadcastId,
+    });
+
+    return res.json({ ok: true });
+  } catch (err: any) {
+    console.error("[edu/broadcasts] delete error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
 /* ─── GET /broadcasts/:id/watch ──────────────────────────────────────── */
 /**
  * Returns live status + HLS playlist URL.
@@ -381,13 +435,20 @@ router.get("/broadcasts", requireAuth, async (req, res) => {
     if (!ctx) return res.status(403).json({ error: "not_edu_member" });
 
     const limit = Math.min(Math.max(parseInt(String(req.query.limit)) || 50, 1), 200);
+    const statusFilter = typeof req.query.status === "string" ? req.query.status.trim().toLowerCase() : null;
 
     const snap = await tenantCol("eduBroadcasts")
       .where("orgId", "==", ctx.orgId)
       .limit(limit)
       .get();
 
-    const broadcasts = snap.docs.map(d => normalizeBroadcast(d.id, d.data()));
+    let broadcasts = snap.docs.map(d => normalizeBroadcast(d.id, d.data()));
+
+    // Filter by status if ?status= is provided (e.g. ?status=live)
+    if (statusFilter) {
+      broadcasts = broadcasts.filter((b: any) => b.status === statusFilter);
+    }
+
     // Sort in-memory (avoids composite index requirement)
     broadcasts.sort((a: any, b: any) => {
       const ta = typeof a.createdAt === "number" ? a.createdAt : 0;

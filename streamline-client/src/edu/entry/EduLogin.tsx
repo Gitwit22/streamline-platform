@@ -56,6 +56,8 @@ export default function EduLogin() {
   const [showOnboardingWarn, setShowOnboardingWarn] = useState(false);
   const [canSelfServeOnboarding, setCanSelfServeOnboarding] = useState(false);
   const [showCredentials, setShowCredentials] = useState(false);
+  const [mode, setMode] = useState<"login" | "activate">("login");
+  const [portalSlug, setPortalSlug] = useState("");
 
   const returnTo = useMemo(() => {
     try {
@@ -324,7 +326,37 @@ export default function EduLogin() {
               <div aria-hidden className="absolute left-0 right-0 top-0 h-[3px] bg-gradient-to-r from-orange-500 via-red-600 to-violet-600" />
 
               <h1 className="text-3xl font-bold tracking-tight text-white">StreamLine EDU</h1>
-              <div className="mt-1 text-sm text-slate-400">Explore the platform or sign in with your school credentials.</div>
+              <div className="mt-1 text-sm text-slate-400">
+                {mode === "login"
+                  ? "Explore the platform or sign in with your school credentials."
+                  : "Use the activation code your administrator gave you."}
+              </div>
+
+              {/* Sign In / Enter Code toggle */}
+              <div className="mt-5 flex rounded-xl border border-slate-700 bg-slate-900 p-1">
+                <button
+                  type="button"
+                  onClick={() => { setMode("login"); setError(""); }}
+                  className={`flex-1 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                    mode === "login"
+                      ? "bg-gradient-to-r from-orange-500/20 to-red-600/20 text-orange-300"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  Sign In
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setMode("activate"); setError(""); }}
+                  className={`flex-1 rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                    mode === "activate"
+                      ? "bg-gradient-to-r from-orange-500/20 to-red-600/20 text-orange-300"
+                      : "text-slate-400 hover:text-white"
+                  }`}
+                >
+                  Enter Activation Code
+                </button>
+              </div>
 
               {error && (
                 <div className="mt-6 rounded-2xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
@@ -332,6 +364,8 @@ export default function EduLogin() {
                 </div>
               )}
 
+              {mode === "login" ? (
+                <>
               <form onSubmit={handleSubmit} className="mt-8">
                 <div className="space-y-6">
                   <div>
@@ -388,6 +422,41 @@ export default function EduLogin() {
                   Tip: If you don’t have a school EDU role yet, ask your Faculty Admin.
                 </p>
               </form>
+                </>
+              ) : (
+                /* ── Activation code redirect ────────────────── */
+                <div className="mt-8 space-y-5">
+                  <div>
+                    <label className="block text-sm font-medium text-slate-300" htmlFor="portal-slug">
+                      School Portal Name
+                    </label>
+                    <input
+                      id="portal-slug"
+                      value={portalSlug}
+                      onChange={(e) => setPortalSlug(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, ""))}
+                      className="mt-2 w-full rounded-xl border border-slate-700 bg-slate-900 px-5 py-4 text-base text-white outline-none placeholder:text-slate-500 focus:border-orange-500 focus:ring-2 focus:ring-orange-500/10"
+                      placeholder="e.g. nxt-lvl-academy"
+                      autoComplete="off"
+                    />
+                    <p className="mt-1.5 text-xs text-slate-500">
+                      Ask your admin for the school portal name (e.g. your-school-name).
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    disabled={!portalSlug.trim()}
+                    onClick={() => nav(`/streamline/edu/portal/${portalSlug.trim()}`)}
+                    className="w-full rounded-xl bg-gradient-to-r from-orange-500 via-red-600 to-violet-600 px-4 py-4 text-base font-semibold text-white transition hover:opacity-90 disabled:opacity-50"
+                  >
+                    Continue to Activation
+                  </button>
+
+                  <p className="text-center text-xs text-slate-500">
+                    You'll be taken to your school's portal to enter your code and set up your account.
+                  </p>
+                </div>
+              )}
 
               {canSelfServeOnboarding ? (
                 <div className="mt-6">

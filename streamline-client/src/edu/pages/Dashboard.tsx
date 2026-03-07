@@ -79,6 +79,18 @@ export default function Dashboard() {
   }, []);
   const isLive = liveBroadcasts.length > 0;
 
+  /* Stop or delete a stuck broadcast */
+  const stopBroadcast = async (id: string) => {
+    try {
+      // Try stop first, then delete as fallback
+      const stopRes = await apiFetchAuth(`/api/edu/broadcasts/${id}/stop`, { method: "POST" });
+      if (!stopRes.ok) {
+        await apiFetchAuth(`/api/edu/broadcasts/${id}`, { method: "DELETE" });
+      }
+    } catch { /* ignore */ }
+    setLiveBroadcasts((prev) => prev.filter((b) => b.id !== id));
+  };
+
   /* True when the school is brand new — show getting-started prompts */
   const isNewSchool = roomCount + studentCount + staffCount + recordingCount <= 4 && staffCount <= 1;
 
@@ -122,9 +134,16 @@ export default function Dashboard() {
                 <span className="font-semibold text-red-400">LIVE NOW</span>
                 <span className="text-white">{liveBroadcasts[0].title}</span>
                 <span className="text-sm text-slate-400">{liveBroadcasts[0].viewers} viewers</span>
-                <button onClick={() => nav("/streamline/edu/broadcast")} className="ml-auto rounded-lg bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-500">
-                  Watch
-                </button>
+                <div className="ml-auto flex items-center gap-2">
+                  <button onClick={() => nav("/streamline/edu/broadcast")} className="rounded-lg bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-500">
+                    Watch
+                  </button>
+                  {!isStudentProducer && (
+                    <button onClick={() => stopBroadcast(liveBroadcasts[0].id)} className="rounded-lg border border-slate-600 bg-slate-700 px-3 py-1 text-sm font-medium text-white hover:bg-slate-600">
+                      End
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -258,9 +277,14 @@ export default function Dashboard() {
             <span className="font-semibold text-red-400">LIVE NOW</span>
             <span className="text-white">{liveBroadcasts[0].title}</span>
             <span className="text-sm text-slate-400">{liveBroadcasts[0].viewers} viewers</span>
-            <button onClick={() => nav("/streamline/edu/broadcast")} className="ml-auto rounded-lg bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-500">
-              Watch
-            </button>
+            <div className="ml-auto flex items-center gap-2">
+              <button onClick={() => nav("/streamline/edu/broadcast")} className="rounded-lg bg-red-600 px-3 py-1 text-sm font-medium text-white hover:bg-red-500">
+                Watch
+              </button>
+              <button onClick={() => stopBroadcast(liveBroadcasts[0].id)} className="rounded-lg border border-slate-600 bg-slate-700 px-3 py-1 text-sm font-medium text-white hover:bg-slate-600">
+                End
+              </button>
+            </div>
           </div>
         </div>
       )}
