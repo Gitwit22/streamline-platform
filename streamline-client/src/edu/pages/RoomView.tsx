@@ -967,26 +967,17 @@ export default function RoomView() {
                 </div>
               </div>
 
-              {/* Layout Switcher */}
+              {/* Layout (read-only) */}
               <div className="rounded-xl border border-slate-700 bg-slate-800/50 p-4">
                 <h4 className="text-xs font-semibold uppercase tracking-wider text-slate-400">Layout</h4>
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  {(["grid", "speaker", "single", "custom"] as const).map((l) => (
-                    <button
-                      key={l}
-                      className={`rounded-lg border px-3 py-2 text-xs font-medium transition ${
-                        room.defaultLayout === l
-                          ? "border-orange-500 bg-orange-500/10 text-orange-300"
-                          : "border-slate-700 text-slate-400 hover:text-slate-200"
-                      }`}
-                    >
-                      {l === "grid" && "⊞ "}
-                      {l === "speaker" && "👤 "}
-                      {l === "single" && "🖥️ "}
-                      {l === "custom" && "✨ "}
-                      {l.charAt(0).toUpperCase() + l.slice(1)}
-                    </button>
-                  ))}
+                <div className="mt-3 flex items-center gap-2">
+                  <span className="rounded-lg border border-orange-500 bg-orange-500/10 px-3 py-2 text-xs font-medium text-orange-300">
+                    {room.defaultLayout === "grid" && "⊞ "}
+                    {room.defaultLayout === "speaker" && "👤 "}
+                    {room.defaultLayout === "single" && "🖥️ "}
+                    {room.defaultLayout === "custom" && "✨ "}
+                    {room.defaultLayout.charAt(0).toUpperCase() + room.defaultLayout.slice(1)}
+                  </span>
                 </div>
               </div>
 

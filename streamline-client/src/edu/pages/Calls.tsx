@@ -46,6 +46,12 @@ export default function EduCalls() {
   const [newTitle, setNewTitle] = useState("");
   const [showNew, setShowNew] = useState(false);
 
+  // New call user picker state
+  const [newCallSearch, setNewCallSearch] = useState("");
+  const [selectedCallUser, setSelectedCallUser] = useState<{ id: string; name: string; role: string } | null>(null);
+  const [newCallUsersLoading, setNewCallUsersLoading] = useState(false);
+  const [newCallUsers, setNewCallUsers] = useState<{ id: string; name: string; role: string; status: string }[]>([]);
+
   // Call controls state
   const [micMuted, setMicMuted] = useState(false);
   const [camOff, setCamOff] = useState(false);
@@ -78,7 +84,43 @@ export default function EduCalls() {
     };
   }, [activeCall?.id, activeCall?.startedAt]);
 
-  // Load active staff for the picker
+  // Load active users for the new-call picker
+  const loadNewCallUsers = useCallback(async () => {
+    setNewCallUsersLoading(true);
+    try {
+      const [staffRecords, people] = await Promise.all([
+        fetchPendingStaff().catch(() => [] as PendingStaffRecord[]),
+        listEduPeopleFromApi({ limit: 200 }).catch(() => [] as EduPerson[]),
+      ]);
+      const merged = new Map<string, { id: string; name: string; role: string; status: string }>();
+      for (const s of staffRecords) {
+        if (s.status === "active" && s.id !== me.uid) {
+          merged.set(s.id, { id: s.id, name: s.fullName, role: s.positionTitle || s.role, status: s.status });
+        }
+      }
+      for (const p of people) {
+        if (p.status === "active" && !merged.has(p.id) && p.id !== me.uid) {
+          merged.set(p.id, { id: p.id, name: p.name, role: p.role.replace(/_/g, " "), status: p.status });
+        }
+      }
+      setNewCallUsers(Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name)));
+    } catch {
+      setNewCallUsers([]);
+    } finally {
+      setNewCallUsersLoading(false);
+    }
+  }, [me.uid]);
+
+  // Filtered users for new-call search
+  const filteredNewCallUsers = useMemo(() => {
+    if (!newCallSearch.trim()) return newCallUsers;
+    const q = newCallSearch.toLowerCase();
+    return newCallUsers.filter(
+      (u) => u.name.toLowerCase().includes(q) || u.role.toLowerCase().includes(q),
+    );
+  }, [newCallUsers, newCallSearch]);
+
+  // Load active staff for the add-participant picker
   const loadStaff = useCallback(async () => {
     setStaffLoading(true);
     try {
@@ -148,12 +190,15 @@ export default function EduCalls() {
   }, [load]);
 
   const handleCreate = async () => {
-    if (!newTitle.trim()) return;
+    if (!selectedCallUser) return;
     setCreating(true);
     try {
-      const c = await createEduCall({ title: newTitle.trim() });
+      const title = `Call with ${selectedCallUser.name}`;
+      const c = await createEduCall({ title, participants: [selectedCallUser.id] });
       setCalls((prev) => [c, ...prev]);
       setNewTitle("");
+      setSelectedCallUser(null);
+      setNewCallSearch("");
       setShowNew(false);
     } finally {
       setCreating(false);
@@ -262,7 +307,7 @@ export default function EduCalls() {
           </p>
         </div>
         <button
-          onClick={() => setShowNew(true)}
+          onClick={() => { setShowNew(true); loadNewCallUsers(); }}
           className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-orange-500 to-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:opacity-90"
         >
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
@@ -272,30 +317,114 @@ export default function EduCalls() {
         </button>
       </div>
 
-      {/* New call form */}
+      {/* New call — user picker */}
       {showNew && (
-        <div className="flex items-center gap-3 rounded-2xl border border-orange-500/20 bg-slate-800/50 p-4">
-          <input
-            autoFocus
-            value={newTitle}
-            onChange={(e) => setNewTitle(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && handleCreate()}
-            placeholder="Call title…"
-            className="flex-1 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2.5 text-sm text-white outline-none focus:border-orange-500 placeholder:text-slate-500"
-          />
-          <button
-            disabled={creating || !newTitle.trim()}
-            onClick={handleCreate}
-            className="rounded-xl bg-gradient-to-r from-orange-500 to-red-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-50"
-          >
-            {creating ? "Creating…" : "Create"}
-          </button>
-          <button
-            onClick={() => setShowNew(false)}
-            className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-slate-700"
-          >
-            Cancel
-          </button>
+        <div className="rounded-2xl border border-orange-500/20 bg-slate-800/50 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <span className="text-sm font-semibold text-white">Select a user to call</span>
+            <button
+              onClick={() => { setShowNew(false); setSelectedCallUser(null); setNewCallSearch(""); }}
+              className="text-slate-400 hover:text-white"
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
+                <path d="M18 6L6 18M6 6l12 12" />
+              </svg>
+            </button>
+          </div>
+
+          {/* Search input */}
+          <div className="relative mb-3">
+            <svg className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="11" cy="11" r="8" /><path d="M21 21l-4.35-4.35" />
+            </svg>
+            <input
+              autoFocus
+              value={newCallSearch}
+              onChange={(e) => setNewCallSearch(e.target.value)}
+              placeholder="Search users…"
+              className="w-full rounded-xl border border-slate-700 bg-slate-900 py-2.5 pl-9 pr-3 text-sm text-white outline-none focus:border-orange-500 placeholder:text-slate-500"
+            />
+          </div>
+
+          {/* User list */}
+          <div className="max-h-56 overflow-y-auto rounded-xl border border-slate-700 bg-slate-900">
+            {newCallUsersLoading && (
+              <div className="flex items-center justify-center py-6">
+                <div className="h-5 w-5 animate-spin rounded-full border-2 border-orange-500 border-t-transparent" />
+              </div>
+            )}
+            {!newCallUsersLoading && filteredNewCallUsers.length === 0 && (
+              <div className="py-6 text-center text-xs text-slate-500">
+                {newCallUsers.length === 0 ? "No active users found" : "No matches"}
+              </div>
+            )}
+            {!newCallUsersLoading && filteredNewCallUsers.map((u) => {
+              const selected = selectedCallUser?.id === u.id;
+              return (
+                <button
+                  key={u.id}
+                  onClick={() => setSelectedCallUser(selected ? null : u)}
+                  className={`flex w-full items-center gap-3 border-b border-slate-800 px-4 py-3 text-left transition last:border-b-0 ${
+                    selected
+                      ? "bg-orange-500/15 ring-1 ring-inset ring-orange-500/40"
+                      : "hover:bg-slate-800"
+                  }`}
+                >
+                  {/* Avatar */}
+                  <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-xs font-bold ${
+                    selected
+                      ? "bg-orange-500/30 text-orange-200"
+                      : "bg-slate-700 text-slate-300"
+                  }`}>
+                    {u.name.split(/\s+/).map((w) => w[0]).join("").toUpperCase().slice(0, 2) || "?"}
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-white">{u.name}</div>
+                    <div className="truncate text-xs text-slate-400">{u.role}</div>
+                  </div>
+                  {/* Online dot */}
+                  <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-green-500" title="Online" />
+                  {/* Selection ring */}
+                  <div className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border-2 transition ${
+                    selected
+                      ? "border-orange-500 bg-orange-500"
+                      : "border-slate-600 bg-transparent"
+                  }`}>
+                    {selected && (
+                      <svg viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" className="h-3 w-3">
+                        <path d="M20 6L9 17l-5-5" />
+                      </svg>
+                    )}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Action row */}
+          <div className="mt-3 flex items-center justify-between">
+            <span className="text-xs text-slate-500">
+              {selectedCallUser ? `Call ${selectedCallUser.name}` : "Choose a user above"}
+            </span>
+            <div className="flex gap-2">
+              <button
+                onClick={() => { setShowNew(false); setSelectedCallUser(null); setNewCallSearch(""); }}
+                className="rounded-xl border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-medium text-slate-300 transition hover:bg-slate-700"
+              >
+                Cancel
+              </button>
+              <button
+                disabled={creating || !selectedCallUser}
+                onClick={handleCreate}
+                className="flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-orange-500 to-red-600 px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-50"
+              >
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
+                  <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.362 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0 1 22 16.92z" />
+                </svg>
+                {creating ? "Calling…" : "Call"}
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

@@ -222,7 +222,9 @@ router.post("/rooms/:roomId/connect", requireAuth as any, async (req: any, res) 
       return res.status(500).json({ error: "LiveKit not configured" });
     }
     const { AccessToken } = await getLiveKitSdk();
-    const displayName = req.user?.name || req.user?.email || uid;
+    const acct = (req as any).account;
+    const rawUser = acct?.rawUser || {};
+    const displayName = rawUser.displayName || rawUser.name || rawUser.email || uid;
     const identity = `edu-${uid}`;
     const at = new AccessToken(apiKey, apiSecret, { identity, name: displayName });
     at.addGrant({
