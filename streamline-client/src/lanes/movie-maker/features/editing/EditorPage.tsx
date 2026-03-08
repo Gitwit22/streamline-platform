@@ -73,7 +73,7 @@ export default function EditorPage() {
     { id: 'audio_1', name: 'Audio 1', type: 'audio', muted: false, locked: false, solo: false, linkedTrackId: 'video_1' },
   ]);
   const [clips, setClips] = useState<TimelineClip[]>([]);
-  const [isSaving, setIsSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
   // Playback state
   const [playheadTime, setPlayheadTime] = useState(0);
@@ -103,6 +103,8 @@ export default function EditorPage() {
   // ============================================================================
 
   useEffect(() => {
+    let cancelled = false;
+
     const loadProject = async () => {
       if (projectId === "new") {
         const recordingId = searchParams.get("recordingId");
@@ -111,6 +113,7 @@ export default function EditorPage() {
         if (recordingId) {
           console.log('📹 Loading recording:', recordingId);
           const recording = await editingApi.getRecording(recordingId);
+          if (cancelled) return;
           console.log('✅ Recording loaded:', recording);
           
           if (recording) {
@@ -132,7 +135,7 @@ export default function EditorPage() {
             
             // Load video directly into ref
             setTimeout(() => {
-              if (videoRef.current) {
+              if (!cancelled && videoRef.current) {
                 videoRef.current.src = videoUrl;
                 videoRef.current.load();
                 console.log('📺 Video loaded into player:', videoUrl);
@@ -158,6 +161,7 @@ export default function EditorPage() {
           }
         } else if (assetId) {
           const asset = await editingApi.getAsset(assetId);
+          if (cancelled) return;
           if (asset) {
             setProjectName(`Project: ${asset.name}`);
             setClips([
@@ -194,8 +198,24 @@ export default function EditorPage() {
       } else {
         // Load existing project
         const proj = await editingApi.getProject(projectId!);
+        if (cancelled) return;
         if (proj) {
           setProjectName(proj.name);
+
+          // Restore saved track state if available
+          const savedTracks = (proj as any)?.timeline?.tracks;
+          if (Array.isArray(savedTracks) && savedTracks.length > 0) {
+            const restoredTracks: Track[] = savedTracks.map((t: any, idx: number) => ({
+              id: String(t?.id || `track_${idx}`),
+              name: String(t?.name || 'Track'),
+              type: t?.type === 'audio' ? 'audio' as const : 'video' as const,
+              muted: !!t?.muted,
+              locked: !!t?.locked,
+              solo: !!t?.solo,
+              linkedTrackId: typeof t?.linkedTrackId === 'string' ? t.linkedTrackId : null,
+            }));
+            setTracks(restoredTracks);
+          }
 
           const timelineClips = (proj as any)?.timeline?.clips;
           if (Array.isArray(timelineClips) && timelineClips.length > 0) {
@@ -214,13 +234,14 @@ export default function EditorPage() {
 
             setTimeout(() => {
               const firstUrl = normalized[0]?.videoUrl;
-              if (videoRef.current && firstUrl) {
+              if (!cancelled && videoRef.current && firstUrl) {
                 videoRef.current.src = firstUrl;
                 videoRef.current.load();
               }
             }, 50);
           } else {
             const asset = await editingApi.getAsset(proj.assetId);
+            if (cancelled) return;
             const videoUrl = asset?.videoUrl || SAMPLE_VIDEO_URL;
             setClips([
               {
@@ -237,7 +258,7 @@ export default function EditorPage() {
             ]);
 
             setTimeout(() => {
-              if (videoRef.current) {
+              if (!cancelled && videoRef.current) {
                 videoRef.current.src = videoUrl;
                 videoRef.current.load();
               }
@@ -248,6 +269,7 @@ export default function EditorPage() {
     };
 
     loadProject();
+    return () => { cancelled = true; };
   }, [projectId, searchParams]);
 
   // ============================================================================
@@ -692,7 +714,7 @@ export default function EditorPage() {
   }, [clips, selectedClipId, tracks]);
 
   const handleSave = async () => {
-    setIsSaving(true);
+    setSaveStatus('saving');
     try {
       // If this is a "new" project, create a real project first.
       let actualProjectId = projectId;
@@ -714,11 +736,13 @@ export default function EditorPage() {
         }
       }
 
-      await editingApi.saveTimeline(actualProjectId!, clips);
-      setTimeout(() => setIsSaving(false), 600);
+      await editingApi.saveTimeline(actualProjectId!, clips, tracks);
+      setSaveStatus('saved');
+      setTimeout(() => setSaveStatus('idle'), 2000);
     } catch (error) {
       console.error('Save failed:', error);
-      setIsSaving(false);
+      setSaveStatus('error');
+      setTimeout(() => setSaveStatus('idle'), 3000);
     }
   };
 
@@ -736,14 +760,14 @@ export default function EditorPage() {
           assetId: firstClip.assetId,
         });
         actualProjectId = created.id;
-        await editingApi.saveTimeline(actualProjectId!, clips);
+        await editingApi.saveTimeline(actualProjectId!, clips, tracks);
         nav(`/editing/export/${created.id}`, { replace: true });
         return;
       }
 
       if (actualProjectId) {
         await editingApi.updateProject(actualProjectId, { name: projectName });
-        await editingApi.saveTimeline(actualProjectId, clips);
+        await editingApi.saveTimeline(actualProjectId, clips, tracks);
         nav(`/editing/export/${actualProjectId}`);
       }
     } catch (e) {
@@ -877,7 +901,7 @@ export default function EditorPage() {
               e.currentTarget.style.borderColor = 'rgba(255, 255, 255, 0.1)';
             }}
           >
-            {isSaving ? "Saving..." : "💾 Save"}
+            {saveStatus === 'saving' ? "Saving..." : saveStatus === 'saved' ? "✅ Saved" : saveStatus === 'error' ? "❌ Failed" : "💾 Save"}
           </button>
           <button
             onClick={handleExport}

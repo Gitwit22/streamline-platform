@@ -39,6 +39,7 @@ export type Project = {
 export type TimelineClip = {
   id: string;
   assetId: string;
+  trackId: string;
   startTime: number;
   duration: number;
   inPoint: number;
@@ -47,9 +48,19 @@ export type TimelineClip = {
   videoUrl: string;
 };
 
+export type TimelineTrack = {
+  id: string;
+  name: string;
+  type: 'video' | 'audio';
+  muted: boolean;
+  locked: boolean;
+  solo: boolean;
+  linkedTrackId: string | null;
+};
+
 export type TimelineData = {
   clips: TimelineClip[];
-  tracks: number;
+  tracks: TimelineTrack[] | number;
 };
 
 export type Recording = {
@@ -370,11 +381,15 @@ export const projectsApi = {
     }
   },
 
-  async saveTimeline(id: string, clips: TimelineClip[]): Promise<{ saved: boolean }> {
+  async saveTimeline(id: string, clips: TimelineClip[], tracks?: TimelineTrack[]): Promise<{ saved: boolean }> {
     try {
+      const body: { clips: TimelineClip[]; tracks?: TimelineTrack[] } = { clips };
+      if (tracks) {
+        body.tracks = tracks;
+      }
       const response = await apiFetchAuth(`${API_BASE}/editing/projects/${id}/timeline`, {
         method: 'PUT',
-        body: JSON.stringify({ clips }),
+        body: JSON.stringify(body),
       }, { allowNonOk: true });
       if (!response.ok) {
         throw new Error('Failed to save timeline');
@@ -488,7 +503,7 @@ export const editingApi = {
   getProject: (id: string) => projectsApi.getById(id),
   createProject: (data: { name: string; assetId: string }) => projectsApi.create(data),
   updateProject: (id: string, data: Partial<Project>) => projectsApi.update(id, data),
-  saveTimeline: (id: string, clips: TimelineClip[]) => projectsApi.saveTimeline(id, clips),
+  saveTimeline: (id: string, clips: TimelineClip[], tracks?: TimelineTrack[]) => projectsApi.saveTimeline(id, clips, tracks),
   deleteProject: (id: string) => projectsApi.delete(id),
 
   // Export
