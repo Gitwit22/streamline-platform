@@ -286,9 +286,9 @@ export default function EduCalls() {
       const title = `Call with ${selectedCallUser.name}`;
       const c = await createEduCall({ title, participants: [selectedCallUser.id] });
 
-      // Immediately activate the call
-      const activated = await updateEduCall(c.id, { status: "active" });
-      setCalls((prev) => [activated, ...prev]);
+      // Keep the call in "scheduled" status so the recipient sees the
+      // incoming-call notification. It becomes "active" when they accept.
+      setCalls((prev) => [c, ...prev]);
 
       setNewTitle("");
       setSelectedCallUser(null);
@@ -296,8 +296,12 @@ export default function EduCalls() {
       setShowNew(false);
       setActiveTab("Active Calls");
 
-      // Connect to LiveKit with the target user
+      // Caller connects to LiveKit immediately and waits for the other user
       await connectToLiveKit(selectedCallUser.id);
+
+      // Once connected, activate the call on our side so the UI shows the call card
+      const activated = await updateEduCall(c.id, { status: "active" });
+      setCalls((prev) => prev.map((x) => (x.id === c.id ? activated : x)));
     } catch (err: any) {
       console.error("[EduCalls] create error:", err);
       setLkError(err?.message || "Failed to start call");

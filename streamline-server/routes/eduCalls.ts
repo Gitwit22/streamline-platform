@@ -217,9 +217,15 @@ router.get("/calls/pending", requireAuth as any, async (req: any, res) => {
       .limit(50)
       .get();
 
+    // Participants may contain raw UIDs or composite orgMembers IDs (orgId_uid).
+    // Match against both formats for the current user.
+    const compositeId = `${ctx.orgId}_${uid}`;
+    const isParticipant = (participants: string[]) =>
+      participants.some((p) => p === uid || p === compositeId);
+
     const pending = snap.docs
       .map((d: any) => normalizeCall(d.id, d.data()))
-      .filter((c) => c.status === "scheduled" && c.createdBy !== uid && c.participants.includes(uid))
+      .filter((c) => c.status === "scheduled" && c.createdBy !== uid && isParticipant(c.participants))
       .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
       .slice(0, 10);
 

@@ -38,33 +38,53 @@ export default function IncomingCallBanner() {
     return () => clearInterval(id);
   }, [poll]);
 
-  // Play a short ringtone pulse when new calls arrive
+  // Play a repeating ringtone while there are incoming calls
   useEffect(() => {
-    if (calls.length > 0 && calls.length > prevCountRef.current) {
+    if (calls.length === 0) return;
+
+    let stopped = false;
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+
+    const playRing = () => {
+      if (stopped) return;
       try {
-        // Use a short oscillator beep — no external audio file needed
         const ctx = new AudioContext();
-        const osc = ctx.createOscillator();
         const gain = ctx.createGain();
-        osc.type = "sine";
-        osc.frequency.value = 440;
         gain.gain.value = 0.15;
-        osc.connect(gain);
         gain.connect(ctx.destination);
-        osc.start();
-        osc.stop(ctx.currentTime + 0.25);
-        // Second short beep
+
+        // Two-tone ring
+        const osc1 = ctx.createOscillator();
+        osc1.type = "sine";
+        osc1.frequency.value = 440;
+        osc1.connect(gain);
+        osc1.start();
+        osc1.stop(ctx.currentTime + 0.25);
+
         const osc2 = ctx.createOscillator();
         osc2.type = "sine";
         osc2.frequency.value = 554.37; // C#5
         osc2.connect(gain);
         osc2.start(ctx.currentTime + 0.3);
         osc2.stop(ctx.currentTime + 0.55);
+
+        // Clean up AudioContext after sounds finish
+        setTimeout(() => ctx.close().catch(() => {}), 1000);
       } catch {
         /* AudioContext may not be available */
       }
-    }
-    prevCountRef.current = calls.length;
+      // Repeat every 3 seconds
+      if (!stopped) {
+        timeoutId = setTimeout(playRing, 3000);
+      }
+    };
+
+    playRing();
+
+    return () => {
+      stopped = true;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
   }, [calls.length]);
 
   const handleDismiss = async (id: string) => {
