@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import {
   fetchEduCalls,
@@ -6,6 +6,14 @@ import {
   updateEduCall,
   type EduCall,
 } from "../api/calls";
+import {
+  fetchPendingStaff,
+  type PendingStaffRecord,
+} from "../api/schoolPortal";
+import {
+  listEduPeopleFromApi,
+  type EduPerson,
+} from "../api/people";
 
 /* ── Tabs ──────────────────────────────────────────────────────── */
 
@@ -48,9 +56,12 @@ export default function EduCalls() {
   const [tick, setTick] = useState(0);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // Add participant
+  // Add participant — staff picker
   const [showAddParticipant, setShowAddParticipant] = useState(false);
-  const [newParticipant, setNewParticipant] = useState("");
+  const [staffSearch, setStaffSearch] = useState("");
+  const [staffList, setStaffList] = useState<{ id: string; name: string; role: string; status: string }[]>([]);
+  const [staffLoading, setStaffLoading] = useState(false);
+  const [selectedStaffIds, setSelectedStaffIds] = useState<Set<string>>(new Set());
 
   const activeCall = calls.find((c) => c.status === "active");
 
@@ -66,6 +77,59 @@ export default function EduCalls() {
       if (tickRef.current) clearInterval(tickRef.current);
     };
   }, [activeCall?.id, activeCall?.startedAt]);
+
+  // Load active staff for the picker
+  const loadStaff = useCallback(async () => {
+    setStaffLoading(true);
+    try {
+      // Fetch from both staff records and people list, merge unique entries
+      const [staffRecords, people] = await Promise.all([
+        fetchPendingStaff().catch(() => [] as PendingStaffRecord[]),
+        listEduPeopleFromApi({ limit: 200 }).catch(() => [] as EduPerson[]),
+      ]);
+
+      const merged = new Map<string, { id: string; name: string; role: string; status: string }>();
+
+      // Active staff from staff records
+      for (const s of staffRecords) {
+        if (s.status === "active") {
+          merged.set(s.id, {
+            id: s.id,
+            name: s.fullName,
+            role: s.positionTitle || s.role,
+            status: s.status,
+          });
+        }
+      }
+
+      // Active people (faculty/staff)
+      for (const p of people) {
+        if (p.status === "active" && !merged.has(p.id)) {
+          merged.set(p.id, {
+            id: p.id,
+            name: p.name,
+            role: p.role.replace(/_/g, " "),
+            status: p.status,
+          });
+        }
+      }
+
+      setStaffList(Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name)));
+    } catch {
+      setStaffList([]);
+    } finally {
+      setStaffLoading(false);
+    }
+  }, []);
+
+  // Filtered staff for search
+  const filteredStaff = useMemo(() => {
+    if (!staffSearch.trim()) return staffList;
+    const q = staffSearch.toLowerCase();
+    return staffList.filter(
+      (s) => s.name.toLowerCase().includes(q) || s.role.toLowerCase().includes(q),
+    );
+  }, [staffList, staffSearch]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -103,7 +167,8 @@ export default function EduCalls() {
     setScreenSharing(false);
     setRecording(false);
     setShowAddParticipant(false);
-    setNewParticipant("");
+    setStaffSearch("");
+    setSelectedStaffIds(new Set());
 
     const updated = await updateEduCall(c.id, { status: "active" });
     setCalls((prev) => prev.map((x) => (x.id === c.id ? updated : x)));
@@ -121,18 +186,36 @@ export default function EduCalls() {
     setRecording(false);
   };
 
-  const handleAddParticipant = () => {
-    if (!newParticipant.trim() || !activeCall) return;
-    const initials = newParticipant.trim().split(" ").map((w: string) => w[0]).join("").toUpperCase().slice(0, 2);
+  const handleAddSelectedStaff = () => {
+    if (selectedStaffIds.size === 0 || !activeCall) return;
+    const newNames = staffList
+      .filter((s) => selectedStaffIds.has(s.id))
+      .map((s) => {
+        // Generate initials from name, or short name if initials are too short
+        const parts = s.name.trim().split(/\s+/);
+        return parts.length >= 2
+          ? parts.map((w) => w[0]).join("").toUpperCase().slice(0, 2)
+          : s.name.slice(0, 2).toUpperCase();
+      });
     setCalls((prev) =>
       prev.map((x) =>
         x.id === activeCall.id
-          ? { ...x, participants: [...x.participants, initials] }
+          ? { ...x, participants: [...x.participants, ...newNames] }
           : x,
       ),
     );
-    setNewParticipant("");
+    setSelectedStaffIds(new Set());
+    setStaffSearch("");
     setShowAddParticipant(false);
+  };
+
+  const toggleStaffSelection = (id: string) => {
+    setSelectedStaffIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
   };
 
   const filtered = calls.filter((c) => {
@@ -269,9 +352,9 @@ export default function EduCalls() {
               )}
               {/* Add participant button */}
               <button
-                onClick={() => setShowAddParticipant(!showAddParticipant)}
+                onClick={() => { if (!showAddParticipant) loadStaff(); setShowAddParticipant(!showAddParticipant); }}
                 className="flex h-12 w-12 items-center justify-center rounded-lg border border-dashed border-slate-600 bg-slate-900/50 text-slate-400 transition hover:border-orange-500/40 hover:text-orange-300"
-                title="Add participant"
+                title="Call a staff member"
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
                   <path d="M12 5v14M5 12h14" />
@@ -279,25 +362,107 @@ export default function EduCalls() {
               </button>
             </div>
 
-            {/* Add participant popover */}
+            {/* Staff picker popover */}
             {showAddParticipant && (
-              <div className="absolute right-20 top-4 z-10 rounded-xl border border-slate-700 bg-slate-900 p-3 shadow-xl">
-                <div className="text-xs font-medium text-slate-300 mb-2">Add Participant</div>
-                <div className="flex items-center gap-2">
-                  <input
-                    autoFocus
-                    value={newParticipant}
-                    onChange={(e) => setNewParticipant(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleAddParticipant()}
-                    placeholder="Name…"
-                    className="w-32 rounded-lg border border-slate-700 bg-slate-800 px-2 py-1.5 text-xs text-white outline-none focus:border-orange-500 placeholder:text-slate-500"
-                  />
+              <div className="absolute right-20 top-4 z-10 w-72 rounded-xl border border-slate-700 bg-slate-900 shadow-xl">
+                {/* Header */}
+                <div className="flex items-center justify-between border-b border-slate-700/50 px-3 py-2.5">
+                  <span className="text-xs font-semibold text-slate-200">Call Staff Member</span>
                   <button
-                    onClick={handleAddParticipant}
-                    disabled={!newParticipant.trim()}
-                    className="rounded-lg bg-orange-500 px-2 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
+                    onClick={() => { setShowAddParticipant(false); setStaffSearch(""); setSelectedStaffIds(new Set()); }}
+                    className="text-slate-500 hover:text-white"
                   >
-                    Add
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3.5 w-3.5">
+                      <path d="M18 6L6 18M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+
+                {/* Search */}
+                <div className="px-3 py-2">
+                  <div className="relative">
+                    <svg className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-slate-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="11" cy="11" r="8" /><path d="M21 21l-4.35-4.35" />
+                    </svg>
+                    <input
+                      autoFocus
+                      value={staffSearch}
+                      onChange={(e) => setStaffSearch(e.target.value)}
+                      placeholder="Search active staff…"
+                      className="w-full rounded-lg border border-slate-700 bg-slate-800 py-1.5 pl-8 pr-3 text-xs text-white outline-none placeholder:text-slate-500 focus:border-orange-500"
+                    />
+                  </div>
+                </div>
+
+                {/* Staff list */}
+                <div className="max-h-48 overflow-y-auto border-t border-slate-700/50 px-1.5 py-1">
+                  {staffLoading && (
+                    <div className="flex items-center justify-center py-4">
+                      <div className="h-4 w-4 animate-spin rounded-full border-2 border-orange-500 border-t-transparent" />
+                    </div>
+                  )}
+                  {!staffLoading && filteredStaff.length === 0 && (
+                    <div className="py-4 text-center text-[11px] text-slate-500">
+                      {staffList.length === 0 ? "No active staff found" : "No matches"}
+                    </div>
+                  )}
+                  {!staffLoading && filteredStaff.map((s) => {
+                    const selected = selectedStaffIds.has(s.id);
+                    return (
+                      <button
+                        key={s.id}
+                        onClick={() => toggleStaffSelection(s.id)}
+                        className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition ${
+                          selected
+                            ? "bg-orange-500/15 ring-1 ring-orange-500/40"
+                            : "hover:bg-slate-800"
+                        }`}
+                      >
+                        {/* Avatar */}
+                        <div className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${
+                          selected
+                            ? "bg-orange-500/30 text-orange-200"
+                            : "bg-slate-700 text-slate-300"
+                        }`}>
+                          {s.name.split(/\s+/).map((w) => w[0]).join("").toUpperCase().slice(0, 2) || "?"}
+                        </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="truncate text-xs font-medium text-white">{s.name}</div>
+                          <div className="truncate text-[10px] text-slate-400">{s.role}</div>
+                        </div>
+                        {/* Online indicator */}
+                        <span className="h-2 w-2 shrink-0 rounded-full bg-green-500" title="Active" />
+                        {/* Checkbox */}
+                        <div className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
+                          selected
+                            ? "border-orange-500 bg-orange-500"
+                            : "border-slate-600 bg-slate-800"
+                        }`}>
+                          {selected && (
+                            <svg viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" className="h-3 w-3">
+                              <path d="M20 6L9 17l-5-5" />
+                            </svg>
+                          )}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Action footer */}
+                <div className="flex items-center justify-between border-t border-slate-700/50 px-3 py-2">
+                  <span className="text-[10px] text-slate-500">
+                    {selectedStaffIds.size > 0 ? `${selectedStaffIds.size} selected` : "Select staff to call"}
+                  </span>
+                  <button
+                    onClick={handleAddSelectedStaff}
+                    disabled={selectedStaffIds.size === 0}
+                    className="flex items-center gap-1 rounded-lg bg-gradient-to-r from-orange-500 to-red-600 px-3 py-1.5 text-[11px] font-semibold text-white transition hover:opacity-90 disabled:opacity-40"
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3 w-3">
+                      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.362 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0 1 22 16.92z" />
+                    </svg>
+                    Call
                   </button>
                 </div>
               </div>

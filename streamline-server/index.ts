@@ -45,6 +45,7 @@ import eduRoomsRoutes from "./routes/eduRooms";
 import eduRecordingsRoutes from "./routes/eduRecordings";
 import eduStudentsRoutes from "./routes/eduStudents";
 import eduStaffRoutes from "./routes/eduStaff";
+import eduChatRoutes from "./routes/eduChat";
 import eduPortalRoutes from "./routes/eduPortal";
 import corpMeRoutes from "./routes/corpMe";
 import corpBroadcastsRoutes from "./routes/corpBroadcasts";
@@ -293,6 +294,8 @@ app.use("/api/edu", eduRecordingsRoutes);
 app.use("/api/edu", eduStudentsRoutes);
 // EDU staff management (admin CRUD for pending staff + onboarding codes)
 app.use("/api/edu", eduStaffRoutes);
+// EDU faculty chat (rooms & messages)
+app.use("/api/edu", eduChatRoutes);
 
 // Corporate lane routes
 app.use("/api/corp", corpMeRoutes);

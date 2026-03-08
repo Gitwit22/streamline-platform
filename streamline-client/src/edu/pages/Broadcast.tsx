@@ -130,6 +130,57 @@ function ChecklistRow({ label, ok, detail }: { label: string; ok: boolean; detai
   );
 }
 
+/** Renders a remote participant tile with track attachment */
+function BroadcastRemoteTile({ rp }: { rp: { identity: string; name: string; videoTrack: any; audioTrack: any } }) {
+  const videoEl = useRef<HTMLVideoElement>(null);
+  const audioEl = useRef<HTMLAudioElement>(null);
+
+  useEffect(() => {
+    if (rp.videoTrack && videoEl.current) {
+      rp.videoTrack.attach(videoEl.current);
+      return () => { try { rp.videoTrack.detach(videoEl.current); } catch {} };
+    }
+  }, [rp.videoTrack]);
+
+  useEffect(() => {
+    if (rp.audioTrack && audioEl.current) {
+      rp.audioTrack.attach(audioEl.current);
+      return () => { try { rp.audioTrack.detach(audioEl.current); } catch {} };
+    }
+  }, [rp.audioTrack]);
+
+  const initials = rp.name
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase())
+    .join("") || "?";
+
+  return (
+    <div className="relative aspect-video overflow-hidden rounded-xl border border-slate-700 bg-slate-950">
+      {rp.videoTrack ? (
+        <video ref={videoEl} autoPlay playsInline className="h-full w-full object-cover" />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-slate-800 text-lg font-bold text-white">
+            {initials}
+          </div>
+        </div>
+      )}
+      <audio ref={audioEl} autoPlay />
+      <div className="absolute bottom-1 left-1 flex items-center gap-1 rounded-md bg-black/60 px-1.5 py-0.5">
+        {!rp.audioTrack && (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3 w-3 text-red-400">
+            <line x1="1" y1="1" x2="23" y2="23" />
+            <path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6" />
+          </svg>
+        )}
+        <span className="text-[10px] text-white">{rp.name}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function Broadcast() {
   const me = useEduMe();
   const loc = useLocation();
@@ -440,6 +491,10 @@ export default function Broadcast() {
   const [goLiveError, setGoLiveError] = useState<string | null>(null);
   const [viewerCount, setViewerCount] = useState(0);
 
+  // Remote participants from LiveKit (co-hosts / talent in the room)
+  type RemotePart = { identity: string; name: string; videoTrack: any | null; audioTrack: any | null };
+  const [remoteParticipants, setRemoteParticipants] = useState<Map<string, RemotePart>>(new Map());
+
   // Local producer A/V controls (tracked while live)
   const [localCamOn, setLocalCamOn] = useState(true);
   const [localMicOn, setLocalMicOn] = useState(true);
@@ -703,6 +758,32 @@ export default function Broadcast() {
 
       room.on(RoomEvent.ParticipantConnected, () => setViewerCount(room.remoteParticipants.size));
       room.on(RoomEvent.ParticipantDisconnected, () => setViewerCount(room.remoteParticipants.size));
+
+      // ── Remote participant sync ─────────────────────────────
+      const syncRemotes = () => {
+        const next = new Map<string, RemotePart>();
+        for (const [, p] of room.remoteParticipants) {
+          let videoTrack: any = null;
+          let audioTrack: any = null;
+          for (const pub of p.trackPublications.values()) {
+            if (pub.track && (pub.source === Track.Source.Camera || pub.source === Track.Source.ScreenShare)) videoTrack = pub.track;
+            if (pub.track && pub.source === Track.Source.Microphone) audioTrack = pub.track;
+          }
+          next.set(p.identity, {
+            identity: p.identity,
+            name: p.name || p.identity || "Participant",
+            videoTrack,
+            audioTrack,
+          });
+        }
+        setRemoteParticipants(new Map(next));
+      };
+      room.on(RoomEvent.ParticipantConnected, syncRemotes);
+      room.on(RoomEvent.ParticipantDisconnected, syncRemotes);
+      room.on(RoomEvent.TrackSubscribed, syncRemotes);
+      room.on(RoomEvent.TrackUnsubscribed, syncRemotes);
+      room.on(RoomEvent.TrackMuted, syncRemotes);
+      room.on(RoomEvent.TrackUnmuted, syncRemotes);
 
       // Handle unexpected disconnection (network drop, server timeout, token expiry)
       room.on(RoomEvent.Disconnected, () => {
@@ -1791,6 +1872,21 @@ export default function Broadcast() {
               </div>
             </div>
           </div>
+
+          {/* Co-hosts / participants in the LiveKit room */}
+          {remoteParticipants.size > 0 && (
+            <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">
+              <div className="mb-4">
+                <div className="text-lg font-semibold text-white">Room Participants</div>
+                <div className="mt-1 text-sm text-slate-400">{remoteParticipants.size} other{remoteParticipants.size !== 1 ? "s" : ""} in the room</div>
+              </div>
+              <div className={`grid gap-3 ${remoteParticipants.size <= 2 ? "grid-cols-2" : "grid-cols-3"}`}>
+                {Array.from(remoteParticipants.values()).map((rp) => (
+                  <BroadcastRemoteTile key={rp.identity} rp={rp} />
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Pre-recorded media playback controls */}
           <div className="rounded-2xl border border-slate-800/50 bg-slate-900/50 p-6">

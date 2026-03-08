@@ -4,7 +4,7 @@ import { useEduMe } from "../layout/EduProtectedRoute";
 import { apiFetchAuth } from "../../lib/api";
 import { goLiveEduBroadcast, stopEduBroadcast, connectToEduRoom, type EduBroadcast, type GoLiveResponse } from "../api/broadcasts";
 import { apiStartRecording, apiStopRecording } from "../../lib/api";
-import type { Room as LkRoom } from "livekit-client";
+import type { Room as LkRoom, RemoteParticipant, RemoteTrackPublication, RemoteTrack } from "livekit-client";
 
 /* ── Types ─────────────────────────────────────────────────────── */
 
@@ -29,6 +29,67 @@ type Participant = {
   hasAudio: boolean;
   role: "host" | "producer" | "talent" | "participant";
 };
+
+/** State tracked per remote LiveKit participant */
+type RemotePartState = {
+  identity: string;
+  name: string;
+  videoTrack: RemoteTrack | null;
+  audioTrack: RemoteTrack | null;
+};
+
+/** Renders a remote participant's video + audio, attaching tracks via refs */
+function RemoteParticipantTile({ rp }: { rp: RemotePartState }) {
+  const videoEl = useRef<HTMLVideoElement>(null);
+  const audioEl = useRef<HTMLAudioElement>(null);
+
+  useEffect(() => {
+    if (rp.videoTrack && videoEl.current) {
+      (rp.videoTrack as any).attach(videoEl.current);
+      return () => { try { (rp.videoTrack as any).detach(videoEl.current); } catch {} };
+    }
+  }, [rp.videoTrack]);
+
+  useEffect(() => {
+    if (rp.audioTrack && audioEl.current) {
+      (rp.audioTrack as any).attach(audioEl.current);
+      return () => { try { (rp.audioTrack as any).detach(audioEl.current); } catch {} };
+    }
+  }, [rp.audioTrack]);
+
+  const initials = rp.name
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase())
+    .join("") || "?";
+
+  return (
+    <div className="relative overflow-hidden rounded-xl border border-slate-700 bg-slate-950">
+      {rp.videoTrack ? (
+        <video ref={videoEl} autoPlay playsInline className="h-full w-full object-cover" />
+      ) : (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-2">
+          <div className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-800 text-2xl font-bold text-white">
+            {initials}
+          </div>
+        </div>
+      )}
+      {/* Hidden audio element for the remote participant */}
+      <audio ref={audioEl} autoPlay />
+      {/* Name badge */}
+      <div className="absolute bottom-2 left-2 flex items-center gap-1.5 rounded-lg bg-black/60 px-2 py-1">
+        {!rp.audioTrack && (
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3 w-3 text-red-400">
+            <line x1="1" y1="1" x2="23" y2="23" />
+            <path d="M9 9v3a3 3 0 005.12 2.12M15 9.34V4a3 3 0 00-5.94-.6" />
+          </svg>
+        )}
+        <span className="text-xs text-white">{rp.name}</span>
+      </div>
+    </div>
+  );
+}
 
 /* ── Component ─────────────────────────────────────────────────── */
 
@@ -60,6 +121,9 @@ export default function RoomView() {
 
   // Demo participants
   const [participants, setParticipants] = useState<Participant[]>([]);
+
+  // Remote participants from LiveKit
+  const [remoteParticipants, setRemoteParticipants] = useState<Map<string, RemotePartState>>(new Map());
 
   // Broadcast state
   const [broadcastBusy, setBroadcastBusy] = useState(false);
@@ -171,6 +235,57 @@ export default function RoomView() {
         if (camPub?.track && localVideoRef.current) {
           camPub.track.attach(localVideoRef.current);
         }
+
+        // ─── Remote participant handling ────────────────────────
+        const buildState = (p: RemoteParticipant): RemotePartState => {
+          let videoTrack: RemoteTrack | null = null;
+          let audioTrack: RemoteTrack | null = null;
+          for (const pub of p.trackPublications.values()) {
+            if (pub.track && pub.source === Track.Source.Camera) videoTrack = pub.track as RemoteTrack;
+            if (pub.track && pub.source === Track.Source.Microphone) audioTrack = pub.track as RemoteTrack;
+            if (pub.track && pub.source === Track.Source.ScreenShare) videoTrack = pub.track as RemoteTrack;
+          }
+          return {
+            identity: p.identity,
+            name: p.name || p.identity || "Participant",
+            videoTrack,
+            audioTrack,
+          };
+        };
+
+        const syncRemotes = () => {
+          const next = new Map<string, RemotePartState>();
+          for (const [, p] of lkRoom.remoteParticipants) {
+            next.set(p.identity, buildState(p));
+          }
+          setRemoteParticipants(new Map(next));
+          // Keep legacy participants list in sync
+          setParticipants((prev) => {
+            const self = prev.find((p) => p.isSelf);
+            const remotes: Participant[] = [];
+            for (const [, rp] of next) {
+              remotes.push({
+                id: rp.identity,
+                name: rp.name,
+                isSelf: false,
+                hasVideo: !!rp.videoTrack,
+                hasAudio: !!rp.audioTrack,
+                role: "participant",
+              });
+            }
+            return self ? [self, ...remotes] : remotes;
+          });
+        };
+
+        lkRoom.on(RoomEvent.ParticipantConnected, syncRemotes);
+        lkRoom.on(RoomEvent.ParticipantDisconnected, syncRemotes);
+        lkRoom.on(RoomEvent.TrackSubscribed, syncRemotes);
+        lkRoom.on(RoomEvent.TrackUnsubscribed, syncRemotes);
+        lkRoom.on(RoomEvent.TrackMuted, syncRemotes);
+        lkRoom.on(RoomEvent.TrackUnmuted, syncRemotes);
+
+        // Sync any participants already in the room
+        syncRemotes();
 
         setLkConnected(true);
       } catch (e: any) {
@@ -435,8 +550,8 @@ export default function RoomView() {
           {/* Participant video grid */}
           <div className="flex-1 min-h-0 overflow-y-auto p-4">
             <div className={`grid h-full gap-3 ${
-              participants.length <= 1 ? "grid-cols-1" :
-              participants.length <= 4 ? "grid-cols-2" :
+              (1 + remoteParticipants.size) <= 1 ? "grid-cols-1" :
+              (1 + remoteParticipants.size) <= 4 ? "grid-cols-2" :
               "grid-cols-3"
             }`}>
               {/* Self tile */}
@@ -473,28 +588,9 @@ export default function RoomView() {
                 </div>
               </div>
 
-              {/* Remote participants (placeholder for LiveKit integration) */}
-              {participants
-                .filter((p) => !p.isSelf)
-                .map((p) => (
-                <div key={p.id} className="relative flex items-center justify-center overflow-hidden rounded-xl border border-slate-700 bg-slate-950">
-                  <div className="flex h-16 w-16 items-center justify-center rounded-full bg-slate-800 text-2xl font-bold text-white">
-                    {p.name
-                      .split(" ")
-                      .filter(Boolean)
-                      .slice(0, 2)
-                      .map((w) => w[0]?.toUpperCase())
-                      .join("") || "?"}
-                  </div>
-                  <div className="absolute bottom-2 left-2 flex items-center gap-1.5 rounded-lg bg-black/60 px-2 py-1">
-                    {!p.hasAudio && (
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-3 w-3 text-red-400">
-                        <line x1="1" y1="1" x2="23" y2="23" />
-                      </svg>
-                    )}
-                    <span className="text-xs text-white">{p.name}</span>
-                  </div>
-                </div>
+              {/* Remote participants — real LiveKit tracks */}
+              {Array.from(remoteParticipants.values()).map((rp) => (
+                <RemoteParticipantTile key={rp.identity} rp={rp} />
               ))}
             </div>
           </div>
