@@ -106,9 +106,10 @@ export function HlsPlayer({
 
     if (autoPlay) {
       video.muted = true;
-      const p = video.play();
-      p?.catch(() => {
-        // Autoplay blocked, user interaction required
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video.play().catch(() => {
+          // Autoplay blocked, user interaction required
+        });
       });
     }
 
