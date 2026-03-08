@@ -201,7 +201,9 @@ export default function LiveRoomViewer() {
     hls.attachMedia(video);
 
     video.muted = true;
-    video.play()?.catch(() => { /* autoplay blocked */ });
+    hls.on(Hls.Events.MANIFEST_PARSED, () => {
+      video.play()?.catch(() => { /* autoplay blocked */ });
+    });
 
     return () => {
       try { hls.destroy(); } catch { /* ignore */ }
