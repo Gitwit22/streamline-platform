@@ -6,6 +6,7 @@ import {
   updateEduCall,
   type EduCall,
 } from "../api/calls";
+import { getEduCallTokenDM } from "../api/callToken";
 import {
   fetchPendingStaff,
   type PendingStaffRecord,
@@ -14,6 +15,7 @@ import {
   listEduPeopleFromApi,
   type EduPerson,
 } from "../api/people";
+import type { Room as LkRoom } from "livekit-client";
 
 /* ── Tabs ──────────────────────────────────────────────────────── */
 
@@ -58,6 +60,15 @@ export default function EduCalls() {
   const [screenSharing, setScreenSharing] = useState(false);
   const [recording, setRecording] = useState(false);
 
+  // LiveKit connection state
+  const lkRoomRef = useRef<LkRoom | null>(null);
+  const [lkConnected, setLkConnected] = useState(false);
+  const [lkError, setLkError] = useState<string | null>(null);
+  const [connectingLk, setConnectingLk] = useState(false);
+  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
+
   // Elapsed time ticker
   const [tick, setTick] = useState(0);
   const tickRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -70,6 +81,85 @@ export default function EduCalls() {
   const [selectedStaffIds, setSelectedStaffIds] = useState<Set<string>>(new Set());
 
   const activeCall = calls.find((c) => c.status === "active");
+
+  /* ── LiveKit connect / disconnect ─────────────────────────── */
+
+  const connectToLiveKit = useCallback(async (targetUserId: string) => {
+    setConnectingLk(true);
+    setLkError(null);
+    try {
+      const { token, roomName, livekitUrl } = await getEduCallTokenDM(targetUserId);
+      if (!livekitUrl) throw new Error("LiveKit URL not configured on server");
+
+      const { Room: LkRoomClass, RoomEvent, Track } = await import("livekit-client");
+      const lkRoom = new LkRoomClass({ adaptiveStream: true, dynacast: true });
+      lkRoomRef.current = lkRoom;
+
+      lkRoom.on(RoomEvent.Disconnected, () => {
+        console.warn("[EduCalls] LiveKit disconnected");
+        lkRoomRef.current = null;
+        setLkConnected(false);
+      });
+
+      // Attach remote tracks
+      lkRoom.on(RoomEvent.TrackSubscribed, (track, _pub, _participant) => {
+        if (track.kind === Track.Kind.Video && remoteVideoRef.current) {
+          track.attach(remoteVideoRef.current);
+        } else if (track.kind === Track.Kind.Audio && remoteAudioRef.current) {
+          track.attach(remoteAudioRef.current);
+        }
+      });
+
+      lkRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
+        track.detach();
+      });
+
+      await lkRoom.connect(livekitUrl, token);
+
+      // Enable camera + mic by default
+      await lkRoom.localParticipant.setCameraEnabled(true);
+      await lkRoom.localParticipant.setMicrophoneEnabled(true);
+
+      // Attach local camera to preview
+      const camPub = lkRoom.localParticipant.getTrackPublication(Track.Source.Camera);
+      if (camPub?.track && localVideoRef.current) {
+        camPub.track.attach(localVideoRef.current);
+      }
+
+      setLkConnected(true);
+      setMicMuted(false);
+      setCamOff(false);
+      console.log("[EduCalls] Connected to LiveKit room:", roomName);
+    } catch (err: any) {
+      console.error("[EduCalls] LiveKit connect error:", err);
+      setLkError(err?.message || "Failed to connect to call");
+      lkRoomRef.current = null;
+    } finally {
+      setConnectingLk(false);
+    }
+  }, []);
+
+  const disconnectLiveKit = useCallback(() => {
+    if (lkRoomRef.current) {
+      try { lkRoomRef.current.disconnect(); } catch { /* ignore */ }
+      lkRoomRef.current = null;
+    }
+    setLkConnected(false);
+    setMicMuted(false);
+    setCamOff(false);
+    setScreenSharing(false);
+    setRecording(false);
+  }, []);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (lkRoomRef.current) {
+        try { lkRoomRef.current.disconnect(); } catch { /* ignore */ }
+        lkRoomRef.current = null;
+      }
+    };
+  }, []);
 
   // Tick for elapsed time when there's an active call
   useEffect(() => {
@@ -195,11 +285,22 @@ export default function EduCalls() {
     try {
       const title = `Call with ${selectedCallUser.name}`;
       const c = await createEduCall({ title, participants: [selectedCallUser.id] });
-      setCalls((prev) => [c, ...prev]);
+
+      // Immediately activate the call
+      const activated = await updateEduCall(c.id, { status: "active" });
+      setCalls((prev) => [activated, ...prev]);
+
       setNewTitle("");
       setSelectedCallUser(null);
       setNewCallSearch("");
       setShowNew(false);
+      setActiveTab("Active Calls");
+
+      // Connect to LiveKit with the target user
+      await connectToLiveKit(selectedCallUser.id);
+    } catch (err: any) {
+      console.error("[EduCalls] create error:", err);
+      setLkError(err?.message || "Failed to start call");
     } finally {
       setCreating(false);
     }
@@ -219,16 +320,20 @@ export default function EduCalls() {
     setCalls((prev) => prev.map((x) => (x.id === c.id ? updated : x)));
     // Switch to Active Calls tab so the user sees the call UI
     setActiveTab("Active Calls");
+
+    // Connect to LiveKit — use the first participant that isn't us
+    const targetUid = c.participants.find((p) => p !== me.uid) || c.createdBy;
+    if (targetUid && targetUid !== me.uid) {
+      await connectToLiveKit(targetUid);
+    }
   };
 
   const handleEndCall = async (c: EduCall) => {
+    // Disconnect LiveKit first
+    disconnectLiveKit();
+
     const updated = await updateEduCall(c.id, { status: "completed" });
     setCalls((prev) => prev.map((x) => (x.id === c.id ? updated : x)));
-    // Reset controls
-    setMicMuted(false);
-    setCamOff(false);
-    setScreenSharing(false);
-    setRecording(false);
   };
 
   const handleAddSelectedStaff = () => {
@@ -454,16 +559,62 @@ export default function EduCalls() {
               )}
             </div>
 
-            <div className="text-center">
-              <div className="mx-auto mb-3 flex h-20 w-20 items-center justify-center rounded-full bg-gradient-to-br from-orange-500/30 to-red-600/30 text-2xl font-bold text-orange-300">
-                {activeCall.title.charAt(0)}
-              </div>
-              <p className="font-semibold text-white">{activeCall.title}</p>
-              <p className="mt-1 text-sm text-slate-400">
-                {activeCall.participants.length} participant{activeCall.participants.length !== 1 ? "s" : ""}
-                {activeCall.startedAt ? ` · Started ${formatTime(activeCall.startedAt)}` : ""}
-              </p>
+            {/* Video feeds */}
+            <div className="absolute inset-0 flex items-center justify-center">
+              {/* Remote video (full area) */}
+              <video
+                ref={remoteVideoRef}
+                autoPlay
+                playsInline
+                className="h-full w-full object-cover"
+              />
+              <audio ref={remoteAudioRef} autoPlay />
+              {/* Local video (picture-in-picture) */}
+              <video
+                ref={localVideoRef}
+                autoPlay
+                playsInline
+                muted
+                className="absolute bottom-4 right-4 h-32 w-44 rounded-xl border-2 border-slate-600 bg-slate-950 object-cover shadow-lg"
+              />
             </div>
+
+            {/* Connecting / error overlay */}
+            {connectingLk && (
+              <div className="absolute inset-0 flex items-center justify-center bg-slate-950/80 z-10">
+                <div className="flex flex-col items-center gap-3">
+                  <div className="h-8 w-8 animate-spin rounded-full border-3 border-orange-500 border-t-transparent" />
+                  <span className="text-sm text-slate-300">Connecting…</span>
+                </div>
+              </div>
+            )}
+            {lkError && (
+              <div className="absolute inset-0 flex items-center justify-center bg-slate-950/80 z-10">
+                <div className="flex flex-col items-center gap-2 text-center px-6">
+                  <span className="text-red-400 text-sm">{lkError}</span>
+                  <button onClick={() => setLkError(null)} className="text-xs text-slate-400 hover:text-white">Dismiss</button>
+                </div>
+              </div>
+            )}
+            {!lkConnected && !connectingLk && !lkError && (
+              <div className="text-center z-10">
+                <div className="mx-auto mb-3 flex h-20 w-20 items-center justify-center rounded-full bg-gradient-to-br from-orange-500/30 to-red-600/30 text-2xl font-bold text-orange-300">
+                  {activeCall.title.charAt(0)}
+                </div>
+                <p className="font-semibold text-white">{activeCall.title}</p>
+                <p className="mt-1 text-sm text-slate-400">Waiting for connection…</p>
+              </div>
+            )}
+
+            {lkConnected && (
+              <div className="absolute bottom-4 left-4 z-10">
+                <p className="text-xs text-green-400 font-medium">● Connected</p>
+                <p className="mt-0.5 text-xs text-slate-400">
+                  {activeCall.participants.length} participant{activeCall.participants.length !== 1 ? "s" : ""}
+                  {activeCall.startedAt ? ` · Started ${formatTime(activeCall.startedAt)}` : ""}
+                </p>
+              </div>
+            )}
             {/* Participant avatars */}
             <div className="absolute right-4 top-4 flex flex-col gap-2">
               {activeCall.participants.slice(0, 4).map((p, i) => (
@@ -601,7 +752,16 @@ export default function EduCalls() {
           <div className="flex items-center justify-center gap-3 border-t border-slate-700 bg-slate-900 py-4">
             {/* Mic toggle */}
             <button
-              onClick={() => setMicMuted(!micMuted)}
+              onClick={async () => {
+                const room = lkRoomRef.current;
+                if (room) {
+                  const next = !micMuted;
+                  await room.localParticipant.setMicrophoneEnabled(!next);
+                  setMicMuted(next);
+                } else {
+                  setMicMuted(!micMuted);
+                }
+              }}
               className={`flex h-10 w-10 items-center justify-center rounded-lg border transition ${
                 micMuted
                   ? "border-red-500/40 bg-red-500/20 text-red-400"
@@ -622,7 +782,24 @@ export default function EduCalls() {
             </button>
             {/* Camera toggle */}
             <button
-              onClick={() => setCamOff(!camOff)}
+              onClick={async () => {
+                const room = lkRoomRef.current;
+                if (room) {
+                  const next = !camOff;
+                  await room.localParticipant.setCameraEnabled(!next);
+                  setCamOff(next);
+                  // Re-attach or detach local preview
+                  if (!next && localVideoRef.current) {
+                    const { Track } = await import("livekit-client");
+                    const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+                    if (camPub?.track) camPub.track.attach(localVideoRef.current);
+                  } else if (localVideoRef.current) {
+                    localVideoRef.current.srcObject = null;
+                  }
+                } else {
+                  setCamOff(!camOff);
+                }
+              }}
               className={`flex h-10 w-10 items-center justify-center rounded-lg border transition ${
                 camOff
                   ? "border-red-500/40 bg-red-500/20 text-red-400"
@@ -645,7 +822,16 @@ export default function EduCalls() {
             </button>
             {/* Screen share toggle */}
             <button
-              onClick={() => setScreenSharing(!screenSharing)}
+              onClick={async () => {
+                const room = lkRoomRef.current;
+                if (room) {
+                  const next = !screenSharing;
+                  await room.localParticipant.setScreenShareEnabled(next);
+                  setScreenSharing(next);
+                } else {
+                  setScreenSharing(!screenSharing);
+                }
+              }}
               className={`flex h-10 w-10 items-center justify-center rounded-lg border transition ${
                 screenSharing
                   ? "border-blue-500/40 bg-blue-500/20 text-blue-400"
