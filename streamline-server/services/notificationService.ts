@@ -1,5 +1,5 @@
 /**
- * notificationService — Centralised notification creation and management.
+ * notificationService — Centralized notification creation and management.
  *
  * ALL notifications in StreamLine must flow through this service.
  * Never call Firestore directly for notifications from route handlers.
@@ -111,11 +111,18 @@ function notificationsCol() {
 }
 
 function serializeNotification(id: string, data: any): NotificationDoc {
+  const type = typeof data.type === "string" ? (data.type as NotificationType) : "system_message";
+  const category = typeof data.category === "string" ? (data.category as NotificationCategory) : "system";
+
+  if (typeof data.type !== "string" || typeof data.category !== "string") {
+    console.warn(`[notificationService] Notification ${id} has missing type/category, using defaults`);
+  }
+
   return {
     id,
     userId: typeof data.userId === "string" ? data.userId : "",
-    type: typeof data.type === "string" ? (data.type as NotificationType) : "system_message",
-    category: typeof data.category === "string" ? (data.category as NotificationCategory) : "system",
+    type,
+    category,
     title: typeof data.title === "string" ? data.title : "",
     message: typeof data.message === "string" ? data.message : "",
     link: typeof data.link === "string" ? data.link : null,
