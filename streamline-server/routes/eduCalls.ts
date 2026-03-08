@@ -64,11 +64,12 @@ router.get("/calls", requireAuth as any, async (req: any, res) => {
 
     const snap = await tenantCol("eduCalls")
       .where("orgId", "==", ctx.orgId)
-      .orderBy("createdAt", "desc")
       .limit(limit)
       .get();
 
-    let calls = snap.docs.map((d: any) => normalizeCall(d.id, d.data()));
+    let calls = snap.docs
+      .map((d: any) => normalizeCall(d.id, d.data()))
+      .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
 
     const statusFilter = asString(req.query.status as string)
       .split(",")
@@ -209,16 +210,18 @@ router.get("/calls/pending", requireAuth as any, async (req: any, res) => {
 
     // Find calls where this user is a participant, status is "scheduled" (ringing),
     // and createdBy is NOT this user (so it's an incoming call).
+    // Simple query: just filter by orgId, then filter in-memory to avoid
+    // needing a Firestore composite index.
     const snap = await tenantCol("eduCalls")
       .where("orgId", "==", ctx.orgId)
-      .where("status", "==", "scheduled")
-      .orderBy("createdAt", "desc")
-      .limit(10)
+      .limit(50)
       .get();
 
     const pending = snap.docs
       .map((d: any) => normalizeCall(d.id, d.data()))
-      .filter((c) => c.createdBy !== uid && c.participants.includes(uid));
+      .filter((c) => c.status === "scheduled" && c.createdBy !== uid && c.participants.includes(uid))
+      .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+      .slice(0, 10);
 
     return res.json({ calls: pending });
   } catch (err: any) {
