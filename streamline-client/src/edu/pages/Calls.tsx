@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { useLocation } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import {
   fetchEduCalls,
@@ -40,6 +41,8 @@ function formatElapsed(ms: number) {
 
 export default function EduCalls() {
   const me = useEduMe();
+  const location = useLocation();
+  const navState = location.state as { acceptedCallId?: string; callerUid?: string } | null;
 
   const [activeTab, setActiveTab] = useState<Tab>("Active Calls");
   const [calls, setCalls] = useState<EduCall[]>([]);
@@ -279,6 +282,45 @@ export default function EduCalls() {
     load();
   }, [load]);
 
+  // Auto-connect when navigated from IncomingCallBanner (accepted a call)
+  const autoConnectedRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      navState?.acceptedCallId &&
+      navState?.callerUid &&
+      !lkConnected &&
+      !connectingLk &&
+      autoConnectedRef.current !== navState.acceptedCallId
+    ) {
+      autoConnectedRef.current = navState.acceptedCallId;
+      setActiveTab("Active Calls");
+      connectToLiveKit(navState.callerUid);
+      // Clear navigation state so refreshes don't re-trigger
+      window.history.replaceState({}, "");
+    }
+  }, [navState, lkConnected, connectingLk, connectToLiveKit]);
+
+  // Auto-connect when page loads and there's an active call we haven't connected to
+  useEffect(() => {
+    if (
+      !loading &&
+      activeCall &&
+      !lkConnected &&
+      !connectingLk &&
+      !autoConnectedRef.current
+    ) {
+      // Find the other participant to connect to
+      const otherParticipant = activeCall.participants.find(
+        (p) => p !== me.uid && !p.endsWith(`_${me.uid}`)
+      );
+      const targetUid = otherParticipant || activeCall.createdBy;
+      if (targetUid && targetUid !== me.uid) {
+        autoConnectedRef.current = activeCall.id;
+        connectToLiveKit(targetUid);
+      }
+    }
+  }, [loading, activeCall, lkConnected, connectingLk, me.uid, calls, connectToLiveKit]);
+
   const handleCreate = async () => {
     if (!selectedCallUser) return;
     setCreating(true);
@@ -325,9 +367,13 @@ export default function EduCalls() {
     // Switch to Active Calls tab so the user sees the call UI
     setActiveTab("Active Calls");
 
-    // Connect to LiveKit — use the first participant that isn't us
-    const targetUid = c.participants.find((p) => p !== me.uid) || c.createdBy;
+    // Connect to LiveKit — use the first participant that isn't us.
+    // Participants may be raw UIDs or composite orgId_uid format.
+    const targetUid = c.participants.find(
+      (p) => p !== me.uid && !p.endsWith(`_${me.uid}`)
+    ) || c.createdBy;
     if (targetUid && targetUid !== me.uid) {
+      autoConnectedRef.current = c.id;
       await connectToLiveKit(targetUid);
     }
   };

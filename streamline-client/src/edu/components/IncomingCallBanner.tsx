@@ -7,8 +7,8 @@ import {
   type PendingEduCall,
 } from "../api/calls";
 
-/** Polling interval in ms — checks for incoming calls every 5 seconds. */
-const POLL_INTERVAL = 5_000;
+/** Polling interval in ms — checks for incoming calls every 2 seconds. */
+const POLL_INTERVAL = 2_000;
 
 /**
  * Site-wide incoming-call notification.
@@ -105,8 +105,10 @@ export default function IncomingCallBanner() {
     setAccepting(call.id);
     try {
       await updateEduCall(call.id, { status: "active" });
-      // Navigate to the Calls page on accept
-      navigate("/streamline/edu/calls");
+      // Navigate to the Calls page with call info so it auto-connects
+      navigate("/streamline/edu/calls", {
+        state: { acceptedCallId: call.id, callerUid: call.createdBy },
+      });
     } finally {
       setAccepting(null);
       setCalls((prev) => prev.filter((c) => c.id !== call.id));
