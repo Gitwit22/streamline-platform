@@ -5,7 +5,7 @@ import { setLogLevel, LogLevel } from "livekit-client";
 import App from "./App";
 import "@livekit/components-styles";
 import "./index.css";
-import { ErrorBoundary } from "./components/ErrorBoundary";
+import { ErrorBoundary } from "./core/components/ErrorBoundary";
 
 // Reduce LiveKit SDK console noise and avoid logging room/participant identifiers.
 // In production, only warnings+errors are logged; in development, keep info-level.

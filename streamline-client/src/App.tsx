@@ -1,20 +1,20 @@
 import { useEffect, useState } from "react";
 import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
-import { LoginPage } from "./pages/LoginPage";
-import { SignupPage } from "./pages/SignupPage";
-import Privacy from "./pages/Privacy";
-import Terms from "./pages/Terms";
-import Support from "./pages/Support";
-import BillingCanceled from "./pages/BillingCanceled";
-import BillingSuccess from "./pages/BillingSuccess";
-import { ProtectedRoute } from "./components/ProtectedRoute";
-import { creatorRoutes } from "./creator/routes";
+import { LoginPage } from "@/core/pages/LoginPage";
+import { SignupPage } from "@/core/pages/SignupPage";
+import Privacy from "@/core/pages/Privacy";
+import Terms from "@/core/pages/Terms";
+import Support from "@/core/pages/Support";
+import BillingCanceled from "@/core/pages/BillingCanceled";
+import BillingSuccess from "@/core/pages/BillingSuccess";
+import { ProtectedRoute } from "@/core/components/ProtectedRoute";
+import { movieMakerRoutes } from "@/lanes/movie-maker/routes";
 
-import { clearAuthStorage } from "./lib/api";
-import { clearMeCache } from "./lib/meCache";
-import { clearPlatformFlagsCache } from "./lib/platformFlagsCache";
-import { useFeatureAccess } from "./hooks/useFeatureAccess";
-import { useEffectiveEntitlements } from "./hooks/useEffectiveEntitlements";
+import { clearAuthStorage } from "@/core/lib/api";
+import { clearMeCache } from "@/core/lib/meCache";
+import { clearPlatformFlagsCache } from "@/core/lib/platformFlagsCache";
+import { useFeatureAccess } from "@/core/hooks/useFeatureAccess";
+import { useEffectiveEntitlements } from "@/core/hooks/useEffectiveEntitlements";
 
 
 function App() {
@@ -153,8 +153,8 @@ function App() {
       <Route path="/billing/canceled" element={<BillingCanceled />} />
       <Route path="/billing/success" element={<BillingSuccess />} />
 
-      {/* Creator lane */}
-      {creatorRoutes({ canContentLibrary, canMyContentRecordings, canProjects, canEditor, canMyContent, myContentTarget })}
+      {/* Movie Maker lane */}
+      {movieMakerRoutes({ canContentLibrary, canMyContentRecordings, canProjects, canEditor, canMyContent, myContentTarget })}
 
       </Routes>
     </>
