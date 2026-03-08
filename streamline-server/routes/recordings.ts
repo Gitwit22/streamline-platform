@@ -112,6 +112,10 @@ async function assertMyContentRecordingsEnabled(res: any): Promise<boolean> {
 }
 
 async function requireMyContentRecordingsEnabled(req: any, res: any, next: any) {
+  // EDU bypass: room access tokens minted by the EDU system carry eduBypass=true.
+  // EDU accounts are covered by the school's subscription, not individual plans.
+  if ((req as any).roomAccess?.eduBypass) return next();
+
   if (!(await assertMyContentRecordingsEnabled(res))) return;
   return next();
 }
@@ -723,8 +727,8 @@ async function stopRecordingInternal(options: {
 router.post(
   "/start",
   requireAuth,
-  requireMyContentRecordingsEnabled as any,
   requireRoomAccessToken as any,
+  requireMyContentRecordingsEnabled as any,
   async (req, res) => {
   const startTime = Date.now();
   console.log("[recordings/start] Request received");
@@ -735,14 +739,17 @@ router.post(
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
-    // Feature access gate
-    const featureAccess = await canAccessFeature((req as any).account || uid, "recording");
-    if (!featureAccess.allowed) {
-      return res.status(403).json({
-        success: false,
-        error: featureAccess.code || LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
-        reason: featureAccess.reason || "Recording requires upgrade",
-      });
+    // Feature access gate (bypassed for EDU — school subscription covers members)
+    const isEduRecording = !!(req as any).roomAccess?.eduBypass;
+    if (!isEduRecording) {
+      const featureAccess = await canAccessFeature((req as any).account || uid, "recording");
+      if (!featureAccess.allowed) {
+        return res.status(403).json({
+          success: false,
+          error: featureAccess.code || LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
+          reason: featureAccess.reason || "Recording requires upgrade",
+        });
+      }
     }
 
     // Validate request
@@ -811,11 +818,14 @@ router.post(
     const recordingClass = rawRecordingClass === "emergency" ? "emergency" : null;
 
     // Plan + features (canonical limits via EffectiveEntitlements)
-    const entitlements = await getEffectiveEntitlements(uid);
-    const planId = entitlements.planId;
-    const plan = entitlements.plan.raw || {};
+    // EDU recordings bypass plan-based gates (school subscription covers all)
+    const entitlements = isEduRecording ? null : await getEffectiveEntitlements(uid);
+    const planId = entitlements?.planId || "edu";
+    const plan = entitlements?.plan?.raw || {};
 
     // Monthly usage gate: block non-overage plans; allow Pro and log totals.
+    // EDU bypasses usage gates — the school subscription manages limits externally.
+    if (!isEduRecording) {
     try {
       const monthKey = getCurrentMonthKey();
       const usageDocId = `${uid}_${monthKey}`;
@@ -856,12 +866,13 @@ router.post(
       // Do not block recording start on bookkeeping failures.
       console.error("[recordings/start] usage gate failed", e);
     }
+    } // end !isEduRecording usage gate
 
     const dualAllowed = !!(plan?.features?.dualRecording || plan?.features?.dual_recording);
     const allowHigherRecordingThanStream = !!(
       plan?.features?.allowHigherRecordingThanStream || plan?.features?.allow_higher_recording_than_stream
     );
-    const maxRecordingMinutesPerClip = Number(entitlements.limits.maxRecordingMinutesPerClip || 0);
+    const maxRecordingMinutesPerClip = Number(entitlements?.limits?.maxRecordingMinutesPerClip || 0);
 
     // Plan gate for dual recording (feature: dualRecording)
     if (mode === "dual" && !dualAllowed) {
@@ -1376,8 +1387,8 @@ router.post("/sweep", async (_req, res) => {
 router.post(
   "/stop",
   requireAuth,
-  requireMyContentRecordingsEnabled as any,
   requireRoomAccessToken as any,
+  requireMyContentRecordingsEnabled as any,
   async (req, res) => {
   console.log("[recordings/stop] Request received");
 

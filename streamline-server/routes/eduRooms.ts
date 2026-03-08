@@ -1,8 +1,11 @@
 import express from "express";
 import admin from "firebase-admin";
+import jwt from "jsonwebtoken";
 import { requireAuth } from "../middleware/requireAuth";
 import { writeEduAudit } from "../lib/eduAudit";
 import { tenantCol, globalCol } from "../lib/dbPaths";
+import { ensureRoomDoc } from "../services/rooms";
+import { getLiveKitSdk } from "../lib/livekit";
 
 const router = express.Router();
 
@@ -168,6 +171,123 @@ router.get("/rooms/:roomId", requireAuth as any, async (req: any, res) => {
     });
   } catch (err: any) {
     console.error("[eduRooms] GET /rooms/:roomId error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── POST /api/edu/rooms/:roomId/connect ─────────────────────────
+// Creates (or reuses) a LiveKit room for this EDU room and mints
+// tokens so the client can connect immediately on room entry —
+// before any broadcast or recording is started.
+router.post("/rooms/:roomId/connect", requireAuth as any, async (req: any, res) => {
+  try {
+    const uid = req.user?.uid;
+    if (!uid) return res.status(401).json({ error: "Unauthorized" });
+
+    const ctx = await getOrgContext(uid);
+    if (!ctx) return res.status(403).json({ error: "No org context" });
+
+    // Any org member can connect to a room
+    const roomId = req.params.roomId;
+    const snap = await tenantCol("rooms").doc(roomId).get();
+    if (!snap.exists) return res.status(404).json({ error: "Room not found" });
+
+    const data = snap.data() as any;
+    if (data.orgId !== ctx.orgId) return res.status(403).json({ error: "Not in your org" });
+
+    // Determine role-based canPublish
+    const canPublish = ctx.orgRole === "faculty_admin" ||
+      ctx.orgRole === "faculty_teacher" ||
+      ctx.orgRole === "student_producer" ||
+      ctx.orgRole === "student_producer_assigned";
+
+    // Use a stable LiveKit room name tied to the EDU room ID
+    const livekitRoomName = data.livekitRoomName || `edu-room-${roomId}`;
+
+    // Ensure the Firestore room doc has the livekitRoomName
+    await ensureRoomDoc({
+      roomId,
+      ownerId: data.createdBy || uid,
+      livekitRoomName,
+      roomType: data.roomType || "rtc",
+      initialStatus: "live",
+      visibility: "unlisted",
+      ...(data.savedEmbedId ? { savedEmbedId: data.savedEmbedId } : {}),
+    });
+
+    // Mint LiveKit participant token
+    const apiKey = process.env.LIVEKIT_API_KEY;
+    const apiSecret = process.env.LIVEKIT_API_SECRET;
+    if (!apiKey || !apiSecret) {
+      return res.status(500).json({ error: "LiveKit not configured" });
+    }
+    const { AccessToken } = await getLiveKitSdk();
+    const displayName = req.user?.name || req.user?.email || uid;
+    const identity = `edu-${uid}`;
+    const at = new AccessToken(apiKey, apiSecret, { identity, name: displayName });
+    at.addGrant({
+      room: livekitRoomName,
+      roomJoin: true,
+      canPublish,
+      canSubscribe: true,
+      canPublishData: true,
+    });
+    const lkToken = await at.toJwt();
+
+    // Mint room access token with EDU bypass flag
+    const roomAccessSecret = String(
+      process.env.ROOM_ACCESS_TOKEN_SECRET || process.env.JWT_SECRET || "dev-secret"
+    ).trim();
+    const roomAccessToken = jwt.sign(
+      {
+        roomId,
+        livekitRoomName,
+        role: canPublish ? "host" : "viewer",
+        identity,
+        eduBypass: true,
+        permissions: {
+          canStream: canPublish,
+          canRecord: canPublish,
+          canDestinations: canPublish,
+          canModerate: canPublish,
+          canLayout: canPublish,
+          canScreenShare: canPublish,
+          canInvite: canPublish,
+          canAnalytics: canPublish,
+          canMuteGuests: canPublish,
+          canRemoveGuests: canPublish,
+        },
+      },
+      roomAccessSecret,
+      { expiresIn: "12h" },
+    );
+
+    // LiveKit WebSocket URL for the client
+    const rawLkUrl = String(process.env.LIVEKIT_URL || "").trim();
+    let livekitUrl: string | null = null;
+    if (rawLkUrl) {
+      livekitUrl = /^https?:\/\//i.test(rawLkUrl)
+        ? rawLkUrl.replace(/^http:\/\//i, "ws://").replace(/^https:\/\//i, "wss://")
+        : rawLkUrl;
+    }
+
+    writeEduAudit({
+      orgId: ctx.orgId,
+      actorUid: uid,
+      actorName: displayName,
+      action: "room.connect",
+      targetId: roomId,
+    });
+
+    return res.json({
+      lkToken,
+      roomAccessToken,
+      livekitUrl,
+      livekitRoomName,
+      roomId,
+    });
+  } catch (err: any) {
+    console.error("[eduRooms] POST /rooms/:roomId/connect error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

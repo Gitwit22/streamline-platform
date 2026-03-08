@@ -18,6 +18,10 @@ export type RoomAccessClaims = {
   // True when the caller was elevated to host due to internal-admin override.
   // Useful for client UX decisions (e.g., avoid ending the room when an admin leaves).
   adminOverride?: boolean;
+  // True when the token was minted by the EDU system. Recording and other
+  // feature-access gates are bypassed because the school subscription covers
+  // all members rather than individual per-user plans.
+  eduBypass?: boolean;
 };
 
 function getRoomAccessSecret(): string {

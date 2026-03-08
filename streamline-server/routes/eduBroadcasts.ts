@@ -157,17 +157,44 @@ router.post("/broadcasts/go-live", requireAuth, async (req, res) => {
     const eventId = asString(req.body.eventId).trim() || null;
     const assignedRoomId = asString(req.body.assignedRoomId).trim() || null;
 
-    // If an assignedRoomId is provided, look up its savedEmbedId so
-    // we can bind the new broadcast room to the same embed.
-    let savedEmbedId: string | undefined;
-    if (assignedRoomId) {
+    // If the client is already connected to a LiveKit room (via the
+    // /rooms/:id/connect endpoint), reuse that room for HLS egress
+    // instead of creating a brand-new one.
+    const existingRoomId = asString(req.body.existingRoomId).trim() || null;
+    const existingLivekitRoomName = asString(req.body.existingLivekitRoomName).trim() || null;
+
+    // Resolve savedEmbedId so the embed viewer can show this broadcast.
+    // Priority: 1) explicit body param  2) event doc  3) assigned room doc
+    let savedEmbedId: string | undefined =
+      asString(req.body.savedEmbedId).trim() || undefined;
+
+    // If not provided explicitly, try the event doc
+    if (!savedEmbedId && eventId) {
       try {
-        const { data: srcRoom } = await getRoom(assignedRoomId);
-        if ((srcRoom as any).savedEmbedId) {
-          savedEmbedId = (srcRoom as any).savedEmbedId;
+        const evSnap = await tenantCol("events").doc(eventId).get();
+        if (evSnap.exists) {
+          const evData = evSnap.data() as any;
+          if (typeof evData?.savedEmbedId === "string" && evData.savedEmbedId.trim()) {
+            savedEmbedId = evData.savedEmbedId.trim();
+          }
         }
       } catch {
-        // Non-fatal — assigned room may not exist yet.
+        // Non-fatal
+      }
+    }
+
+    // Fallback: look up savedEmbedId from the assigned / existing room doc
+    if (!savedEmbedId) {
+      const lookupRoomId = assignedRoomId || existingRoomId;
+      if (lookupRoomId) {
+        try {
+          const { data: srcRoom } = await getRoom(lookupRoomId);
+          if ((srcRoom as any).savedEmbedId) {
+            savedEmbedId = (srcRoom as any).savedEmbedId;
+          }
+        } catch {
+          // Non-fatal — assigned room may not exist yet.
+        }
       }
     }
 
@@ -192,9 +219,9 @@ router.post("/broadcasts/go-live", requireAuth, async (req, res) => {
       eventId,
     };
 
-    // 2) Create a dedicated room
-    const roomId = `edu-bc-${broadcastId}`;
-    const livekitRoomName = roomId;
+    // 2) Create or reuse a room for this broadcast
+    const roomId = existingRoomId || `edu-bc-${broadcastId}`;
+    const livekitRoomName = existingLivekitRoomName || roomId;
 
     const { ref: roomRef } = await ensureRoomDoc({
       roomId,
@@ -274,7 +301,25 @@ router.post("/broadcasts/go-live", requireAuth, async (req, res) => {
 
     // 5) Mint room access token
     const roomAccessToken = jwt.sign(
-      { roomId, livekitRoomName, role: "host", identity: `edu-host-${uid}` },
+      {
+        roomId,
+        livekitRoomName,
+        role: "host",
+        identity: `edu-host-${uid}`,
+        eduBypass: true,
+        permissions: {
+          canStream: true,
+          canRecord: true,
+          canDestinations: true,
+          canModerate: true,
+          canLayout: true,
+          canScreenShare: true,
+          canInvite: true,
+          canAnalytics: true,
+          canMuteGuests: true,
+          canRemoveGuests: true,
+        },
+      },
       getRoomAccessSecret(),
       { expiresIn: "12h" }
     );
@@ -339,7 +384,10 @@ router.post("/broadcasts/:id/stop", requireAuth, async (req, res) => {
 
         // Reset the saved embed's activeRoomId so the public viewer
         // shows "offline" instead of pointing at a dead room.
-        const embedId = (roomSnap.data() as any)?.savedEmbedId as string | undefined;
+        // Check room doc first, then fall back to the broadcast doc.
+        const embedId =
+          (roomSnap.data() as any)?.savedEmbedId as string | undefined
+          || existing.savedEmbedId as string | undefined;
         if (embedId) {
           try {
             await tenantCol("savedEmbeds").doc(embedId).set(
@@ -426,8 +474,10 @@ router.delete("/broadcasts/:id", requireAuth, async (req, res) => {
       if (roomSnap.exists) {
         await setHlsIdle(roomRef);
 
-        // Reset embed link
-        const embedId = (roomSnap.data() as any)?.savedEmbedId as string | undefined;
+        // Reset embed link — check room doc, then broadcast doc
+        const embedId =
+          (roomSnap.data() as any)?.savedEmbedId as string | undefined
+          || existing.savedEmbedId as string | undefined;
         if (embedId) {
           try {
             await tenantCol("savedEmbeds").doc(embedId).set(

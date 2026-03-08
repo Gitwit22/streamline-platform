@@ -23,6 +23,14 @@ export interface EduBroadcast {
   egressId: string | null;
 }
 
+export interface ConnectResponse {
+  lkToken: string;
+  roomAccessToken: string;
+  livekitUrl: string;
+  livekitRoomName: string;
+  roomId: string;
+}
+
 export interface GoLiveResponse {
   broadcast: EduBroadcast;
   lkToken: string;
@@ -41,6 +49,23 @@ export interface WatchResponse {
 }
 
 /**
+ * POST /api/edu/rooms/:roomId/connect
+ * Creates a LiveKit room and mints tokens so the client can connect
+ * immediately on room entry — before any broadcast or recording.
+ */
+export async function connectToEduRoom(roomId: string): Promise<ConnectResponse> {
+  const res = await apiFetchAuth(`/api/edu/rooms/${roomId}/connect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || "connect_failed");
+  }
+  return res.json();
+}
+
+/**
  * POST /api/edu/broadcasts/go-live
  * Creates a broadcast, a LiveKit room, starts HLS egress, and
  * returns a host LiveKit token.
@@ -53,6 +78,9 @@ export async function goLiveEduBroadcast(body: {
   recordMp4: boolean;
   eventId?: string | null;
   assignedRoomId?: string | null;
+  existingRoomId?: string | null;
+  existingLivekitRoomName?: string | null;
+  savedEmbedId?: string | null;
 }): Promise<GoLiveResponse> {
   const res = await apiFetchAuth("/api/edu/broadcasts/go-live", {
     method: "POST",

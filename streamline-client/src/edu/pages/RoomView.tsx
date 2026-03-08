@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import { apiFetchAuth } from "../../lib/api";
-import { goLiveEduBroadcast, stopEduBroadcast, type EduBroadcast } from "../api/broadcasts";
+import { goLiveEduBroadcast, stopEduBroadcast, connectToEduRoom, type EduBroadcast, type GoLiveResponse } from "../api/broadcasts";
 import { apiStartRecording, apiStopRecording } from "../../lib/api";
+import type { Room as LkRoom } from "livekit-client";
 
 /* ── Types ─────────────────────────────────────────────────────── */
 
@@ -66,6 +67,11 @@ export default function RoomView() {
   const [roomAccessToken, setRoomAccessToken] = useState<string | null>(null);
   const [broadcastError, setBroadcastError] = useState<string | null>(null);
 
+  // LiveKit connection state (established on room entry, before any broadcast)
+  const [connectedRoomId, setConnectedRoomId] = useState<string | null>(null);
+  const [livekitRoomName, setLivekitRoomName] = useState<string | null>(null);
+  const [lkConnected, setLkConnected] = useState(false);
+
   // Recording state
   const [recordingBusy, setRecordingBusy] = useState(false);
   const [activeRecordingId, setActiveRecordingId] = useState<string | null>(null);
@@ -74,6 +80,10 @@ export default function RoomView() {
   // Local video
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+
+  // LiveKit room ref (created when connecting to the room)
+  const lkRoomRef = useRef<LkRoom | null>(null);
+  const intentionalDisconnectRef = useRef(false);
 
   // ── Load room ────────────────────────────────────────────────
   useEffect(() => {
@@ -103,8 +113,81 @@ export default function RoomView() {
     })();
   }, [roomId]);
 
-  // ── Start local camera ───────────────────────────────────────
+  // ── Connect to LiveKit on room entry ─────────────────────────
+  // Once the room metadata is loaded, call the connect endpoint to
+  // get a LiveKit token and room-access token, then join the room.
+  // This happens before any broadcast or recording is started.
   useEffect(() => {
+    if (!room || !roomId || lkConnected || lkRoomRef.current) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const conn = await connectToEduRoom(roomId);
+        if (cancelled) return;
+        setRoomAccessToken(conn.roomAccessToken);
+        setConnectedRoomId(conn.roomId);
+        setLivekitRoomName(conn.livekitRoomName);
+
+        const { Room: LkRoomClass, RoomEvent, Track } = await import("livekit-client");
+        if (cancelled) return;
+
+        const lkRoom = new LkRoomClass({ adaptiveStream: true, dynacast: true });
+        lkRoomRef.current = lkRoom;
+
+        lkRoom.on(RoomEvent.Disconnected, () => {
+          if (intentionalDisconnectRef.current) {
+            intentionalDisconnectRef.current = false;
+            return;
+          }
+          console.warn("[RoomView] LiveKit disconnected unexpectedly");
+          lkRoomRef.current = null;
+          setLkConnected(false);
+          setBroadcastError("Connection lost — disconnected from room.");
+        });
+
+        await lkRoom.connect(conn.livekitUrl, conn.lkToken);
+        if (cancelled) {
+          lkRoom.disconnect();
+          lkRoomRef.current = null;
+          return;
+        }
+
+        // Stop local getUserMedia stream — LiveKit owns the devices now
+        if (streamRef.current) {
+          streamRef.current.getTracks().forEach((t) => t.stop());
+          streamRef.current = null;
+        }
+        if (localVideoRef.current) localVideoRef.current.srcObject = null;
+
+        // Publish camera + mic via LiveKit
+        const camOpts = prefCam ? { deviceId: prefCam } : {};
+        const micOpts = prefMic ? { deviceId: prefMic } : {};
+        if (cameraOn) await lkRoom.localParticipant.setCameraEnabled(true, camOpts);
+        if (micOn) await lkRoom.localParticipant.setMicrophoneEnabled(true, micOpts);
+
+        // Attach local video track to the preview element
+        const camPub = lkRoom.localParticipant.getTrackPublication(Track.Source.Camera);
+        if (camPub?.track && localVideoRef.current) {
+          camPub.track.attach(localVideoRef.current);
+        }
+
+        setLkConnected(true);
+      } catch (e: any) {
+        console.error("[RoomView] LiveKit connect failed:", e?.message || e);
+        // Non-fatal: local preview continues working via getUserMedia
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [room, roomId]);
+
+  // ── Start local camera (only when LiveKit is NOT connected) ──
+  useEffect(() => {
+    // Once LiveKit is connected, it owns camera/mic.
+    // The toggle handlers use lkRoom.localParticipant directly.
+    if (lkRoomRef.current) return;
+
     if (!cameraOn) {
       if (streamRef.current) {
         streamRef.current.getVideoTracks().forEach((t) => t.stop());
@@ -132,12 +215,17 @@ export default function RoomView() {
     return () => {
       cancelled = true;
     };
-  }, [cameraOn, prefCam]);
+  }, [cameraOn, prefCam, lkConnected]);
 
   // ── Cleanup ──────────────────────────────────────────────────
   useEffect(() => {
     return () => {
       if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
+      if (lkRoomRef.current) {
+        intentionalDisconnectRef.current = true;
+        try { lkRoomRef.current.disconnect(); } catch {}
+        lkRoomRef.current = null;
+      }
     };
   }, []);
 
@@ -146,6 +234,12 @@ export default function RoomView() {
     // Stop recording first, then broadcast
     if (activeRecordingId && roomAccessToken) {
       try { await apiStopRecording(activeRecordingId, roomAccessToken); } catch { /* best effort */ }
+    }
+    // Disconnect LiveKit
+    intentionalDisconnectRef.current = true;
+    if (lkRoomRef.current) {
+      try { lkRoomRef.current.disconnect(); } catch {}
+      lkRoomRef.current = null;
     }
     if (activeBroadcast) {
       try { await stopEduBroadcast(activeBroadcast.id); } catch { /* best effort */ }
@@ -156,6 +250,27 @@ export default function RoomView() {
     }
     nav("/streamline/edu/rooms");
   }, [nav, activeRecordingId, roomAccessToken, activeBroadcast]);
+
+  // ── Camera / Mic toggle (LiveKit-aware) ──────────────────────
+  const toggleCamera = useCallback(async () => {
+    const next = !cameraOn;
+    setCameraOn(next);
+    if (lkRoomRef.current) {
+      try {
+        await lkRoomRef.current.localParticipant.setCameraEnabled(next);
+      } catch { /* swallow */ }
+    }
+  }, [cameraOn]);
+
+  const toggleMic = useCallback(async () => {
+    const next = !micOn;
+    setMicOn(next);
+    if (lkRoomRef.current) {
+      try {
+        await lkRoomRef.current.localParticipant.setMicrophoneEnabled(next);
+      } catch { /* swallow */ }
+    }
+  }, [micOn]);
 
   // ── Screen share toggle ──────────────────────────────────────
   const toggleScreenShare = useCallback(async () => {
@@ -172,6 +287,8 @@ export default function RoomView() {
   }, [screenSharing]);
 
   // ── Start / Stop Broadcast ───────────────────────────────────
+  // LiveKit connection is already established via the connect endpoint.
+  // Go-live just starts HLS egress on the existing room.
   const handleStartBroadcast = useCallback(async () => {
     if (!room || broadcastBusy || activeBroadcast) return;
     setBroadcastBusy(true);
@@ -184,24 +301,27 @@ export default function RoomView() {
         publishHls: true,
         recordMp4: room.recordingEnabled,
         assignedRoomId: room.id,
+        existingRoomId: connectedRoomId,
+        existingLivekitRoomName: livekitRoomName,
       });
       setActiveBroadcast(res.broadcast);
-      setRoomAccessToken(res.roomAccessToken);
+      // Update room access token with the one from go-live (same room, fresh token)
+      if (res.roomAccessToken) setRoomAccessToken(res.roomAccessToken);
     } catch (e: any) {
       setBroadcastError(e?.message || "Failed to start broadcast");
     } finally {
       setBroadcastBusy(false);
     }
-  }, [room, broadcastBusy, activeBroadcast]);
+  }, [room, broadcastBusy, activeBroadcast, connectedRoomId, livekitRoomName]);
 
   const handleStopBroadcast = useCallback(async () => {
     if (!activeBroadcast || broadcastBusy) return;
     setBroadcastBusy(true);
     setBroadcastError(null);
     try {
+      // Only stop HLS — keep the LiveKit connection alive for recording / future broadcasts
       await stopEduBroadcast(activeBroadcast.id);
       setActiveBroadcast(null);
-      setRoomAccessToken(null);
     } catch (e: any) {
       setBroadcastError(e?.message || "Failed to stop broadcast");
     } finally {
@@ -210,24 +330,25 @@ export default function RoomView() {
   }, [activeBroadcast, broadcastBusy]);
 
   // ── Start / Stop Recording ───────────────────────────────────
+  // Recording is independent of broadcast. It only requires an active
+  // LiveKit connection (established on room entry via /connect).
   const handleStartRecording = useCallback(async () => {
     if (recordingBusy || activeRecordingId) return;
-    // Recording requires an active broadcast (to have a LiveKit room)
-    if (!activeBroadcast?.roomId || !roomAccessToken) {
-      setRecordingError("Start a broadcast first to enable recording");
+    if (!connectedRoomId || !roomAccessToken) {
+      setRecordingError("Not connected to room — please wait or refresh");
       return;
     }
     setRecordingBusy(true);
     setRecordingError(null);
     try {
-      const data = await apiStartRecording(activeBroadcast.roomId, "cloud", undefined, roomAccessToken);
+      const data = await apiStartRecording(connectedRoomId, "cloud", undefined, roomAccessToken);
       setActiveRecordingId(data.recordingId || data.id || null);
     } catch (e: any) {
       setRecordingError(e?.message || "Failed to start recording");
     } finally {
       setRecordingBusy(false);
     }
-  }, [recordingBusy, activeRecordingId, activeBroadcast, roomAccessToken]);
+  }, [recordingBusy, activeRecordingId, connectedRoomId, roomAccessToken]);
 
   const handleStopRecording = useCallback(async () => {
     if (!activeRecordingId || recordingBusy) return;
@@ -382,7 +503,7 @@ export default function RoomView() {
           <div className="flex items-center justify-center gap-3 border-t border-slate-700 bg-slate-900 px-4 py-3">
             {/* Camera toggle */}
             <button
-              onClick={() => setCameraOn((v) => !v)}
+              onClick={toggleCamera}
               className={`rounded-full p-3 transition ${
                 cameraOn
                   ? "bg-slate-800 text-white hover:bg-slate-700"
@@ -407,7 +528,7 @@ export default function RoomView() {
 
             {/* Mic toggle */}
             <button
-              onClick={() => setMicOn((v) => !v)}
+              onClick={toggleMic}
               className={`rounded-full p-3 transition ${
                 micOn
                   ? "bg-slate-800 text-white hover:bg-slate-700"
@@ -613,7 +734,7 @@ export default function RoomView() {
                     ) : (
                       <button
                         onClick={handleStartRecording}
-                        disabled={recordingBusy || !activeBroadcast}
+                        disabled={recordingBusy || !lkConnected}
                         className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2.5 text-sm text-slate-300 transition hover:bg-slate-700 disabled:opacity-50"
                       >
                         {recordingBusy ? "Starting…" : "🔴 Start Recording"}
@@ -625,9 +746,9 @@ export default function RoomView() {
                         Recording in progress
                       </div>
                     )}
-                    {!activeBroadcast && !activeRecordingId && (
+                    {!lkConnected && !activeRecordingId && (
                       <p className="text-center text-[11px] text-slate-500">
-                        Start a broadcast first to enable recording
+                        Connecting to room…
                       </p>
                     )}
                     {recordingError && (

@@ -691,6 +691,7 @@ export default function Broadcast() {
         recordMp4,
         eventId: activeEventId,
         assignedRoomId: boundEvent?.assignedRoomId || null,
+        savedEmbedId: boundEvent?.savedEmbedId || null,
       });
       setGoLiveData(data);
       setBroadcastId(data.broadcast.id);
@@ -1176,7 +1177,17 @@ export default function Broadcast() {
               </div>
               <div className="space-y-2">
                 <ChecklistRow label="Event configured" ok={true} detail={boundEvent.title} />
-                <ChecklistRow label="Room assigned" ok={!!assignedRoom} detail={assignedRoom?.name || "Not assigned — assign in Event Settings"} />
+                <ChecklistRow
+                  label="Room / Embed ready"
+                  ok={!!assignedRoom || !!boundEvent.savedEmbedId}
+                  detail={
+                    assignedRoom
+                      ? assignedRoom.name
+                      : boundEvent.savedEmbedId
+                        ? "Embed configured — room will be created on go-live"
+                        : "No room or embed — assign in Event Settings"
+                  }
+                />
                 <ChecklistRow label="At least one output enabled" ok={publishHls || recordMp4 || alsoYoutube} detail={[publishHls && "HLS", recordMp4 && "Record", alsoYoutube && "YouTube"].filter(Boolean).join(", ") || "None"} />
                 <ChecklistRow label="Producer set" ok={!!(boundEvent.producerName || producer)} detail={boundEvent.producerName || producer || "—"} />
               </div>
