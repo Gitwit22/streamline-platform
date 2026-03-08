@@ -138,7 +138,7 @@ function App() {
       )}
 
       <Routes>
-      {/* Redirect legacy lane paths to creator welcome */}
+      {/* Redirect legacy lane paths to welcome */}
       <Route path="/streamline/corporate/*" element={<Navigate to="/welcome" replace />} />
       <Route path="/streamline/edu/*" element={<Navigate to="/welcome" replace />} />
       <Route path="/demo" element={<Navigate to="/welcome" replace />} />
