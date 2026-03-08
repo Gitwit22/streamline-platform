@@ -15,7 +15,8 @@
     "smoke:deploy": "tsx scripts/deploy-smoke.ts",
     "cron:expire-emergency": "node dist/scripts/expireEmergencyCron.js",
     "auth:audit-duplicate-emails": "tsx scripts/auditDuplicateEmails.ts",
-    "auth:backfill-firebase-users": "tsx scripts/backfillFirebaseAuthUsers.ts"
+    "auth:backfill-firebase-users": "tsx scripts/backfillFirebaseAuthUsers.ts",
+    "cron:event-reminder": "tsx jobs/eventReminder.ts"
   },
   "keywords": [],
   "author": "",
@@ -35,7 +36,8 @@
     "livekit-server-sdk": "2.6.1",
     "lucide-react": "^0.561.0",
     "multer": "^1.4.5-lts.1",
-    "stripe": "^20.1.0"
+    "stripe": "^20.1.0",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
@@ -45,6 +47,7 @@
     "@types/express": "^4.17.21",
     "@types/multer": "^1.4.13",
     "@types/node": "^25.0.3",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3"
   }

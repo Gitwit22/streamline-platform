@@ -47,6 +47,7 @@ import eduStudentsRoutes from "./routes/eduStudents";
 import eduStaffRoutes from "./routes/eduStaff";
 import eduChatRoutes from "./routes/eduChat";
 import eduPortalRoutes from "./routes/eduPortal";
+import notificationsRoutes from "./routes/notifications";
 import corpMeRoutes from "./routes/corpMe";
 import corpBroadcastsRoutes from "./routes/corpBroadcasts";
 import corpCallsRoutes from "./routes/corpCalls";
@@ -77,7 +78,8 @@ import { PERMISSION_ERRORS } from "./lib/permissionErrors";
 import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "./middleware/roomAccessToken";
 
 import { requireAdmin } from "./middleware/adminAuth";
-
+import horizonApi from "./routes/horizonApi";
+import { attachHorizonWs } from "./routes/horizonWs";
 
 import { uploadVideo } from "./lib/storageClient";
 import { tenantCol, globalCol } from "./lib/dbPaths";
@@ -186,6 +188,9 @@ app.use("/api/admin", adminRoutes);
 
 // Maintenance routes (admin-only)
 app.use("/api/maintenance", maintenanceRoutes);
+
+// Horizon admin dashboard API (admin-only)
+app.use("/api/horizon", requireAdmin, horizonApi);
 
 
 // Health endpoint
@@ -296,6 +301,8 @@ app.use("/api/edu", eduStudentsRoutes);
 app.use("/api/edu", eduStaffRoutes);
 // EDU faculty chat (rooms & messages)
 app.use("/api/edu", eduChatRoutes);
+// EDU notifications (bell, read, unread count)
+app.use("/api/edu", notificationsRoutes);
 
 // Corporate lane routes
 app.use("/api/corp", corpMeRoutes);
@@ -1265,7 +1272,7 @@ app.use((req, res) => {
 
 
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`✅ Server listening on http://localhost:${PORT}`);
   console.log("[config-health]", {
     env: String(process.env.NODE_ENV || "development"),
@@ -1277,3 +1284,6 @@ app.listen(PORT, () => {
     hasRoomAccessTokenSecret: !!process.env.ROOM_ACCESS_TOKEN_SECRET,
   });
 });
+
+// Horizon admin WebSocket (authenticated, admin-only)
+attachHorizonWs(server);
