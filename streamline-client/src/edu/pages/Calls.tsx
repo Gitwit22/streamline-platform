@@ -83,7 +83,13 @@ export default function EduCalls() {
   const [staffLoading, setStaffLoading] = useState(false);
   const [selectedStaffIds, setSelectedStaffIds] = useState<Set<string>>(new Set());
 
-  const activeCall = calls.find((c) => c.status === "active");
+  // Show call card for active calls OR outgoing calls where I'm the creator and
+  // already connected to LiveKit (keeps call "scheduled" so recipient sees notification).
+  const activeCall = calls.find(
+    (c) =>
+      c.status === "active" ||
+      (c.status === "scheduled" && c.createdBy === me.uid && lkConnected),
+  );
 
   /* ── LiveKit connect / disconnect ─────────────────────────── */
 
@@ -282,12 +288,15 @@ export default function EduCalls() {
     load();
   }, [load]);
 
-  // Auto-connect when navigated from IncomingCallBanner (accepted a call)
+  // Auto-connect when navigated from IncomingCallBanner (accepted a call).
+  // Wait for load() to finish and activeCall to be in the DOM so video refs exist.
   const autoConnectedRef = useRef<string | null>(null);
   useEffect(() => {
     if (
       navState?.acceptedCallId &&
       navState?.callerUid &&
+      !loading &&
+      activeCall &&
       !lkConnected &&
       !connectingLk &&
       autoConnectedRef.current !== navState.acceptedCallId
@@ -298,13 +307,14 @@ export default function EduCalls() {
       // Clear navigation state so refreshes don't re-trigger
       window.history.replaceState({}, "");
     }
-  }, [navState, lkConnected, connectingLk, connectToLiveKit]);
+  }, [navState, loading, activeCall, lkConnected, connectingLk, connectToLiveKit]);
 
   // Auto-connect when page loads and there's an active call we haven't connected to
   useEffect(() => {
     if (
       !loading &&
       activeCall &&
+      activeCall.status === "active" &&
       !lkConnected &&
       !connectingLk &&
       !autoConnectedRef.current
@@ -320,6 +330,34 @@ export default function EduCalls() {
       }
     }
   }, [loading, activeCall, lkConnected, connectingLk, me.uid, calls, connectToLiveKit]);
+
+  // Re-attach LiveKit tracks when video elements mount (activeCall card renders).
+  // This handles the case where LiveKit connected BEFORE the video elements
+  // were in the DOM (e.g. timing race between load() and connectToLiveKit).
+  useEffect(() => {
+    const room = lkRoomRef.current;
+    if (!lkConnected || !room || !activeCall) return;
+
+    // Re-attach local camera
+    for (const pub of room.localParticipant.trackPublications.values()) {
+      if (pub.track && pub.source === "camera" && localVideoRef.current) {
+        pub.track.attach(localVideoRef.current);
+      }
+    }
+
+    // Re-attach remote tracks
+    room.remoteParticipants.forEach((participant) => {
+      participant.trackPublications.forEach((pub) => {
+        if (pub.track) {
+          if (pub.track.kind === "video" && remoteVideoRef.current) {
+            pub.track.attach(remoteVideoRef.current);
+          } else if (pub.track.kind === "audio" && remoteAudioRef.current) {
+            pub.track.attach(remoteAudioRef.current);
+          }
+        }
+      });
+    });
+  }, [lkConnected, activeCall]);
 
   const handleCreate = async () => {
     if (!selectedCallUser) return;
@@ -338,12 +376,12 @@ export default function EduCalls() {
       setShowNew(false);
       setActiveTab("Active Calls");
 
-      // Caller connects to LiveKit immediately and waits for the other user
+      // Caller connects to LiveKit immediately and waits for the other user.
+      // Do NOT activate the call here — keep it "scheduled" so the recipient
+      // sees the incoming-call notification. activeCall detection now matches
+      // scheduled + createdBy === me + lkConnected, so the caller still sees
+      // the call card after connecting.
       await connectToLiveKit(selectedCallUser.id);
-
-      // Once connected, activate the call on our side so the UI shows the call card
-      const activated = await updateEduCall(c.id, { status: "active" });
-      setCalls((prev) => prev.map((x) => (x.id === c.id ? activated : x)));
     } catch (err: any) {
       console.error("[EduCalls] create error:", err);
       setLkError(err?.message || "Failed to start call");
@@ -655,8 +693,23 @@ export default function EduCalls() {
                 <p className="mt-1 text-sm text-slate-400">Waiting for connection…</p>
               </div>
             )}
+            {/* Ringing overlay — caller waiting for recipient to pick up */}
+            {lkConnected && activeCall.status === "scheduled" && (
+              <div className="absolute inset-0 flex items-center justify-center bg-slate-950/60 z-10">
+                <div className="flex flex-col items-center gap-3">
+                  <div className="relative flex h-16 w-16 items-center justify-center rounded-full bg-orange-500/20">
+                    <span className="absolute inset-0 animate-ping rounded-full bg-orange-500/20" />
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="relative h-6 w-6 text-orange-400">
+                      <path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.79 19.79 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.127.96.362 1.903.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.338 1.85.573 2.81.7A2 2 0 0 1 22 16.92z" />
+                    </svg>
+                  </div>
+                  <p className="text-sm font-medium text-white">Calling…</p>
+                  <p className="text-xs text-slate-400">Waiting for them to answer</p>
+                </div>
+              </div>
+            )}
 
-            {lkConnected && (
+            {lkConnected && activeCall.status === "active" && (
               <div className="absolute bottom-4 left-4 z-10">
                 <p className="text-xs text-green-400 font-medium">● Connected</p>
                 <p className="mt-0.5 text-xs text-slate-400">

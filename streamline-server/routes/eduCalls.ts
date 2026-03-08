@@ -110,6 +110,10 @@ router.post("/calls", requireAuth as any, async (req: any, res) => {
     const callId = `${ctx.orgId}_call_${now}_${Math.random().toString(36).slice(2, 8)}`;
 
     const participants = Array.isArray(req.body.participants) ? req.body.participants : [];
+    // Always include the caller in the participants list
+    if (!participants.includes(uid)) {
+      participants.unshift(uid);
+    }
 
     const doc: any = {
       orgId: ctx.orgId,
