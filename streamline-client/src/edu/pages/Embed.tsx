@@ -168,6 +168,7 @@ export default function Embed() {
       const embed = await createEduSavedEmbed({
         name: `Live Broadcast – ${room.name}`,
         description: `Public embed for room "${room.name}"`,
+        sourceRoomId: room.id,
         hlsConfig: {
           title: room.name,
           subtitle: "Live Broadcast",

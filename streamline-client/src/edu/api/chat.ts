@@ -80,3 +80,40 @@ export async function createEduChatRoom(body: {
   const data = await res.json();
   return data.room;
 }
+
+/* ── Staff & Presence ──────────────────────────────────────────── */
+
+export interface EduChatStaffMember {
+  uid: string;
+  name: string;
+  email: string;
+  role: string;
+  department: string | null;
+  avatar: string | null;
+  status: string;
+}
+
+export interface EduChatOnlineStaff {
+  uid: string;
+  userName: string;
+  orgRole: string;
+  lastHeartbeat: number;
+}
+
+export async function fetchEduChatStaff(): Promise<EduChatStaffMember[]> {
+  const res = await apiFetchAuth("/api/edu/chat/staff");
+  if (!res.ok) throw new Error("fetch_chat_staff_failed");
+  const data = await res.json();
+  return data.staff ?? [];
+}
+
+export async function fetchEduChatOnline(): Promise<EduChatOnlineStaff[]> {
+  const res = await apiFetchAuth("/api/edu/chat/staff/online");
+  if (!res.ok) throw new Error("fetch_online_failed");
+  const data = await res.json();
+  return data.online ?? [];
+}
+
+export async function sendEduChatHeartbeat(): Promise<void> {
+  await apiFetchAuth("/api/edu/chat/heartbeat", { method: "POST" });
+}

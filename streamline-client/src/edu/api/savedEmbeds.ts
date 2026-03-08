@@ -12,6 +12,8 @@ export type EduSavedEmbed = {
 export async function createEduSavedEmbed(params: {
   name: string;
   description?: string;
+  /** When provided, links the embed to an existing room instead of creating a new one. */
+  sourceRoomId?: string;
   hlsConfig?: {
     enabled?: boolean;
     title?: string;
@@ -26,6 +28,7 @@ export async function createEduSavedEmbed(params: {
     body: JSON.stringify({
       name: params.name,
       description: params.description,
+      ...(params.sourceRoomId ? { sourceRoomId: params.sourceRoomId } : {}),
       hlsConfig: params.hlsConfig,
     }),
   }, { allowNonOk: true, suppressAuthSideEffects: true });

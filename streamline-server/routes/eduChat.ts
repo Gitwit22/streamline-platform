@@ -6,6 +6,9 @@
  *   POST   /chat/rooms                     → create a new chat room
  *   GET    /chat/rooms/:id/messages        → list messages for a room
  *   POST   /chat/rooms/:id/messages        → send a message to a room
+ *   GET    /chat/staff                     → list all staff in the org
+ *   GET    /chat/staff/online              → list currently-online staff
+ *   POST   /chat/heartbeat                 → record presence heartbeat
  */
 
 import express from "express";
@@ -276,6 +279,167 @@ router.post("/chat/rooms/:id/messages", requireAuth, async (req, res) => {
     return res.json({ message: normalizeMessage(msgId, doc) });
   } catch (err: any) {
     console.error("[edu/chat] send error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── GET /chat/staff ─ list all staff members in the org ───────── */
+
+function normalizeStaffEntry(docId: string, data: any) {
+  const role = asString(data?.role).trim() || "faculty_teacher";
+  return {
+    uid: asString(data?.uid).trim() || docId.split("_").pop() || docId,
+    name:
+      typeof data?.name === "string" && data.name.trim()
+        ? data.name.trim()
+        : typeof data?.displayName === "string" && data.displayName.trim()
+          ? data.displayName.trim()
+          : typeof data?.email === "string"
+            ? data.email
+            : "Staff",
+    email: typeof data?.email === "string" ? data.email : "",
+    role,
+    department: typeof data?.department === "string" ? data.department : null,
+    avatar: typeof data?.avatar === "string" ? data.avatar : null,
+    status: asString(data?.status).trim() || "active",
+  };
+}
+
+router.get("/chat/staff", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+  try {
+    const ctx = await getEduContext(uid);
+    if (!ctx) return res.status(403).json({ error: "not_edu_member" });
+
+    let docs: any[] = [];
+    try {
+      const snap = await tenantCol("orgMembers")
+        .where("orgId", "==", ctx.orgId)
+        .limit(200)
+        .get();
+      docs = snap.docs;
+    } catch {
+      docs = [];
+    }
+
+    // Fallback for legacy datasets
+    if (!docs.length) {
+      const snap = await tenantCol("orgMembers").limit(200).get();
+      const prefix = `${ctx.orgId}_`;
+      docs = snap.docs.filter((d) => String(d.id || "").startsWith(prefix));
+    }
+
+    const staff = docs
+      .map((d) => normalizeStaffEntry(d.id, d.data()))
+      .filter((s) => {
+        // Only include faculty roles (not students/viewers)
+        return (
+          s.status !== "disabled" &&
+          (s.role === "faculty_admin" || s.role === "faculty_teacher")
+        );
+      })
+      .sort((a, b) => {
+        // Admins first, then alphabetical
+        if (a.role === "faculty_admin" && b.role !== "faculty_admin") return -1;
+        if (b.role === "faculty_admin" && a.role !== "faculty_admin") return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+    return res.json({ staff });
+  } catch (err: any) {
+    console.error("[edu/chat] staff list error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── POST /chat/heartbeat ─ record presence heartbeat ──────────── */
+
+/** Heartbeats are stored in a Firestore collection with TTL-like semantics.
+ *  Each staff member writes to `eduChatPresence/{orgId}_{uid}`.
+ *  A user is "online" if their heartbeat is < 2 minutes old. */
+const ONLINE_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
+
+router.post("/chat/heartbeat", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+  try {
+    const ctx = await getEduContext(uid);
+    if (!ctx) return res.status(403).json({ error: "not_edu_member" });
+
+    const docId = `${ctx.orgId}_${uid}`;
+    await tenantCol("eduChatPresence").doc(docId).set(
+      {
+        orgId: ctx.orgId,
+        uid,
+        userName: ctx.userName,
+        orgRole: ctx.orgRole,
+        lastHeartbeat: Date.now(),
+      },
+      { merge: true },
+    );
+
+    return res.json({ ok: true });
+  } catch (err: any) {
+    console.error("[edu/chat] heartbeat error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
+/* ── GET /chat/staff/online ─ list currently-online staff ──────── */
+
+router.get("/chat/staff/online", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+  try {
+    const ctx = await getEduContext(uid);
+    if (!ctx) return res.status(403).json({ error: "not_edu_member" });
+
+    const cutoff = Date.now() - ONLINE_THRESHOLD_MS;
+
+    let docs: any[] = [];
+    try {
+      const snap = await tenantCol("eduChatPresence")
+        .where("orgId", "==", ctx.orgId)
+        .where("lastHeartbeat", ">", cutoff)
+        .limit(200)
+        .get();
+      docs = snap.docs;
+    } catch {
+      // Fallback: fetch all presence docs for org and filter in memory
+      try {
+        const snap = await tenantCol("eduChatPresence")
+          .where("orgId", "==", ctx.orgId)
+          .limit(200)
+          .get();
+        docs = snap.docs.filter((d) => {
+          const hb = (d.data() as any)?.lastHeartbeat;
+          return typeof hb === "number" && hb > cutoff;
+        });
+      } catch {
+        docs = [];
+      }
+    }
+
+    const onlineStaff = docs
+      .map((d) => {
+        const data = d.data() as any;
+        return {
+          uid: asString(data?.uid),
+          userName: asString(data?.userName),
+          orgRole: asString(data?.orgRole),
+          lastHeartbeat: typeof data?.lastHeartbeat === "number" ? data.lastHeartbeat : 0,
+        };
+      })
+      .filter((s) => s.uid && (s.orgRole === "faculty_admin" || s.orgRole === "faculty_teacher"))
+      .sort((a, b) => a.userName.localeCompare(b.userName));
+
+    return res.json({ online: onlineStaff });
+  } catch (err: any) {
+    console.error("[edu/chat] staff/online error:", err?.message || err);
     return res.status(500).json({ error: "internal" });
   }
 });

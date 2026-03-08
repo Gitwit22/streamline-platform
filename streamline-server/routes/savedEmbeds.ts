@@ -172,23 +172,65 @@ router.post("/", requireAuth as any, async (req: any, res) => {
     return errorResponse(res, 400, "invalid_input");
   }
 
-  // Create a NEW Firestore roomId (canonical), and create a friendly LiveKit room name.
-  const roomId = tenantCol("rooms").doc().id;
-  const livekitRoomName = buildFriendlyLivekitRoomName(req, resolvedName, roomId);
+  // When the client supplies a sourceRoomId we link the embed to
+  // that existing room instead of minting a brand-new one.
+  // This is the normal path for "Shareable Room" embeds created
+  // from the Embed page.
+  const sourceRoomId = typeof req.body?.sourceRoomId === "string"
+    ? req.body.sourceRoomId.trim()
+    : "";
+
+  let roomId: string;
+  let livekitRoomName: string;
+
+  if (sourceRoomId) {
+    // Validate that the source room exists and belongs to the caller.
+    const existingSnap = await tenantCol("rooms").doc(sourceRoomId).get();
+    if (!existingSnap.exists) {
+      return res.status(404).json({ error: "not_found", details: "sourceRoomId not found" });
+    }
+    const existingData = (existingSnap.data() || {}) as any;
+    if (existingData.ownerId && existingData.ownerId !== uid) {
+      const adminOk = await isAdmin(uid);
+      if (!adminOk) {
+        // Allow org members (same orgId) to link rooms they don't own.
+        if (!existingData.orgId || existingData.orgId !== ((req as any).account?.orgId ?? "__none__")) {
+          return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+        }
+      }
+    }
+    roomId = sourceRoomId;
+    livekitRoomName = existingData.livekitRoomName || sourceRoomId;
+  } else {
+    // Create a NEW Firestore roomId (canonical), and create a friendly LiveKit room name.
+    roomId = tenantCol("rooms").doc().id;
+    livekitRoomName = buildFriendlyLivekitRoomName(req, resolvedName, roomId);
+  }
 
   // Pre-create the embed document reference so we know its id up front.
   const embedRef = tenantCol("savedEmbeds").doc();
   const savedEmbedId = embedRef.id;
 
   try {
-    await ensureRoomDoc({
-      roomId,
-      ownerId: uid,
-      livekitRoomName,
-      roomType: "rtc",
-      initialStatus: "idle",
-      savedEmbedId,
-    });
+    if (sourceRoomId) {
+      // Link the existing room to this embed (do NOT overwrite existing fields).
+      await tenantCol("rooms").doc(roomId).set(
+        {
+          savedEmbedId,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    } else {
+      await ensureRoomDoc({
+        roomId,
+        ownerId: uid,
+        livekitRoomName,
+        roomType: "rtc",
+        initialStatus: "idle",
+        savedEmbedId,
+      });
+    }
 
     // Initialize rooms/{roomId}.hlsConfig via merge update.
     // Do NOT touch rooms/{roomId}.hls runtime state.
