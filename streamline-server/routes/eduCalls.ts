@@ -281,17 +281,29 @@ router.post("/calls/token", requireAuth, async (req, res) => {
 
     const targetUserId = asString(req.body.targetUserId).trim();
     if (!targetUserId) return res.status(400).json({ error: "target_required" });
-    if (targetUserId === uid) return res.status(400).json({ error: "cannot_call_self" });
+    // Check self-call: target could be raw UID or composite orgId_uid
+    if (targetUserId === uid || targetUserId === `${ctx.orgId}_${uid}`) {
+      return res.status(400).json({ error: "cannot_call_self" });
+    }
 
     // Verify target is in same org
-    const targetMemberId = `${ctx.orgId}_${targetUserId}`;
+    // The client may send a raw UID or a composite orgMembers doc ID (orgId_uid).
+    const orgPrefix = `${ctx.orgId}_`;
+    const targetMemberId = targetUserId.startsWith(orgPrefix)
+      ? targetUserId
+      : `${orgPrefix}${targetUserId}`;
     const targetSnap = await tenantCol("orgMembers").doc(targetMemberId).get().catch(() => null as any);
     if (!targetSnap || !targetSnap.exists) {
       return res.status(404).json({ error: "target_not_in_org" });
     }
 
+    // Extract the raw UID from the member doc ID for the room name
+    const targetRawUid = targetMemberId.startsWith(orgPrefix)
+      ? targetMemberId.slice(orgPrefix.length)
+      : targetMemberId;
+
     // Deterministic room name: sorted user IDs
-    const sorted = [uid, targetUserId].sort();
+    const sorted = [uid, targetRawUid].sort();
     const roomName = `edu_${ctx.orgId}_dm_${sorted[0]}_${sorted[1]}`;
 
     // Mint LiveKit token
