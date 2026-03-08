@@ -823,7 +823,7 @@ router.put("/projects/:id/timeline", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
     const { id } = req.params;
-    const { clips } = req.body as any;
+    const { clips, tracks: rawTracks } = req.body as any;
 
     if (!userId) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
@@ -850,22 +850,44 @@ router.put("/projects/:id/timeline", async (req: Request, res: Response) => {
     }
 
     const sanitized = clips
-      .map((c: any) => ({
-        id: String(c?.id || ""),
-        assetId: String(c?.assetId || ""),
-        trackId: typeof c?.trackId === "string" ? c.trackId : "video_1",
-        startTime: Math.max(0, Number(c?.startTime || 0)),
-        duration: Math.max(0, Number(c?.duration || 0)),
-        inPoint: Math.max(0, Number(c?.inPoint || 0)),
-        outPoint: Math.max(0, Number(c?.outPoint || 0)),
-        name: typeof c?.name === "string" ? c.name : "Clip",
-        videoUrl: typeof c?.videoUrl === "string" ? c.videoUrl : "",
-      }))
+      .map((c: any) => {
+        const startTime = Math.max(0, Number(c?.startTime ?? 0));
+        const duration = Math.max(0, Number(c?.duration ?? 0));
+        const inPoint = Math.max(0, Number(c?.inPoint ?? 0));
+        const outPoint = Math.max(inPoint, Number(c?.outPoint ?? 0));
+        return {
+          id: String(c?.id || ""),
+          assetId: String(c?.assetId || ""),
+          trackId: typeof c?.trackId === "string" ? c.trackId : "video_1",
+          startTime,
+          duration,
+          inPoint,
+          outPoint,
+          name: typeof c?.name === "string" ? c.name.slice(0, 200) : "Clip",
+          videoUrl: typeof c?.videoUrl === "string" ? c.videoUrl : "",
+        };
+      })
       .filter((c: any) => c.id && c.assetId);
+
+    // Persist track state if provided, otherwise default to track count
+    let tracksData: any = 2;
+    if (Array.isArray(rawTracks) && rawTracks.length > 0) {
+      tracksData = rawTracks
+        .filter((t: any) => t && typeof t.id === "string" && typeof t.type === "string")
+        .map((t: any) => ({
+          id: String(t.id),
+          name: typeof t.name === "string" ? t.name.slice(0, 100) : "Track",
+          type: t.type === "audio" ? "audio" : "video",
+          muted: !!t.muted,
+          locked: !!t.locked,
+          solo: !!t.solo,
+          linkedTrackId: typeof t.linkedTrackId === "string" ? t.linkedTrackId : null,
+        }));
+    }
 
     const timeline = {
       clips: sanitized,
-      tracks: 2,
+      tracks: tracksData,
     };
 
     await ref.set(
