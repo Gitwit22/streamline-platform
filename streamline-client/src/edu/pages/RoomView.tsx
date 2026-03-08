@@ -2,9 +2,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import { apiFetchAuth } from "../../lib/api";
+import { API_BASE } from "../../lib/apiBase";
 import { goLiveEduBroadcast, stopEduBroadcast, connectToEduRoom, type EduBroadcast, type GoLiveResponse } from "../api/broadcasts";
 import { apiStartRecording, apiStopRecording } from "../../lib/api";
 import type { Room as LkRoom, RemoteParticipant, RemoteTrackPublication, RemoteTrack } from "livekit-client";
+import { useRecordingReadyPoller } from "../../hooks/useRecordingReadyPoller";
+import RecordingToast from "../../components/RecordingToast";
 
 /* ── Types ─────────────────────────────────────────────────────── */
 
@@ -141,9 +144,143 @@ export default function RoomView() {
   const [activeRecordingId, setActiveRecordingId] = useState<string | null>(null);
   const [recordingError, setRecordingError] = useState<string | null>(null);
 
+  // Recording-ready poller: notifies the user when a recording finishes processing
+  const recordingPoller = useRecordingReadyPoller();
+
+  // Chat state
+  type ChatMsg = {
+    id: string;
+    text: string;
+    createdAtMs: number | null;
+    sender: { identity: string | null; uid: string | null; role: string | null; name: string | null };
+  };
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
+  const [chatSessionId, setChatSessionId] = useState<string | null>(null);
+  const [chatInput, setChatInput] = useState("");
+  const [chatSending, setChatSending] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const sseRef = useRef<EventSource | null>(null);
+
   // Local video
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
+
+  // ── Chat: fetch session + open SSE when panel opens ──────────
+  useEffect(() => {
+    if (!chatOpen || !roomAccessToken || !connectedRoomId) {
+      // Tear down SSE when chat closes
+      if (sseRef.current) {
+        sseRef.current.close();
+        sseRef.current = null;
+      }
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        // 1. Get or create a chat session
+        const sessionRes = await fetch(
+          `${API_BASE}/api/rooms/${encodeURIComponent(connectedRoomId)}/chat/session?autostart=1`,
+          {
+            headers: { "x-room-access-token": roomAccessToken },
+            credentials: "include",
+          }
+        );
+        if (!sessionRes.ok || cancelled) return;
+        const sessionData = await sessionRes.json();
+        const sid = sessionData.sessionId;
+        if (!sid || cancelled) return;
+        setChatSessionId(sid);
+
+        // 2. Fetch existing messages
+        const msgRes = await fetch(
+          `${API_BASE}/api/rooms/${encodeURIComponent(connectedRoomId)}/chat/messages?sessionId=${encodeURIComponent(sid)}&limit=200`,
+          {
+            headers: { "x-room-access-token": roomAccessToken },
+            credentials: "include",
+          }
+        );
+        if (msgRes.ok && !cancelled) {
+          const msgData = await msgRes.json();
+          setChatMessages(msgData.messages || []);
+        }
+
+        // 3. Open SSE stream for real-time updates
+        if (sseRef.current) {
+          sseRef.current.close();
+          sseRef.current = null;
+        }
+        const sseUrl = `${API_BASE}/api/rooms/${encodeURIComponent(connectedRoomId)}/chat/stream?sessionId=${encodeURIComponent(sid)}&t=${encodeURIComponent(roomAccessToken)}`;
+        const es = new EventSource(sseUrl);
+        sseRef.current = es;
+
+        // Track message IDs we already have so we don't duplicate
+        const seenIds = new Set<string>();
+
+        es.addEventListener("message", (ev) => {
+          try {
+            const msg = JSON.parse(ev.data) as ChatMsg;
+            if (!msg.id || seenIds.has(msg.id)) return;
+            seenIds.add(msg.id);
+            setChatMessages((prev) => {
+              // dedup: skip if already in list
+              if (prev.some((m) => m.id === msg.id)) return prev;
+              return [...prev, msg];
+            });
+          } catch {}
+        });
+
+        es.addEventListener("error", () => {
+          // EventSource auto-reconnects; nothing special needed
+        });
+      } catch (err) {
+        console.error("[RoomChat] session/stream init failed:", err);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (sseRef.current) {
+        sseRef.current.close();
+        sseRef.current = null;
+      }
+    };
+  }, [chatOpen, roomAccessToken, connectedRoomId]);
+
+  // Auto-scroll chat to bottom when new messages arrive
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
+
+  // Send chat message
+  const handleChatSend = useCallback(async () => {
+    const text = chatInput.trim();
+    if (!text || !connectedRoomId || !roomAccessToken || chatSending) return;
+    setChatSending(true);
+    try {
+      const res = await fetch(
+        `${API_BASE}/api/rooms/${encodeURIComponent(connectedRoomId)}/chat/messages`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-room-access-token": roomAccessToken,
+          },
+          credentials: "include",
+          body: JSON.stringify({ text, displayName: me?.displayName || "" }),
+        }
+      );
+      if (res.ok) {
+        setChatInput("");
+      }
+    } catch (err) {
+      console.error("[RoomChat] send failed:", err);
+    } finally {
+      setChatSending(false);
+    }
+  }, [chatInput, connectedRoomId, roomAccessToken, chatSending, me?.displayName]);
 
   // LiveKit room ref (created when connecting to the room)
   const lkRoomRef = useRef<LkRoom | null>(null);
@@ -467,17 +604,20 @@ export default function RoomView() {
 
   const handleStopRecording = useCallback(async () => {
     if (!activeRecordingId || recordingBusy) return;
+    const stoppingId = activeRecordingId;
     setRecordingBusy(true);
     setRecordingError(null);
     try {
       await apiStopRecording(activeRecordingId, roomAccessToken);
       setActiveRecordingId(null);
+      // Start polling for recording readiness — notifies user when file is available
+      recordingPoller.startPolling(stoppingId);
     } catch (e: any) {
       setRecordingError(e?.message || "Failed to stop recording");
     } finally {
       setRecordingBusy(false);
     }
-  }, [activeRecordingId, recordingBusy, roomAccessToken]);
+  }, [activeRecordingId, recordingBusy, roomAccessToken, recordingPoller]);
 
   // ── Render ───────────────────────────────────────────────────
   if (loading) {
@@ -716,23 +856,59 @@ export default function RoomView() {
                 </svg>
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-4">
-              <div className="flex h-full flex-col items-center justify-center text-center">
-                <div className="text-2xl">💬</div>
-                <p className="mt-2 text-sm text-slate-400">
-                  Chat messages will appear here.
-                </p>
-                <p className="mt-1 text-xs text-slate-500">
-                  LiveKit data channels will power real-time chat.
-                </p>
-              </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-2">
+              {chatMessages.length === 0 && (
+                <div className="flex h-full flex-col items-center justify-center text-center">
+                  <div className="text-2xl">💬</div>
+                  <p className="mt-2 text-sm text-slate-400">
+                    No messages yet. Say something!
+                  </p>
+                </div>
+              )}
+              {chatMessages.map((msg) => {
+                const isSelf = msg.sender.uid === me?.uid || msg.sender.identity === me?.uid;
+                return (
+                  <div key={msg.id} className={`flex flex-col ${isSelf ? "items-end" : "items-start"}`}>
+                    <span className="mb-0.5 text-[10px] text-slate-500">
+                      {msg.sender.name || msg.sender.identity || "Unknown"}
+                      {msg.createdAtMs ? " · " + new Date(msg.createdAtMs).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : ""}
+                    </span>
+                    <div
+                      className={`max-w-[85%] rounded-xl px-3 py-1.5 text-sm break-words ${
+                        isSelf
+                          ? "bg-orange-600 text-white"
+                          : "bg-slate-800 text-slate-200"
+                      }`}
+                    >
+                      {msg.text}
+                    </div>
+                  </div>
+                );
+              })}
+              <div ref={chatEndRef} />
             </div>
-            <div className="border-t border-slate-700 p-3">
+            <form
+              className="border-t border-slate-700 p-3 flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleChatSend();
+              }}
+            >
               <input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
                 placeholder="Type a message..."
-                className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none placeholder:text-slate-500 focus:border-orange-500"
+                maxLength={800}
+                className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white outline-none placeholder:text-slate-500 focus:border-orange-500"
               />
-            </div>
+              <button
+                type="submit"
+                disabled={!chatInput.trim() || chatSending}
+                className="rounded-lg bg-orange-600 px-3 py-2 text-sm font-medium text-white transition hover:bg-orange-500 disabled:opacity-40"
+              >
+                {chatSending ? "…" : "Send"}
+              </button>
+            </form>
           </div>
         )}
 
@@ -900,6 +1076,16 @@ export default function RoomView() {
           </div>
         )}
       </div>
+
+      {/* Recording ready / processing toast */}
+      {recordingPoller.toast && (
+        <RecordingToast
+          message={recordingPoller.toast.message}
+          type={recordingPoller.toast.type}
+          onDismiss={recordingPoller.dismissToast}
+          recordingsPath="/streamline/edu/recordings"
+        />
+      )}
     </div>
   );
 }

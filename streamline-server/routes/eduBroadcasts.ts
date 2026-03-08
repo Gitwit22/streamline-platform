@@ -4,7 +4,7 @@ import admin from "firebase-admin";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { loadEduOrgSettingsForUid, type EduOrgRole } from "../lib/eduOrgContext";
-import { ensureRoomDoc, getRoom, setHlsStarting, setHlsLive, setHlsIdle } from "../services/rooms";
+import { ensureRoomDoc, getRoom, setHlsStarting, setHlsLive, setHlsIdle, setHlsError } from "../services/rooms";
 import { startHlsEgress, stopEgress } from "../services/livekitEgress";
 import { deletePrefix } from "../lib/storageClient";
 import { getLiveKitSdk } from "../lib/livekit";
@@ -289,7 +289,13 @@ router.post("/broadcasts/go-live", requireAuth, async (req, res) => {
         }
       } catch (egressErr: any) {
         console.error("[edu/broadcasts] egress start error:", egressErr?.message || egressErr);
-        // Proceed — host can still be in room
+        // Mark room as error so the public HLS endpoint reports the
+        // correct state instead of staying stuck at "starting".
+        try {
+          await setHlsError(roomRef, egressErr?.message || "HLS egress failed to start");
+        } catch { /* best-effort */ }
+        // Clear the playlist URL so the client does not think HLS is live.
+        playlistUrl = null;
       }
     }
 
@@ -298,6 +304,19 @@ router.post("/broadcasts/go-live", requireAuth, async (req, res) => {
     doc.egressId = egressId;
 
     await tenantCol("eduBroadcasts").doc(broadcastId).set(doc, { merge: true });
+
+    // Link the broadcast back to the event so embed viewers can
+    // resolve event → broadcast → hlsPlaybackUrl.
+    if (eventId) {
+      try {
+        await tenantCol("events").doc(eventId).set(
+          { broadcastId, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
+          { merge: true },
+        );
+      } catch (evErr: any) {
+        console.warn("[edu/broadcasts] event broadcastId link failed:", evErr?.message);
+      }
+    }
 
     // 5) Mint room access token
     const roomAccessToken = jwt.sign(

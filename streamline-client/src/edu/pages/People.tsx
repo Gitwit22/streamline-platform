@@ -184,6 +184,7 @@ function RoleSelect({
       className="w-full rounded-xl border border-slate-700/60 bg-slate-950/40 px-3 py-2 text-sm text-white outline-none focus:border-orange-500/40"
     >
       {allowFacultyAdmin ? <option value="faculty_admin">Faculty Admin</option> : null}
+      <option value="faculty_teacher">Teacher</option>
       <option value="student_producer">Student Producer</option>
       {includeAssigned ? <option value="student_producer_assigned">Student Producer (Assigned)</option> : null}
       <option value="talent">Talent</option>
@@ -196,6 +197,8 @@ export default function People() {
 
   const roleRaw = String(me?.orgRole || me?.role || "faculty_admin");
   const isFacultyAdmin = roleRaw === "faculty_admin";
+  const isFacultyTeacher = roleRaw === "faculty_teacher";
+  const isStaffMember = isFacultyAdmin || isFacultyTeacher;
   const isStudentProducer = roleRaw === "student_producer" || roleRaw === "student_producer_assigned";
 
   const [tab, setTab] = useState<TabId>("students");
@@ -327,7 +330,7 @@ export default function People() {
     }
   }
 
-  const canSee = isFacultyAdmin || isStudentProducer;
+  const canSee = isStaffMember || isStudentProducer;
   if (!canSee) {
     return <div className="p-6 text-slate-300">You don’t have access to this page.</div>;
   }
@@ -348,11 +351,10 @@ export default function People() {
     if (extractUid(p.id) === me?.uid) return false;
     // Disabled / invited members can't be called
     if (p.status !== "active") return false;
-    // Only faculty + producers can make calls (already gated above), but we also
-    // restrict calling to/between active producers & faculty only — talent/viewer can be targets for faculty
-    if (isFacultyAdmin) return true;
-    // Student producers can call faculty + other producers
-    return p.role === "faculty_admin" || p.role === "student_producer" || p.role === "student_producer_assigned";
+    // Faculty admins and teachers can call anyone
+    if (isStaffMember) return true;
+    // Student producers can call faculty + teachers + other producers
+    return p.role === "faculty_admin" || p.role === "faculty_teacher" || p.role === "student_producer" || p.role === "student_producer_assigned";
   }
   return (
     <div className="space-y-6">

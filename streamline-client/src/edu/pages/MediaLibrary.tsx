@@ -195,10 +195,51 @@ export default function MediaLibrary() {
     setTimeout(() => setToast(null), 3500);
   };
 
-  const handlePlay = (item: LibraryItem) => {
+  /* Track which item is loading a link */
+  const [loadingAction, setLoadingAction] = useState<string | null>(null);
+
+  /** Fetch a signed download URL from the server */
+  const getDownloadUrl = async (recordingId: string): Promise<string | null> => {
+    try {
+      const res = await apiFetchAuth(`/api/recordings/${recordingId}/download-link`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      if (json.success && json.data?.url) return json.data.url;
+      showToast(json.message || "Download link not available yet", "error");
+      return null;
+    } catch (e: any) {
+      showToast(`Failed to get link: ${e?.message || e}`, "error");
+      return null;
+    }
+  };
+
+  const handlePlay = async (item: LibraryItem) => {
     if (item.status !== "ready") return;
-    const url = (item._raw as any)?.videoUrl || (item._raw as any)?.url;
-    if (url) window.open(String(url), "_blank", "noopener,noreferrer");
+    setLoadingAction(`play-${item.id}`);
+    try {
+      const url = await getDownloadUrl(item.id);
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+    } finally {
+      setLoadingAction(null);
+    }
+  };
+
+  const handleDownload = async (item: LibraryItem) => {
+    if (item.status !== "ready") return;
+    setLoadingAction(`dl-${item.id}`);
+    try {
+      const url = await getDownloadUrl(item.id);
+      if (url) {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${item.title || "recording"}.mp4`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+    } finally {
+      setLoadingAction(null);
+    }
   };
 
   const handleDelete = async (item: LibraryItem) => {
@@ -386,15 +427,28 @@ export default function MediaLibrary() {
 
               {/* Play */}
               <button
-                onClick={() => handlePlay(item)}
-                disabled={item.status !== "ready"}
+                onClick={() => void handlePlay(item)}
+                disabled={item.status !== "ready" || loadingAction === `play-${item.id}`}
                 className={`rounded-lg px-3 py-1.5 text-xs transition ${
                   item.status === "ready"
                     ? "bg-slate-700/60 text-slate-300 hover:bg-slate-700 hover:text-white"
                     : "cursor-not-allowed bg-slate-800/30 text-slate-600"
                 }`}
               >
-                Play
+                {loadingAction === `play-${item.id}` ? "Loading…" : "Play"}
+              </button>
+
+              {/* Download */}
+              <button
+                onClick={() => void handleDownload(item)}
+                disabled={item.status !== "ready" || loadingAction === `dl-${item.id}`}
+                className={`rounded-lg px-3 py-1.5 text-xs transition ${
+                  item.status === "ready"
+                    ? "bg-slate-700/60 text-slate-300 hover:bg-slate-700 hover:text-white"
+                    : "cursor-not-allowed bg-slate-800/30 text-slate-600"
+                }`}
+              >
+                {loadingAction === `dl-${item.id}` ? "Loading…" : "Download"}
               </button>
 
               {/* Delete (admin only) */}

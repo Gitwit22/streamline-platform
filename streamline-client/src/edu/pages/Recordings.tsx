@@ -46,6 +46,14 @@ export default function Recordings() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [loadingAction, setLoadingAction] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
+
+  // Auto-refresh: poll for recording status updates on processing recordings
+  const hasProcessing = useMemo(
+    () => recordings.some((r) => r.status === "processing"),
+    [recordings]
+  );
 
   useEffect(() => {
     let mounted = true;
@@ -64,11 +72,78 @@ export default function Recordings() {
     return () => { mounted = false; };
   }, []);
 
+  // Poll every 5 seconds if there are processing recordings
+  useEffect(() => {
+    if (!hasProcessing) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await apiFetchAuth("/api/edu/recordings?limit=100");
+        if (!res.ok) return;
+        const data = await res.json();
+        setRecordings(data.recordings || []);
+      } catch {
+        // silent — don't disrupt the UI
+      }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [hasProcessing]);
+
   const filtered = useMemo(() => {
     if (!search.trim()) return recordings;
     const q = search.toLowerCase();
     return recordings.filter((r) => r.title.toLowerCase().includes(q));
   }, [recordings, search]);
+
+  /* ── Actions ───────────────────────────────────────────────── */
+
+  const showToastMsg = (text: string) => {
+    setToast(text);
+    setTimeout(() => setToast(null), 3500);
+  };
+
+  /** Fetch a signed download URL from the server */
+  const getDownloadUrl = async (recordingId: string): Promise<string | null> => {
+    try {
+      const res = await apiFetchAuth(`/api/recordings/${recordingId}/download-link`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      if (json.success && json.data?.url) return json.data.url;
+      showToastMsg(json.message || "Download link not available yet");
+      return null;
+    } catch (e: any) {
+      showToastMsg(`Failed to get link: ${e?.message || e}`);
+      return null;
+    }
+  };
+
+  const handlePlay = async (rec: Recording) => {
+    if (rec.status !== "ready") return;
+    setLoadingAction(`play-${rec.id}`);
+    try {
+      const url = await getDownloadUrl(rec.id);
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+    } finally {
+      setLoadingAction(null);
+    }
+  };
+
+  const handleDownload = async (rec: Recording) => {
+    if (rec.status !== "ready") return;
+    setLoadingAction(`dl-${rec.id}`);
+    try {
+      const url = await getDownloadUrl(rec.id);
+      if (url) {
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${rec.title || "recording"}.mp4`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+      }
+    } finally {
+      setLoadingAction(null);
+    }
+  };
 
   if (loading) {
     return (
@@ -83,6 +158,13 @@ export default function Recordings() {
 
   return (
     <div className="space-y-6">
+      {/* Toast */}
+      {toast && (
+        <div className="fixed right-6 top-6 z-50 flex items-center gap-3 rounded-xl border border-red-500/30 bg-red-500/10 px-5 py-3 text-sm font-medium text-red-200 shadow-lg">
+          {toast}
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
@@ -145,8 +227,19 @@ export default function Recordings() {
                   Failed
                 </span>
               )}
-              <button className="rounded-lg bg-slate-700/60 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-700 hover:text-white">
-                Play
+              <button
+                onClick={() => void handlePlay(rec)}
+                disabled={rec.status !== "ready" || loadingAction === `play-${rec.id}`}
+                className="rounded-lg bg-slate-700/60 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-700 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {loadingAction === `play-${rec.id}` ? "Loading…" : "Play"}
+              </button>
+              <button
+                onClick={() => void handleDownload(rec)}
+                disabled={rec.status !== "ready" || loadingAction === `dl-${rec.id}`}
+                className="rounded-lg bg-slate-700/60 px-3 py-1.5 text-xs text-slate-300 transition hover:bg-slate-700 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {loadingAction === `dl-${rec.id}` ? "Loading…" : "Download"}
               </button>
             </div>
           </div>

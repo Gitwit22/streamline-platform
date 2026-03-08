@@ -97,13 +97,28 @@ router.get("/chat/rooms", requireAuth, async (req, res) => {
     const ctx = await getEduContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_edu_member" });
 
-    const snap = await tenantCol("eduChatRooms")
-      .where("orgId", "==", ctx.orgId)
-      .orderBy("lastMessageAt", "desc")
-      .limit(100)
-      .get();
+    let rooms: ReturnType<typeof normalizeRoom>[] = [];
+    try {
+      // Try compound query (requires composite index: orgId ASC + lastMessageAt DESC)
+      const snap = await tenantCol("eduChatRooms")
+        .where("orgId", "==", ctx.orgId)
+        .orderBy("lastMessageAt", "desc")
+        .limit(100)
+        .get();
+      rooms = snap.docs.map((d) => normalizeRoom(d.id, d.data()));
+    } catch (indexErr: any) {
+      // Compound query failed (likely missing composite index) — fall back
+      // to a simple equality filter and sort in memory.
+      console.warn("[edu/chat] compound query failed, falling back to simple query:", indexErr?.message);
+      const snap = await tenantCol("eduChatRooms")
+        .where("orgId", "==", ctx.orgId)
+        .limit(100)
+        .get();
+      rooms = snap.docs
+        .map((d) => normalizeRoom(d.id, d.data()))
+        .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
+    }
 
-    const rooms = snap.docs.map((d) => normalizeRoom(d.id, d.data()));
     return res.json({ rooms });
   } catch (err: any) {
     console.error("[edu/chat] rooms error:", err?.message || err);
@@ -173,18 +188,39 @@ router.get("/chat/rooms/:id/messages", requireAuth, async (req, res) => {
     const room = roomSnap.data() as any;
     if (room.orgId !== ctx.orgId) return res.status(403).json({ error: "wrong_org" });
 
-    let query = tenantCol("eduChatMessages")
-      .where("roomId", "==", roomId)
-      .orderBy("createdAt", "desc")
-      .limit(limit);
+    let messages: ReturnType<typeof normalizeMessage>[] = [];
+    try {
+      // Compound query (requires composite index: roomId ASC + createdAt DESC)
+      let query = tenantCol("eduChatMessages")
+        .where("roomId", "==", roomId)
+        .orderBy("createdAt", "desc")
+        .limit(limit);
 
-    const before = coerceMillis(req.query.before as string);
-    if (before) {
-      query = query.where("createdAt", "<", before);
+      const before = coerceMillis(req.query.before as string);
+      if (before) {
+        query = query.where("createdAt", "<", before);
+      }
+
+      const snap = await query.get();
+      messages = snap.docs.map((d) => normalizeMessage(d.id, d.data())).reverse();
+    } catch (indexErr: any) {
+      // Fallback: simple query + in-memory sort
+      console.warn("[edu/chat] messages compound query failed, falling back:", indexErr?.message);
+      const snap = await tenantCol("eduChatMessages")
+        .where("roomId", "==", roomId)
+        .limit(limit)
+        .get();
+      messages = snap.docs
+        .map((d) => normalizeMessage(d.id, d.data()))
+        .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+
+      // Apply 'before' filter in memory
+      const before = coerceMillis(req.query.before as string);
+      if (before) {
+        messages = messages.filter((m) => (m.createdAt ?? 0) < before);
+      }
+      messages = messages.slice(-limit);
     }
-
-    const snap = await query.get();
-    const messages = snap.docs.map((d) => normalizeMessage(d.id, d.data())).reverse();
 
     return res.json({ messages });
   } catch (err: any) {

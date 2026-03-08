@@ -84,13 +84,22 @@ async function loadPublicEventPayload(eventId: string) {
 
   let broadcast: any = null;
   if (broadcastId) {
-    const bSnap = await tenantCol("broadcasts").doc(broadcastId).get();
+    // Try standard broadcasts collection first, then EDU broadcasts.
+    let bSnap = await tenantCol("broadcasts").doc(broadcastId).get();
+    if (!bSnap.exists) {
+      bSnap = await tenantCol("eduBroadcasts").doc(broadcastId).get();
+    }
     if (bSnap.exists) {
       const b = bSnap.data() || {};
+      // EDU broadcasts store the URL as "playlistUrl"; standard broadcasts
+      // use "hlsPlaybackUrl". Normalise to hlsPlaybackUrl for the viewer.
+      const hlsUrl =
+        (typeof (b as any).hlsPlaybackUrl === "string" ? (b as any).hlsPlaybackUrl : null) ||
+        (typeof (b as any).playlistUrl === "string" ? (b as any).playlistUrl : null);
       broadcast = {
         id: bSnap.id,
         status: typeof (b as any).status === "string" ? (b as any).status : null,
-        hlsPlaybackUrl: typeof (b as any).hlsPlaybackUrl === "string" ? (b as any).hlsPlaybackUrl : null,
+        hlsPlaybackUrl: hlsUrl,
         recordingId: typeof (b as any).recordingId === "string" ? (b as any).recordingId : null,
         replayUrl: typeof (b as any).replayUrl === "string" ? (b as any).replayUrl : null,
         endedAt: coerceIso((b as any).endedAt),
@@ -144,7 +153,10 @@ router.get("/events/:eventId", async (req, res) => {
     // Use GET /api/public/edu/embed?embedId=... for authorized playback details.
     let broadcast: any = null;
     if (broadcastId) {
-      const bSnap = await tenantCol("broadcasts").doc(broadcastId).get();
+      let bSnap = await tenantCol("broadcasts").doc(broadcastId).get();
+      if (!bSnap.exists) {
+        bSnap = await tenantCol("eduBroadcasts").doc(broadcastId).get();
+      }
       if (bSnap.exists) {
         const b = bSnap.data() || {};
         broadcast = {

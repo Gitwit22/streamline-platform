@@ -7,6 +7,8 @@ import { goLiveEduBroadcast, stopEduBroadcast, watchEduBroadcast, type GoLiveRes
 import { apiFetchAuth, apiStartRecording, apiStopRecording } from "../../lib/api";
 import { useSchoolBranding } from "../state/schoolBranding";
 import SchoolLogo from "../components/SchoolLogo";
+import { useRecordingReadyPoller } from "../../hooks/useRecordingReadyPoller";
+import RecordingToast from "../../components/RecordingToast";
 
 type BroadcastTemplateId = "announcements" | "event" | "principal";
 type LayoutMode = "grid" | "speaker" | "single";
@@ -407,6 +409,19 @@ export default function Broadcast() {
   const [recordingStatus, setRecordingStatus] = useState<OutputStatus>("off");
   const [activeRecordingId, setActiveRecordingId] = useState<string | null>(null);
   const [recordingBusy, setRecordingBusy] = useState(false);
+
+  // Recording-ready poller: notifies the user when a recording finishes processing
+  const recordingPoller = useRecordingReadyPoller();
+
+  // IMPORTANT: Add RecordingToast component to JSX return (search for final </div> before "export default")
+  // {recordingPoller.toast && (
+  //   <RecordingToast
+  //     message={recordingPoller.toast.message}
+  //     type={recordingPoller.toast.type}
+  //     onDismiss={recordingPoller.dismissToast}
+  //     recordingsPath="/streamline/edu/recordings"
+  //   />
+  // )}
   const [youtubeStatus, setYoutubeStatus] = useState<OutputStatus>("off");
 
   // If opened via /broadcast?eventId=..., preload settings/crew/title.
@@ -903,11 +918,14 @@ export default function Broadcast() {
 
   async function handleStopRecording() {
     if (recordingBusy || !activeRecordingId) return;
+    const stoppingId = activeRecordingId;
     setRecordingBusy(true);
     try {
       await apiStopRecording(activeRecordingId, goLiveData?.roomAccessToken ?? null);
       setActiveRecordingId(null);
       setRecordingStatus("off");
+      // Start polling for recording readiness — notifies user when file is available
+      recordingPoller.startPolling(stoppingId);
     } catch (err: any) {
       console.error("[EduBroadcast] stop recording error:", err);
       setRecordingStatus("error");

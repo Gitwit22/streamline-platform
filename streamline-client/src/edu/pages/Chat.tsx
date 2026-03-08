@@ -41,21 +41,29 @@ export default function EduChat() {
   const [showNewRoom, setShowNewRoom] = useState(false);
   const [newRoomName, setNewRoomName] = useState("");
   const [callTarget, setCallTarget] = useState<string | null>(null);
+  const [roomsError, setRoomsError] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   /* ── Load rooms ──────────────────────────────────────────── */
-  const loadRooms = useCallback(async () => {
+  const loadRooms = useCallback(async (retryCount = 0) => {
     setLoading(true);
+    setRoomsError(false);
     try {
       const data = await fetchEduChatRooms();
       setRooms(data);
-      if (data.length > 0) setSelectedRoom(data[0].id);
+      if (data.length > 0 && !selectedRoom) setSelectedRoom(data[0].id);
     } catch {
+      // Retry once after a short delay (auth token may still be propagating)
+      if (retryCount < 1) {
+        await new Promise((r) => setTimeout(r, 1500));
+        return loadRooms(retryCount + 1);
+      }
       setRooms([]);
+      setRoomsError(true);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selectedRoom]);
 
   useEffect(() => {
     loadRooms();
@@ -164,8 +172,20 @@ export default function EduChat() {
           )}
           {!loading && rooms.length === 0 && (
             <div className="flex flex-col items-center justify-center px-4 py-10 text-center">
-              <div className="text-sm text-slate-400">No chat rooms yet</div>
-              <div className="mt-1 text-[11px] text-slate-500">Click + to create your first room</div>
+              <div className="text-sm text-slate-400">
+                {roomsError ? "Couldn't load rooms" : "No chat rooms yet"}
+              </div>
+              <div className="mt-1 text-[11px] text-slate-500">
+                {roomsError ? "There was a problem loading your chat rooms." : "Click + to create your first room"}
+              </div>
+              {roomsError && (
+                <button
+                  onClick={() => loadRooms()}
+                  className="mt-3 rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs font-medium text-orange-400 transition hover:bg-slate-700"
+                >
+                  Retry
+                </button>
+              )}
             </div>
           )}
 
