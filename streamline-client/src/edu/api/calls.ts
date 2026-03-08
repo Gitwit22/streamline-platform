@@ -72,3 +72,21 @@ export async function updateEduCall(
   const data = await res.json();
   return data.call;
 }
+
+/* ── Pending / incoming calls for the current user ─────────────── */
+
+export interface PendingEduCall extends EduCall {
+  callerName: string;
+  targetUserId: string;
+}
+
+export async function fetchPendingEduCalls(): Promise<PendingEduCall[]> {
+  const res = await apiFetchAuth("/api/edu/calls/pending");
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.calls ?? [];
+}
+
+export async function dismissEduCall(id: string): Promise<void> {
+  await apiFetchAuth(`/api/edu/calls/${id}/dismiss`, { method: "PATCH" });
+}

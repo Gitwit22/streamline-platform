@@ -1236,11 +1236,22 @@ router.post(
         fileOutputKeys: Object.keys(fileOutput || {}),
       });
 
-      const compositeOpts = {
-        layout: layout,
-        audioOnly: false,
-        videoOnly: false,
-      };
+      // For the speaker layout, use a custom compositor page that adds
+      // debounced speaker switching (2 s delay) and smooth CSS crossfade.
+      const compositorBaseUrl = process.env.COMPOSITOR_BASE_URL;
+
+      const compositeOpts: Record<string, unknown> =
+        resolvedLayout.mode === "speaker" && compositorBaseUrl
+          ? {
+              customBaseUrl: `${compositorBaseUrl}/compositor/speaker`,
+              audioOnly: false,
+              videoOnly: false,
+            }
+          : {
+              layout: layout,
+              audioOnly: false,
+              videoOnly: false,
+            };
 
       if (process.env.AUTH_DEBUG === "1") {
         console.log("[livekit-debug] startRoomCompositeEgress (recording)", {

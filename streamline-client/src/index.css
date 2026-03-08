@@ -211,3 +211,31 @@ body:not(.sl-edu) button:focus-visible {
 /* Desktop: allow LiveKit to control screen-share tile visuals; no extra overlay */
 @media (min-width: 769px) {
 }
+
+/* ── Incoming-call banner animations ─────────────────────────── */
+@keyframes slide-down {
+  from {
+    opacity: 0;
+    transform: translateY(-100%);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-slide-down {
+  animation: slide-down 0.35s ease-out both;
+}
+
+@keyframes wiggle {
+  0%, 100% { transform: rotate(0deg); }
+  15% { transform: rotate(-15deg); }
+  30% { transform: rotate(12deg); }
+  45% { transform: rotate(-10deg); }
+  60% { transform: rotate(8deg); }
+  75% { transform: rotate(-5deg); }
+  90% { transform: rotate(3deg); }
+}
+.animate-wiggle {
+  animation: wiggle 0.8s ease-in-out infinite;
+}

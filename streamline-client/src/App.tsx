@@ -41,6 +41,7 @@ import EduCalls from "./edu/pages/Calls";
 import SchoolPortal from "./edu/entry/SchoolPortal";
 import ChangePassword from "./edu/pages/ChangePassword";
 import LiveRoomViewer from "./pages/LiveRoomViewer";
+import CompositorSpeaker from "./pages/CompositorSpeaker";
 
 import CorporateLanding from "./corporate/entry/CorporateLanding";
 import CorporateLogin from "./corporate/entry/CorporateLogin";
@@ -348,6 +349,9 @@ function App() {
 
       {/* Public shareable-room HLS viewer (no auth) */}
       <Route path="/live/:id" element={<LiveRoomViewer />} />
+
+      {/* LiveKit egress compositor (loaded by headless browser, no auth) */}
+      <Route path="/compositor/speaker" element={<CompositorSpeaker />} />
 
       {/* Public / auth flow */}
       <Route path="/" element={DEMO_LANDING_ENABLED ? <Demo /> : <Navigate to="/welcome" replace />} />

@@ -30,6 +30,10 @@ services:
       - key: LIVEKIT_API_SECRET
         sync: false
 
+      # Custom compositor URL (public client URL for speaker layout egress)
+      - key: COMPOSITOR_BASE_URL
+        sync: false
+
       # Auth
       - key: JWT_SECRET
         sync: false

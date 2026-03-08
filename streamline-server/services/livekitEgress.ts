@@ -70,12 +70,20 @@ export async function startHlsEgress(params: {
     });
   }
 
-  const layoutWithNames = `${params.layout}-dark`;
+  // For the speaker layout, use a custom compositor page that adds
+  // debounced speaker switching (2 s delay) and smooth CSS crossfade
+  // transitions.  The grid layout keeps using LiveKit's built-in template.
+  const compositorBaseUrl = process.env.COMPOSITOR_BASE_URL; // e.g. https://app.example.com
+
+  const egressOpts: Record<string, unknown> =
+    params.layout === "speaker" && compositorBaseUrl
+      ? { customBaseUrl: `${compositorBaseUrl}/compositor/speaker` }
+      : { layout: `${params.layout}-dark` };
 
   const info = await client.startRoomCompositeEgress(
     params.roomName,
     { segments: output },
-    { layout: layoutWithNames }
+    egressOpts as any,
   );
 
   // mapPreset(params.presetId) reserved for future encoding options usage

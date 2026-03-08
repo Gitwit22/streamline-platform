@@ -41,6 +41,7 @@ node -e "console.log(process.env.STRIPE_SECRET_KEY.startsWith('sk_live_') ? '✅
 LIVEKIT_URL=wss://your-project.livekit.cloud
 LIVEKIT_API_KEY=API...
 LIVEKIT_API_SECRET=...
+COMPOSITOR_BASE_URL=https://your-app.example.com   # public URL of the client app (for custom speaker layout in egress)
 ```
 
 **How to verify:**
