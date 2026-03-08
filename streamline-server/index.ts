@@ -47,6 +47,7 @@ import eduStudentsRoutes from "./routes/eduStudents";
 import eduStaffRoutes from "./routes/eduStaff";
 import eduChatRoutes from "./routes/eduChat";
 import eduPortalRoutes from "./routes/eduPortal";
+import notificationsRoutes from "./routes/notifications";
 import corpMeRoutes from "./routes/corpMe";
 import corpBroadcastsRoutes from "./routes/corpBroadcasts";
 import corpCallsRoutes from "./routes/corpCalls";
@@ -296,6 +297,8 @@ app.use("/api/edu", eduStudentsRoutes);
 app.use("/api/edu", eduStaffRoutes);
 // EDU faculty chat (rooms & messages)
 app.use("/api/edu", eduChatRoutes);
+// EDU notifications (bell, read, unread count)
+app.use("/api/edu", notificationsRoutes);
 
 // Corporate lane routes
 app.use("/api/corp", corpMeRoutes);

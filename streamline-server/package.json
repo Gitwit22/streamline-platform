@@ -15,7 +15,8 @@
     "smoke:deploy": "tsx scripts/deploy-smoke.ts",
     "cron:expire-emergency": "node dist/scripts/expireEmergencyCron.js",
     "auth:audit-duplicate-emails": "tsx scripts/auditDuplicateEmails.ts",
-    "auth:backfill-firebase-users": "tsx scripts/backfillFirebaseAuthUsers.ts"
+    "auth:backfill-firebase-users": "tsx scripts/backfillFirebaseAuthUsers.ts",
+    "cron:event-reminder": "tsx jobs/eventReminder.ts"
   },
   "keywords": [],
   "author": "",
