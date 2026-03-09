@@ -121,6 +121,8 @@ const allowedOrigins = new Set(
     // Production custom domains
     "https://streamline.nxtlvlts.com",
     "https://www.streamline.nxtlvlts.com",
+    // Support hub
+    "https://support-hub.pages.dev",
     // Local dev
     "http://localhost:5173",
     "http://127.0.0.1:5173",

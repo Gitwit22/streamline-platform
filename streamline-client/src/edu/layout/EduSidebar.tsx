@@ -47,8 +47,8 @@ export default function EduSidebar() {
           { id: "chat", label: "Faculty Chat", path: "/streamline/edu/chat" },
           { id: "calls", label: "Video Calls", path: "/streamline/edu/calls" },
         ] : []),
-        ...(isStaff ? [{ id: "support", label: "Support", path: "/streamline/edu/support" }] : []),
         { id: "media-library", label: "Media Library", path: "/streamline/edu/media-library" },
+        ...(isStaff ? [{ id: "support", label: "Support", path: "/streamline/edu/support" }] : []),
         ...(isFacultyAdmin ? [{ id: "settings", label: "School Settings", path: "/streamline/edu/settings" }] : []),
       ];
     },
