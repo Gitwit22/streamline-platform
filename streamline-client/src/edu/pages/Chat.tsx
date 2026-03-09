@@ -97,14 +97,14 @@ export default function EduChat() {
   /* ── Derive online uid set for quick lookups ─────────────── */
   const onlineUids = new Set(onlineStaff.map((s) => s.uid));
 
-  /* ── Message auto-refresh (every 5s) ─────────────────────── */
+  /* ── Message auto-refresh (every 15s — keeps Firestore reads low) ── */
   useEffect(() => {
     if (!selectedRoom) return;
     const interval = setInterval(() => {
       fetchEduMessages(selectedRoom, { limit: 50 })
         .then((data) => setMessages(data))
         .catch(() => {});
-    }, 5_000);
+    }, 15_000);
     return () => clearInterval(interval);
   }, [selectedRoom]);
 
