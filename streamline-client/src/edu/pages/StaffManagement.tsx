@@ -1,4 +1,6 @@
 import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { Phone, MessageSquare, Loader2 } from "lucide-react";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import {
   fetchPendingStaff,
@@ -7,6 +9,8 @@ import {
   updateStaffStatus,
   type PendingStaffRecord,
 } from "../api/schoolPortal";
+import { createEduCall } from "../api/calls";
+import { getOrCreateDirectChatRoom, type DirectCallTarget } from "../api/directComms";
 
 /* ── Helpers ────────────────────────────────────────────────────── */
 
@@ -36,7 +40,10 @@ const labelCls = "block text-sm font-medium text-slate-300";
 
 export default function StaffManagement() {
   const me = useEduMe();
+  const navigate = useNavigate();
   const isFacultyAdmin = String(me?.orgRole || me?.role || "") === "faculty_admin";
+  const isFacultyTeacher = String(me?.orgRole || me?.role || "") === "faculty_teacher";
+  const isStaff = isFacultyAdmin || isFacultyTeacher;
 
   const [staff, setStaff] = useState<PendingStaffRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -45,6 +52,65 @@ export default function StaffManagement() {
   const [showAdd, setShowAdd] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState<string | null>(null);
+  const [callBusy, setCallBusy] = useState<string | null>(null);
+  const [chatBusy, setChatBusy] = useState<string | null>(null);
+
+  /** Can the current user contact this staff member? */
+  function canContact(s: PendingStaffRecord): boolean {
+    if (!isStaff) return false;
+    if (s.status !== "active") return false;
+    if (s.id === me?.uid) return false;
+    return true;
+  }
+
+  /** Start a direct call with a staff member. */
+  const handleStartCall = useCallback(async (s: PendingStaffRecord) => {
+    if (callBusy) return;
+    setCallBusy(s.id);
+    try {
+      const target: DirectCallTarget = {
+        uid: s.id,
+        name: s.fullName,
+        role: s.positionTitle || s.role,
+      };
+      // Create a scheduled call so the recipient gets the incoming-call banner
+      const call = await createEduCall({
+        title: `Call with ${s.fullName}`,
+        participants: [s.id],
+      });
+      // Navigate to Calls page with context to auto-connect
+      navigate("/streamline/edu/calls", {
+        state: {
+          directCallTarget: target,
+          callId: call.id,
+          autoConnect: true,
+        },
+      });
+    } catch (err: any) {
+      console.error("[StaffMgmt] call error:", err?.message || err);
+    } finally {
+      setCallBusy(null);
+    }
+  }, [callBusy, me?.uid, navigate]);
+
+  /** Open a direct chat with a staff member. */
+  const handleOpenChat = useCallback(async (s: PendingStaffRecord) => {
+    if (chatBusy) return;
+    setChatBusy(s.id);
+    try {
+      const { roomId } = await getOrCreateDirectChatRoom(s.id);
+      navigate("/streamline/edu/chat", {
+        state: {
+          directRoomId: roomId,
+          targetName: s.fullName,
+        },
+      });
+    } catch (err: any) {
+      console.error("[StaffMgmt] chat error:", err?.message || err);
+    } finally {
+      setChatBusy(null);
+    }
+  }, [chatBusy, navigate]);
 
   /* ── Fetch ─────────────────────────────────────────────────── */
   const loadStaff = useCallback(async () => {
@@ -169,6 +235,7 @@ export default function StaffManagement() {
               <th className="px-5 py-3">Name</th>
               <th className="px-5 py-3">Position</th>
               <th className="px-5 py-3">Status</th>
+              {isStaff && <th className="px-5 py-3 text-center">Contact</th>}
               <th className="px-5 py-3">Activation Code</th>
               {isFacultyAdmin && <th className="px-5 py-3 text-right">Actions</th>}
             </tr>
@@ -193,6 +260,34 @@ export default function StaffManagement() {
                     {s.status.charAt(0).toUpperCase() + s.status.slice(1)}
                   </span>
                 </td>
+                {isStaff && (
+                  <td className="px-5 py-4">
+                    <div className="flex items-center justify-center gap-2">
+                      {canContact(s) ? (
+                        <>
+                          <button
+                            onClick={() => handleStartCall(s)}
+                            disabled={callBusy === s.id}
+                            title={`Call ${s.fullName}`}
+                            className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-green-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {callBusy === s.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Phone className="h-4 w-4" />}
+                          </button>
+                          <button
+                            onClick={() => handleOpenChat(s)}
+                            disabled={chatBusy === s.id}
+                            title={`Chat with ${s.fullName}`}
+                            className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-slate-700 hover:text-blue-400 disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            {chatBusy === s.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
+                          </button>
+                        </>
+                      ) : (
+                        <span className="text-xs text-slate-600">—</span>
+                      )}
+                    </div>
+                  </td>
+                )}
                 <td className="px-5 py-4">
                   <div className="flex items-center gap-2">
                     <code className="rounded bg-slate-800 px-2 py-1 font-mono text-xs tracking-widest text-orange-300">{s.onboardingCode}</code>
@@ -240,7 +335,7 @@ export default function StaffManagement() {
             ))}
             {filtered.length === 0 && (
               <tr>
-                <td colSpan={isFacultyAdmin ? 5 : 4} className="px-5 py-12 text-center text-slate-400">
+                <td colSpan={isFacultyAdmin ? 6 : isStaff ? 5 : 4} className="px-5 py-12 text-center text-slate-400">
                   {search ? "No staff match your search." : "No staff added yet. Click '+ Add Staff' to invite team members."}
                 </td>
               </tr>

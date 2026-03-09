@@ -42,7 +42,13 @@ function formatElapsed(ms: number) {
 export default function EduCalls() {
   const me = useEduMe();
   const location = useLocation();
-  const navState = location.state as { acceptedCallId?: string; callerUid?: string } | null;
+  const navState = location.state as {
+    acceptedCallId?: string;
+    callerUid?: string;
+    directCallTarget?: { uid: string; name: string; role: string };
+    callId?: string;
+    autoConnect?: boolean;
+  } | null;
 
   const [activeTab, setActiveTab] = useState<Tab>("Active Calls");
   const [calls, setCalls] = useState<EduCall[]>([]);
@@ -308,6 +314,23 @@ export default function EduCalls() {
       window.history.replaceState({}, "");
     }
   }, [navState, loading, activeCall, lkConnected, connectingLk, connectToLiveKit]);
+
+  // Auto-connect when routed from People / StaffManagement page (direct call)
+  useEffect(() => {
+    if (
+      navState?.directCallTarget?.uid &&
+      navState?.autoConnect &&
+      !loading &&
+      !lkConnected &&
+      !connectingLk &&
+      autoConnectedRef.current !== navState.callId
+    ) {
+      autoConnectedRef.current = navState.callId || navState.directCallTarget.uid;
+      setActiveTab("Active Calls");
+      connectToLiveKit(navState.directCallTarget.uid);
+      window.history.replaceState({}, "");
+    }
+  }, [navState, loading, lkConnected, connectingLk, connectToLiveKit]);
 
   // Auto-connect when page loads and there's an active call we haven't connected to
   useEffect(() => {

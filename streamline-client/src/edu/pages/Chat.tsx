@@ -1,4 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from "react";
+import { useLocation } from "react-router-dom";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import {
   fetchEduChatRooms,
@@ -35,6 +36,8 @@ function formatMsgTime(ms: number | null) {
 
 export default function EduChat() {
   const me = useEduMe();
+  const location = useLocation();
+  const navState = location.state as { directRoomId?: string; targetName?: string } | null;
 
   const [rooms, setRooms] = useState<EduChatRoom[]>([]);
   const [messages, setMessages] = useState<EduChatMessage[]>([]);
@@ -99,7 +102,19 @@ export default function EduChat() {
     try {
       const data = await fetchEduChatRooms();
       setRooms(data);
-      if (data.length > 0 && !selectedRoom) setSelectedRoom(data[0].id);
+      // If navigated with a direct room ID, select it; otherwise default to first
+      if (navState?.directRoomId) {
+        const exists = data.some((r: EduChatRoom) => r.id === navState.directRoomId);
+        if (exists) {
+          setSelectedRoom(navState.directRoomId);
+        } else if (data.length > 0 && !selectedRoom) {
+          setSelectedRoom(data[0].id);
+        }
+        // Clear nav state so refresh doesn't re-select
+        window.history.replaceState({}, "");
+      } else if (data.length > 0 && !selectedRoom) {
+        setSelectedRoom(data[0].id);
+      }
     } catch {
       // Retry once after a short delay (auth token may still be propagating)
       if (retryCount < 1) {

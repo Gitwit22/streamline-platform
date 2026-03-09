@@ -172,6 +172,76 @@ router.post("/chat/rooms", requireAuth, async (req, res) => {
   }
 });
 
+/* ── POST /chat/rooms/direct ─ get-or-create a 1:1 DM room ────── */
+/**
+ * Uses deterministic room ID based on sorted user-ID pair so that
+ * John → Sarah and Sarah → John always share the same room.
+ */
+router.post("/chat/rooms/direct", requireAuth, async (req, res) => {
+  const uid = String((req as any).user?.uid || "").trim();
+  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+  try {
+    const ctx = await getEduContext(uid);
+    if (!ctx) return res.status(403).json({ error: "not_edu_member" });
+
+    if (ctx.orgRole !== "faculty_admin" && ctx.orgRole !== "faculty_teacher") {
+      return res.status(403).json({ error: "faculty_only" });
+    }
+
+    const targetUserId = asString(req.body.targetUserId).trim();
+    if (!targetUserId) return res.status(400).json({ error: "targetUserId_required" });
+    if (targetUserId === uid) return res.status(400).json({ error: "cannot_dm_self" });
+
+    // Deterministic room ID: sorted pair of UIDs
+    const pairKey = [uid, targetUserId].sort().join("_");
+    const roomId = `${ctx.orgId}_dm_${pairKey}`;
+
+    // Resolve target user name
+    let targetName = "Staff Member";
+    try {
+      const tSnap = await globalCol("users").doc(targetUserId).get();
+      if (tSnap.exists) {
+        const tData = tSnap.data() as any;
+        targetName =
+          (typeof tData?.name === "string" && tData.name.trim()) ||
+          (typeof tData?.displayName === "string" && tData.displayName.trim()) ||
+          targetName;
+      }
+    } catch { /* fallback to generic name */ }
+
+    const roomRef = tenantCol("eduChatRooms").doc(roomId);
+    const snap = await roomRef.get();
+
+    if (snap.exists) {
+      return res.json({ roomId, created: false });
+    }
+
+    // Create the DM room
+    const now = Date.now();
+    const doc = {
+      orgId: ctx.orgId,
+      name: `${ctx.userName} & ${targetName}`,
+      section: "direct",
+      isPrivate: true,
+      isDirect: true,
+      members: [uid, targetUserId],
+      unreadCount: 0,
+      lastMessage: "",
+      lastMessageAt: now,
+      memberCount: 2,
+      createdAt: now,
+      createdBy: uid,
+    };
+
+    await roomRef.set(doc, { merge: true });
+    return res.json({ roomId, created: true });
+  } catch (err: any) {
+    console.error("[edu/chat] direct room error:", err?.message || err);
+    return res.status(500).json({ error: "internal" });
+  }
+});
+
 /* ── GET /chat/rooms/:id/messages ─ list messages ──────────────── */
 
 router.get("/chat/rooms/:id/messages", requireAuth, async (req, res) => {

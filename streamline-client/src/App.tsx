@@ -321,7 +321,7 @@ function App() {
           <Route
             path="chat"
             element={
-              <EduRoleGuard allow={["faculty_admin"]}>
+              <EduRoleGuard allow={["faculty_admin", "faculty_teacher"]}>
                 <EduChat />
               </EduRoleGuard>
             }
@@ -329,7 +329,7 @@ function App() {
           <Route
             path="calls"
             element={
-              <EduRoleGuard allow={["faculty_admin"]}>
+              <EduRoleGuard allow={["faculty_admin", "faculty_teacher"]}>
                 <EduCalls />
               </EduRoleGuard>
             }
