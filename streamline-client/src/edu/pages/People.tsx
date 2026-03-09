@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { Phone } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+import { Phone, MessageSquare } from "lucide-react";
 import { useEduMe } from "../layout/EduProtectedRoute";
 import { listEduEvents, computeEduEventStatus } from "../state/eduEvents";
 import {
@@ -13,6 +14,7 @@ import {
 } from "../api/people";
 import { getEduCallTokenDM } from "../api/callToken";
 import EduCallModal from "../components/CallModal";
+import { getOrCreateDirectChatRoom } from "../api/directComms";
 
 type TabId = "students" | "staff";
 
@@ -194,6 +196,7 @@ function RoleSelect({
 
 export default function People() {
   const me = useEduMe();
+  const navigate = useNavigate();
 
   const roleRaw = String(me?.orgRole || me?.role || "faculty_admin");
   const isFacultyAdmin = roleRaw === "faculty_admin";
@@ -222,6 +225,7 @@ export default function People() {
 
   const [drawerTarget, setDrawerTarget] = useState<EduPerson | null>(null);
   const [callTarget, setCallTarget] = useState<EduPerson | null>(null);
+  const [chatBusy, setChatBusy] = useState<string | null>(null);
   const [allEvents, setAllEvents] = useState<import("../state/eduEvents").EduEvent[]>([]);
   useEffect(() => {
     let cancelled = false;
@@ -356,6 +360,31 @@ export default function People() {
     // Student producers can call faculty + teachers + other producers
     return p.role === "faculty_admin" || p.role === "faculty_teacher" || p.role === "student_producer" || p.role === "student_producer_assigned";
   }
+
+  /** Can the current user chat this person? Same rules as canCall. */
+  function canChat(p: EduPerson): boolean {
+    if (extractUid(p.id) === me?.uid) return false;
+    if (p.status !== "active") return false;
+    if (isStaffMember) return true;
+    return p.role === "faculty_admin" || p.role === "faculty_teacher" || p.role === "student_producer" || p.role === "student_producer_assigned";
+  }
+
+  /** Open a DM chat with a person. */
+  async function handleOpenChat(p: EduPerson) {
+    const uid = extractUid(p.id);
+    if (chatBusy) return;
+    setChatBusy(uid);
+    try {
+      const { roomId } = await getOrCreateDirectChatRoom(uid);
+      navigate("/streamline/edu/chat", {
+        state: { directRoomId: roomId, targetName: p.name || p.email || "" },
+      });
+    } catch (err: any) {
+      console.error("[People] chat error:", err?.message || err);
+    } finally {
+      setChatBusy(null);
+    }
+  }
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -459,6 +488,23 @@ export default function People() {
                       <td className="px-5 py-4 text-sm text-slate-300">{p.assignedEventsCount ?? 0}</td>
                       <td className="px-5 py-4">
                         <div className="flex items-center justify-end gap-2">
+                          {canChat(p) && (
+                            <button
+                              type="button"
+                              onClick={() => void handleOpenChat(p)}
+                              disabled={chatBusy === extractUid(p.id)}
+                              title={`Chat with ${p.name || "member"}`}
+                              className={`rounded-lg p-2 text-slate-400 hover:bg-slate-800 hover:text-orange-400 transition-colors ${
+                                chatBusy === extractUid(p.id) ? "opacity-50 cursor-not-allowed" : ""
+                              }`}
+                            >
+                              {chatBusy === extractUid(p.id) ? (
+                                <div className="h-4 w-4 animate-spin rounded-full border-2 border-orange-500 border-t-transparent" />
+                              ) : (
+                                <MessageSquare className="h-4 w-4" />
+                              )}
+                            </button>
+                          )}
                           {canCall(p) && (
                             <button
                               type="button"

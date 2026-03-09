@@ -15,6 +15,7 @@ import {
   type EduChatOnlineStaff,
 } from "../api/chat";
 import { getEduCallTokenDM } from "../api/callToken";
+import { getOrCreateDirectChatRoom } from "../api/directComms";
 
 /* ── Helpers ────────────────────────────────────────────────────── */
 
@@ -56,6 +57,7 @@ export default function EduChat() {
   const [allStaff, setAllStaff] = useState<EduChatStaffMember[]>([]);
   const [onlineStaff, setOnlineStaff] = useState<EduChatOnlineStaff[]>([]);
   const [staffLoading, setStaffLoading] = useState(true);
+  const [dmBusy, setDmBusy] = useState<string | null>(null);
 
   /* ── Load staff + online ─────────────────────────────────── */
   const loadStaffAndOnline = useCallback(async () => {
@@ -94,6 +96,34 @@ export default function EduChat() {
 
   /* ── Derive online uid set for quick lookups ─────────────── */
   const onlineUids = new Set(onlineStaff.map((s) => s.uid));
+
+  /* ── Message auto-refresh (every 5s) ─────────────────────── */
+  useEffect(() => {
+    if (!selectedRoom) return;
+    const interval = setInterval(() => {
+      fetchEduMessages(selectedRoom, { limit: 50 })
+        .then((data) => setMessages(data))
+        .catch(() => {});
+    }, 5_000);
+    return () => clearInterval(interval);
+  }, [selectedRoom]);
+
+  /* ── Click staff → open DM ───────────────────────────────── */
+  const handleStaffDM = async (staffUid: string) => {
+    if (dmBusy || staffUid === me?.uid) return;
+    setDmBusy(staffUid);
+    try {
+      const { roomId } = await getOrCreateDirectChatRoom(staffUid);
+      // Reload rooms so the DM appears in the sidebar
+      const data = await fetchEduChatRooms();
+      setRooms(data);
+      setSelectedRoom(roomId);
+    } catch (err: any) {
+      console.error("[Chat] DM error:", err?.message || err);
+    } finally {
+      setDmBusy(null);
+    }
+  };
 
   /* ── Load rooms ──────────────────────────────────────────── */
   const loadRooms = useCallback(async (retryCount = 0) => {
@@ -400,9 +430,13 @@ export default function EduChat() {
           ) : (
             <div className="px-2 py-2">
               {onlineStaff.map((s) => (
-                <div
+                <button
                   key={s.uid}
-                  className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-slate-800/60"
+                  onClick={() => handleStaffDM(s.uid)}
+                  disabled={s.uid === me?.uid || dmBusy === s.uid}
+                  className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors ${
+                    s.uid === me?.uid ? "cursor-default" : "cursor-pointer hover:bg-slate-800/60"
+                  } ${dmBusy === s.uid ? "opacity-60" : ""}`}
                 >
                   <div className="relative flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-green-600/30 to-green-800/30 text-[10px] font-bold text-green-300">
                     {initials(s.userName)}
@@ -416,7 +450,10 @@ export default function EduChat() {
                       {s.orgRole === "faculty_admin" ? "Admin" : "Teacher"}
                     </div>
                   </div>
-                </div>
+                  {dmBusy === s.uid && (
+                    <div className="h-3 w-3 animate-spin rounded-full border border-orange-500 border-t-transparent" />
+                  )}
+                </button>
               ))}
             </div>
           )}
@@ -441,9 +478,13 @@ export default function EduChat() {
               {allStaff.map((s) => {
                 const isOnline = onlineUids.has(s.uid);
                 return (
-                  <div
+                  <button
                     key={s.uid}
-                    className="flex items-center gap-2.5 rounded-lg px-2 py-1.5 transition-colors hover:bg-slate-800/60"
+                    onClick={() => handleStaffDM(s.uid)}
+                    disabled={s.uid === me?.uid || dmBusy === s.uid}
+                    className={`flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left transition-colors ${
+                      s.uid === me?.uid ? "cursor-default" : "cursor-pointer hover:bg-slate-800/60"
+                    } ${dmBusy === s.uid ? "opacity-60" : ""}`}
                   >
                     <div className="relative flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-slate-700 to-slate-800 text-[10px] font-bold text-white">
                       {initials(s.name)}
@@ -467,10 +508,12 @@ export default function EduChat() {
                         )}
                       </div>
                     </div>
-                    {isOnline && (
+                    {dmBusy === s.uid ? (
+                      <div className="h-3 w-3 animate-spin rounded-full border border-orange-500 border-t-transparent" />
+                    ) : isOnline ? (
                       <span className="text-[9px] font-medium text-green-400">online</span>
-                    )}
-                  </div>
+                    ) : null}
+                  </button>
                 );
               })}
             </div>
