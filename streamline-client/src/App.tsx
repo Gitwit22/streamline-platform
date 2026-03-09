@@ -38,6 +38,7 @@ import EduLearnMore from "./edu/entry/EduLearnMore";
 import EduGetStarted from "./edu/entry/EduGetStarted";
 import EduChat from "./edu/pages/Chat";
 import EduCalls from "./edu/pages/Calls";
+import EduSupport from "./edu/pages/Support";
 import SchoolPortal from "./edu/entry/SchoolPortal";
 import ChangePassword from "./edu/pages/ChangePassword";
 import LiveRoomViewer from "./pages/LiveRoomViewer";
@@ -331,6 +332,14 @@ function App() {
             element={
               <EduRoleGuard allow={["faculty_admin", "faculty_teacher"]}>
                 <EduCalls />
+              </EduRoleGuard>
+            }
+          />
+          <Route
+            path="support"
+            element={
+              <EduRoleGuard allow={["faculty_admin", "faculty_teacher", "principal", "school_admin", "district_staff", "support_staff"]}>
+                <EduSupport />
               </EduRoleGuard>
             }
           />

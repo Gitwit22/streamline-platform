@@ -14,7 +14,7 @@ import {
 } from "../api/people";
 import { getEduCallTokenDM } from "../api/callToken";
 import EduCallModal from "../components/CallModal";
-import { getOrCreateDirectChatRoom } from "../api/directComms";
+import { getOrCreateDM } from "../api/conversations";
 
 type TabId = "students" | "staff";
 
@@ -375,9 +375,9 @@ export default function People() {
     if (chatBusy) return;
     setChatBusy(uid);
     try {
-      const { roomId } = await getOrCreateDirectChatRoom(uid);
+      const result = await getOrCreateDM(uid);
       navigate("/streamline/edu/chat", {
-        state: { directRoomId: roomId, targetName: p.name || p.email || "" },
+        state: { conversationId: result.conversation.id },
       });
     } catch (err: any) {
       console.error("[People] chat error:", err?.message || err);

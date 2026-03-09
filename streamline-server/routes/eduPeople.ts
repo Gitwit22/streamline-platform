@@ -215,7 +215,7 @@ router.get("/people", requireAuth, async (req, res) => {
     const ctx = await getOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "org_required" });
 
-    if (!assertRole(ctx.orgRole, ["faculty_admin", "student_producer", "student_producer_assigned"])) {
+    if (!assertRole(ctx.orgRole, ["faculty_admin", "faculty_teacher", "student_producer", "student_producer_assigned"])) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 

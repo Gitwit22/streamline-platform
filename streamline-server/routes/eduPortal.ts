@@ -16,6 +16,7 @@
 import express from "express";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import { firestore } from "../firebaseAdmin";
 import { tenantCol, globalCol } from "../lib/dbPaths";
 import { DEFAULT_TEACHER_PERMISSIONS } from "../lib/teacherPermissions";
 
@@ -312,60 +313,100 @@ router.post("/:slug/activate-staff", async (req, res) => {
       ? "faculty_teacher"
       : (pending.role || "faculty_admin");
 
-    // Create the user account in global users collection
-    const userRef = globalCol("users").doc();
-    const uid = userRef.id;
+    // ── Idempotency guard: check if a user with this email already exists ──
+    const existingUser = await globalCol("users")
+      .where("email", "==", username)
+      .limit(1)
+      .get();
 
-    await userRef.set({
-      displayName: fullName,
-      name: fullName,
-      email: username,
-      passwordHash,
-      orgId,
-      orgType: "edu",
-      orgName: org.name || "",
-      orgRole: resolvedRole,
-      positionTitle: positionTitle || pending.positionTitle || "",
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    // Create membership
-    const memberId = `${orgId}_${uid}`;
-    const memberDoc: any = {
-      orgId,
-      uid,
-      email: username,
-      name: fullName,
-      role: resolvedRole,
-      status: "active",
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    // Seed default permissions for teachers
-    if (resolvedRole === "faculty_teacher") {
-      memberDoc.permissions = { ...DEFAULT_TEACHER_PERMISSIONS };
+    if (!existingUser.empty) {
+      // Account already activated — return the existing credentials so the
+      // client treats this as a success (prevents duplicate user docs).
+      const existingDoc = existingUser.docs[0];
+      const existingUid = existingDoc.id;
+      console.log("[eduPortal] activate-staff: email already exists, returning existing user", { username, uid: existingUid });
+      const token = jwt.sign({ uid: existingUid }, getJwtSecret(), { expiresIn: "7d" });
+      (res as any).cookie("token", token, cookieOptions());
+      return res.json({
+        ok: true,
+        token,
+        userId: existingUid,
+        role: resolvedRole,
+      });
     }
 
-    await tenantCol("orgMembers").doc(memberId).set(memberDoc);
+    // ── Use a transaction to atomically check + consume the pending invite ──
+    const result = await firestore.runTransaction(async (tx) => {
+      // Re-read the pending staff doc inside the transaction to guard against
+      // concurrent activations (double-click / race condition).
+      const freshSnap = await tx.get(staffDoc.ref);
+      if (!freshSnap.exists) throw new Error("invite_not_found");
+      const freshData = freshSnap.data() as any;
+      if (freshData.status !== "pending") {
+        throw new Error("invite_already_used");
+      }
 
-    // Mark pending staff as used
-    await staffDoc.ref.set(
-      { status: "active", usedAt: now, activatedByUid: uid },
-      { merge: true },
-    );
+      // Create the user account in global users collection
+      const userRef = globalCol("users").doc();
+      const uid = userRef.id;
 
-    const token = jwt.sign({ uid }, getJwtSecret(), { expiresIn: "7d" });
+      tx.set(userRef, {
+        displayName: fullName,
+        name: fullName,
+        email: username,
+        passwordHash,
+        orgId,
+        orgType: "edu",
+        orgName: org.name || "",
+        orgRole: resolvedRole,
+        positionTitle: positionTitle || pending.positionTitle || "",
+        createdAt: now,
+        updatedAt: now,
+      });
+
+      // Create membership
+      const memberId = `${orgId}_${uid}`;
+      const memberDoc: any = {
+        orgId,
+        uid,
+        email: username,
+        name: fullName,
+        role: resolvedRole,
+        status: "active",
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      // Seed default permissions for teachers
+      if (resolvedRole === "faculty_teacher") {
+        memberDoc.permissions = { ...DEFAULT_TEACHER_PERMISSIONS };
+      }
+
+      tx.set(tenantCol("orgMembers").doc(memberId), memberDoc);
+
+      // Mark pending staff as used (inside the same transaction)
+      tx.set(staffDoc.ref, { status: "active", usedAt: now, activatedByUid: uid }, { merge: true });
+
+      return { uid, resolvedRole };
+    });
+
+    const token = jwt.sign({ uid: result.uid }, getJwtSecret(), { expiresIn: "7d" });
     (res as any).cookie("token", token, cookieOptions());
 
     return res.json({
       ok: true,
       token,
-      userId: uid,
-      role: resolvedRole,
+      userId: result.uid,
+      role: result.resolvedRole,
     });
   } catch (err: any) {
+    // Handle known transaction-abort reasons gracefully
+    if (err?.message === "invite_already_used") {
+      return res.status(409).json({ error: "This activation code has already been used" });
+    }
+    if (err?.message === "invite_not_found") {
+      return res.status(404).json({ error: "Invalid or expired activation code" });
+    }
     console.error("[eduPortal] POST /:slug/activate-staff error:", err);
     return res.status(500).json({ error: "internal" });
   }

@@ -23,6 +23,76 @@ import type { Room as LkRoom } from "livekit-client";
 const tabs = ["Active Calls", "Scheduled", "Recordings"] as const;
 type Tab = (typeof tabs)[number];
 
+/* ── Call-picker user shape (deduped, merged roles) ────────────── */
+
+type CallPickerUser = {
+  id: string;       // stable user-facing ID (prefer orgMembers id)
+  name: string;
+  email: string;
+  roles: string[];   // e.g. ["faculty admin", "Market Teacher"]
+  status: string;
+};
+
+/**
+ * Deduplicate users sourced from pendingStaff + orgMembers.
+ *
+ * The two collections use unrelated doc-ID spaces so a naive Map-by-id
+ * never matches across sources.  We key on **email** (lowercased) as the
+ * stable identifier that is present in both collections, then merge
+ * role labels into a single set so one person → one row.
+ *
+ * Prefer the orgMembers `id` over the pendingStaff `id` because it
+ * encodes the real user UID that call routing needs.
+ */
+function dedupeUsersForCallPicker(
+  staffRecords: PendingStaffRecord[],
+  people: EduPerson[],
+  excludeUid: string,
+): CallPickerUser[] {
+  const byEmail = new Map<string, CallPickerUser>();
+
+  // 1. Seed from orgMembers (preferred id)
+  for (const p of people) {
+    if (p.status !== "active" || p.id === excludeUid) continue;
+    const key = (p.email || p.id).trim().toLowerCase();
+    const roleLabel = p.role.replace(/_/g, " ");
+    const existing = byEmail.get(key);
+    if (existing) {
+      if (!existing.roles.includes(roleLabel)) existing.roles.push(roleLabel);
+    } else {
+      byEmail.set(key, {
+        id: p.id,
+        name: p.name,
+        email: p.email || "",
+        roles: [roleLabel],
+        status: p.status,
+      });
+    }
+  }
+
+  // 2. Layer pendingStaff on top — if the email already exists we only
+  //    merge the role label; otherwise create a new entry.
+  for (const s of staffRecords) {
+    if (s.status !== "active" || s.id === excludeUid) continue;
+    const key = (s.email || s.id).trim().toLowerCase();
+    const roleLabel = s.positionTitle || s.role.replace(/_/g, " ");
+    const existing = byEmail.get(key);
+    if (existing) {
+      if (!existing.roles.includes(roleLabel)) existing.roles.push(roleLabel);
+    } else {
+      byEmail.set(key, {
+        id: s.id,
+        name: s.fullName,
+        email: s.email || "",
+        roles: [roleLabel],
+        status: s.status,
+      });
+    }
+  }
+
+  return Array.from(byEmail.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
 /* ── Helpers ────────────────────────────────────────────────────── */
 
 function formatTime(ms: number | null) {
@@ -59,9 +129,9 @@ export default function EduCalls() {
 
   // New call user picker state
   const [newCallSearch, setNewCallSearch] = useState("");
-  const [selectedCallUser, setSelectedCallUser] = useState<{ id: string; name: string; role: string } | null>(null);
+  const [selectedCallUser, setSelectedCallUser] = useState<CallPickerUser | null>(null);
   const [newCallUsersLoading, setNewCallUsersLoading] = useState(false);
-  const [newCallUsers, setNewCallUsers] = useState<{ id: string; name: string; role: string; status: string }[]>([]);
+  const [newCallUsers, setNewCallUsers] = useState<CallPickerUser[]>([]);
 
   // Call controls state
   const [micMuted, setMicMuted] = useState(false);
@@ -77,6 +147,8 @@ export default function EduCalls() {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
+  const remoteScreenRef = useRef<HTMLVideoElement>(null);
+  const [remoteScreenActive, setRemoteScreenActive] = useState(false);
 
   // Elapsed time ticker
   const [tick, setTick] = useState(0);
@@ -85,7 +157,7 @@ export default function EduCalls() {
   // Add participant — staff picker
   const [showAddParticipant, setShowAddParticipant] = useState(false);
   const [staffSearch, setStaffSearch] = useState("");
-  const [staffList, setStaffList] = useState<{ id: string; name: string; role: string; status: string }[]>([]);
+  const [staffList, setStaffList] = useState<CallPickerUser[]>([]);
   const [staffLoading, setStaffLoading] = useState(false);
   const [selectedStaffIds, setSelectedStaffIds] = useState<Set<string>>(new Set());
 
@@ -118,15 +190,25 @@ export default function EduCalls() {
 
       // Attach remote tracks
       lkRoom.on(RoomEvent.TrackSubscribed, (track, _pub, _participant) => {
-        if (track.kind === Track.Kind.Video && remoteVideoRef.current) {
-          track.attach(remoteVideoRef.current);
+        if (track.kind === Track.Kind.Video) {
+          if (_pub.source === Track.Source.ScreenShare) {
+            console.log("[EduCalls] Remote screen share track subscribed");
+            if (remoteScreenRef.current) track.attach(remoteScreenRef.current);
+            setRemoteScreenActive(true);
+          } else {
+            if (remoteVideoRef.current) track.attach(remoteVideoRef.current);
+          }
         } else if (track.kind === Track.Kind.Audio && remoteAudioRef.current) {
           track.attach(remoteAudioRef.current);
         }
       });
 
-      lkRoom.on(RoomEvent.TrackUnsubscribed, (track) => {
+      lkRoom.on(RoomEvent.TrackUnsubscribed, (track, _pub) => {
         track.detach();
+        if (_pub.source === Track.Source.ScreenShare) {
+          console.log("[EduCalls] Remote screen share track unsubscribed");
+          setRemoteScreenActive(false);
+        }
       });
 
       await lkRoom.connect(livekitUrl, token);
@@ -164,6 +246,7 @@ export default function EduCalls() {
     setCamOff(false);
     setScreenSharing(false);
     setRecording(false);
+    setRemoteScreenActive(false);
   }, []);
 
   // Cleanup on unmount
@@ -189,7 +272,7 @@ export default function EduCalls() {
     };
   }, [activeCall?.id, activeCall?.startedAt]);
 
-  // Load active users for the new-call picker
+  // Load active users for the new-call picker (deduped by email)
   const loadNewCallUsers = useCallback(async () => {
     setNewCallUsersLoading(true);
     try {
@@ -197,18 +280,7 @@ export default function EduCalls() {
         fetchPendingStaff().catch(() => [] as PendingStaffRecord[]),
         listEduPeopleFromApi({ limit: 200 }).catch(() => [] as EduPerson[]),
       ]);
-      const merged = new Map<string, { id: string; name: string; role: string; status: string }>();
-      for (const s of staffRecords) {
-        if (s.status === "active" && s.id !== me.uid) {
-          merged.set(s.id, { id: s.id, name: s.fullName, role: s.positionTitle || s.role, status: s.status });
-        }
-      }
-      for (const p of people) {
-        if (p.status === "active" && !merged.has(p.id) && p.id !== me.uid) {
-          merged.set(p.id, { id: p.id, name: p.name, role: p.role.replace(/_/g, " "), status: p.status });
-        }
-      }
-      setNewCallUsers(Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name)));
+      setNewCallUsers(dedupeUsersForCallPicker(staffRecords, people, me.uid));
     } catch {
       setNewCallUsers([]);
     } finally {
@@ -216,52 +288,27 @@ export default function EduCalls() {
     }
   }, [me.uid]);
 
-  // Filtered users for new-call search
+  // Filtered users for new-call search (matches name, email, or any role label)
   const filteredNewCallUsers = useMemo(() => {
     if (!newCallSearch.trim()) return newCallUsers;
     const q = newCallSearch.toLowerCase();
     return newCallUsers.filter(
-      (u) => u.name.toLowerCase().includes(q) || u.role.toLowerCase().includes(q),
+      (u) =>
+        u.name.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q) ||
+        u.roles.some((r) => r.toLowerCase().includes(q)),
     );
   }, [newCallUsers, newCallSearch]);
 
-  // Load active staff for the add-participant picker
+  // Load active staff for the add-participant picker (deduped by email)
   const loadStaff = useCallback(async () => {
     setStaffLoading(true);
     try {
-      // Fetch from both staff records and people list, merge unique entries
       const [staffRecords, people] = await Promise.all([
         fetchPendingStaff().catch(() => [] as PendingStaffRecord[]),
         listEduPeopleFromApi({ limit: 200 }).catch(() => [] as EduPerson[]),
       ]);
-
-      const merged = new Map<string, { id: string; name: string; role: string; status: string }>();
-
-      // Active staff from staff records
-      for (const s of staffRecords) {
-        if (s.status === "active") {
-          merged.set(s.id, {
-            id: s.id,
-            name: s.fullName,
-            role: s.positionTitle || s.role,
-            status: s.status,
-          });
-        }
-      }
-
-      // Active people (faculty/staff)
-      for (const p of people) {
-        if (p.status === "active" && !merged.has(p.id)) {
-          merged.set(p.id, {
-            id: p.id,
-            name: p.name,
-            role: p.role.replace(/_/g, " "),
-            status: p.status,
-          });
-        }
-      }
-
-      setStaffList(Array.from(merged.values()).sort((a, b) => a.name.localeCompare(b.name)));
+      setStaffList(dedupeUsersForCallPicker(staffRecords, people, ""));
     } catch {
       setStaffList([]);
     } finally {
@@ -269,12 +316,15 @@ export default function EduCalls() {
     }
   }, []);
 
-  // Filtered staff for search
+  // Filtered staff for search (matches name, email, or any role label)
   const filteredStaff = useMemo(() => {
     if (!staffSearch.trim()) return staffList;
     const q = staffSearch.toLowerCase();
     return staffList.filter(
-      (s) => s.name.toLowerCase().includes(q) || s.role.toLowerCase().includes(q),
+      (s) =>
+        s.name.toLowerCase().includes(q) ||
+        s.email.toLowerCase().includes(q) ||
+        s.roles.some((r) => r.toLowerCase().includes(q)),
     );
   }, [staffList, staffSearch]);
 
@@ -293,6 +343,58 @@ export default function EduCalls() {
   useEffect(() => {
     load();
   }, [load]);
+
+  // ── Poll for call-status changes while the caller waits for the
+  //    callee to accept (overlay is "Calling…").  Also listen for
+  //    ParticipantConnected as an early signal to re-fetch immediately.
+  useEffect(() => {
+    if (!lkConnected) return;
+
+    // Only poll while there's an outgoing "scheduled" call we created.
+    const isRinging = calls.some(
+      (c) => c.status === "scheduled" && c.createdBy === me.uid,
+    );
+    if (!isRinging) return;
+
+    console.log("[EduCalls] Starting call-status poll (waiting for accept)");
+
+    const poll = setInterval(async () => {
+      try {
+        const fresh = await fetchEduCalls({ limit: 50 });
+        setCalls(fresh);
+        const accepted = fresh.some(
+          (c) => c.status === "active" && c.createdBy === me.uid,
+        );
+        if (accepted) {
+          console.log("[EduCalls] Callee accepted — overlay cleared via poll");
+        }
+      } catch { /* best-effort */ }
+    }, 3_000);
+
+    // Also listen for a remote participant joining the LiveKit room —
+    // this means the callee connected and we can re-fetch immediately.
+    const room = lkRoomRef.current;
+    let participantHandler: (() => void) | null = null;
+    if (room) {
+      (async () => {
+        const { RoomEvent } = await import("livekit-client");
+        const handler = async () => {
+          console.log("[EduCalls] Remote participant connected — refreshing calls");
+          try {
+            const fresh = await fetchEduCalls({ limit: 50 });
+            setCalls(fresh);
+          } catch { /* best-effort */ }
+        };
+        room.on(RoomEvent.ParticipantConnected, handler);
+        participantHandler = () => room.off(RoomEvent.ParticipantConnected, handler);
+      })();
+    }
+
+    return () => {
+      clearInterval(poll);
+      participantHandler?.();
+    };
+  }, [lkConnected, calls, me.uid]);
 
   // Auto-connect when navigated from IncomingCallBanner (accepted a call).
   // Wait for load() to finish and activeCall to be in the DOM so video refs exist.
@@ -369,10 +471,14 @@ export default function EduCalls() {
     }
 
     // Re-attach remote tracks
+    let hasScreenShare = false;
     room.remoteParticipants.forEach((participant) => {
       participant.trackPublications.forEach((pub) => {
         if (pub.track) {
-          if (pub.track.kind === "video" && remoteVideoRef.current) {
+          if (pub.track.kind === "video" && pub.source === "screen_share") {
+            if (remoteScreenRef.current) pub.track.attach(remoteScreenRef.current);
+            hasScreenShare = true;
+          } else if (pub.track.kind === "video" && remoteVideoRef.current) {
             pub.track.attach(remoteVideoRef.current);
           } else if (pub.track.kind === "audio" && remoteAudioRef.current) {
             pub.track.attach(remoteAudioRef.current);
@@ -380,6 +486,7 @@ export default function EduCalls() {
         }
       });
     });
+    setRemoteScreenActive(hasScreenShare);
   }, [lkConnected, activeCall]);
 
   const handleCreate = async () => {
@@ -596,7 +703,7 @@ export default function EduCalls() {
                   </div>
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium text-white">{u.name}</div>
-                    <div className="truncate text-xs text-slate-400">{u.role}</div>
+                    <div className="truncate text-xs text-slate-400">{u.roles.join(" • ")}</div>
                   </div>
                   {/* Online dot */}
                   <span className="h-2.5 w-2.5 shrink-0 rounded-full bg-green-500" title="Online" />
@@ -672,12 +779,24 @@ export default function EduCalls() {
 
             {/* Video feeds */}
             <div className="absolute inset-0 flex items-center justify-center">
-              {/* Remote video (full area) */}
+              {/* Remote screen share (takes full area when active) */}
+              {remoteScreenActive && (
+                <video
+                  ref={remoteScreenRef}
+                  autoPlay
+                  playsInline
+                  className="absolute inset-0 h-full w-full object-contain bg-slate-950 z-[1]"
+                />
+              )}
+              {/* Remote video (full area, or small PiP when screen sharing) */}
               <video
                 ref={remoteVideoRef}
                 autoPlay
                 playsInline
-                className="h-full w-full object-cover"
+                className={remoteScreenActive
+                  ? "absolute bottom-4 left-4 h-28 w-36 rounded-xl border-2 border-slate-600 bg-slate-950 object-cover shadow-lg z-[2]"
+                  : "h-full w-full object-cover"
+                }
               />
               <audio ref={remoteAudioRef} autoPlay />
               {/* Local video (picture-in-picture) */}
@@ -686,7 +805,7 @@ export default function EduCalls() {
                 autoPlay
                 playsInline
                 muted
-                className="absolute bottom-4 right-4 h-32 w-44 rounded-xl border-2 border-slate-600 bg-slate-950 object-cover shadow-lg"
+                className={`absolute ${remoteScreenActive ? "bottom-4 left-44" : "bottom-4 right-4"} h-32 w-44 rounded-xl border-2 border-slate-600 bg-slate-950 object-cover shadow-lg z-[2]`}
               />
             </div>
 
@@ -834,7 +953,7 @@ export default function EduCalls() {
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="truncate text-xs font-medium text-white">{s.name}</div>
-                          <div className="truncate text-[10px] text-slate-400">{s.role}</div>
+                          <div className="truncate text-[10px] text-slate-400">{s.roles.join(" • ")}</div>
                         </div>
                         {/* Online indicator */}
                         <span className="h-2 w-2 shrink-0 rounded-full bg-green-500" title="Active" />
