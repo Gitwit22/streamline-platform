@@ -72,7 +72,7 @@ export default function Recordings() {
     return () => { mounted = false; };
   }, []);
 
-  // Poll every 5 seconds if there are processing recordings
+  // Poll every 15 seconds if there are processing recordings
   useEffect(() => {
     if (!hasProcessing) return;
     const interval = setInterval(async () => {
@@ -84,7 +84,7 @@ export default function Recordings() {
       } catch {
         // silent — don't disrupt the UI
       }
-    }, 5000);
+    }, 15_000);
     return () => clearInterval(interval);
   }, [hasProcessing]);
 

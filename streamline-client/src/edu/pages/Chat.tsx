@@ -78,7 +78,7 @@ export default function EduChat() {
     loadStaffAndOnline();
   }, [loadStaffAndOnline]);
 
-  /* ── Heartbeat (every 60s) + refresh online list ─────────── */
+  /* ── Heartbeat (every 120s) + refresh online list ────────── */
   useEffect(() => {
     // Send initial heartbeat
     sendEduChatHeartbeat().catch(() => {});
@@ -89,7 +89,7 @@ export default function EduChat() {
       fetchEduChatOnline()
         .then((data) => setOnlineStaff(data))
         .catch(() => {});
-    }, 60_000);
+    }, 120_000);
 
     return () => clearInterval(interval);
   }, []);
@@ -97,14 +97,14 @@ export default function EduChat() {
   /* ── Derive online uid set for quick lookups ─────────────── */
   const onlineUids = new Set(onlineStaff.map((s) => s.uid));
 
-  /* ── Message auto-refresh (every 15s — keeps Firestore reads low) ── */
+  /* ── Message auto-refresh (every 30s — keeps Firestore reads low) ── */
   useEffect(() => {
     if (!selectedRoom) return;
     const interval = setInterval(() => {
       fetchEduMessages(selectedRoom, { limit: 50 })
         .then((data) => setMessages(data))
         .catch(() => {});
-    }, 15_000);
+    }, 30_000);
     return () => clearInterval(interval);
   }, [selectedRoom]);
 

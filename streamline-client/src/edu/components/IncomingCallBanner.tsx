@@ -7,8 +7,10 @@ import {
   type PendingEduCall,
 } from "../api/calls";
 
-/** Polling interval in ms — checks for incoming calls every 2 seconds. */
-const POLL_INTERVAL = 2_000;
+/** Polling interval in ms — checks for incoming calls.
+ *  Kept at 15 s to avoid burning Firestore read quota.
+ *  (2 s was causing ~1,800 reads/hr per user.) */
+const POLL_INTERVAL = 15_000;
 
 /**
  * Site-wide incoming-call notification.

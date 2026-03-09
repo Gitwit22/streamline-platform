@@ -141,7 +141,7 @@ export default function LiveRoomViewer() {
       }
     };
 
-    const id = window.setInterval(poll, 5_000);
+    const id = window.setInterval(poll, 10_000);
     return () => window.clearInterval(id);
   }, [embedMeta?.activeRoomId, viewerState]);
 

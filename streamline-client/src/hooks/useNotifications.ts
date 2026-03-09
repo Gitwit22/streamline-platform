@@ -7,7 +7,7 @@ import {
   type Notification,
 } from "../edu/api/notifications";
 
-const POLL_INTERVAL = 30_000; // 30 seconds
+const POLL_INTERVAL = 60_000; // 60 seconds (reduced from 30 s to lower Firestore reads)
 
 /**
  * Hook to manage notifications with polling.
