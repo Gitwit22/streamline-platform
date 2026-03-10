@@ -4,7 +4,7 @@ import { apiFetchAuth, clearAuthStorage } from "../lib/api";
 
 // Email validation function
 function validateEmail(email: string): boolean {
-  const re = /^[^\s@]+@[^\s@]+\.com$/;
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return re.test(email);
 }
 
