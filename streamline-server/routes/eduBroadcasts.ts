@@ -11,6 +11,7 @@ import { getLiveKitSdk } from "../lib/livekit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { tenantCol } from "../lib/dbPaths";
 import { storagePrefix } from "../lib/storagePaths";
+import { writeEduAudit } from "../lib/eduAudit";
 
 const router = express.Router();
 
@@ -95,28 +96,6 @@ async function getParticipantCount(livekitRoomName: string | undefined | null): 
     const participants = await client.listParticipants(roomName);
     return participants?.length ?? 0;
   } catch { return null; }
-}
-
-/** Write to shared audit collection. */
-async function writeEduAudit(params: {
-  orgId: string;
-  action: string;
-  actorUid: string;
-  actorName: string;
-  targetId?: string | null;
-  meta?: Record<string, any>;
-}) {
-  const now = Date.now();
-  const id = `${params.orgId}_${now}_${Math.random().toString(36).slice(2, 8)}`;
-  await tenantCol("eduAudit").doc(id).set({
-    orgId: params.orgId,
-    action: params.action,
-    actorUid: params.actorUid,
-    actorName: params.actorName || "",
-    targetId: params.targetId ?? null,
-    createdAt: now,
-    ...(params.meta ? { meta: params.meta } : {}),
-  }, { merge: true });
 }
 
 /* ─── POST /broadcasts/go-live ───────────────────────────────────────── */
