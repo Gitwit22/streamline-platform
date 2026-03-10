@@ -42,6 +42,7 @@ import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
 import { deleteFiles, deletePrefix } from "../lib/storageClient";
 import { resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
+import { logger } from "../lib/logger";
 
 const router = Router();
 
@@ -1308,10 +1309,9 @@ router.post(
     });
 
   } catch (err: any) {
-    console.error("[recordings/start] Unexpected error:", err);
+    logger.error("[recordings/start] Unexpected error", { errorMessage: err?.message });
     return res.status(500).json({
       error: "Failed to start recording",
-      details: err?.message,
     });
   }
   }
@@ -1356,8 +1356,8 @@ router.post("/sweep", async (_req, res) => {
 
     return res.json({ ok: true, processed: docs.length });
   } catch (err: any) {
-    console.error("[recordings/sweep] Error during sweep", err);
-    return res.status(500).json({ error: "sweep_failed", details: err?.message || String(err) });
+    logger.error("[recordings/sweep] Error during sweep", { errorMessage: err?.message });
+    return res.status(500).json({ error: "sweep_failed" });
   }
 });
 

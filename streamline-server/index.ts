@@ -2,6 +2,9 @@ import "dotenv/config";
 import express from "express";
 import cors, { type CorsOptions } from "cors";
 import cookieParser from "cookie-parser";
+import { requestId } from "./middleware/requestId";
+import { globalErrorHandler } from "./middleware/errorHandler";
+import { logger } from "./lib/logger";
 import webhookRouter from "./routes/webhook";
 import authRoutes from "./routes/auth";
 import adminRoutes from './routes/admin';
@@ -141,8 +144,8 @@ app.use(cors(corsOptions));
 // Preflight
 app.options(/.*/, cors(corsOptions));
 
-
-
+// Attach a unique request ID to every request for log correlation.
+app.use(requestId);
 
 
 // Stripe/Billing webhooks MUST run before JSON body parsing so Stripe
@@ -1153,11 +1156,12 @@ app.use((req, res) => {
   res.status(404).json({ error: "Not found", path: req.originalUrl });
 });
 
-
+// Global error handler – must be registered after all routes.
+app.use(globalErrorHandler);
 
 app.listen(PORT, () => {
-  console.log(`✅ Server listening on http://localhost:${PORT}`);
-  console.log("[config-health]", {
+  logger.info("server started", {
+    port: PORT,
     env: String(process.env.NODE_ENV || "development"),
     tokenGrants: "v3-no-sources",
     hasLivekitUrl: !!process.env.LIVEKIT_URL,
