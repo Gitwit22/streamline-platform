@@ -118,6 +118,33 @@ router.get("/me", requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * Verify a password against Firebase Auth via the Identity Toolkit REST API.
+ * Requires the FIREBASE_API_KEY env var (Firebase project Web API Key).
+ * Returns true if the password is valid, false otherwise.
+ */
+async function verifyPasswordViaFirebaseAuth(email: string, password: string): Promise<boolean> {
+  const apiKey = process.env.FIREBASE_API_KEY;
+  if (!apiKey) return false;
+
+  try {
+    const res = await fetch(
+      "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": apiKey,
+        },
+        body: JSON.stringify({ email, password, returnSecureToken: false }),
+      },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
  //POST /api/auth/login
   //Body: { email, password }
  //Sets httpOnly cookie "token" so requireAuth works.
@@ -150,13 +177,31 @@ router.post("/login", async (req, res) => {
     // Verify password
     const storedHash = user.passwordHash;
     if (!storedHash) {
-      // user exists but has no password hash (maybe legacy or admin-created)
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
+      // Legacy accounts created via Firebase Auth may not have a passwordHash
+      // in Firestore. Attempt to verify via Firebase Auth and migrate the hash.
+      const firebaseOk = await verifyPasswordViaFirebaseAuth(emailNorm, password);
+      if (!firebaseOk) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
 
-    const ok = await bcrypt.compare(password, storedHash);
-    if (!ok) {
-      return res.status(401).json({ error: "Invalid credentials" });
+      // One-time migration: store bcrypt hash in Firestore so future logins
+      // are self-contained and don't depend on Firebase Auth / API key.
+      try {
+        const migratedHash = await bcrypt.hash(password, 10);
+        await db.collection("users").doc(doc.id).set(
+          { passwordHash: migratedHash },
+          { merge: true },
+        );
+        console.log(`[auth] Migrated passwordHash for legacy user ${doc.id}`);
+      } catch (migrationErr: any) {
+        // Non-fatal: login still succeeds; hash migration will happen on next login.
+        console.warn("[auth] passwordHash migration failed:", migrationErr?.message || migrationErr);
+      }
+    } else {
+      const ok = await bcrypt.compare(password, storedHash);
+      if (!ok) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
     }
 
     const uid = doc.id;
@@ -176,10 +221,7 @@ router.post("/login", async (req, res) => {
     });
   } catch (err: any) {
     console.error("POST /api/auth/login failed:", err?.message || err);
-    return res.status(500).json({
-      error: "Login failed",
-      detail: err?.message || String(err),
-    });
+    return res.status(500).json({ error: "Login failed" });
   }
 });
 
@@ -237,10 +279,7 @@ router.post("/signup", async (req, res) => {
     return res.json({ user: { id: uid, ...stripSensitiveUserFields(userData) }, token });
   } catch (err: any) {
     console.error("POST /api/auth/signup failed:", err?.message || err);
-    return res.status(500).json({
-      error: "Signup failed",
-      detail: err?.message || String(err),
-    });
+    return res.status(500).json({ error: "Signup failed" });
   }
 });
 

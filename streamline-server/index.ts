@@ -750,9 +750,12 @@ app.post("/api/auth/signup", async (req, res) => {
     // CREATE USER DOCUMENT WITH COMPLETE STRUCTURE
     // =============================================================================
 
-    // Build userData (DO NOT store passwordHash)
+    // Build userData – include passwordHash so the canonical auth.ts login
+    // route can verify credentials via Firestore (prevents login failures
+    // for accounts created through this legacy endpoint).
 const userData: any = {
   email: email.trim().toLowerCase(),
+  passwordHash,
   displayName: sanitizeDisplayName(displayName).trim(),
   timeZone: timeZone || "America/Chicago",
 
