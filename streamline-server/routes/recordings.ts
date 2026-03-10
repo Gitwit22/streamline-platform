@@ -44,6 +44,7 @@ import { resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { tenantCol, globalCol } from "../lib/dbPaths";
 import { storageKey, storagePrefix } from "../lib/storagePaths";
+import { safeError } from "../lib/safeError";
 
 const router = Router();
 
@@ -1339,11 +1340,7 @@ router.post(
     });
 
   } catch (err: any) {
-    console.error("[recordings/start] Unexpected error:", err);
-    return res.status(500).json({
-      error: "Failed to start recording",
-      details: err?.message,
-    });
+    return safeError(res, err, "recordings/start");
   }
   }
 );
@@ -1386,8 +1383,7 @@ router.post("/sweep", async (_req, res) => {
 
     return res.json({ ok: true, processed: docs.length });
   } catch (err: any) {
-    console.error("[recordings/sweep] Error during sweep", err);
-    return res.status(500).json({ error: "sweep_failed", details: err?.message || String(err) });
+    return safeError(res, err, "recordings/sweep");
   }
 });
 

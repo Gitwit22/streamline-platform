@@ -25,6 +25,7 @@ import {
 } from "@aws-sdk/client-s3";
 import { tenantCol, globalCol } from "../lib/dbPaths";
 import { storagePrefix } from "../lib/storagePaths";
+import { safeError } from "../lib/safeError";
 
 const router = express.Router();
 
@@ -450,7 +451,7 @@ router.post(
       );
     } catch (err: any) {
       console.error("[stripe-webhook] Signature verification failed:", err?.message);
-      return res.status(400).send(`Webhook Error: ${err?.message || "Bad signature"}`);
+      return res.status(400).send("Webhook signature verification failed");
     }
 
     // Log received event before processing
@@ -783,8 +784,7 @@ router.post(
 
       return res.json({ received: true });
     } catch (err: any) {
-      console.error("[stripe] Webhook handler failed:", err?.message);
-      return res.status(500).send(err?.message || "Webhook handler failed");
+      return safeError(res, err, "stripe-webhook");
     }
   }
 );
@@ -1209,8 +1209,7 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     });
 
   } catch (err: any) {
-    console.error("[livekit-webhook] Error:", err?.message, err?.stack?.slice(0, 500));
-    return res.status(500).json({ ok: false, error: err?.message || "Webhook error" });
+    return safeError(res, err, "livekit-webhook");
   }
 });
 

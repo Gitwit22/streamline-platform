@@ -8,6 +8,7 @@ import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import type { DestinationStatus, DestinationStatusReason, ApiErrorCode, DestinationItem, DestinationsGetResponse, DestinationPostResponse, ValidateRequestBody, ValidateResponse } from "../types/streaming";
 import { decryptStreamKey, encryptStreamKey, normalizeRtmpBase } from "../lib/crypto";
+import { safeError } from "../lib/safeError";
 import { globalCol } from "../lib/dbPaths";
 
 const router = Router();
@@ -90,8 +91,7 @@ router.get("/", requireAuth, async (req: any, res) => {
     const payload: DestinationsGetResponse = { ok: true, items, usedCount: items.length, limit };
     return res.json(payload);
   } catch (err: any) {
-    console.error("GET /api/destinations error:", err);
-    return res.status(500).json({ error: "server_error" as ApiErrorCode, details: err?.message || String(err) });
+    return safeError(res, err, "destinations");
   }
 });
 
@@ -214,8 +214,7 @@ router.post("/", requireAuth, async (req: any, res) => {
     };
     return res.status(201).json(payload);
   } catch (err: any) {
-    console.error("POST /api/destinations error:", err);
-    return res.status(500).json({ error: "server_error" as ApiErrorCode, details: err?.message || String(err) });
+    return safeError(res, err, "destinations");
   }
 });
 
@@ -251,8 +250,7 @@ router.post("/validate", requireAuth, async (req: any, res) => {
     const payload: ValidateResponse = { ok: true, status, statusReason: statusReason ?? null };
     return res.json(payload);
   } catch (err: any) {
-    console.error("POST /api/destinations/validate error:", err);
-    return res.status(500).json({ error: "server_error" as ApiErrorCode, details: err?.message || String(err) });
+    return safeError(res, err, "destinations");
   }
 });
 
@@ -278,8 +276,7 @@ router.post("/:id/validate", requireAuth, async (req: any, res) => {
     const payload: ValidateResponse = { ok: true, status: item.status, statusReason: item.statusReason ?? null };
     return res.json(payload);
   } catch (err: any) {
-    console.error("POST /api/destinations/:id/validate error:", err);
-    return res.status(500).json({ error: "server_error" as ApiErrorCode, details: err?.message || String(err) });
+    return safeError(res, err, "destinations");
   }
 });
 
@@ -394,8 +391,7 @@ router.put("/:id", requireAuth, async (req: any, res) => {
     const usedCount = await getEnabledCount(uid);
     return res.json({ ok: true, destination, usedCount, limit: planLimit });
   } catch (err: any) {
-    console.error("PUT /api/destinations/:id error:", err);
-    return res.status(500).json({ error: "server_error" as ApiErrorCode, details: err?.message || String(err) });
+    return safeError(res, err, "destinations");
   }
 });
 
@@ -420,8 +416,7 @@ router.delete("/:id", requireAuth, async (req: any, res) => {
     await ref.delete();
     return res.json({ ok: true });
   } catch (err: any) {
-    console.error("DELETE /api/destinations/:id error:", err);
-    return res.status(500).json({ error: "server_error" as ApiErrorCode, details: err?.message || String(err) });
+    return safeError(res, err, "destinations");
   }
 });
 

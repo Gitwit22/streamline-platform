@@ -100,8 +100,9 @@ async function main() {
     }
   }
 
-  // Delete audit entries
-  await deleteByQuery(tenantCol("audit").where("orgId", "==", orgId), "audit");
+  // Delete audit entries (new collection + legacy collection)
+  await deleteByQuery(tenantCol("eduAudit").where("orgId", "==", orgId), "eduAudit");
+  await deleteByQuery(tenantCol("audit").where("orgId", "==", orgId), "audit (legacy)");
 
   // Delete org doc
   const orgRef = tenantCol("orgs").doc(orgId);

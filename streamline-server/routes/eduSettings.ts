@@ -3,6 +3,7 @@ import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { tenantCol, globalCol } from "../lib/dbPaths";
+import { writeEduAudit } from "../lib/eduAudit";
 
 const router = express.Router();
 
@@ -149,30 +150,6 @@ function normalizeOrgDoc(docId: string, data: any): any {
   };
 }
 
-async function writeAudit(params: {
-  orgId: string;
-  action: string;
-  actorUid: string;
-  actorName: string;
-  eventId?: string | null;
-  eventTitle?: string | null;
-  targetId?: string | null;
-}) {
-  const now = Date.now();
-  const auditDoc: AuditDoc = {
-    orgId: params.orgId,
-    action: params.action,
-    actorUid: params.actorUid,
-    actorName: params.actorName,
-    eventId: params.eventId ?? null,
-    eventTitle: params.eventTitle ?? null,
-    targetId: params.targetId ?? null,
-    createdAt: now,
-  };
-  const id = `${params.orgId}_${now}_${Math.random().toString(36).slice(2, 8)}`;
-  await tenantCol("audit").doc(id).set(auditDoc, { merge: true });
-}
-
 // GET /api/edu/org
 router.get("/org", requireAuth, async (req, res) => {
   try {
@@ -273,7 +250,7 @@ router.patch("/org", requireAuth, async (req, res) => {
     const orgRef = tenantCol("orgs").doc(ctx.orgId);
     await orgRef.set(next, { merge: true });
 
-    await writeAudit({
+    await writeEduAudit({
       orgId: ctx.orgId,
       action: "org.settings_updated",
       actorUid: uid,
@@ -341,7 +318,7 @@ router.get("/audit", requireAuth, async (req, res) => {
 
     let docs: any[] = [];
     try {
-      const snap = await tenantCol("audit")
+      const snap = await tenantCol("eduAudit")
         .where("orgId", "==", ctx.orgId)
         .orderBy("createdAt", "desc")
         .limit(limit)
@@ -349,7 +326,7 @@ router.get("/audit", requireAuth, async (req, res) => {
       docs = snap.docs;
     } catch {
       // Index-free fallback: read a small window and filter.
-      const snap = await tenantCol("audit").orderBy("createdAt", "desc").limit(50).get().catch(() => null as any);
+      const snap = await tenantCol("eduAudit").orderBy("createdAt", "desc").limit(50).get().catch(() => null as any);
       docs = snap?.docs ? snap.docs.filter((d: any) => String((d.data() || {}).orgId || "") === ctx.orgId).slice(0, limit) : [];
     }
 
@@ -394,7 +371,7 @@ router.post("/audit", requireAuth, async (req, res) => {
     const eventTitle = asString(req.body?.eventTitle).trim() || null;
     const targetId = asString(req.body?.targetId).trim() || null;
 
-    await writeAudit({
+    await writeEduAudit({
       orgId: ctx.orgId,
       action,
       actorUid: uid,

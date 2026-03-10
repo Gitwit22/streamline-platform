@@ -18,6 +18,7 @@ import { resolveMaxDestinations } from "../lib/planLimits";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import { tenantCol, globalCol } from "../lib/dbPaths";
+import { safeError } from "../lib/safeError";
 
 const router = express.Router();
 
@@ -138,8 +139,7 @@ router.get("/plans", async (req, res) => {
     }));
     return res.json({ plans });
   } catch (err: any) {
-    console.error("🎯 ERROR in plans route:", err);
-    return res.status(500).json({ error: "Failed to load plans", details: err.message });
+    return safeError(res, err, "admin/plans");
   }
 });
 
@@ -160,8 +160,7 @@ router.put("/plans/:planId", async (req, res) => {
     await logAdminAction(req.adminUser!.uid, "update_plan", { planId, updateData });
     res.json({ success: true, planId, updated: updateData });
   } catch (error: any) {
-    console.error("Failed to update plan:", error);
-    res.status(500).json({ error: "Failed to update plan", details: error.message });
+    return safeError(res, error, "admin/update-plan");
   }
 });
 /**
@@ -224,8 +223,7 @@ router.get("/users", async (req, res) => {
       offset,
     });
   } catch (error: any) {
-    console.error("Failed to fetch users:", error);
-    res.status(500).json({ error: "Failed to fetch users", details: error.message });
+    return safeError(res, error, "admin/users");
   }
 });
 //delete user
@@ -250,8 +248,7 @@ router.delete("/users/:userId", async (req, res) => {
     await logAdminAction(req.adminUser!.uid, "delete_user", { userId });
     res.json({ success: true, userId });
   } catch (error) {
-    console.error("Failed to delete user:", error);
-    res.status(500).json({ error: "Failed to delete user", details: error.message });
+    return safeError(res, error, "admin/delete-user");
   }
 });
 /**
@@ -325,8 +322,7 @@ router.get("/users/:userId", async (req, res) => {
 
     res.json(userSummary);
   } catch (error: any) {
-    console.error("Failed to fetch user details:", error);
-    res.status(500).json({ error: "Failed to fetch user details", details: error.message });
+    return safeError(res, error, "admin/user-details");
   }
 });
 
@@ -379,8 +375,7 @@ router.post("/users/:userId/grant-minutes", async (req, res) => {
       reason,
     });
   } catch (error: any) {
-    console.error("Failed to grant minutes:", error);
-    res.status(500).json({ error: "Failed to grant minutes", details: error.message });
+    return safeError(res, error, "admin/grant-minutes");
   }
 });
 
@@ -439,8 +434,7 @@ const validPlans: string[] = plansSnap.docs.map((d) => d.id);
       reason,
     });
   } catch (error: any) {
-    console.error("Failed to change plan:", error);
-    res.status(500).json({ error: "Failed to change plan", details: error.message });
+    return safeError(res, error, "admin/change-plan");
   }
 });
 
@@ -491,8 +485,7 @@ router.post("/users/:userId/toggle-billing", async (req, res) => {
       reason,
     });
   } catch (error: any) {
-    console.error("Failed to toggle billing:", error);
-    res.status(500).json({ error: "Failed to toggle billing", details: error.message });
+    return safeError(res, error, "admin/toggle-billing");
   }
 });
 
@@ -637,8 +630,7 @@ router.post("/plans/migrate-schema", async (req, res) => {
       report,
     });
   } catch (error: any) {
-    console.error("plans/migrate-schema failed", error);
-    res.status(500).json({ error: "plans_migrate_schema_failed", details: error.message });
+    return safeError(res, error, "admin/migrate-schema");
   }
 });
 
@@ -703,11 +695,7 @@ router.post("/feature-flags/billing", async (req, res) => {
 
     return res.json({ success: true, billingSystemEnabled: enabled });
   } catch (error: any) {
-    console.error("Failed to toggle platform billing:", error);
-    return res.status(500).json({
-      error: "Failed to toggle platform billing",
-      details: error.message,
-    });
+    return safeError(res, error, "admin/feature-flags-billing");
   }
 });
 
@@ -824,8 +812,7 @@ router.get("/usage", async (req, res) => {
       limit,
     });
   } catch (error: any) {
-    console.error("Failed to fetch usage stats:", error);
-    res.status(500).json({ error: "Failed to fetch usage stats", details: error.message });
+    return safeError(res, error, "admin/usage");
   }
 });
 
@@ -844,12 +831,7 @@ router.get("/usage/summary", async (req, res) => {
     const result = await computeUsageSummaryResult(uid);
     return res.status(result.status).json(result.body);
   } catch (error: any) {
-    console.error("Admin usage summary lookup failed:", error);
-    return res.status(500).json({
-      success: false,
-      error: "Failed to fetch usage summary",
-      details: error?.message,
-    });
+    return safeError(res, error, "admin/usage-summary");
   }
 });
 
@@ -923,8 +905,7 @@ router.get("/stats", async (req, res) => {
 
     res.json(stats);
   } catch (error: any) {
-    console.error("Failed to fetch stats:", error);
-    res.status(500).json({ error: "Failed to fetch stats", details: error.message });
+    return safeError(res, error, "admin/stats");
   }
 });
 
@@ -973,8 +954,7 @@ router.post("/features/toggle", async (req, res) => {
       reason,
     });
   } catch (error: any) {
-    console.error("Failed to toggle feature:", error);
-    res.status(500).json({ error: "Failed to toggle feature", details: error.message });
+    return safeError(res, error, "admin/features-toggle");
   }
 });
 
@@ -1016,8 +996,7 @@ router.get("/features", async (req, res) => {
 
     res.json({ features });
   } catch (error: any) {
-    console.error("Failed to fetch features:", error);
-    res.status(500).json({ error: "Failed to fetch features", details: error.message });
+    return safeError(res, error, "admin/features");
   }
 });
 
