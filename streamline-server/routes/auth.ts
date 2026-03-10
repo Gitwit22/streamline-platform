@@ -129,10 +129,13 @@ async function verifyPasswordViaFirebaseAuth(email: string, password: string): P
 
   try {
     const res = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${encodeURIComponent(apiKey)}`,
+      "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword",
       {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": apiKey,
+        },
         body: JSON.stringify({ email, password, returnSecureToken: false }),
       },
     );
