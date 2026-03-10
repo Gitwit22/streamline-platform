@@ -6,6 +6,7 @@ import type { DestinationStatus, DestinationStatusReason, ApiErrorCode } from ".
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { decryptStreamKey } from "../lib/crypto";
+import { safeError } from "../lib/safeError";
 
 const router = Router();
 
@@ -94,8 +95,7 @@ router.post("/preflight", requireAuth, async (req: any, res) => {
       return res.json({ ok: true, allowed: true, destinations: results });
     }
   } catch (err: any) {
-    console.error("POST /api/live/preflight error:", err);
-    return res.status(500).json({ error: "server_error" as ApiErrorCode, details: err?.message || String(err) });
+    safeError("[live] preflight", req, res, err);
   }
 });
 

@@ -19,6 +19,7 @@ import { firestore as db } from "../firebaseAdmin";
 import { stripe } from "../lib/stripe";
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { FieldValue } from "firebase-admin/firestore";
+import { logger } from "../lib/logger";
 import {
   S3Client,
   HeadObjectCommand,
@@ -447,8 +448,8 @@ router.post(
         mustGetEnv("STRIPE_WEBHOOK_SECRET")
       );
     } catch (err: any) {
-      console.error("[stripe-webhook] Signature verification failed:", err?.message);
-      return res.status(400).send(`Webhook Error: ${err?.message || "Bad signature"}`);
+      logger.error("[stripe-webhook] Signature verification failed", { errorMessage: err?.message });
+      return res.status(400).send("Webhook signature verification failed");
     }
 
     // Log received event before processing
@@ -834,8 +835,8 @@ router.post(
 
       return res.json({ received: true });
     } catch (err: any) {
-      console.error("[stripe] Webhook handler failed:", err?.message);
-      return res.status(500).send(err?.message || "Webhook handler failed");
+      logger.error("[stripe-webhook] handler failed", { errorMessage: err?.message });
+      return res.status(500).json({ received: false, error: "webhook_handler_failed" });
     }
   }
 );
@@ -1262,8 +1263,8 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     });
 
   } catch (err: any) {
-    console.error("[livekit-webhook] Error:", err?.message, err?.stack?.slice(0, 500));
-    return res.status(500).json({ ok: false, error: err?.message || "Webhook error" });
+    logger.error("[livekit-webhook] Error", { errorMessage: err?.message });
+    return res.status(500).json({ ok: false, error: "webhook_handler_failed" });
   }
 });
 

@@ -9,6 +9,7 @@ import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { canAccessFeature } from "./featureAccess";
+import { logger } from "../lib/logger";
 
 const router = Router();
 
@@ -213,7 +214,6 @@ router.post(
       } catch (err: any) {
         return res.status(409).json({
           error: LIMIT_ERRORS.LIMIT_EXCEEDED,
-          details: err?.message || "Storage limit exceeded",
         });
       }
 
@@ -266,10 +266,9 @@ router.post(
         message: "Upload successful"
       });
     } catch (err: any) {
-      console.error("❌ Upload error:", err);
+      logger.error("[editing] upload error", { errorMessage: err?.message });
       res.status(500).json({ 
-        error: err.message || "Upload failed",
-        details: err.stack
+        error: "Upload failed",
       });
     }
   }
@@ -443,8 +442,8 @@ router.get("/assets/:id", async (req: Request, res: Response) => {
       userId: data?.userId,
     });
   } catch (err: any) {
-    console.error("get asset error:", err);
-    res.status(500).json({ error: err.message || "Internal server error" });
+    logger.error("[editing] get asset error", { errorMessage: err?.message });
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -505,8 +504,8 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
     await db.collection("editing_assets").doc(id).delete();
     return res.json({ ok: true, message: "Asset deleted" });
   } catch (err: any) {
-    console.error("delete asset error:", err);
-    res.status(500).json({ error: err.message || "Internal server error" });
+    logger.error("[editing] delete asset error", { errorMessage: err?.message });
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -555,8 +554,8 @@ router.post("/assets/from-recording", async (req: Request, res: Response) => {
 
     res.json(asset);
   } catch (err: any) {
-    console.error("convert recording error:", err);
-    res.status(500).json({ error: err.message || "Internal server error" });
+    logger.error("[editing] convert recording error", { errorMessage: err?.message });
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -985,8 +984,8 @@ router.post("/export", async (req: Request, res: Response) => {
       completedAt: jobDoc.completedAt ? jobDoc.completedAt.toISOString() : undefined,
     });
   } catch (err: any) {
-    console.error("Export error:", err);
-    res.status(500).json({ error: err.message || "Failed to start export" });
+    logger.error("[editing] export error", { errorMessage: err?.message });
+    res.status(500).json({ error: "Failed to start export" });
   }
 });
 
@@ -1195,8 +1194,8 @@ router.put("/:recordingId", async (req: Request, res: Response) => {
       recording: { id: recordingId, ...updateData },
     });
   } catch (err: any) {
-    console.error("❌ update recording error:", err);
-    res.status(500).json({ error: err.message || "Internal server error" });
+    logger.error("[editing] update recording error", { errorMessage: err?.message });
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1250,7 +1249,6 @@ router.post("/render", async (req: Request, res: Response) => {
         } catch (err: any) {
           return res.status(409).json({
             error: LIMIT_ERRORS.LIMIT_EXCEEDED,
-            details: err?.message || "Storage limit exceeded",
           });
         }
 
@@ -1300,8 +1298,8 @@ router.post("/render", async (req: Request, res: Response) => {
       message: "Render job queued",
     });
   } catch (err: any) {
-    console.error("render error:", err);
-    res.status(500).json({ error: err.message || "Internal server error" });
+    logger.error("[editing] render error", { errorMessage: err?.message });
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1359,8 +1357,8 @@ router.post("/create-recording", async (req: Request, res: Response) => {
       recording: recordingData,
     });
   } catch (err: any) {
-    console.error("❌ create-recording error:", err);
-    res.status(500).json({ error: err.message || "Internal server error" });
+    logger.error("[editing] create-recording error", { errorMessage: err?.message });
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1420,8 +1418,8 @@ router.post("/recordings/start", async (req: Request, res: Response) => {
       status: "recording",
     });
   } catch (err: any) {
-    console.error("❌ recording start error:", err);
-    res.status(500).json({ error: err.message || "Failed to start recording" });
+    logger.error("[editing] recording start error", { errorMessage: err?.message });
+    res.status(500).json({ error: "Failed to start recording" });
   }
 });
 
@@ -1470,8 +1468,8 @@ router.post("/recordings/stop", async (req: Request, res: Response) => {
       duration: duration,
     });
   } catch (err: any) {
-    console.error("❌ recording stop error:", err);
-    res.status(500).json({ error: err.message || "Failed to stop recording" });
+    logger.error("[editing] recording stop error", { errorMessage: err?.message });
+    res.status(500).json({ error: "Failed to stop recording" });
   }
 });
 

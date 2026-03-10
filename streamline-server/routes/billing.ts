@@ -9,6 +9,7 @@ import { getUserAccount } from "../lib/userAccount";
 import { CURRENT_TOS_VERSION, hasAcceptedCurrentTos } from "../lib/tos";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { comparePlans } from "../lib/planRank";
+import { logger } from "../lib/logger";
 import {
   applyDailyWindowReset,
   applySuccessfulPlanChange,
@@ -871,7 +872,7 @@ router.post("/checkout", requireAuth, async (req, res) => {
     }
     return res.status(500).json({
       success: false,
-      error: err?.message || "Server error",
+      error: "server_error",
       noopReason: "UNSUPPORTED_MODE" satisfies CheckoutNoopReason,
     });
   }
@@ -918,7 +919,7 @@ router.post("/portal", requireAuth, async (req, res) => {
       return res.status(500).json({ success: false, error: "missing_stripe_key" });
     }
 
-    return res.status(500).json({ success: false, error: err?.message || "Server error" });
+    return res.status(500).json({ success: false, error: "server_error" });
   }
 });
 
@@ -1015,8 +1016,8 @@ router.post("/clear-pending", requireAuth, async (req, res) => {
     await getUserRef(uid).set({ pendingPlan: null }, { merge: true });
     return res.json({ success: true });
   } catch (err: any) {
-    console.error("POST /api/billing/clear-pending failed:", err?.message || err);
-    return res.status(500).json({ success: false, error: err?.message || "Server error" });
+    logger.error("[billing] clear-pending failed", { errorMessage: err?.message });
+    return res.status(500).json({ success: false, error: "server_error" });
   }
 });
 
@@ -1077,8 +1078,8 @@ router.post("/cancel-plan-change", requireAuth, async (req, res) => {
       clearedSchedule: !!scheduledPlanChange
     });
   } catch (err: any) {
-    console.error("POST /api/billing/cancel-plan-change failed:", err?.message || err);
-    return res.status(500).json({ success: false, error: err?.message || "Server error" });
+    logger.error("[billing] cancel-plan-change failed", { errorMessage: err?.message });
+    return res.status(500).json({ success: false, error: "server_error" });
   }
 });
 
@@ -1263,8 +1264,8 @@ router.post("/refresh", requireAuth, async (req, res) => {
       },
     });
   } catch (err: any) {
-    console.error("POST /api/billing/refresh failed:", err?.message || err);
-    return res.status(500).json({ success: false, error: err?.message || "Server error" });
+    logger.error("[billing] refresh failed", { errorMessage: err?.message });
+    return res.status(500).json({ success: false, error: "server_error" });
   }
 });
 
