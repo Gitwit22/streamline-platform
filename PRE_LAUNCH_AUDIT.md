@@ -1,8 +1,26 @@
 # 🚀 Pre-Launch Audit - StreamLine Platform
 
-**Date**: February 14, 2026  
+**Date**: February 14, 2026 (updated March 10, 2026)  
 **Branch**: feature/hls-dev  
-**Status**: ⚠️ NEEDS ATTENTION
+**Status**: ⚠️ NEEDS ATTENTION (see updates below)
+
+## 🔧 Audit Fixes Completed (March 2026)
+
+The following issues have been addressed in the codebase:
+
+- ✅ **Structured logging** – Added `lib/logger.ts` with JSON-formatted, levelled output (debug/info/warn/error) and timestamps.
+- ✅ **Request ID tracking** – Added `middleware/requestId.ts`; every request now carries a unique `x-request-id` for log correlation.
+- ✅ **Global error handler** – Added `middleware/errorHandler.ts` as Express error middleware; catches unhandled errors and returns sanitised responses.
+- ✅ **Error detail leaking fixed** – ~45 instances across routes (`webhook.ts`, `billing.ts`, `admin.ts`, `editing.ts`, `destinations.ts`, `live.ts`, `recordings.ts`) no longer expose `err.message`, `err.stack`, or `details` to clients in production. Internal errors are now logged server-side only.
+- ✅ **Safe error utility** – Added `lib/safeError.ts` for consistent 500 responses with request ID correlation.
+
+### Remaining Items
+
+- [ ] Enable Firestore automatic backups (operations task, not code)
+- [ ] Test manual backup + restore procedure
+- [ ] Verify ALL production environment variables (see `PRODUCTION_ENV_CHECKLIST.md`)
+- [ ] Configure Stripe webhook endpoint in dashboard
+- [ ] Load test with 50 concurrent users
 
 ---
 
