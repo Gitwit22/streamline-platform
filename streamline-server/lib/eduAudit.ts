@@ -25,5 +25,5 @@ export async function writeEduAudit(params: EduAuditParams) {
   };
 
   const id = `${params.orgId}_${now}_${Math.random().toString(36).slice(2, 8)}`;
-  await tenantCol("audit").doc(id).set(doc, { merge: true });
+  await tenantCol("eduAudit").doc(id).set(doc, { merge: true });
 }

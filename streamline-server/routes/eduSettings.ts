@@ -170,7 +170,7 @@ async function writeAudit(params: {
     createdAt: now,
   };
   const id = `${params.orgId}_${now}_${Math.random().toString(36).slice(2, 8)}`;
-  await tenantCol("audit").doc(id).set(auditDoc, { merge: true });
+  await tenantCol("eduAudit").doc(id).set(auditDoc, { merge: true });
 }
 
 // GET /api/edu/org
@@ -341,7 +341,7 @@ router.get("/audit", requireAuth, async (req, res) => {
 
     let docs: any[] = [];
     try {
-      const snap = await tenantCol("audit")
+      const snap = await tenantCol("eduAudit")
         .where("orgId", "==", ctx.orgId)
         .orderBy("createdAt", "desc")
         .limit(limit)
@@ -349,7 +349,7 @@ router.get("/audit", requireAuth, async (req, res) => {
       docs = snap.docs;
     } catch {
       // Index-free fallback: read a small window and filter.
-      const snap = await tenantCol("audit").orderBy("createdAt", "desc").limit(50).get().catch(() => null as any);
+      const snap = await tenantCol("eduAudit").orderBy("createdAt", "desc").limit(50).get().catch(() => null as any);
       docs = snap?.docs ? snap.docs.filter((d: any) => String((d.data() || {}).orgId || "") === ctx.orgId).slice(0, limit) : [];
     }
 

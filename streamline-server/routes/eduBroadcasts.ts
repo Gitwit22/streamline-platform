@@ -108,7 +108,7 @@ async function writeEduAudit(params: {
 }) {
   const now = Date.now();
   const id = `${params.orgId}_${now}_${Math.random().toString(36).slice(2, 8)}`;
-  await tenantCol("audit").doc(id).set({
+  await tenantCol("eduAudit").doc(id).set({
     orgId: params.orgId,
     action: params.action,
     actorUid: params.actorUid,
