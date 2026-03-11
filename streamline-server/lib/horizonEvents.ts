@@ -13,6 +13,9 @@
 
 import { signPayload } from "./hmac";
 
+/** Hard timeout for outbound webhook delivery (milliseconds). */
+const WEBHOOK_TIMEOUT_MS = 10_000;
+
 // ---------------------------------------------------------------------------
 // Event type definitions
 // ---------------------------------------------------------------------------
@@ -122,7 +125,7 @@ export async function dispatchHorizonEvent(
       method: "POST",
       headers,
       body,
-      signal: AbortSignal.timeout(10_000), // 10 s hard timeout
+      signal: AbortSignal.timeout(WEBHOOK_TIMEOUT_MS),
     });
 
     console.log("[horizon-dispatch]", {
