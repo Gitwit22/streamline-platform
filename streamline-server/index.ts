@@ -57,6 +57,7 @@ import { requireAdmin } from "./middleware/adminAuth";
 
 
 import { uploadVideo } from "./lib/storageClient";
+import horizonRoutes from "./routes/horizon";
 
 
 console.log("CLIENT_URL:", process.env.CLIENT_URL);
@@ -145,6 +146,11 @@ app.options(/.*/, cors(corsOptions));
 // webhook signature verification can use the raw request body.
 app.use("/api/webhooks", webhookRouter);
 
+// Horizon bot integration – POST /events uses raw body for HMAC verification,
+// so it must also be mounted before the global JSON parser.
+// Support API endpoints (GET) use the global JSON parser below.
+app.use("/api/horizon", horizonRoutes);
+
 // Body parsers for the rest of the API
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -171,6 +177,7 @@ app.get("/api", (req, res) => {
       "/api/rooms",
       "/api/admin",
       "/api/hls",
+      "/api/horizon",
     ]
   });
 });

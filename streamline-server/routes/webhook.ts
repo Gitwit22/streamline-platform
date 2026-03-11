@@ -23,6 +23,7 @@ import {
   S3Client,
   HeadObjectCommand,
 } from "@aws-sdk/client-s3";
+import { voiceRoomEvent } from "../lib/horizonEvents";
 
 const router = express.Router();
 
@@ -833,6 +834,25 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       egressId: egressInfo?.egressId,
       status: egressInfo?.status,
     });
+
+    // Fire-and-forget: forward LiveKit voice events to Horizon bot
+    const horizonVoiceMap: Record<string, "voice.participant_joined" | "voice.participant_left" | "voice.room_started" | "voice.room_ended" | "voice.egress_ended"> = {
+      participant_joined: "voice.participant_joined",
+      participant_left: "voice.participant_left",
+      room_started: "voice.room_started",
+      room_finished: "voice.room_ended",
+      egress_ended: "voice.egress_ended",
+      "egress.ended": "voice.egress_ended",
+    };
+    const horizonType = horizonVoiceMap[eventName];
+    if (horizonType) {
+      voiceRoomEvent(horizonType, {
+        livekitEvent: eventName,
+        room: event?.room?.name || event?.room?.sid || null,
+        participant: event?.participant?.identity || null,
+        egressId: egressInfo?.egressId || null,
+      });
+    }
 
     // =========================================================================
     // RULE: Only process "egress_ended" (case-insensitive)
