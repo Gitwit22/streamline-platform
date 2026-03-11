@@ -46,6 +46,41 @@ import { firestore } from "../firebaseAdmin";
 const router = Router();
 
 // ============================================================================
+// Middleware: Simple in-memory rate limiter (per-IP, no external dependency)
+// ============================================================================
+
+const RATE_WINDOW_MS = 60_000;  // 1 minute window
+const RATE_MAX_REQUESTS = 120;  // max requests per window per IP
+const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+
+function horizonRateLimit(req: Request, res: Response, next: NextFunction) {
+  const ip = req.ip || req.socket.remoteAddress || "unknown";
+  const now = Date.now();
+  let bucket = rateBuckets.get(ip);
+
+  if (!bucket || now >= bucket.resetAt) {
+    bucket = { count: 0, resetAt: now + RATE_WINDOW_MS };
+    rateBuckets.set(ip, bucket);
+  }
+
+  bucket.count++;
+
+  if (bucket.count > RATE_MAX_REQUESTS) {
+    return res.status(429).json({ error: "rate_limit_exceeded" });
+  }
+
+  next();
+}
+
+// Periodic cleanup of stale rate-limit buckets (every 5 minutes)
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, bucket] of rateBuckets) {
+    if (now >= bucket.resetAt) rateBuckets.delete(ip);
+  }
+}, 5 * 60_000).unref();
+
+// ============================================================================
 // Middleware: Bearer token authentication
 // ============================================================================
 
@@ -74,6 +109,7 @@ function requireHorizonAuth(req: Request, res: Response, next: NextFunction) {
 
 router.post(
   "/events",
+  horizonRateLimit,
   express.raw({ type: "application/json", limit: "256kb" }),
   requireHorizonAuth,
   async (req: Request, res: Response) => {
