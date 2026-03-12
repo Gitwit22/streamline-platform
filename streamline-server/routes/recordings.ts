@@ -812,45 +812,48 @@ router.post(
     const plan = entitlements.plan.raw || {};
 
     // Monthly usage gate: block non-overage plans; allow Pro and log totals.
-    try {
-      const monthKey = getCurrentMonthKey();
-      const usageDocId = `${uid}_${monthKey}`;
-      const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
-      const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
-      const usage = existing.usage || {};
+    // Internal unlimited plans bypass the usage gate entirely.
+    if (planId.toLowerCase() !== "internal_unlimited") {
+      try {
+        const monthKey = getCurrentMonthKey();
+        const usageDocId = `${uid}_${monthKey}`;
+        const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
+        const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
+        const usage = existing.usage || {};
 
-      const decision = evaluateUsageGate({
-        allowsOverages: !!(entitlements.features as any).allowsOverages,
-        limits: {
-          participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
-          transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
-        },
-        usage: {
-          participantMinutes: Number(usage.participantMinutes || 0),
-          transcodeMinutes: Number(usage.transcodeMinutes || 0),
-        },
-        checkParticipant: true,
-        checkTranscode: true,
-      });
-
-      if (!decision.allowed) {
-        return res.status(403).json({
-          success: false,
-          error: decision.reason || LIMIT_ERRORS.USAGE_EXHAUSTED,
-          reason: "Monthly usage limit reached",
+        const decision = evaluateUsageGate({
+          allowsOverages: !!(entitlements.features as any).allowsOverages,
+          limits: {
+            participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
+            transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
+          },
+          usage: {
+            participantMinutes: Number(usage.participantMinutes || 0),
+            transcodeMinutes: Number(usage.transcodeMinutes || 0),
+          },
+          checkParticipant: true,
+          checkTranscode: true,
         });
-      }
 
-      if (decision.shouldLogOverages && decision.overageTotals) {
-        await upsertUsageMonthlyOverageTotals({
-          uid,
-          monthKey,
-          totals: decision.overageTotals,
-        });
+        if (!decision.allowed) {
+          return res.status(403).json({
+            success: false,
+            error: decision.reason || LIMIT_ERRORS.USAGE_EXHAUSTED,
+            reason: "Monthly usage limit reached",
+          });
+        }
+
+        if (decision.shouldLogOverages && decision.overageTotals) {
+          await upsertUsageMonthlyOverageTotals({
+            uid,
+            monthKey,
+            totals: decision.overageTotals,
+          });
+        }
+      } catch (e) {
+        // Do not block recording start on bookkeeping failures.
+        console.error("[recordings/start] usage gate failed", e);
       }
-    } catch (e) {
-      // Do not block recording start on bookkeeping failures.
-      console.error("[recordings/start] usage gate failed", e);
     }
 
     const dualAllowed = !!(plan?.features?.dualRecording || plan?.features?.dual_recording);
