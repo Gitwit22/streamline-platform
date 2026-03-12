@@ -24,6 +24,8 @@ import {
   HeadObjectCommand,
 } from "@aws-sdk/client-s3";
 import { voiceRoomEvent } from "../lib/horizonEvents";
+import { emitRoomStarted, emitRoomEnded, emitRoomParticipantJoined, emitRoomParticipantLeft } from "../events/emitters/roomEmitter";
+import { emitVoiceStreamStarted, emitVoiceStreamEnded } from "../events/emitters/voiceEmitter";
 
 const router = express.Router();
 
@@ -851,6 +853,26 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
         room: event?.room?.name || event?.room?.sid || null,
         participant: event?.participant?.identity || null,
         egressId: egressInfo?.egressId || null,
+      });
+    }
+
+    // Fire-and-forget: emit standardized platform room/voice events
+    const livekitRoomName = event?.room?.name || event?.room?.sid || null;
+    if (eventName === "room_started" && livekitRoomName) {
+      emitRoomStarted({ roomId: livekitRoomName, data: { livekitEvent: eventName } });
+      emitVoiceStreamStarted({ roomId: livekitRoomName, data: { livekitEvent: eventName } });
+    } else if (eventName === "room_finished" && livekitRoomName) {
+      emitRoomEnded({ roomId: livekitRoomName, data: { livekitEvent: eventName } });
+      emitVoiceStreamEnded({ roomId: livekitRoomName, data: { livekitEvent: eventName } });
+    } else if (eventName === "participant_joined" && livekitRoomName) {
+      emitRoomParticipantJoined({
+        roomId: livekitRoomName,
+        data: { identity: event?.participant?.identity || null, livekitEvent: eventName },
+      });
+    } else if (eventName === "participant_left" && livekitRoomName) {
+      emitRoomParticipantLeft({
+        roomId: livekitRoomName,
+        data: { identity: event?.participant?.identity || null, livekitEvent: eventName },
       });
     }
 

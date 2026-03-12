@@ -17,6 +17,7 @@ import { PLAN_IDS, PlanId, isPlanId, getAllPlanIds } from "../types/plan";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
+import adminMonitoringRoutes from "./adminMonitoring";
 
 const router = express.Router();
 
@@ -992,6 +993,10 @@ router.get("/features", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch features", details: error.message });
   }
 });
+
+// Mount admin monitoring & operational awareness sub-routes
+// (monitoring/overview, monitoring/services, monitoring/webhooks, alerts, rooms/active, support/tickets)
+router.use(adminMonitoringRoutes);
 
 
 
