@@ -5,6 +5,7 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { getRoomAccess, requireRoomAccessToken } from "../middleware/roomAccessToken";
 import { chatMessageEvent, chatSessionStartEvent, chatSessionEndEvent } from "../lib/horizonEvents";
+import { emitChatMessageCreated } from "../events/emitters/chatEmitter";
 
 const router = Router();
 
@@ -356,6 +357,18 @@ router.post("/:roomId/chat/messages", requireRoomAccessToken as any, async (req:
       messageId: messageRef.id,
       text,
       sender: { identity: access.identity, uid: (req as any).user?.uid || null, role: access.role, name: senderName },
+    });
+
+    // Fire-and-forget: emit standardized platform event
+    emitChatMessageCreated({
+      roomId: canonicalRoomId,
+      entityId: messageRef.id,
+      actor: {
+        userId: (req as any).user?.uid || access.identity,
+        username: senderName || access.identity,
+        role: access.role,
+      },
+      data: { sessionId: session.sessionId, text },
     });
 
     return res.json({

@@ -5,6 +5,7 @@ import { ensureRoomDoc } from "../services/rooms";
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeRoomLayout, type RoomLayout } from "../lib/roomLayout";
+import { emitRoomCreated } from "../events/emitters/roomEmitter";
 
 const router = Router();
 
@@ -69,6 +70,13 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
       visibility,
       requiresAuth,
       requiresPayment,
+    });
+
+    // Fire-and-forget: emit room.created platform event
+    emitRoomCreated({
+      roomId,
+      actor: { userId: uid, username: uid, role: "owner" },
+      data: { livekitRoomName, roomType },
     });
 
     return res.status(201).json({
