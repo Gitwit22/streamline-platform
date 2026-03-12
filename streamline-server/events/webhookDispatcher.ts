@@ -172,8 +172,10 @@ export async function dispatchEvent(
   let lastStatus: number | null = null;
   let lastSnippet: string | null = null;
   let success = false;
+  let actualAttempts = 0;
 
   for (let attempt = 1; attempt <= cfg.retryCount; attempt++) {
+    actualAttempts = attempt;
     try {
       const result = await attemptDelivery(
         url,
@@ -228,7 +230,7 @@ export async function dispatchEvent(
     entityId: payload.entityId,
     status: success ? "success" : "failed",
     statusCode: lastStatus,
-    attemptCount: cfg.retryCount,
+    attemptCount: actualAttempts,
     responseSnippet: lastSnippet?.slice(0, 500) ?? null,
     createdAt: now,
     updatedAt: Date.now(),
