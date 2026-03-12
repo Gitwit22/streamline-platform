@@ -155,41 +155,45 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
     // Monthly usage gate (HLS consumes transcode):
     // - Non-overage plans are blocked when over limit
     // - Pro continues and (when exceeded) logs overage totals
+    // - Internal unlimited plans bypass the usage gate entirely
     try {
       const entitlements = await getEffectiveEntitlements((req as any).account || uid);
-      const monthKey = getCurrentMonthKey();
-      const usageDocId = `${uid}_${monthKey}`;
-      const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
-      const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
-      const usage = existing.usage || {};
 
-      const decision = evaluateUsageGate({
-        allowsOverages: !!(entitlements.features as any).allowsOverages,
-        limits: {
-          participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
-          transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
-        },
-        usage: {
-          participantMinutes: Number(usage.participantMinutes || 0),
-          transcodeMinutes: Number(usage.transcodeMinutes || 0),
-        },
-        checkParticipant: true,
-        checkTranscode: true,
-      });
+      if (entitlements.planId.toLowerCase() !== "internal_unlimited") {
+        const monthKey = getCurrentMonthKey();
+        const usageDocId = `${uid}_${monthKey}`;
+        const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
+        const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
+        const usage = existing.usage || {};
 
-      if (!decision.allowed) {
-        return res.status(403).json({
-          error: decision.reason || LIMIT_ERRORS.USAGE_EXHAUSTED,
-          reason: "Monthly usage limit reached",
+        const decision = evaluateUsageGate({
+          allowsOverages: !!(entitlements.features as any).allowsOverages,
+          limits: {
+            participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
+            transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
+          },
+          usage: {
+            participantMinutes: Number(usage.participantMinutes || 0),
+            transcodeMinutes: Number(usage.transcodeMinutes || 0),
+          },
+          checkParticipant: true,
+          checkTranscode: true,
         });
-      }
 
-      if (decision.shouldLogOverages && decision.overageTotals) {
-        await upsertUsageMonthlyOverageTotals({
-          uid,
-          monthKey,
-          totals: decision.overageTotals,
-        });
+        if (!decision.allowed) {
+          return res.status(403).json({
+            error: decision.reason || LIMIT_ERRORS.USAGE_EXHAUSTED,
+            reason: "Monthly usage limit reached",
+          });
+        }
+
+        if (decision.shouldLogOverages && decision.overageTotals) {
+          await upsertUsageMonthlyOverageTotals({
+            uid,
+            monthKey,
+            totals: decision.overageTotals,
+          });
+        }
       }
     } catch (e) {
       // Do not block HLS start on bookkeeping failures.
