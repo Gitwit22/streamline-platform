@@ -2558,15 +2558,6 @@ function RoomPage() {
                   ? "Invite invalid or expired."
                   : "This room requires an account to join. Please sign in.")
             );
-            // Only force login redirect when we truly have no invite to attempt guest join.
-            if (!inviteToken) {
-              try {
-                const next = `${location.pathname}${location.search}`;
-                nav(`/login?next=${encodeURIComponent(next)}`, { replace: true });
-              } catch {
-                // ignore
-              }
-            }
             return;
           }
 

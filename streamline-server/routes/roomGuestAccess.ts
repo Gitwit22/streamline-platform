@@ -690,7 +690,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       visibilityRaw === "public" || visibilityRaw === "unlisted" || visibilityRaw === "private"
         ? (visibilityRaw as any)
         : "unlisted";
-    const requiresAuth = typeof room.requiresAuth === "boolean" ? !!room.requiresAuth : true;
+    const requiresAuth = typeof room.requiresAuth === "boolean" ? !!room.requiresAuth : false;
     const requiresPayment = typeof room.requiresPayment === "boolean" ? !!room.requiresPayment : false;
     const roomType = typeof room.roomType === "string" ? String(room.roomType).trim() : "";
     const allowGuestsPolicy = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
@@ -711,8 +711,10 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       return res.status(401).json({ error: "login_required" });
     }
 
-    // If not authed, guest access must be explicitly enabled and backed by a verified guest session
-    if (!user) {
+    // If not authed and the room requires auth, guest access must be explicitly
+    // enabled (ALLOW_GUEST_RTC_JOIN=1) and backed by a verified guest session.
+    // When requiresAuth is false (the default) any visitor may join without credentials.
+    if (!user && requiresAuth) {
       if (!allowGuestJoin) {
         return res.status(401).json({ error: "login_required" });
       }
