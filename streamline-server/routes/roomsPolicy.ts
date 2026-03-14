@@ -32,7 +32,7 @@ router.get("/:roomId/policy", requireRoomAccessToken as any, async (req: any, re
       ? (visibilityRaw as any)
       : "unlisted";
 
-  const requiresAuth = typeof room.requiresAuth === "boolean" ? !!room.requiresAuth : true;
+  const requiresAuth = typeof room.requiresAuth === "boolean" ? !!room.requiresAuth : false;
   const requiresPayment = typeof room.requiresPayment === "boolean" ? !!room.requiresPayment : false;
   const allowGuests = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
 

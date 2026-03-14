@@ -86,7 +86,7 @@ export async function ensureRoomDoc(params: {
     params.visibility === "public" || params.visibility === "unlisted" || params.visibility === "private"
       ? params.visibility
       : "unlisted";
-  const requiresAuth = params.requiresAuth === undefined ? true : !!params.requiresAuth;
+  const requiresAuth = params.requiresAuth === undefined ? false : !!params.requiresAuth;
   const requiresPayment = params.requiresPayment === undefined ? false : !!params.requiresPayment;
 
   if (!snap.exists) {

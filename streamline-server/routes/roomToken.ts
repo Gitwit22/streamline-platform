@@ -516,7 +516,7 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
     let roomPolicy: { ownerId: string | null; visibility: "public" | "unlisted" | "private"; requiresAuth: boolean; requiresPayment: boolean; roomType?: string | null } = {
       ownerId: null,
       visibility: "unlisted",
-      requiresAuth: true,
+      requiresAuth: false,
       requiresPayment: false,
       roomType: null,
     };
@@ -534,7 +534,7 @@ router.post("/", requireAuthOrInvite, async (req, res) => {
       roomPolicy = {
         ownerId: typeof roomData?.ownerId === "string" && roomData.ownerId.trim() ? roomData.ownerId.trim() : null,
         visibility,
-        requiresAuth: typeof roomData?.requiresAuth === "boolean" ? !!roomData.requiresAuth : true,
+        requiresAuth: typeof roomData?.requiresAuth === "boolean" ? !!roomData.requiresAuth : false,
         requiresPayment: typeof roomData?.requiresPayment === "boolean" ? !!roomData.requiresPayment : false,
         roomType: typeof roomData?.roomType === "string" ? roomData.roomType : null,
       };
@@ -906,7 +906,7 @@ router.post("/guest", requireAuth as any, async (req: any, res) => {
     // Load room policy + owner (do not trust hostUid from the client).
     let ownerId: string | null = null;
     let visibility: "public" | "unlisted" | "private" = "unlisted";
-    let requiresAuth = true;
+    let requiresAuth = false;
     let requiresPayment = false;
     let roomType: string | null = null;
     try {
@@ -917,7 +917,7 @@ router.post("/guest", requireAuth as any, async (req: any, res) => {
       if (visibilityRaw === "public" || visibilityRaw === "unlisted" || visibilityRaw === "private") {
         visibility = visibilityRaw as any;
       }
-      requiresAuth = typeof roomData.requiresAuth === "boolean" ? !!roomData.requiresAuth : true;
+      requiresAuth = typeof roomData.requiresAuth === "boolean" ? !!roomData.requiresAuth : false;
       requiresPayment = typeof roomData.requiresPayment === "boolean" ? !!roomData.requiresPayment : false;
       roomType = typeof roomData.roomType === "string" ? roomData.roomType : null;
     } catch (err) {
