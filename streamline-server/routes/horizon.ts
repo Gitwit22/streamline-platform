@@ -42,6 +42,7 @@ import { Router, type Request, type Response, type NextFunction } from "express"
 import express from "express";
 import { verifySignature } from "../lib/hmac";
 import { firestore } from "../firebaseAdmin";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 
 const router = Router();
 
@@ -95,7 +96,7 @@ function requireHorizonAuth(req: Request, res: Response, next: NextFunction) {
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
 
   if (!token || token !== expected) {
-    return res.status(401).json({ error: "unauthorized" });
+    return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
   }
 
   next();
@@ -252,7 +253,7 @@ router.get("/support/rooms/:roomId", requireHorizonAuth, async (req: Request, re
     if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
     const doc = await firestore.collection("rooms").doc(roomId).get();
-    if (!doc.exists) return res.status(404).json({ error: "room_not_found" });
+    if (!doc.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
     const d = doc.data() || {};
     return res.json({
@@ -288,7 +289,7 @@ router.get(
       if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
       const roomDoc = await firestore.collection("rooms").doc(roomId).get();
-      if (!roomDoc.exists) return res.status(404).json({ error: "room_not_found" });
+      if (!roomDoc.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
       const roomData = roomDoc.data() || {};
       const sessionId = roomData.chat?.activeSessionId;
