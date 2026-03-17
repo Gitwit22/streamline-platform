@@ -16,6 +16,7 @@ import { clearMeCache } from "./lib/meCache";
 import { clearPlatformFlagsCache } from "./lib/platformFlagsCache";
 import { useFeatureAccess } from "./hooks/useFeatureAccess";
 import { useEffectiveEntitlements } from "./hooks/useEffectiveEntitlements";
+import { cleanTrackingParams } from "./lib/cleanTrackingParams";
 
 
 function App() {
@@ -34,6 +35,12 @@ function App() {
   const myContentTarget = (canContentLibrary || canMyContentRecordings)
     ? "/content"
     : null;
+
+  useEffect(() => {
+    // Strip tracking parameters (fbclid, utm_*, etc.) that social platforms
+    // and email clients append when users click shared invite links.
+    cleanTrackingParams();
+  }, []);
 
   useEffect(() => {
     const onUnauthorized = () => {
@@ -64,14 +71,26 @@ function App() {
         }
       }
 
-      // ── Room / live / join pages: show banner but do NOT redirect ──
-      // The Room page manages its own `needsReauth` state and shows an
-      // in-room re-auth prompt.  Clearing storage here would destroy
-      // the room-access-token and force-boot the user.
-      if (
-        path.startsWith("/room") || path.startsWith("/join") ||
-        path.startsWith("/live") || path.startsWith("/ig/")
-      ) {
+      // ── Guest detection: suppress banner for guest sessions ─────────
+      // Guests who joined via an invite link have a guest session token
+      // but no account. A 401 on auth endpoints is expected for them and
+      // should not trigger the "Session expired" banner.
+      if (path.startsWith("/room") || path.startsWith("/join") || path.startsWith("/live") || path.startsWith("/ig/")) {
+        const sp = new URLSearchParams(window.location.search);
+        const hasGuestToken = sp.has("gst");
+        let hasStoredGuestSession = false;
+        try {
+          hasStoredGuestSession = !!localStorage.getItem("sl_guestSessionToken");
+        } catch { /* ignore */ }
+        if (hasGuestToken || hasStoredGuestSession) {
+          // Guest user — do not show "Session expired" banner
+          return;
+        }
+
+        // Authenticated user whose session expired — show banner but do NOT redirect.
+        // The Room page manages its own `needsReauth` state and shows an
+        // in-room re-auth prompt. Clearing storage here would destroy
+        // the room-access-token and force-boot the user.
         setShowUnauthorized(true);
         return;
       }
