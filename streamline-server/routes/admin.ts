@@ -639,6 +639,42 @@ router.post("/users/:userId/toggle-billing", async (req, res) => {
 });
 
 /**
+ * POST /api/admin/users/:userId/reset-plan-guards
+ * Reset billing guards, plan-change locks, and cooldowns so the user can change plans again.
+ */
+router.post("/users/:userId/reset-plan-guards", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const userRef = firestore.collection("users").doc(userId);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    await userRef.update({
+      billingGuards: null,
+      planChangeLock: null,
+      planChangeCooldownUntil: null,
+      planChangeRequestId: null,
+      planChangeRequestResult: null,
+      updatedAt: new Date(),
+    });
+
+    await logAdminAction(req.adminUser!.uid, "reset_plan_guards", { userId });
+
+    console.log(
+      `Admin ${req.adminUser!.email} reset plan-change guards for user ${userId}`
+    );
+
+    res.json({ success: true, userId });
+  } catch (error: any) {
+    console.error("Failed to reset plan guards:", error);
+    res.status(500).json({ error: "Failed to reset plan guards" });
+  }
+});
+
+/**
  * POST /api/admin/plans/migrate-schema
  * One-time migration to normalize plan documents in Firestore to the canonical schema.
  *

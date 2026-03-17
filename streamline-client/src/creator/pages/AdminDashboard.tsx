@@ -613,6 +613,18 @@ export default function AdminDashboard() {
     }
   };
 
+  const resetPlanGuards = async (userId: string) => {
+    const res = await apiFetch(`/api/admin/users/${userId}/reset-plan-guards`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    if (res.ok) {
+      showToast("Plan-change limits reset");
+    } else {
+      showToast(`Reset failed: ${await describeNonOkResponse(res)}`);
+    }
+  };
+
   const toggleBilling = async (userId: string, enabled: boolean) => {
     const res = await apiFetch(`/api/admin/users/${userId}/toggle-billing`, {
       method: "POST",
@@ -958,8 +970,11 @@ export default function AdminDashboard() {
 
                           <td style={S.td}>
                             <div style={{ display: "flex", gap: 8 }}>
-                              <button onClick={() => setSelectedUser(u)} style={S.actionBtn}>
+                              <button onClick={() => setSelectedUser(u)} style={S.actionBtn} title="Grant minutes">
                                 ⚡
+                              </button>
+                              <button onClick={() => resetPlanGuards(u.uid)} style={S.actionBtn} title="Reset plan-change limits">
+                                🔄
                               </button>
                               <button onClick={() => deleteUser(u.uid)} style={{ ...S.actionBtn, opacity: deleteLoading ? 0.7 : 1 }} disabled={deleteLoading}>
                                 🗑️
