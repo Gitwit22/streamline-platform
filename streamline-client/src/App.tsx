@@ -69,8 +69,8 @@ function App() {
       // apiFetchAuth call would emit sl:unauthorized.  Preserve their
       // guest session tokens (sl_guestSessionToken, etc.) and skip the
       // redirect so the invite flow can complete normally.
-      const guestPrefixes = ["/invite/", "/i/", "/join", "/room/", "/room", "/live/", "/live", "/ig/"];
-      if (guestPrefixes.some((p) => path === p || path.startsWith(p))) {
+      const guestPaths = ["/invite", "/i", "/join", "/room", "/live", "/ig"];
+      if (guestPaths.some((p) => path === p || path.startsWith(p + "/"))) {
         clearMeCache();
         return;
       }
