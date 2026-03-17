@@ -191,7 +191,7 @@ router.post("/legacy/resolve", async (req, res) => {
           tx.set(ref, {
             roomId: resolved.roomId,
             mode: "guest",
-            role: "viewer",
+            role: "guest",
             expiresAt,
             maxUses: null,
             useCount: 0,
@@ -221,7 +221,7 @@ router.post("/legacy/resolve", async (req, res) => {
         {
           roomId: resolved.roomId,
           mode: "guest",
-          role: "viewer",
+          role: "guest",
           expiresAt,
           maxUses: null,
           useCount: 0,

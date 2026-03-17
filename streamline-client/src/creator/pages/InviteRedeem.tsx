@@ -100,6 +100,23 @@ export default function InviteRedeem() {
         try { localStorage.setItem("sl_guestSessionToken", gst); localStorage.setItem("sl_guestSessionRoomId", roomId); } catch {}
       }
 
+      // Cache the LiveKit token from join-now so Room.tsx can use it immediately
+      // without a second round-trip to /api/rooms/:roomId/token.
+      if (data?.roomToken && data?.serverUrl) {
+        try {
+          sessionStorage.setItem(`sl_lk_token:${roomId}`, JSON.stringify({
+            token: data.roomToken,
+            serverUrl: data.serverUrl,
+            identity: data.identity || "",
+            displayName: name,
+            roomAccessToken: data.roomAccessToken || "",
+            isViewer: data.isViewer ?? false,
+            role: data.role || "guest",
+            fetchedAt: Date.now(),
+          }));
+        } catch { /* ignore */ }
+      }
+
       const qp = gst ? `?gst=${encodeURIComponent(gst)}` : "";
       nav(`/room/${encodeURIComponent(roomId)}${qp}`, { replace: true });
     } catch (err: any) {

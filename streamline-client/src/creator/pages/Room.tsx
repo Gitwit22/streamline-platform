@@ -2190,9 +2190,12 @@ function RoomPage() {
               setToken(parsed.token);
               setServerUrl(parsed.serverUrl);
               if (parsed.identity) setParticipantIdentity(parsed.identity);
-              
-              // Guests are RTC participants with mic+cam (not view-only)
-              // isViewer stays false (invite guests can publish)
+              if (parsed.roomAccessToken) setRoomAccessToken(parsed.roomAccessToken);
+              if (typeof parsed.isViewer === "boolean") setIsViewer(parsed.isViewer);
+              if (typeof parsed.role === "string" && parsed.role) {
+                setUserRole(parsed.role);
+                if (parsed.role === "viewer") setIsHost(false);
+              }
               
               // Clear the cached token after use to prevent stale data
               sessionStorage.removeItem(`sl_lk_token:${roomId}`);

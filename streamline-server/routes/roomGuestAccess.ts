@@ -657,7 +657,11 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     });
 
     // SECURITY: join-now is unauthenticated; never mint host-level tokens.
-    const mintedRole: "guest" | "participant" | "host" = inviteRole === "host" ? "guest" : inviteRole;
+    // Normalize legacy "viewer" role to "guest" — invite-based participants should
+    // always get RTC publish permissions (mic+cam).  The old legacy/resolve created
+    // invite docs with role="viewer", which would produce a view-only LiveKit token.
+    const mintedRole: "guest" | "participant" | "host" =
+      inviteRole === "host" || inviteRole === "viewer" ? "guest" : inviteRole;
     const grant = roleGrant(mintedRole);
     at.addGrant({ room: livekitRoomName, ...grant } as any);
 
@@ -669,8 +673,10 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     // CRITICAL: Guest session must expire AFTER LiveKit token so re-minting works
     const guestSessionTtl = "2h";
     // Guest sessions only support "guest" | "participant" roles
-    // If invite has role="host", treat as "guest" for the unauthenticated join-now flow
-    const guestSessionRole: "guest" | "participant" = inviteRole === "host" ? "guest" : inviteRole;
+    // If invite has role="host" or legacy "viewer", treat as "guest" for the
+    // unauthenticated join-now flow so the GST carries the correct role.
+    const guestSessionRole: "guest" | "participant" =
+      inviteRole === "host" || inviteRole === "viewer" ? "guest" : inviteRole;
     const guestSessionToken = signGuestSession({ inviteId, roomId, role: guestSessionRole }, guestSessionTtl);
     logPayload.guestSessionTtl = guestSessionTtl;
 
@@ -1178,20 +1184,6 @@ router.get("/invites/:inviteId/info", async (req: any, res) => {
       : false;
     const inviteValid = !revoked && !expired && !maxUsesReached;
 
-    // Temporary debug — remove after confirming fix
-    console.log("[invite-info-debug]", {
-      inviteId,
-      revoked,
-      expired,
-      expiresAtType: expiresAtRaw === null ? "null" : typeof expiresAtRaw,
-      expiresAtMillis,
-      now,
-      maxUsesReached,
-      maxUses: invite.maxUses,
-      useCount: invite.useCount,
-      inviteValid,
-    });
-
     // Resolve room info
     const roomId = String(invite.roomId || "");
     const roomSnap = roomId ? await firestore.collection("rooms").doc(roomId).get() : null;
@@ -1212,8 +1204,6 @@ router.get("/invites/:inviteId/info", async (req: any, res) => {
       status,
       allowGuests,
       inviteValid,
-      // Temporary debug — remove after confirming fix
-      _debug: { revoked, expired, maxUsesReached, expiresAtMillis, now, maxUses: invite.maxUses, useCount: invite.useCount },
     });
   } catch (err) {
     console.error("/api/invites/:inviteId/info error", err);
