@@ -54,6 +54,16 @@ function App() {
         return;
       }
 
+      // ── Invite join flow: suppress banner when arriving via invite ──
+      // /join?t=<token> is a guest invite entry-point — a 401 is expected
+      // because the participant has no account yet.
+      if (path.startsWith("/join")) {
+        const sp = new URLSearchParams(window.location.search);
+        if (sp.has("t") || sp.has("inviteToken") || sp.has("room")) {
+          return;
+        }
+      }
+
       // ── Room / live / join pages: show banner but do NOT redirect ──
       // The Room page manages its own `needsReauth` state and shows an
       // in-room re-auth prompt.  Clearing storage here would destroy
