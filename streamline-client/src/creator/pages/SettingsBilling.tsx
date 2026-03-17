@@ -1662,7 +1662,7 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
       const res = await apiFetchWithCookieFallback("/api/billing/portal", {
         method: "POST",
       });
-      const data = await safeReadJson(res);
+      const { json: data } = await safeReadJson(res);
 
       if (!res.ok) {
         const errCode = String((data as any)?.error || "");
@@ -2497,6 +2497,14 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                         >
                           {actionLoading === "pro" ? "⏳ Loading..." : "Choose Pro Plan"}
                         </button>
+
+                        <button
+                          onClick={() => { window.location.href = "https://buy.stripe.com/cNifZi3oM5jPdAu3nWcAo00"; }}
+                          style={{ ...S.secondaryBtn, background: "linear-gradient(135deg, #22c55e, #16a34a)", color: "#fff", border: 0 }}
+                          disabled={!!actionLoading}
+                        >
+                          🚀 Start Pro Free Trial
+                        </button>
                       </>
                     )}
 
@@ -2803,21 +2811,33 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                             </button>
                           </div>
                         ) : planId === "pro" && (userPlan === "free" || userPlan === "starter" || userPlan === "basic") ? (
-                          <button
-                            onClick={() => startCheckout("pro")}
-                            style={{
-                              ...S.planUpgradeBtn,
-                              background: `linear-gradient(135deg, ${color}, ${color}dd)`,
-                            }}
-                            disabled={!!actionLoading || isBlocked || isProcessing}
-                          >
-                            {actionLoading === "pro"
-                              ? "⏳..."
-                              : getPlanActionLabel(userPlan, "pro", {
-                                  isProcessing,
-                                  pendingPlan: user?.pendingPlan,
-                                })}
-                          </button>
+                          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                            <button
+                              onClick={() => startCheckout("pro")}
+                              style={{
+                                ...S.planUpgradeBtn,
+                                background: `linear-gradient(135deg, ${color}, ${color}dd)`,
+                              }}
+                              disabled={!!actionLoading || isBlocked || isProcessing}
+                            >
+                              {actionLoading === "pro"
+                                ? "⏳..."
+                                : getPlanActionLabel(userPlan, "pro", {
+                                    isProcessing,
+                                    pendingPlan: user?.pendingPlan,
+                                  })}
+                            </button>
+                            <button
+                              onClick={() => { window.location.href = "https://buy.stripe.com/cNifZi3oM5jPdAu3nWcAo00"; }}
+                              style={{
+                                ...S.planUpgradeBtn,
+                                background: `linear-gradient(135deg, #22c55e, #16a34a)`,
+                              }}
+                              disabled={!!actionLoading || isBlocked || isProcessing}
+                            >
+                              🚀 Start Pro Free Trial
+                            </button>
+                          </div>
                         ) : planId === "free" && (userPlan === "starter" || userPlan === "pro" || userPlan === "basic") ? (
                           <button
                             onClick={openPortal}
@@ -3680,6 +3700,18 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                     {actionLoading === "pro"
                       ? "⏳ Redirecting..."
                       : `Pro — $${(proPlan as any)?.priceMonthly ?? proPlan?.price ?? "—"}/mo`}
+                  </button>
+
+                  <button
+                    onClick={() => { window.location.href = "https://buy.stripe.com/cNifZi3oM5jPdAu3nWcAo00"; }}
+                    style={{
+                      ...S.planUpgradeBtn,
+                      background: "linear-gradient(135deg,#22c55e,#16a34a)",
+                      border: 0,
+                    }}
+                    disabled={!!actionLoading}
+                  >
+                    🚀 Start Pro Free Trial
                   </button>
 
                   <button
