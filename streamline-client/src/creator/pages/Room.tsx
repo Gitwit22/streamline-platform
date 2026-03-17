@@ -1084,7 +1084,7 @@ function LiveKitShell({
         subjectToControls && !controlsAllowPublishAudio ? " sl-controls-no-audio" : ""
       }${subjectToControls && !controlsTileVisible ? " sl-controls-hide-self" : ""}${
         subjectToControls && !controlsAllowScreenShare ? " sl-controls-no-screen" : ""
-      } sl-screen-${screenShareMode}`}
+      }${advancedScreenShareEnabled ? ` sl-screen-${screenShareMode}` : ""}`}
       token={token}
       serverUrl={serverUrl}
       connect={true}
