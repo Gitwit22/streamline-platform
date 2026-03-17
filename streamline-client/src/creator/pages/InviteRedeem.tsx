@@ -203,6 +203,7 @@ export default function InviteRedeem() {
                   setTimeout(() => setLinkCopied(false), 2000);
                 } catch { /* ignore */ }
               }}
+              aria-label={linkCopied ? "Link copied to clipboard" : "Copy invite link to clipboard"}
               style={{
                 display: "block",
                 marginTop: 8,
@@ -216,7 +217,9 @@ export default function InviteRedeem() {
                 cursor: "pointer",
               }}
             >
-              {linkCopied ? "✓ Link copied!" : "📋 Copy link to open in browser"}
+              <span aria-live="polite">
+                {linkCopied ? "✓ Link copied!" : "📋 Copy link to open in browser"}
+              </span>
             </button>
           </div>
         )}

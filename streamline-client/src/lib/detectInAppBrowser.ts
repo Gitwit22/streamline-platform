@@ -41,19 +41,14 @@ export function getOpenInBrowserHint(appName: string | null): string {
     case "TikTok":
       return "Tap ⋯ → Open with browser";
     case "Twitter":
-      return "Tap the share icon → Open in browser";
-    case "LinkedIn":
-      return "Tap ⋯ → Open in browser";
-    case "Snapchat":
-      return "Tap ⋯ → Open in browser";
-    case "Pinterest":
-      return "Tap ⋯ → Open in browser";
-    case "WhatsApp":
-      return "Tap ⋯ → Open in browser";
-    case "WeChat":
-      return "Tap ⋯ → Open in browser";
     case "Line":
       return "Tap the share icon → Open in browser";
+    case "LinkedIn":
+    case "Snapchat":
+    case "Pinterest":
+    case "WhatsApp":
+    case "WeChat":
+      return "Tap ⋯ → Open in browser";
     default:
       return "Open this link in your default browser for the best experience";
   }
