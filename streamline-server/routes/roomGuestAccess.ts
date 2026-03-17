@@ -1168,11 +1168,29 @@ router.get("/invites/:inviteId/info", async (req: any, res) => {
     // Check validity: not revoked and not expired
     const now = Date.now();
     const revoked = !!invite.revokedAt;
-    const expired = invite.expiresAt ? invite.expiresAt.toMillis?.() < now || invite.expiresAt < now : false;
+    const expiresAtRaw = invite.expiresAt;
+    const expiresAtMillis = expiresAtRaw?.toMillis?.() ?? null;
+    const expired = expiresAtRaw
+      ? (typeof expiresAtMillis === "number" ? expiresAtMillis < now : false)
+      : false;
     const maxUsesReached = typeof invite.maxUses === "number" && invite.maxUses > 0
       ? (invite.useCount || 0) >= invite.maxUses
       : false;
     const inviteValid = !revoked && !expired && !maxUsesReached;
+
+    // Temporary debug — remove after confirming fix
+    console.log("[invite-info-debug]", {
+      inviteId,
+      revoked,
+      expired,
+      expiresAtType: expiresAtRaw === null ? "null" : typeof expiresAtRaw,
+      expiresAtMillis,
+      now,
+      maxUsesReached,
+      maxUses: invite.maxUses,
+      useCount: invite.useCount,
+      inviteValid,
+    });
 
     // Resolve room info
     const roomId = String(invite.roomId || "");
@@ -1194,6 +1212,8 @@ router.get("/invites/:inviteId/info", async (req: any, res) => {
       status,
       allowGuests,
       inviteValid,
+      // Temporary debug — remove after confirming fix
+      _debug: { revoked, expired, maxUsesReached, expiresAtMillis, now, maxUses: invite.maxUses, useCount: invite.useCount },
     });
   } catch (err) {
     console.error("/api/invites/:inviteId/info error", err);
