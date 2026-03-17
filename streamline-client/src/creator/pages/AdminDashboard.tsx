@@ -353,6 +353,7 @@ export default function AdminDashboard() {
       Billing: [],
       Access: [],
       "Site Tools": [],
+      "Room Features": [],
       Security: [],
       Experiments: [],
       Other: [],
