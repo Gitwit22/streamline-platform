@@ -2676,62 +2676,57 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                         )}
                       </div>
                       <ul style={S.featureList}>
-                        <FeatureRow label={usageLabels.inRoomMinutes} value={plan.limits.monthlyMinutesIncluded} />
+                        {/* Usage buckets */}
+                        {plan.limits.monthlyMinutesIncluded > 0 && (
+                          <FeatureRow label={usageLabels.inRoomMinutes} value={plan.limits.monthlyMinutesIncluded} />
+                        )}
                         {platformTranscodeEnabled !== false && plan.limits.transcodeMinutes > 0 && (
-                          <FeatureRow
-                            label={usageLabels.broadcastMinutes}
-                            value={plan.limits.transcodeMinutes}
-                          />
+                          <FeatureRow label={usageLabels.broadcastMinutes} value={plan.limits.transcodeMinutes} />
                         )}
-                        <FeatureRow label="Max guests" value={plan.limits.maxGuests} />
-                        <FeatureRow label="Stream destinations" value={plan.limits.rtmpDestinationsMax} />
-                        {platformRecordingEnabled !== false && (
-                          <FeatureRow
-                            label="Recording"
-                            value={Boolean((plan as any).features?.recording)}
-                            lockedText="Not included in this plan"
-                          />
+                        {/* Limits — only show non-zero */}
+                        {plan.limits.maxGuests > 0 && (
+                          <FeatureRow label={`Up to ${plan.limits.maxGuests} guests`} value={true} />
                         )}
-                        {platformTranscodeEnabled !== false && (
-                          <FeatureRow
-                            label="Multistream"
-                            value={Boolean((plan as any).features?.multistream ?? (plan as any).multistreamEnabled)}
-                            lockedText="Not included in this plan"
-                          />
+                        {plan.limits.rtmpDestinationsMax > 0 && (
+                          <FeatureRow label={`Up to ${plan.limits.rtmpDestinationsMax} stream destinations`} value={true} />
                         )}
-                        {platformHlsEnabled !== false && (
-                          <FeatureRow
-                            label="HLS Broadcast Page"
-                            value={Boolean(
-                              (plan as any).features?.hlsCustomizationEnabled ??
-                              (plan as any).features?.canCustomizeHlsPage ??
-                              (plan as any).features?.canHls ??
-                              (plan as any).features?.hls
-                            )}
-                            lockedText="Not included in this plan"
-                          />
+                        {/* Features — only show enabled */}
+                        {platformRecordingEnabled !== false && Boolean((plan as any).features?.recording) && (
+                          <FeatureRow label="Recording" value={true} />
                         )}
-                        {/* Advanced Permissions is now removed from plan marketing UI; all accounts use simple Participant/Co-host defaults. */}
-                        {plan.editing?.access && (
-                          <>
-                            <FeatureRow label="Projects" value={plan.editing.maxProjects} />
-                            <FeatureRow label="Storage" value={`${plan.editing.maxStorageGB}GB`} />
-                          </>
+                        {Boolean((plan as any).features?.dualRecording) && (
+                          <FeatureRow label="Dual Recording" value={true} />
+                        )}
+                        {platformTranscodeEnabled !== false && Boolean((plan as any).features?.multistream ?? (plan as any).multistreamEnabled) && (
+                          <FeatureRow label="Multistream" value={true} />
+                        )}
+                        {platformHlsEnabled !== false && Boolean(
+                          (plan as any).features?.hlsCustomizationEnabled ??
+                          (plan as any).features?.canCustomizeHlsPage ??
+                          (plan as any).features?.canHls ??
+                          (plan as any).features?.hls
+                        ) && (
+                          <FeatureRow label="HLS Broadcast Page" value={true} />
+                        )}
+                        {plan.editing?.access && plan.editing.maxProjects > 0 && (
+                          <FeatureRow label={`${plan.editing.maxProjects} projects`} value={true} />
+                        )}
+                        {plan.editing?.access && plan.editing.maxStorageGB > 0 && (
+                          <FeatureRow label={`${plan.editing.maxStorageGB}GB storage`} value={true} />
                         )}
                       </ul>
-                      {(planId !== "free" && planId !== "basic") && (
+                      {(plan.limits.monthlyMinutesIncluded > 0 || (platformTranscodeEnabled !== false && plan.limits.transcodeMinutes > 0)) && planId !== "free" && (
                         <div style={{ color: "#94a3b8", fontSize: 12, margin: "8px 0 0 0", lineHeight: 1.45 }}>
                           <div>
                             <span style={{ color: "#60a5fa" }}>{usageLabels.inRoomMinutes}</span> {" "}
                             {usageTooltips.inRoomMinutes}
                           </div>
-                          <div style={{ marginTop: 6 }}>
-                            <span style={{ color: "#a78bfa" }}>{usageLabels.broadcastMinutes}</span> {" "}
-                            {usageTooltips.broadcastMinutes}
-                          </div>
-                          <div style={{ marginTop: 8 }}>
-                            Broadcast minutes are counted per destination, per minute.
-                          </div>
+                          {platformTranscodeEnabled !== false && plan.limits.transcodeMinutes > 0 && (
+                            <div style={{ marginTop: 6 }}>
+                              <span style={{ color: "#a78bfa" }}>{usageLabels.broadcastMinutes}</span> {" "}
+                              {usageTooltips.broadcastMinutes}
+                            </div>
+                          )}
                         </div>
                       )}
                       <div style={S.planCardAction}>
