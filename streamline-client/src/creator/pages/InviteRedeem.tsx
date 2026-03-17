@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { apiFetch } from "../../lib/api";
-import { detectInAppBrowser, getInAppBrowserName } from "../../lib/detectInAppBrowser";
+import { detectInAppBrowser, getInAppBrowserName, getOpenInBrowserHint } from "../../lib/detectInAppBrowser";
 import {
   sanitizeDisplayName,
   resolveDisplayName,
@@ -28,8 +28,10 @@ export default function InviteRedeem() {
   const [joining, setJoining] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [displayName, setDisplayName] = useState(() => resolveDisplayName(null));
+  const [linkCopied, setLinkCopied] = useState(false);
   const isInApp = detectInAppBrowser();
   const inAppName = isInApp ? getInAppBrowserName() : null;
+  const openHint = isInApp ? getOpenInBrowserHint(inAppName) : null;
 
   // Fetch invite info on mount (read-only, no useCount burn)
   useEffect(() => {
@@ -192,7 +194,30 @@ export default function InviteRedeem() {
             fontSize: 13, lineHeight: 1.45,
           }}>
             <strong>Heads up:</strong> You're in {inAppName ? `the ${inAppName} browser` : "an in-app browser"} which may block camera &amp; mic access.
-            For the best experience, tap <strong>⋯</strong> → <strong>Open in browser</strong>.
+            {openHint && <span> {openHint}.</span>}
+            <button
+              onClick={() => {
+                try {
+                  navigator.clipboard.writeText(window.location.href);
+                  setLinkCopied(true);
+                  setTimeout(() => setLinkCopied(false), 2000);
+                } catch { /* ignore */ }
+              }}
+              style={{
+                display: "block",
+                marginTop: 8,
+                padding: "6px 14px",
+                borderRadius: 8,
+                border: "1px solid rgba(250,204,21,0.35)",
+                background: "rgba(250,204,21,0.08)",
+                color: "#fbbf24",
+                fontSize: 12,
+                fontWeight: 600,
+                cursor: "pointer",
+              }}
+            >
+              {linkCopied ? "✓ Link copied!" : "📋 Copy link to open in browser"}
+            </button>
           </div>
         )}
 
