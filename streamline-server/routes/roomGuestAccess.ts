@@ -657,11 +657,9 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     });
 
     // SECURITY: join-now is unauthenticated; never mint host-level tokens.
-    // Normalize legacy "viewer" role to "guest" — invite-based participants should
-    // always get RTC publish permissions (mic+cam).  The old legacy/resolve created
-    // invite docs with role="viewer", which would produce a view-only LiveKit token.
+    // "viewer" is already normalized to "guest" in the redeem step above.
     const mintedRole: "guest" | "participant" | "host" =
-      inviteRole === "host" || inviteRole === "viewer" ? "guest" : inviteRole;
+      inviteRole === "host" ? "guest" : inviteRole;
     const grant = roleGrant(mintedRole);
     at.addGrant({ room: livekitRoomName, ...grant } as any);
 
@@ -673,10 +671,9 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     // CRITICAL: Guest session must expire AFTER LiveKit token so re-minting works
     const guestSessionTtl = "2h";
     // Guest sessions only support "guest" | "participant" roles
-    // If invite has role="host" or legacy "viewer", treat as "guest" for the
-    // unauthenticated join-now flow so the GST carries the correct role.
+    // "viewer" is already normalized to "guest" in the redeem step above.
     const guestSessionRole: "guest" | "participant" =
-      inviteRole === "host" || inviteRole === "viewer" ? "guest" : inviteRole;
+      inviteRole === "host" ? "guest" : inviteRole;
     const guestSessionToken = signGuestSession({ inviteId, roomId, role: guestSessionRole }, guestSessionTtl);
     logPayload.guestSessionTtl = guestSessionTtl;
 
