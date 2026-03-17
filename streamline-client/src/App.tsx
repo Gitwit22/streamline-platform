@@ -62,12 +62,24 @@ function App() {
 
   useEffect(() => {
     const onUnauthorized = () => {
+      const path = window.location.pathname || "";
+
+      // Guest-accessible paths should never be redirected to login.
+      // Guests visiting via invite links have no auth token, so any
+      // apiFetchAuth call would emit sl:unauthorized.  Preserve their
+      // guest session tokens (sl_guestSessionToken, etc.) and skip the
+      // redirect so the invite flow can complete normally.
+      const guestPrefixes = ["/invite/", "/i/", "/join", "/room/", "/room", "/live/", "/live", "/ig/"];
+      if (guestPrefixes.some((p) => path === p || path.startsWith(p))) {
+        clearMeCache();
+        return;
+      }
+
       clearAuthStorage();
       clearMeCache();
       clearPlatformFlagsCache();
       setShowUnauthorized(true);
 
-      const path = window.location.pathname || "";
       if (path.startsWith("/login") || path.startsWith("/signup")) {
         return;
       }

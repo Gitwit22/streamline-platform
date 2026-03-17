@@ -4,7 +4,7 @@ import { PLAN_IDS, PlanId, isPlanId } from "../lib/planIds";
 import { API_BASE } from "../lib/apiBase";
 import { logAuthDebugContext } from "../lib/logAuthDebug";
 import { useNavigate, useSearchParams,} from "react-router-dom";
-import { apiFetch, apiFetchAuth, clearAuthStorage } from "../lib/api";
+import { apiFetch, apiFetchAuth, clearAuthStorage, getAuthToken } from "../lib/api";
 import { useFeatureAccess } from "../hooks/useFeatureAccess";
 import { useEffectiveEntitlements } from "../hooks/useEffectiveEntitlements";
 
@@ -298,8 +298,14 @@ export default function Join() {
   }, [inviteTokenParam, legacyInviteRoomParam]);
 
   // Load platform-level flags to know if HLS (and Saved Rooms join) should be available.
+  // Skip for guests (no auth token) — they default to HLS enabled.
   useEffect(() => {
     let cancelled = false;
+
+    if (!getAuthToken()) {
+      setPlatformHlsEnabled(true);
+      return;
+    }
 
     (async () => {
       try {
@@ -346,6 +352,8 @@ export default function Join() {
   // bind the room to a Saved Embed at creation time.
   useEffect(() => {
     if (isParticipant) return;
+    // Guests have no auth token — skip saved-embeds fetch.
+    if (!getAuthToken()) return;
 
     let cancelled = false;
     (async () => {
@@ -398,7 +406,9 @@ export default function Join() {
   // Fetch real usage summary (for all authenticated users)
   useEffect(() => {
     let didCancel = false;
-   
+
+    // Guests have no auth token — skip usage fetch entirely.
+    if (!getAuthToken()) return;
 
     setUsageLoading(true);
     setUsageError(null);
