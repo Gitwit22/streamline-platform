@@ -1,5 +1,5 @@
 /**
- * Studio Layout system – types, presets, normalisation, and auto-suggest logic.
+ * Studio Layout system – types, presets, normalization, and auto-suggest logic.
  *
  * A "studio layout" defines *where* each participant's video appears on the
  * composed program canvas.  It is independent of the LiveKit room layout

@@ -71,8 +71,13 @@ export default function StudioLayoutPanel({
 
   // -- load ----------------------------------------------------------------
 
+  // -- load (runs once when roomId/roomAccessToken change) -----------------
+
+  const initialParticipantCountRef = useRef(participantCount);
+
   useEffect(() => {
     let cancelled = false;
+    const initialCount = initialParticipantCountRef.current;
     (async () => {
       try {
         const data = await apiGetStudioLayout(roomId, roomAccessToken);
@@ -83,13 +88,13 @@ export default function StudioLayoutPanel({
           setAdjustMode(data.studioLayout.adjustMode);
         } else {
           // No saved layout – seed from participant count
-          const preset = suggestPreset(participantCount);
+          const preset = suggestPreset(initialCount);
           setActivePresetId(preset);
           setSlots(getPresetSlots(preset));
         }
       } catch {
         // API failure – seed locally
-        const preset = suggestPreset(participantCount);
+        const preset = suggestPreset(initialCount);
         setActivePresetId(preset);
         setSlots(getPresetSlots(preset));
       } finally {
@@ -97,7 +102,7 @@ export default function StudioLayoutPanel({
       }
     })();
     return () => { cancelled = true; };
-  }, [roomId, roomAccessToken]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [roomId, roomAccessToken]);
 
   // -- auto-suggest when participant count changes -------------------------
 
@@ -117,7 +122,7 @@ export default function StudioLayoutPanel({
       const better = shouldSuggestChange(activePresetId, participantCount);
       if (better) setSuggestion(better);
     }
-  }, [participantCount, loaded]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [participantCount, loaded, adjustMode, activePresetId, applyPreset]);
 
   // -- apply preset --------------------------------------------------------
 

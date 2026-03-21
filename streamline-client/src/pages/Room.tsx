@@ -4637,7 +4637,7 @@ function RoomPage() {
 
             {(isHost || canManageStream) && (
               <button
-                onClick={() => setStudioLayoutOpen(v => !v)}
+                onClick={() => setStudioLayoutOpen(prev => !prev)}
                 style={{
                   fontSize: '0.75rem',
                   padding: '0.5rem 0.75rem',
