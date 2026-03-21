@@ -342,6 +342,41 @@ export async function apiUpdateRoomLayout(
   return res.json() as Promise<{ ok: true; roomId: string; roomLayout: RoomLayout }>;
 }
 
+// ---------------------------------------------------------------------------
+// Studio Layout API (preset-based canvas composition)
+// ---------------------------------------------------------------------------
+
+import type { StudioLayout } from "./studioLayout";
+
+export async function apiGetStudioLayout(roomId: string, roomAccessToken: string) {
+  const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/studio-layout`, {
+    method: "GET",
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+  return res.json() as Promise<{
+    ok: true;
+    roomId: string;
+    studioLayout: StudioLayout | null;
+  }>;
+}
+
+export async function apiUpdateStudioLayout(
+  roomId: string,
+  roomAccessToken: string,
+  studioLayout: StudioLayout,
+) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/studio-layout`, {
+    method: "PATCH",
+    body: JSON.stringify({ studioLayout }),
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; studioLayout: StudioLayout }>;
+}
+
 export type RoomPolicy = {
   visibility: "public" | "unlisted" | "private";
   requiresAuth: boolean;
