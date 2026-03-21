@@ -104,7 +104,7 @@ export default function VerticalPreviewOverlay({
               fontWeight: 600,
             }}
           >
-            IG Safe Zone (9:16)
+            Vertical Safe Zone (9:16)
           </div>
         </>
       )}

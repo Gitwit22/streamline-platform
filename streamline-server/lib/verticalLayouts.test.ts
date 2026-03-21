@@ -88,7 +88,7 @@ function checkVerticalSafeZone(
     if (slotLeft < safeLeft - 1 || slotRight > safeRight + 1) {
       warnings.push({
         slotId: slot.id,
-        message: `Slot "${slot.id}" extends outside the vertical safe zone and may be cropped on Instagram.`,
+        message: `Slot "${slot.id}" extends outside the vertical safe zone and may be cropped on vertical platforms.`,
       });
     }
   }
