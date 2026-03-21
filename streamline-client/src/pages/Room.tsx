@@ -22,6 +22,7 @@ import {
 } from "../lib/api";
 import { logTelemetry, markTiming, measureTiming } from "../lib/telemetry";
 import RoleOverlay from "../components/RoleOverlay";
+import StudioLayoutPanel from "../components/StudioLayoutPanel";
 import StreamSetupModalV2 from "../components/StreamSetupModal";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { RoleChangeToast } from "../components/RoleChangeToast";
@@ -1154,6 +1155,8 @@ type LiveKitShellProps = {
   dashboardGreenroomEnabled: boolean;
   dashboardOverlaysEnabled: boolean;
   dashboardRole: "host" | "moderator" | "participant";
+  studioLayoutOpen: boolean;
+  onCloseStudioLayout: () => void;
   onLeaveRequested?: () => void;
   onDisconnected: () => void;
 };
@@ -1180,12 +1183,15 @@ function LiveKitShell({
   dashboardGreenroomEnabled,
   dashboardOverlaysEnabled,
   dashboardRole,
+  studioLayoutOpen,
+  onCloseStudioLayout,
   onLeaveRequested,
   onDisconnected,
 }: LiveKitShellProps) {
   const [guestStatus, setGuestStatus] = useState<GuestStatus>(null);
   const statusRef = useRef<GuestStatus>(null);
   const mediaRootRef = useRef<HTMLDivElement | null>(null);
+  const studioParticipants = useParticipants();
 
   // Media permission error state and handlers
   const [mediaPermissionError, setMediaPermissionError] = useState<{
@@ -1500,6 +1506,16 @@ function LiveKitShell({
             overlaysEnabled={dashboardOverlaysEnabled}
           />
         )}
+        {studioLayoutOpen && !isViewer && roomId && roomAccessToken && (
+          <div style={{ position: "fixed", top: 80, right: 16, zIndex: 9998 }}>
+            <StudioLayoutPanel
+              roomId={roomId}
+              roomAccessToken={roomAccessToken}
+              participantCount={studioParticipants.length}
+              onClose={onCloseStudioLayout}
+            />
+          </div>
+        )}
       </div>
     </LiveKitRoom>
   );
@@ -1536,6 +1552,7 @@ function RoomPage() {
   const [token, setToken] = useState<string | null>(null);
   const [serverUrl, setServerUrl] = useState<string | null>(null);
   const [dashboardOpen, setDashboardOpen] = useState(false);
+  const [studioLayoutOpen, setStudioLayoutOpen] = useState(false);
   const [showStreamSetup, setShowStreamSetup] = useState(false);
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [egressId, setEgressId] = useState<string | null>(null);
@@ -4618,6 +4635,24 @@ function RoomPage() {
               Dashboard
             </button>
 
+            {(isHost || canManageStream) && (
+              <button
+                onClick={() => setStudioLayoutOpen(v => !v)}
+                style={{
+                  fontSize: '0.75rem',
+                  padding: '0.5rem 0.75rem',
+                  border: studioLayoutOpen ? '1px solid rgba(220, 38, 38, 0.7)' : '1px solid rgba(255, 255, 255, 0.4)',
+                  borderRadius: '0.375rem',
+                  background: studioLayoutOpen ? 'rgba(220, 38, 38, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                  color: '#ffffff',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease'
+                }}
+              >
+                Layouts
+              </button>
+            )}
+
             {canManageStream && (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', color: '#ffffff' }}>
@@ -4697,6 +4732,8 @@ function RoomPage() {
           dashboardGreenroomEnabled={dashboardGreenroomEnabled}
           dashboardOverlaysEnabled={dashboardOverlaysEnabled}
           dashboardRole={isHost ? "host" : "participant"}
+          studioLayoutOpen={studioLayoutOpen}
+          onCloseStudioLayout={() => setStudioLayoutOpen(false)}
           onLeaveRequested={() => {
             void handleEndStream();
           }}
