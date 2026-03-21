@@ -25,6 +25,7 @@ import roomsActiveEmbedRoutes from "./routes/roomsActiveEmbed";
 import roomControlsRoutes from "./routes/roomControls";
 import roomChatRoutes from "./routes/roomChat";
 import roomsLayoutRoutes from "./routes/roomsLayout";
+import roomsStudioLayoutRoutes from "./routes/roomsStudioLayout";
 import roomsPolicyRoutes from "./routes/roomsPolicy";
 import roomsRecordingsRoutes from "./routes/roomsRecordings";
 import destinationsRoutes from "./routes/destinations";
@@ -275,6 +276,8 @@ app.use("/api/rooms", roomChatRoutes);
 app.use("/api/rooms", horizonRoomHooks);
 // Persistent room layout config (controls viewer layout; recordings inherit)
 app.use("/api/rooms", roomsLayoutRoutes);
+// Studio layout config (preset-based canvas composition for the program output)
+app.use("/api/rooms", roomsStudioLayoutRoutes);
 // Latest recording state + reconcile helpers
 app.use("/api/rooms", roomsRecordingsRoutes);
 // Room-level persistent HLS config (NOT runtime HLS state)
