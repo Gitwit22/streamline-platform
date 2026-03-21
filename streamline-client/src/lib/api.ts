@@ -304,11 +304,14 @@ export async function apiStopRecording(recordingId: string, roomAccessToken?: st
 
 export type RoomLayoutMode = "speaker" | "grid" | "carousel" | "pip";
 
+export type OutputFormat = "landscape_16x9" | "vertical_9x16" | "square_1x1";
+
 export type RoomLayout = {
   mode: RoomLayoutMode;
   maxTiles?: number;
   followSpeaker?: boolean;
   pinnedIdentity?: string | null;
+  outputFormat?: OutputFormat;
 };
 
 export async function apiGetRoomLayout(roomId: string, roomAccessToken: string) {
@@ -322,8 +325,10 @@ export async function apiGetRoomLayout(roomId: string, roomAccessToken: string) 
     ok: true;
     roomId: string;
     roomLayout: RoomLayout | null;
+    outputFormat: OutputFormat;
     effectiveLayoutMode: "speaker" | "grid";
     effectiveLayoutSource: "roomLayout" | "legacyRecordingLayout" | "request" | "default";
+    availablePresets: Array<{ id: string; label: string; participantCount: number }>;
   }>;
 }
 

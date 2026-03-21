@@ -4,7 +4,8 @@ import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { requireRoomAccessToken, type RoomAccessClaims } from "../middleware/roomAccessToken";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
-import { normalizeRoomLayout, resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
+import { normalizeRoomLayout, normalizeOutputFormat, resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
+import { getPresetsForFormat } from "../lib/verticalLayouts";
 
 const router = Router();
 
@@ -27,13 +28,19 @@ router.get("/:roomId/layout", requireRoomAccessToken as any, async (req: any, re
 
   const roomLayout = normalizeRoomLayout(data.roomLayout) || null;
   const resolved = resolveCompositeLayoutFromRoom({ roomDoc: data });
+  const outputFormat = roomLayout?.outputFormat || "landscape_16x9";
+  const availablePresets = outputFormat !== "landscape_16x9"
+    ? getPresetsForFormat(outputFormat)
+    : [];
 
   return res.json({
     ok: true,
     roomId,
     roomLayout,
+    outputFormat,
     effectiveLayoutMode: resolved.mode,
     effectiveLayoutSource: resolved.source,
+    availablePresets: availablePresets.map((p) => ({ id: p.id, label: p.label, participantCount: p.participantCount })),
   });
 });
 
