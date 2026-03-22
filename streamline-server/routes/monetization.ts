@@ -14,6 +14,8 @@ import { Router, type Request, type Response } from "express";
 import crypto from "crypto";
 import { stripe } from "../lib/stripe";
 import { requireAuth } from "../middleware/requireAuth";
+import { canAccessFeature } from "./featureAccess";
+import { firestore as db } from "../firebaseAdmin";
 import {
   createMonetizedEvent,
   updateMonetizedEvent,
@@ -60,6 +62,31 @@ router.post("/events", requireAuth, async (req: Request, res: Response) => {
   try {
     const uid = (req as any).user?.uid;
     if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+    // ── Entitlement gates ────────────────────────────────────────────
+    const monetizationAccess = await canAccessFeature(uid, "monetization");
+    if (!monetizationAccess.allowed) {
+      return res.status(403).json({
+        error: "monetization_not_enabled",
+        reason: monetizationAccess.reason || "Monetization is not enabled on this platform",
+      });
+    }
+
+    const ppvAccess = await canAccessFeature(uid, "payPerView");
+    if (!ppvAccess.allowed) {
+      return res.status(403).json({
+        error: "ppv_not_entitled",
+        reason: ppvAccess.reason || "Your plan does not include pay-per-view",
+      });
+    }
+
+    const hlsAccess = await canAccessFeature(uid, "hls");
+    if (!hlsAccess.allowed) {
+      return res.status(403).json({
+        error: "hls_not_entitled",
+        reason: hlsAccess.reason || "Pay-per-view requires an HLS-enabled plan",
+      });
+    }
 
     const {
       eventId,
@@ -119,9 +146,34 @@ router.post("/events", requireAuth, async (req: Request, res: Response) => {
       return res.json({ ok: true, event: updated });
     }
 
-    // Create new event
+    // ── Create new event ─────────────────────────────────────────────
     if (!roomId) return res.status(400).json({ error: "room_id_required" });
     if (!name) return res.status(400).json({ error: "name_required" });
+
+    // Validate room exists, belongs to this user, and is HLS-capable
+    let roomSnap;
+    try {
+      roomSnap = await db.collection("rooms").doc(String(roomId)).get();
+    } catch {
+      return res.status(400).json({ error: "room_lookup_failed" });
+    }
+    if (!roomSnap.exists) {
+      return res.status(400).json({ error: "room_not_found" });
+    }
+    const roomData = roomSnap.data() as any;
+    if (roomData.ownerId !== uid) {
+      return res.status(403).json({ error: "not_room_owner" });
+    }
+    // Enforce HLS-only: room must be of type "hls" or have active HLS config
+    const roomIsHls =
+      roomData.roomType === "hls" ||
+      roomData.hlsConfig?.enabled === true;
+    if (!roomIsHls) {
+      return res.status(400).json({
+        error: "room_not_hls",
+        reason: "Pay-per-view requires an HLS-enabled room. Enable HLS on this room first.",
+      });
+    }
 
     const input: CreateEventInput = {
       roomId: String(roomId),
@@ -360,6 +412,37 @@ router.post("/enter", async (req: Request, res: Response) => {
     return res.json({ ok: true, access: true });
   } catch (err: any) {
     console.error("[monetization] enter error:", err?.message);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// ── HLS-enabled rooms for the room picker ──────────────────────────
+// GET /api/monetization/hls-rooms — returns rooms owned by the user that have HLS enabled
+router.get("/hls-rooms", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const uid = (req as any).uid;
+    if (!uid) return res.status(401).json({ error: "unauthorized" });
+
+    const snap = await db.collection("rooms").where("ownerId", "==", uid).get();
+    const hlsRooms = snap.docs
+      .map((d) => {
+        const data = d.data() || {};
+        const isHls =
+          data.roomType === "hls" || data.hlsConfig?.enabled === true;
+        if (!isHls) return null;
+        return {
+          id: d.id,
+          roomType: data.roomType || null,
+          status: data.status || "idle",
+          hlsEnabled: true,
+          name: data.name || data.livekitRoomName || d.id,
+        };
+      })
+      .filter(Boolean);
+
+    return res.json({ ok: true, rooms: hlsRooms });
+  } catch (err: any) {
+    console.error("[monetization] hls-rooms error:", err?.message);
     return res.status(500).json({ error: "internal_error" });
   }
 });

@@ -5,6 +5,8 @@
  */
 import React, { useEffect, useState, useCallback } from "react";
 import { apiFetchAuth, apiFetch } from "../../lib/api";
+import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
+import { useFeatureAccess } from "../../hooks/useFeatureAccess";
 
 type MonetizationMode = "off" | "fixed" | "pwyw" | "donation";
 
@@ -31,12 +33,22 @@ const MODE_LABELS: Record<MonetizationMode, string> = {
 };
 
 export default function MonetizationSetup() {
+  // ── Entitlement checks ───────────────────────────────────────────
+  const { effectiveEntitlements } = useEffectiveEntitlements();
+  const { access } = useFeatureAccess(effectiveEntitlements);
+  const canMonetization = !!access?.monetization?.allowed;
+  const canPayPerView = !!access?.payPerView?.allowed;
+
   // ── State ────────────────────────────────────────────────────────
   const [events, setEvents] = useState<MonetizedEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  // HLS room picker
+  const [hlsRooms, setHlsRooms] = useState<{ id: string; name: string }[]>([]);
+  const [roomsLoading, setRoomsLoading] = useState(true);
 
   // Form
   const [editingEventId, setEditingEventId] = useState<string | null>(null);
@@ -67,9 +79,28 @@ export default function MonetizationSetup() {
     }
   }, []);
 
+  // ── Load HLS-enabled rooms ──────────────────────────────────────
+  const loadHlsRooms = useCallback(async () => {
+    try {
+      const res = await apiFetchAuth("/api/monetization/hls-rooms");
+      const data = await res.json();
+      setHlsRooms(data.rooms || []);
+    } catch (err: any) {
+      console.error("Failed to load HLS rooms:", err);
+    } finally {
+      setRoomsLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
-    loadEvents();
-  }, [loadEvents]);
+    if (canMonetization) {
+      loadEvents();
+      loadHlsRooms();
+    } else {
+      setLoading(false);
+      setRoomsLoading(false);
+    }
+  }, [canMonetization, loadEvents, loadHlsRooms]);
 
   // ── Populate form for editing ────────────────────────────────────
   function editEvent(ev: MonetizedEvent) {
@@ -215,6 +246,48 @@ export default function MonetizationSetup() {
   };
 
   // ── Render ───────────────────────────────────────────────────────
+
+  // ── Locked state: monetization not entitled ─────────────────────
+  if (!canMonetization) {
+    return (
+      <div style={{ maxWidth: 720, margin: "0 auto", padding: 24, color: "#fff" }}>
+        <h1 style={{ fontSize: 22, marginBottom: 4 }}>Monetization</h1>
+        <div style={{
+          background: "#1a1a2e",
+          borderRadius: 12,
+          padding: 24,
+          border: "1px solid rgba(255,255,255,0.08)",
+          textAlign: "center",
+        }}>
+          <p style={{ fontSize: 16, marginBottom: 8 }}>Monetization is not available on your current plan.</p>
+          <p style={{ color: "#888", fontSize: 14 }}>
+            Upgrade to a plan with monetization to create pay-per-view events.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!canPayPerView) {
+    return (
+      <div style={{ maxWidth: 720, margin: "0 auto", padding: 24, color: "#fff" }}>
+        <h1 style={{ fontSize: 22, marginBottom: 4 }}>Monetization</h1>
+        <div style={{
+          background: "#1a1a2e",
+          borderRadius: 12,
+          padding: 24,
+          border: "1px solid rgba(255,255,255,0.08)",
+          textAlign: "center",
+        }}>
+          <p style={{ fontSize: 16, marginBottom: 8 }}>Pay-per-view is not enabled.</p>
+          <p style={{ color: "#888", fontSize: 14 }}>
+            Contact your administrator or upgrade your plan to enable pay-per-view events.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ maxWidth: 720, margin: "0 auto", padding: 24, color: "#fff" }}>
       <h1 style={{ fontSize: 22, marginBottom: 4 }}>Monetization</h1>
@@ -228,13 +301,25 @@ export default function MonetizationSetup() {
           {editingEventId ? "Edit Event" : "Create Monetized Event"}
         </h2>
 
-        <label style={label}>Room ID</label>
-        <input
-          style={input}
-          placeholder="Enter your HLS room ID"
-          value={roomId}
-          onChange={(e) => setRoomId(e.target.value)}
-        />
+        <label style={label}>HLS Room</label>
+        {roomsLoading ? (
+          <p style={{ color: "#888", fontSize: 13 }}>Loading rooms…</p>
+        ) : hlsRooms.length === 0 ? (
+          <p style={{ color: "#ef4444", fontSize: 13 }}>
+            No HLS-enabled rooms found. Create a room with HLS enabled first.
+          </p>
+        ) : (
+          <select
+            style={{ ...input, appearance: "auto" as any }}
+            value={roomId}
+            onChange={(e) => setRoomId(e.target.value)}
+          >
+            <option value="">Select an HLS room…</option>
+            {hlsRooms.map((r) => (
+              <option key={r.id} value={r.id}>{r.name || r.id}</option>
+            ))}
+          </select>
+        )}
 
         <label style={label}>Event Name</label>
         <input

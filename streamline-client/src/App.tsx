@@ -31,6 +31,7 @@ function App() {
   const canEditor = access.editor.allowed;
   const canMyContentRecordings = !!access?.myContentRecordings?.allowed;
   const canMyContent = !!access?.myContent?.allowed;
+  const canMonetization = !!access?.monetization?.allowed;
 
   const myContentTarget = (canContentLibrary || canMyContentRecordings)
     ? "/content"
@@ -185,7 +186,7 @@ function App() {
       <Route path="/ppv/:eventId" element={<PpvViewer />} />
 
       {/* Creator lane */}
-      {creatorRoutes({ canContentLibrary, canMyContentRecordings, canProjects, canEditor, canMyContent, myContentTarget })}
+      {creatorRoutes({ canContentLibrary, canMyContentRecordings, canProjects, canEditor, canMyContent, canMonetization, myContentTarget })}
 
       </Routes>
     </>

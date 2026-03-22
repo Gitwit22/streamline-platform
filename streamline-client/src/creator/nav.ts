@@ -9,6 +9,8 @@ export interface CreatorNavItem {
   label: string;
   path: string;
   icon?: string;
+  /** Optional access key — when set, only show this item if the matching feature is allowed. */
+  accessKey?: string;
 }
 
 export const creatorNavItems: CreatorNavItem[] = [
@@ -16,6 +18,20 @@ export const creatorNavItems: CreatorNavItem[] = [
   { label: "Content Library",    path: "/content" },
   { label: "Projects",           path: "/projects" },
   { label: "Destinations",       path: "/settings/destinations" },
-  { label: "Monetization",       path: "/settings/monetization" },
+  { label: "Monetization",       path: "/settings/monetization", accessKey: "monetization" },
   { label: "Billing",            path: "/settings/billing" },
 ];
+
+/**
+ * Return only the nav items the current user is allowed to see.
+ * Items without an `accessKey` are always included.
+ * Items *with* an `accessKey` are included only if `allowedFeatures`
+ * contains that key set to `true`.
+ */
+export function getVisibleNavItems(
+  allowedFeatures: Record<string, boolean>,
+): CreatorNavItem[] {
+  return creatorNavItems.filter(
+    (item) => !item.accessKey || allowedFeatures[item.accessKey] === true,
+  );
+}

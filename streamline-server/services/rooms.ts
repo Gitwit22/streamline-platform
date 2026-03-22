@@ -57,6 +57,10 @@ export type RoomDoc = {
     updatedAt?: FirebaseFirestore.Timestamp | null;
   };
   hlsConfig?: RoomHlsConfig;
+  /** Room-level monetization toggle (requires HLS). */
+  monetizationEnabled?: boolean;
+  /** Room-level PPV toggle (requires HLS + monetizationEnabled). */
+  payPerViewEnabled?: boolean;
   [key: string]: any;
 };
 

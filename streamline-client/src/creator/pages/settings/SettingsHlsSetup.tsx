@@ -74,10 +74,13 @@ export default function SettingsHlsSetup({
   platformEnabled,
   canCustomize: _canCustomize,
   onUpgrade: _onUpgrade,
+  onSelectedRoomChange: _onSelectedRoomChange,
 }: {
   platformEnabled: boolean;
   canCustomize: boolean;
   onUpgrade?: () => void;
+  /** Fires when the selected embed/room changes. Passes roomId or null. */
+  onSelectedRoomChange?: (roomId: string | null, hlsEnabled: boolean) => void;
 }) {
   const canCustomize = !!_canCustomize;
   const onUpgrade = _onUpgrade;
@@ -117,6 +120,11 @@ export default function SettingsHlsSetup({
     }
   };
   const selectedEmbed = useMemo(() => embeds.find((e) => e.embedId === selectedEmbedId) || null, [embeds, selectedEmbedId]);
+
+  // Notify parent of room selection changes.
+  useEffect(() => {
+    _onSelectedRoomChange?.(selectedEmbed?.roomId || null, !!selectedEmbed?.roomId);
+  }, [selectedEmbed?.roomId]);
 
   // Create form
   const [createName, setCreateName] = useState(() => {

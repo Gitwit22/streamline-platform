@@ -35,6 +35,10 @@ export type PlatformFlagsLike = {
 
   // Audio mixer panel (bus routing, ducking, program output)
   audioMixerEnabled?: unknown;
+
+  // Monetization + PPV (opt-in, default disabled)
+  monetizationEnabled?: unknown;
+  payPerViewEnabled?: unknown;
 };
 
 function isNewPlatformFlagEnabled(value: unknown): boolean {
@@ -136,6 +140,12 @@ export function computeEffectiveFeatureAccess(input: {
     allowed: boolean;
   };
   audioMixer: {
+    allowed: boolean;
+  };
+  monetization: {
+    allowed: boolean;
+  };
+  payPerView: {
     allowed: boolean;
   };
 } {
@@ -246,6 +256,14 @@ export function computeEffectiveFeatureAccess(input: {
     },
     audioMixer: {
       allowed: isNewPlatformFlagEnabled((pf as any).audioMixerEnabled),
+    },
+    monetization: {
+      allowed: isNewPlatformFlagEnabled((pf as any).monetizationEnabled) &&
+        resolveEntitlementBoolean(features, ["monetization"]),
+    },
+    payPerView: {
+      allowed: isNewPlatformFlagEnabled((pf as any).payPerViewEnabled) &&
+        resolveEntitlementBoolean(features, ["payPerView"]),
     },
   };
 }

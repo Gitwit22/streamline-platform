@@ -57,6 +57,7 @@ export interface CreatorRouteFlags {
   canProjects: boolean;
   canEditor: boolean;
   canMyContent: boolean;
+  canMonetization: boolean;
   myContentTarget: string | null;
 }
 
@@ -67,6 +68,7 @@ export function creatorRoutes(flags: CreatorRouteFlags) {
     canProjects,
     canEditor,
     canMyContent,
+    canMonetization,
     myContentTarget,
   } = flags;
 
@@ -103,7 +105,10 @@ export function creatorRoutes(flags: CreatorRouteFlags) {
       <Route path="/live/:savedEmbedId" element={<Live />} />
       <Route path="/ig/:savedEmbedId" element={<Live />} />
       <Route path="/settings/destinations" element={<SettingsDestinations />} />
-      <Route path="/settings/monetization" element={<MonetizationSetup />} />
+      <Route
+        path="/settings/monetization"
+        element={canMonetization ? <MonetizationSetup /> : <Navigate to="/join" replace />}
+      />
       <Route path="/room-exit/:recordingId" element={<RoomExitPage />} />
 
       {/* Legacy redirect */}

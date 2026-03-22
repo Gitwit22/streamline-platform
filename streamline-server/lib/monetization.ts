@@ -40,6 +40,11 @@ export interface MonetizedEvent {
   allowCustomDonation: boolean;
   singlePersonOnly: boolean;
   status: EventStatus;
+  // HLS enforcement fields — PPV events require HLS delivery
+  requiresHls: boolean;
+  deliveryMode: "hls";
+  hlsEnabledAtCreation: boolean;
+  monetizationType: "pay_per_view" | "donation" | "off";
   createdAt: FirebaseFirestore.Timestamp | FieldValue;
   updatedAt: FirebaseFirestore.Timestamp | FieldValue;
 }
@@ -144,6 +149,9 @@ export async function createMonetizedEvent(
 
   const isPaid = input.monetizationMode === "fixed" || input.monetizationMode === "pwyw";
 
+  const monetizationType: MonetizedEvent["monetizationType"] =
+    isPaid ? "pay_per_view" : input.monetizationMode === "donation" ? "donation" : "off";
+
   const event: MonetizedEvent = {
     id: ref.id,
     roomId: input.roomId,
@@ -158,6 +166,10 @@ export async function createMonetizedEvent(
     allowCustomDonation: input.allowCustomDonation ?? true,
     singlePersonOnly: input.singlePersonOnly ?? isPaid,
     status: "draft",
+    requiresHls: true,
+    deliveryMode: "hls",
+    hlsEnabledAtCreation: true,
+    monetizationType,
     createdAt: now,
     updatedAt: now,
   };

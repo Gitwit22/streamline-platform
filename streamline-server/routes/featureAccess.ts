@@ -104,6 +104,20 @@ export async function canAccessFeature(
       };
     }
   }
+
+  // Monetization / Pay-Per-View platform gates (default DISABLED when missing)
+  if (featureKey === "monetization" || featureKey === "payPerView") {
+    const platformEnabled = await getPlatformMonetizationFlag(featureKey);
+    if (!platformEnabled) {
+      const label = featureKey === "monetization" ? "Monetization" : "Pay-per-view";
+      return {
+        allowed: false,
+        code: LIMIT_ERRORS.FEATURE_DISABLED,
+        reason: `${label} is not enabled on this platform`,
+        _diag: { uid, planId, feature: featureKey, failedAt: "platform_gate" },
+      };
+    }
+  }
   if (process.env.DEBUG_FEATURE_ACCESS === "1") {
     console.log(
       `[featureAccess] uid=${uid} feature=${featureKey} planId=${planId} adminOverride=${!!user?.adminOverride}`
@@ -208,6 +222,19 @@ export async function canAccessFeature(
           `[featureAccess] alias check result enabled=${enabled} via hls|canHls|hlsBroadcast`
         );
       }
+    } else if (featureKey === "monetization") {
+      enabled = Boolean(
+        plan?.features?.monetization ||
+        plan?.monetizationEnabled ||
+        plan?.monetization
+      );
+    } else if (featureKey === "payPerView") {
+      enabled = Boolean(
+        plan?.features?.payPerView ||
+        plan?.features?.ppv ||
+        plan?.payPerViewEnabled ||
+        plan?.ppvEnabled
+      );
     }
   }
 
@@ -229,6 +256,13 @@ let cachedRecordingEnabled: boolean | null = null;
 let cachedRecordingEnabledAt = 0;
 let cachedHlsEnabled: boolean | null = null;
 let cachedHlsEnabledAt = 0;
+
+// Monetization platform flags — default DISABLED (opt-in)
+let cachedMonetizationEnabled: boolean | null = null;
+let cachedMonetizationEnabledAt = 0;
+let cachedPayPerViewEnabled: boolean | null = null;
+let cachedPayPerViewEnabledAt = 0;
+
 const PLATFORM_FEATURE_TTL_MS = 30 * 1000;
 
 async function getPlatformFeatureEnabled(featureKey: "recording" | "hls"): Promise<boolean> {
@@ -271,5 +305,49 @@ async function getPlatformFeatureEnabled(featureKey: "recording" | "hls"): Promi
     cachedHlsEnabled = true;
     cachedHlsEnabledAt = now;
     return cachedHlsEnabled;
+  }
+}
+
+/**
+ * Platform-level monetization flags — default DISABLED when missing.
+ * Firestore docs: featureFlags/monetizationEnabled, featureFlags/payPerViewEnabled
+ */
+export async function getPlatformMonetizationFlag(
+  key: "monetization" | "payPerView"
+): Promise<boolean> {
+  const now = Date.now();
+  const docId = key === "monetization" ? "monetizationEnabled" : "payPerViewEnabled";
+
+  if (key === "monetization") {
+    if (cachedMonetizationEnabled !== null && now - cachedMonetizationEnabledAt < PLATFORM_FEATURE_TTL_MS) {
+      return cachedMonetizationEnabled;
+    }
+    try {
+      const snap = await db.collection("featureFlags").doc(docId).get();
+      const data = snap.exists ? snap.data() || {} : {};
+      cachedMonetizationEnabled = (data as any).enabled === true;
+      cachedMonetizationEnabledAt = now;
+      return cachedMonetizationEnabled;
+    } catch {
+      cachedMonetizationEnabled = false;
+      cachedMonetizationEnabledAt = now;
+      return false;
+    }
+  }
+
+  // payPerView
+  if (cachedPayPerViewEnabled !== null && now - cachedPayPerViewEnabledAt < PLATFORM_FEATURE_TTL_MS) {
+    return cachedPayPerViewEnabled;
+  }
+  try {
+    const snap = await db.collection("featureFlags").doc(docId).get();
+    const data = snap.exists ? snap.data() || {} : {};
+    cachedPayPerViewEnabled = (data as any).enabled === true;
+    cachedPayPerViewEnabledAt = now;
+    return cachedPayPerViewEnabled;
+  } catch {
+    cachedPayPerViewEnabled = false;
+    cachedPayPerViewEnabledAt = now;
+    return false;
   }
 }

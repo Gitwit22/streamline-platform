@@ -6,4 +6,5 @@
  */
 export { creatorRoutes } from "./routes";
 export type { CreatorRouteFlags } from "./routes";
-export { creatorNavItems } from "./nav";
+export { creatorNavItems, getVisibleNavItems } from "./nav";
+export type { CreatorNavItem } from "./nav";

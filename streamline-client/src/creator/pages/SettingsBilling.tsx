@@ -11,6 +11,7 @@ import { ApiUnauthorizedError, apiFetch, apiFetchAuth, clearAuthStorage, type Ro
 import { useAuthMe, isAuthUserInTestMode } from "../../hooks/useAuthMe";
 import { formatLimitLabel } from "../../lib/entitlements";
 import SettingsHlsSetup from "./settings/SettingsHlsSetup";
+import RoomMonetizationSetup from "./settings/RoomMonetizationSetup";
 import { getMeCached, clearMeCache } from "../../lib/meCache";
 import { clearPlatformFlagsCache } from "../../lib/platformFlagsCache";
 import { isFeatureAvailable, isPlatformEnabled } from "../../lib/featureAvailability";
@@ -145,6 +146,8 @@ const DEFAULT_ENTITLEMENTS = {
   rtmpMultistream: false,
   canHls: false,
   hlsCustomizationEnabled: false,
+  monetization: false,
+  payPerView: false,
   maxGuests: 0,
   maxDestinations: 0,
   participantMinutes: 0,
@@ -277,6 +280,12 @@ export default function SettingsBilling() {
   const [platformTranscodeEnabled, setPlatformTranscodeEnabled] = useState<boolean>(true);
   const [platformHlsSettingsTabEnabled, setPlatformHlsSettingsTabEnabled] = useState<boolean>(true);
   const [platformRecordingEnabled, setPlatformRecordingEnabled] = useState<boolean>(true);
+  const [platformMonetizationEnabled, setPlatformMonetizationEnabled] = useState<boolean>(false);
+  const [platformPayPerViewEnabled, setPlatformPayPerViewEnabled] = useState<boolean>(false);
+
+  // Track which room is currently selected in the HLS tab so we can show per-room monetization toggles
+  const [hlsSelectedRoomId, setHlsSelectedRoomId] = useState<string | null>(null);
+  const [hlsRoomHlsEnabled, setHlsRoomHlsEnabled] = useState(false);
 
   const [mediaPrefs, setMediaPrefs] = useState<typeof DEFAULT_MEDIA_PREFS>(DEFAULT_MEDIA_PREFS);
   const [presetOptions, setPresetOptions] = useState<Array<{ id: string; label: string }>>([]);
@@ -684,6 +693,9 @@ export default function SettingsBilling() {
           setPlatformHlsEnabled(isPlatformEnabled(pf.hlsEnabled));
           setPlatformRecordingEnabled(isPlatformEnabled(pf.recordingEnabled));
           setPlatformTranscodeEnabled(isPlatformEnabled(pf.transcodeEnabled));
+          // Monetization/PPV flags default to disabled (opt-in).
+          setPlatformMonetizationEnabled(pf.monetizationEnabled === true);
+          setPlatformPayPerViewEnabled(pf.payPerViewEnabled === true);
           const hlsTabFlag =
             typeof pf.hlsSettingsTab === "boolean"
               ? pf.hlsSettingsTab
@@ -696,6 +708,8 @@ export default function SettingsBilling() {
           setPlatformRecordingEnabled(true);
           setPlatformTranscodeEnabled(true);
           setPlatformHlsSettingsTabEnabled(true);
+          setPlatformMonetizationEnabled(false);
+          setPlatformPayPerViewEnabled(false);
         }
 
         if (Array.isArray(data.plans) && data.plans.length) {
@@ -770,6 +784,8 @@ export default function SettingsBilling() {
           maxDestinations,
           participantMinutes: Number((limits as any).participantMinutes ?? 0),
           transcodeMinutes: Number(limits.transcodeMinutes ?? 0),
+          monetization: !!features.monetization,
+          payPerView: !!features.payPerView,
         });
         return;
       }
@@ -790,6 +806,8 @@ export default function SettingsBilling() {
         maxDestinations: Number(legacy?.maxDestinations ?? 0),
         participantMinutes: Number(legacy?.participantMinutes ?? 0),
         transcodeMinutes: Number(legacy?.transcodeMinutes ?? 0),
+        monetization: false,
+        payPerView: false,
       });
     } catch (err) {
       console.warn("loadEntitlements failed; using defaults", err);
@@ -2064,7 +2082,24 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 platformEnabled={platformHlsEnabled}
                 canCustomize={!!entitlements.hlsCustomizationEnabled}
                 onUpgrade={() => setActiveTab("plan")}
+                onSelectedRoomChange={(roomId, hlsOn) => {
+                  setHlsSelectedRoomId(roomId);
+                  setHlsRoomHlsEnabled(hlsOn);
+                }}
               />
+
+              {/* Per-room monetization toggles (only when a room is selected) */}
+              {hlsSelectedRoomId && (
+                <RoomMonetizationSetup
+                  roomId={hlsSelectedRoomId}
+                  hlsEnabled={hlsRoomHlsEnabled}
+                  platformMonetizationEnabled={platformMonetizationEnabled}
+                  platformPayPerViewEnabled={platformPayPerViewEnabled}
+                  planMonetization={entitlements.monetization}
+                  planPayPerView={entitlements.payPerView}
+                  onUpgrade={() => setActiveTab("plan")}
+                />
+              )}
             </div>
           </div>
         )}

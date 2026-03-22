@@ -235,6 +235,8 @@ async function getSegmentedUiFlags() {
     audioMixerSnap,
     advancedScreenShareSnap,
     mixedAudioPublishSnap,
+    monetizationSnap,
+    payPerViewSnap,
   ] = await Promise.all([
     firestore.collection("featureFlags").doc("contentLibraryEnabled").get(),
     firestore.collection("featureFlags").doc("projectsEnabled").get(),
@@ -244,6 +246,8 @@ async function getSegmentedUiFlags() {
     firestore.collection("featureFlags").doc("audioMixerEnabled").get(),
     firestore.collection("featureFlags").doc("advancedScreenShareEnabled").get(),
     firestore.collection("featureFlags").doc("mixedAudioPublishEnabled").get(),
+    firestore.collection("featureFlags").doc("monetizationEnabled").get(),
+    firestore.collection("featureFlags").doc("payPerViewEnabled").get(),
   ]);
 
   // Default to ENABLED when the Firestore document doesn't exist.
@@ -273,6 +277,8 @@ async function getSegmentedUiFlags() {
     audioMixerEnabled: resolveOptIn(audioMixerSnap),
     advancedScreenShareEnabled: resolveOptIn(advancedScreenShareSnap),
     mixedAudioPublishEnabled: resolveOptIn(mixedAudioPublishSnap),
+    monetizationEnabled: resolveOptIn(monetizationSnap),
+    payPerViewEnabled: resolveOptIn(payPerViewSnap),
   };
 }
 // Advanced permissions have been fully removed in favor of a single,
@@ -651,6 +657,10 @@ router.get("/me", async (req, res) => {
 
           // Optional: surface for client gating (e.g. Overages toggle).
           overagesAllowed: !!(features as any).overagesAllowed,
+
+          // Monetization / PPV plan-level entitlements
+          monetization: !!(features as any).monetization,
+          payPerView: !!(features as any).payPerView,
 
           // Editing (plans are truth)
           editing: planEditingAccess,

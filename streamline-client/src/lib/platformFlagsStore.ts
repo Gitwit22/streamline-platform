@@ -9,6 +9,10 @@ export type PlatformFlags = {
   advancedScreenShareEnabled?: boolean;
   /** Audio mixer panel (bus routing, ducking, program output). */
   audioMixerEnabled?: boolean;
+  /** Platform-wide monetization kill-switch (opt-in, default disabled). */
+  monetizationEnabled?: boolean;
+  /** Platform-wide PPV kill-switch (opt-in, default disabled). */
+  payPerViewEnabled?: boolean;
   [key: string]: any;
 };
 
