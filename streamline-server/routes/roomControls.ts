@@ -30,6 +30,8 @@ type RoomControls = {
   role?: string;
   // Screen-share routing (persisted + broadcast via SSE).
   screenShareLayout?: string;
+  // Output format for platform-aware layout (e.g. Instagram vertical).
+  outputFormat?: string;
 };
 
 const DEFAULT_CONTROLS: Required<Pick<RoomControls, "canPublishAudio" | "tileVisible">> = {
@@ -213,6 +215,13 @@ function pickScreenShareLayout(v: any): string | undefined {
   return undefined;
 }
 
+const VALID_OUTPUT_FORMATS = new Set(["landscape_16x9", "vertical_9x16", "square_1x1"]);
+
+function pickOutputFormat(v: any): string | undefined {
+  if (typeof v === "string" && VALID_OUTPUT_FORMATS.has(v)) return v;
+  return undefined;
+}
+
 function isHostOrCohost(role?: string): boolean {
   const r = String(role || "").toLowerCase();
   // Updated policy: only hosts can modify room controls or presets.
@@ -262,11 +271,12 @@ router.patch("/:roomId/controls", requireAuth as any, requireRoomAccessToken as 
     forcedMute: pickBoolean(body.forcedMute),
     forcedVideoOff: pickBoolean(body.forcedVideoOff),
     screenShareLayout: pickScreenShareLayout(body.screenShareLayout),
+    outputFormat: pickOutputFormat(body.outputFormat),
   };
 
   // Only accept known keys.
   const cleaned: RoomControls = {};
-  const STRING_CONTROL_KEYS = new Set<keyof RoomControls>(["screenShareLayout"]);
+  const STRING_CONTROL_KEYS = new Set<keyof RoomControls>(["screenShareLayout", "outputFormat"]);
   (Object.keys(patch) as Array<keyof RoomControls>).forEach((k) => {
     const val = patch[k];
     if (typeof val === "boolean") (cleaned as any)[k] = val;
@@ -435,10 +445,11 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
     forcedMute: pickBoolean(body.forcedMute),
     forcedVideoOff: pickBoolean(body.forcedVideoOff),
     screenShareLayout: pickScreenShareLayout(body.screenShareLayout),
+    outputFormat: pickOutputFormat(body.outputFormat),
   };
 
   const cleaned: RoomControls = {};
-  const STRING_CTRL_KEYS = new Set<keyof RoomControls>(["screenShareLayout"]);
+  const STRING_CTRL_KEYS = new Set<keyof RoomControls>(["screenShareLayout", "outputFormat"]);
   (Object.keys(patch) as Array<keyof RoomControls>).forEach((k) => {
     const val = patch[k];
     if (typeof val === "boolean") (cleaned as any)[k] = val;

@@ -14,6 +14,7 @@ import { getCurrentMonthKey } from "../lib/usageTracker";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { evaluateUsageGate } from "../lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
+import { OUTPUT_FORMAT_DIMENSIONS } from "../lib/roomLayout";
 
 // livekit-server-sdk is ESM; use dynamic import so CommonJS builds work on Render
 let _lkMod: any | null = null;
@@ -414,9 +415,10 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       if (instagramUrls.length > 0) {
         const instagramStreamOutput = new StreamOutput({ protocol: StreamProtocol.RTMP, urls: instagramUrls });
 
+        const igDims = OUTPUT_FORMAT_DIMENSIONS["vertical_9x16"];
         const instagramEncodingOptions = {
-          videoWidth: 720,
-          videoHeight: 1280,
+          videoWidth: igDims.width,
+          videoHeight: igDims.height,
           frameRate: 30,
           videoBitrate: 3000 * 1000,
           audioBitrate: 128 * 1000,
