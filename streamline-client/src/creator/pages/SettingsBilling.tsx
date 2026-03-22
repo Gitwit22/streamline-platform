@@ -2743,6 +2743,12 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                         ) && (
                           <FeatureRow label="HLS Broadcast Page" value={true} />
                         )}
+                        {platformMonetizationEnabled && Boolean((plan as any).features?.monetization) && (
+                          <FeatureRow label="Monetization" value={true} />
+                        )}
+                        {platformMonetizationEnabled && platformPayPerViewEnabled && Boolean((plan as any).features?.payPerView) && (
+                          <FeatureRow label="Pay-Per-View" value={true} />
+                        )}
                         {plan.editing?.access && plan.editing.maxProjects > 0 && (
                           <FeatureRow label={`${plan.editing.maxProjects} projects`} value={true} />
                         )}

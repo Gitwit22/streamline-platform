@@ -147,6 +147,45 @@ export default function RoomMonetizationSetup({
   if (!roomId) return null;
   if (!loaded) return null;
 
+  // Platform flags off → hide the entire section.
+  if (!platformMonetizationEnabled) return null;
+
+  // Plan doesn't include monetization → visible but gated with upgrade prompt.
+  if (!planMonetization) {
+    return (
+      <div style={{
+        marginTop: 16,
+        padding: "12px 14px",
+        borderRadius: 10,
+        border: "1px solid rgba(255,255,255,0.08)",
+        background: "rgba(15,23,42,0.5)",
+      }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: "#e5e7eb", marginBottom: 8 }}>
+          💰 Monetization
+        </div>
+        <p style={{ fontSize: 13, color: "#94a3b8", marginBottom: 10 }}>
+          Monetization and pay-per-view are not included in your current plan.
+        </p>
+        <button
+          type="button"
+          onClick={() => (onUpgrade ? onUpgrade() : (window.location.href = "/settings/billing"))}
+          style={{
+            padding: "6px 14px",
+            borderRadius: 999,
+            border: "none",
+            background: "linear-gradient(135deg,#6366f1,#4f46e5)",
+            color: "#f9fafb",
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: "pointer",
+          }}
+        >
+          Upgrade Plan to Access
+        </button>
+      </div>
+    );
+  }
+
   const toggleRow: React.CSSProperties = {
     display: "flex",
     alignItems: "center",

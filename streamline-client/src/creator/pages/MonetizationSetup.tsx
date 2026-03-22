@@ -38,6 +38,8 @@ export default function MonetizationSetup() {
   const { access } = useFeatureAccess(effectiveEntitlements);
   const canMonetization = !!access?.monetization?.allowed;
   const canPayPerView = !!access?.payPerView?.allowed;
+  const ppvPlatformEnabled = !!access?.payPerView?.platformEnabled;
+  const ppvPlanIncluded = !!access?.payPerView?.planIncluded;
 
   // ── State ────────────────────────────────────────────────────────
   const [events, setEvents] = useState<MonetizedEvent[]>([]);
@@ -269,6 +271,9 @@ export default function MonetizationSetup() {
   }
 
   if (!canPayPerView) {
+    // Platform PPV off → not available messaging (no upgrade option)
+    // Plan PPV missing → upgrade prompt
+    const isPlanOnly = ppvPlatformEnabled && !ppvPlanIncluded;
     return (
       <div style={{ maxWidth: 720, margin: "0 auto", padding: 24, color: "#fff" }}>
         <h1 style={{ fontSize: 22, marginBottom: 4 }}>Monetization</h1>
@@ -279,9 +284,13 @@ export default function MonetizationSetup() {
           border: "1px solid rgba(255,255,255,0.08)",
           textAlign: "center",
         }}>
-          <p style={{ fontSize: 16, marginBottom: 8 }}>Pay-per-view is not enabled.</p>
+          <p style={{ fontSize: 16, marginBottom: 8 }}>
+            {isPlanOnly ? "Pay-per-view is not included in your current plan." : "Pay-per-view is not currently available."}
+          </p>
           <p style={{ color: "#888", fontSize: 14 }}>
-            Contact your administrator or upgrade your plan to enable pay-per-view events.
+            {isPlanOnly
+              ? "Upgrade your plan to create pay-per-view events."
+              : "Pay-per-view is not enabled on this platform."}
           </p>
         </div>
       </div>

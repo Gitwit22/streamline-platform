@@ -31,7 +31,7 @@ function App() {
   const canEditor = access.editor.allowed;
   const canMyContentRecordings = !!access?.myContentRecordings?.allowed;
   const canMyContent = !!access?.myContent?.allowed;
-  const canMonetization = !!access?.monetization?.allowed;
+  const canMonetization = !!access?.monetization?.platformEnabled;
 
   const myContentTarget = (canContentLibrary || canMyContentRecordings)
     ? "/content"

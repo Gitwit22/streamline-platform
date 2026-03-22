@@ -144,9 +144,13 @@ export function computeEffectiveFeatureAccess(input: {
   };
   monetization: {
     allowed: boolean;
+    platformEnabled: boolean;
+    planIncluded: boolean;
   };
   payPerView: {
     allowed: boolean;
+    platformEnabled: boolean;
+    planIncluded: boolean;
   };
 } {
   const eff = input.effectiveEntitlements || {};
@@ -257,13 +261,15 @@ export function computeEffectiveFeatureAccess(input: {
     audioMixer: {
       allowed: isNewPlatformFlagEnabled((pf as any).audioMixerEnabled),
     },
-    monetization: {
-      allowed: isNewPlatformFlagEnabled((pf as any).monetizationEnabled) &&
-        resolveEntitlementBoolean(features, ["monetization"]),
-    },
-    payPerView: {
-      allowed: isNewPlatformFlagEnabled((pf as any).payPerViewEnabled) &&
-        resolveEntitlementBoolean(features, ["payPerView"]),
-    },
+    monetization: (() => {
+      const platformEnabled = isNewPlatformFlagEnabled((pf as any).monetizationEnabled);
+      const planIncluded = resolveEntitlementBoolean(features, ["monetization"]);
+      return { allowed: platformEnabled && planIncluded, platformEnabled, planIncluded };
+    })(),
+    payPerView: (() => {
+      const platformEnabled = isNewPlatformFlagEnabled((pf as any).payPerViewEnabled);
+      const planIncluded = resolveEntitlementBoolean(features, ["payPerView"]);
+      return { allowed: platformEnabled && planIncluded, platformEnabled, planIncluded };
+    })(),
   };
 }

@@ -136,6 +136,8 @@ interface Plan {
     hlsCustomizationEnabled?: boolean;
     advancedPermissions?: boolean;
     watermarkRecordings: boolean;
+    monetization?: boolean;
+    payPerView?: boolean;
   };
   caps?: {
     hlsMaxMinutesPerSession?: number | null;
@@ -264,6 +266,8 @@ const FEATURE_META: Record<
   audiomixerenabled: { category: "Room Features", label: "Audio Mixer", description: "Enable the bus-based audio mixer panel (gain, ducking, program output) in rooms." },
   advancedscreenshareenabled: { category: "Room Features", label: "Advanced Screen Share", description: "Enable advanced screen share routing (pop-out window, main-stage modes) in rooms." },
   mixedaudiopublishenabled: { category: "Room Features", label: "Mixed Audio Publish", description: "Publish the mixer's program audio instead of the raw microphone track." },
+  monetizationenabled: { category: "Billing", label: "Monetization", description: "Enable monetization features platform-wide (per-room toggles, event creation)." },
+  payperviewenabled: { category: "Billing", label: "Pay-Per-View", description: "Enable pay-per-view gating for HLS events platform-wide." },
 };
 
 const titleize = (value: string) =>
@@ -472,6 +476,16 @@ export default function AdminDashboard() {
   const platformHlsEnabled = useMemo(() => {
     const flag = features.find((f) => f.name === "hlsSettingsTab");
     return typeof flag?.enabled === "boolean" ? flag.enabled : true;
+  }, [features]);
+
+  const platformMonetizationEnabled = useMemo(() => {
+    const flag = features.find((f) => f.name === "monetizationEnabled");
+    return flag?.enabled === true;
+  }, [features]);
+
+  const platformPayPerViewEnabled = useMemo(() => {
+    const flag = features.find((f) => f.name === "payPerViewEnabled");
+    return flag?.enabled === true;
   }, [features]);
 
   const loadStats = async () => {
@@ -1326,6 +1340,8 @@ export default function AdminDashboard() {
                           {plan.features?.dualRecording && <FeaturePill enabled label="Dual Recording" />}
                           {(plan.features?.rtmpMultistream ?? plan.multistreamEnabled) && <FeaturePill enabled label="Multistream" />}
                           {Boolean((plan.features as any)?.hls ?? (plan.features as any)?.hlsEnabled ?? plan.features?.canHls) && <FeaturePill enabled label="HLS" />}
+                          {plan.features?.monetization && <FeaturePill enabled label="Monetization" />}
+                          {plan.features?.payPerView && <FeaturePill enabled label="PPV" />}
                           {plan.editing?.access && <FeaturePill enabled label="Editing" />}
                           {plan.editing?.ai?.autoCut && <FeaturePill enabled label="AI AutoCut" />}
                           {plan.editing?.ai?.captions && <FeaturePill enabled label="AI Captions" />}
@@ -1509,6 +1525,32 @@ export default function AdminDashboard() {
                                 </>
                               )}
                             </PlanSection>
+
+                            {/* ── Monetization ── */}
+                            {platformMonetizationEnabled && (
+                              <PlanSection
+                                title="💰 Monetization"
+                                defaultCollapsed
+                                collapsed={getSectionCollapsed("💰 Monetization", true)}
+                                onToggle={(next) => setSectionCollapsedValue("💰 Monetization", next)}
+                              >
+                                <ToggleRow
+                                  label="Monetization"
+                                  value={Boolean(plan.features?.monetization)}
+                                  onChange={(v) => {
+                                    updatePlanField(plan.id, "features.monetization", v);
+                                    if (!v) updatePlanField(plan.id, "features.payPerView", false);
+                                  }}
+                                />
+                                {Boolean(plan.features?.monetization) && platformPayPerViewEnabled && (
+                                  <ToggleRow
+                                    label="Pay-Per-View"
+                                    value={Boolean(plan.features?.payPerView)}
+                                    onChange={(v) => updatePlanField(plan.id, "features.payPerView", v)}
+                                  />
+                                )}
+                              </PlanSection>
+                            )}
 
                             {/* ── Billing Rules ── */}
                             <PlanSection
