@@ -386,17 +386,20 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       if (urls.length > 0) {
         const streamOutput = new StreamOutput({ protocol: StreamProtocol.RTMP, urls });
 
-        if (process.env.AUTH_DEBUG === "1") {
-          console.log("[livekit-debug] startRoomCompositeEgress (multistream)", {
-            livekitRoomName: roomName,
-            urls,
-          });
-        }
+        // Prefer custom program-compositor template so the RTMP output reflects
+        // the host's real-time layout choices (programState via room metadata).
+        const egressTemplateBase = process.env.EGRESS_TEMPLATE_BASE_URL;
+        const customBaseUrl = egressTemplateBase
+          ? `${egressTemplateBase.replace(/\/+$/, "")}/egress-templates/program-compositor.html`
+          : undefined;
 
         const response = await egressClient.startRoomCompositeEgress(
           roomName,
           { stream: streamOutput },
-          { layout: "grid-dark", encodingOptions }
+          {
+            ...(customBaseUrl ? { customBaseUrl } : { layout: "grid-dark" }),
+            encodingOptions,
+          }
         );
 
         console.log("[multistream:start] Egress response (normal):", {
@@ -424,13 +427,14 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
           audioBitrate: 128 * 1000,
         } as const;
 
-        // Layout: single-speaker fills the entire vertical canvas with the active
-        // speaker / screen-share, which is the best fit for Instagram's 9:16 feed.
-        // "speaker-dark" leaves a participant grid that wastes space in portrait.
-        const instagramLayout =
-          instagramLayoutPreset === "instagram_reels_9x16"
-            ? "single-speaker-dark"
-            : "single-speaker-dark";
+        // Custom portrait template: renders the active speaker / screen-share
+        // at ~87 % scale centred inside the 1080×1920 canvas with safe padding
+        // and a dark background.  Falls back to the built-in layout when the
+        // env var is not set (local dev without a public URL).
+        const egressTemplateBase = process.env.EGRESS_TEMPLATE_BASE_URL;
+        const igCustomBaseUrl = egressTemplateBase
+          ? `${egressTemplateBase.replace(/\/+$/, "")}/egress-templates/ig-portrait.html`
+          : undefined;
 
         if (process.env.AUTH_DEBUG === "1") {
           console.log("[livekit-debug] startRoomCompositeEgress (instagram)", {
@@ -438,13 +442,19 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
             urls: instagramUrls,
             instagramFit,
             instagramLayoutPreset: instagramLayoutPreset || null,
+            igCustomBaseUrl: igCustomBaseUrl || "(fallback: single-speaker-dark)",
           });
         }
 
         const instagramResponse = await egressClient.startRoomCompositeEgress(
           roomName,
           { stream: instagramStreamOutput },
-          { layout: instagramLayout, encodingOptions: instagramEncodingOptions }
+          {
+            ...(igCustomBaseUrl
+              ? { customBaseUrl: igCustomBaseUrl }
+              : { layout: "single-speaker-dark" }),
+            encodingOptions: instagramEncodingOptions,
+          }
         );
 
         console.log("[multistream:start] Egress response (instagram):", {

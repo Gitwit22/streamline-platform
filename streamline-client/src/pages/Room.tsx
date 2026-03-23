@@ -23,6 +23,8 @@ import {
 import { logTelemetry, markTiming, measureTiming } from "../lib/telemetry";
 import RoleOverlay from "../components/RoleOverlay";
 import StudioLayoutPanel from "../components/StudioLayoutPanel";
+import { apiUpdateProgramState } from "../lib/api";
+import type { LayoutSlot, StudioLayoutPresetId } from "../lib/studioLayout";
 import StreamSetupModalV2 from "../components/StreamSetupModal";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { RoleChangeToast } from "../components/RoleChangeToast";
@@ -1532,6 +1534,13 @@ function LiveKitShell({
               roomAccessToken={roomAccessToken}
               participantCount={studioParticipants.length}
               onClose={onCloseStudioLayout}
+              onProgramStateChange={(presetId: StudioLayoutPresetId | "custom" | null, slots: LayoutSlot[]) => {
+                if (!roomId || !roomAccessToken) return;
+                apiUpdateProgramState(roomId, roomAccessToken, {
+                  programLayout: presetId,
+                  programSlots: slots,
+                }).catch((err) => console.warn("[Room] program state update failed", err));
+              }}
             />
           </div>
         )}
@@ -1646,11 +1655,13 @@ function RoomPage() {
 
   const currentRole = userRole;
   const isGuestRole = currentRole === "guest";
+  const isCohost = effectiveControls.rolePresetId === "cohost";
   const can = (key: keyof RoomPermissions) => !needsReauth && (isHost || !!roomPermissions?.[key]);
-  const canInviteLinks = !needsReauth && !isViewer && (isHost || !!effectiveControls.canInviteLinks || can("canInvite"));
+  const canInviteLinks = !needsReauth && !isViewer && (isHost || isCohost) && (isHost || !!effectiveControls.canInviteLinks || can("canInvite"));
   const canManageStream =
     !needsReauth &&
     !isViewer &&
+    (isHost || isCohost) &&
     (isHost ||
       !!effectiveControls.canStartStopStream ||
       !!effectiveControls.canStartStopRecording ||
@@ -4638,21 +4649,23 @@ function RoomPage() {
                 </div>
               </>
             )}
-            <button
-              onClick={() => setDashboardOpen(v => !v)}
-              style={{
-                fontSize: '0.75rem',
-                padding: '0.5rem 0.75rem',
-                border: '1px solid rgba(255, 255, 255, 0.4)',
-                borderRadius: '0.375rem',
-                background: 'rgba(255, 255, 255, 0.05)',
-                color: '#ffffff',
-                cursor: 'pointer',
-                transition: 'all 0.3s ease'
-              }}
-            >
-              Dashboard
-            </button>
+            {(isHost || isCohost) && (
+              <button
+                onClick={() => setDashboardOpen(v => !v)}
+                style={{
+                  fontSize: '0.75rem',
+                  padding: '0.5rem 0.75rem',
+                  border: '1px solid rgba(255, 255, 255, 0.4)',
+                  borderRadius: '0.375rem',
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  color: '#ffffff',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease'
+                }}
+              >
+                Dashboard
+              </button>
+            )}
 
             {(isHost || canManageStream) && (
               <button

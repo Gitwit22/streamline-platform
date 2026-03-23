@@ -1237,8 +1237,15 @@ router.post(
         fileOutputKeys: Object.keys(fileOutput || {}),
       });
 
+      // Prefer custom program-compositor template so recordings reflect
+      // the host's layout choices (programState via room metadata).
+      const egressTemplateBase = process.env.EGRESS_TEMPLATE_BASE_URL;
+      const customBaseUrl = egressTemplateBase
+        ? `${egressTemplateBase.replace(/\/+$/, "")}/egress-templates/program-compositor.html`
+        : undefined;
+
       const compositeOpts = {
-        layout: layout,
+        ...(customBaseUrl ? { customBaseUrl } : { layout: layout }),
         audioOnly: false,
         videoOnly: false,
       };
@@ -1247,7 +1254,8 @@ router.post(
         console.log("[livekit-debug] startRoomCompositeEgress (recording)", {
           livekitRoomName,
           objectKey,
-          layout: compositeOpts.layout,
+          layout: customBaseUrl ? "(custom compositor)" : layout,
+          customBaseUrl: customBaseUrl || undefined,
         });
       }
 

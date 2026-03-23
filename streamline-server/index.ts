@@ -26,6 +26,7 @@ import roomControlsRoutes from "./routes/roomControls";
 import roomChatRoutes from "./routes/roomChat";
 import roomsLayoutRoutes from "./routes/roomsLayout";
 import roomsStudioLayoutRoutes from "./routes/roomsStudioLayout";
+import roomsProgramStateRoutes from "./routes/roomsProgramState";
 import roomsPolicyRoutes from "./routes/roomsPolicy";
 import roomsRecordingsRoutes from "./routes/roomsRecordings";
 import destinationsRoutes from "./routes/destinations";
@@ -187,6 +188,14 @@ app.use("/api/webhooks", webhookRouter);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+
+// Egress compositor templates – served as static HTML so LiveKit's headless
+// Chromium can load them via the customBaseUrl parameter.
+app.use(
+  "/egress-templates",
+  express.static(path.join(process.cwd(), "public", "egress-templates"))
+);
+
 app.use("/api/auth", authRoutes);
 app.use("/api/account", accountRoutes);
 
@@ -278,6 +287,8 @@ app.use("/api/rooms", horizonRoomHooks);
 app.use("/api/rooms", roomsLayoutRoutes);
 // Studio layout config (preset-based canvas composition for the program output)
 app.use("/api/rooms", roomsStudioLayoutRoutes);
+// Program state (shared output/compositor state; synced to LiveKit room metadata)
+app.use("/api/rooms", roomsProgramStateRoutes);
 // Latest recording state + reconcile helpers
 app.use("/api/rooms", roomsRecordingsRoutes);
 // Room-level persistent HLS config (NOT runtime HLS state)

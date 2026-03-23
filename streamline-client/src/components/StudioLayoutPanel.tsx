@@ -13,6 +13,7 @@ import {
   isValidPresetId,
 } from "../lib/studioLayout";
 import { apiGetStudioLayout, apiUpdateStudioLayout } from "../lib/api";
+import type { StudioLayoutPresetId as PresetId, LayoutSlot as Slot } from "../lib/studioLayout";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -24,6 +25,9 @@ export interface StudioLayoutPanelProps {
   /** Number of *visible* participants (including the host). */
   participantCount: number;
   onClose: () => void;
+  /** Called whenever the active preset / slots change so the caller can
+   *  push the change into the shared program state. */
+  onProgramStateChange?: (presetId: PresetId | "custom" | null, slots: Slot[]) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -35,6 +39,7 @@ export default function StudioLayoutPanel({
   roomAccessToken,
   participantCount,
   onClose,
+  onProgramStateChange,
 }: StudioLayoutPanelProps) {
   // -- state ---------------------------------------------------------------
 
@@ -104,6 +109,35 @@ export default function StudioLayoutPanel({
     return () => { cancelled = true; };
   }, [roomId, roomAccessToken]);
 
+  // -- apply preset --------------------------------------------------------
+
+  const applyPreset = useCallback(
+    async (presetId: StudioLayoutPresetId) => {
+      const newSlots = getPresetSlots(presetId);
+      setActivePresetId(presetId);
+      setSlots(newSlots);
+      setEditMode(false);
+      setSuggestion(null);
+
+      // Persist to server
+      try {
+        setSaving(true);
+        await apiUpdateStudioLayout(roomId, roomAccessToken, {
+          presetId,
+          slots: newSlots,
+          adjustMode,
+        });
+        onProgramStateChange?.(presetId, newSlots);
+        showToast(`Switched to ${PRESET_INFO.find((p) => p.id === presetId)?.label ?? presetId}`);
+      } catch {
+        showToast("Failed to save layout");
+      } finally {
+        setSaving(false);
+      }
+    },
+    [roomId, roomAccessToken, adjustMode, showToast, onProgramStateChange],
+  );
+
   // -- auto-suggest when participant count changes -------------------------
 
   useEffect(() => {
@@ -124,34 +158,6 @@ export default function StudioLayoutPanel({
     }
   }, [participantCount, loaded, adjustMode, activePresetId, applyPreset]);
 
-  // -- apply preset --------------------------------------------------------
-
-  const applyPreset = useCallback(
-    async (presetId: StudioLayoutPresetId) => {
-      const newSlots = getPresetSlots(presetId);
-      setActivePresetId(presetId);
-      setSlots(newSlots);
-      setEditMode(false);
-      setSuggestion(null);
-
-      // Persist to server
-      try {
-        setSaving(true);
-        await apiUpdateStudioLayout(roomId, roomAccessToken, {
-          presetId,
-          slots: newSlots,
-          adjustMode,
-        });
-        showToast(`Switched to ${PRESET_INFO.find((p) => p.id === presetId)?.label ?? presetId}`);
-      } catch {
-        showToast("Failed to save layout");
-      } finally {
-        setSaving(false);
-      }
-    },
-    [roomId, roomAccessToken, adjustMode, showToast],
-  );
-
   // -- save custom layout --------------------------------------------------
 
   const saveCustom = useCallback(async () => {
@@ -164,6 +170,7 @@ export default function StudioLayoutPanel({
         customSlots: slots,
       });
       setActivePresetId("custom");
+      onProgramStateChange?.("custom", slots);
       showToast("Custom layout saved");
     } catch {
       showToast("Failed to save layout");

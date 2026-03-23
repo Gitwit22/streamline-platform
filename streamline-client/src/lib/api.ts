@@ -382,6 +382,41 @@ export async function apiUpdateStudioLayout(
   return res.json() as Promise<{ ok: true; roomId: string; studioLayout: StudioLayout }>;
 }
 
+// ---------------------------------------------------------------------------
+// Program State (shared output/compositor state)
+// ---------------------------------------------------------------------------
+
+import type { ProgramState } from "./programState";
+
+export async function apiGetProgramState(roomId: string, roomAccessToken: string) {
+  const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/program-state`, {
+    method: "GET",
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+  return res.json() as Promise<{
+    ok: true;
+    roomId: string;
+    programState: ProgramState | null;
+  }>;
+}
+
+export async function apiUpdateProgramState(
+  roomId: string,
+  roomAccessToken: string,
+  patch: Partial<ProgramState>,
+) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/program-state`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; programState: ProgramState }>;
+}
+
 export type RoomPolicy = {
   visibility: "public" | "unlisted" | "private";
   requiresAuth: boolean;
