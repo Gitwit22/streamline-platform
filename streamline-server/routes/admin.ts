@@ -184,6 +184,7 @@ router.post("/plans/seed", async (req, res) => {
           recording: false, rtmp: false, multistream: false, dualRecording: false,
           advancedPermissions: false, allowsOverages: false,
           canHls: false, hls: false, hlsEnabled: false, hlsCustomizationEnabled: false,
+          invisibleHost: false,
         },
         limits: {
           monthlyMinutesIncluded: 180, transcodeMinutes: 0, maxGuests: 2,
@@ -201,6 +202,7 @@ router.post("/plans/seed", async (req, res) => {
           recording: true, rtmp: false, multistream: false, dualRecording: false,
           advancedPermissions: false, allowsOverages: false,
           canHls: false, hls: false, hlsEnabled: false, hlsCustomizationEnabled: false,
+          invisibleHost: false,
         },
         limits: {
           monthlyMinutesIncluded: 360, transcodeMinutes: 0, maxGuests: 4,
@@ -218,6 +220,7 @@ router.post("/plans/seed", async (req, res) => {
           recording: true, rtmp: true, multistream: true, dualRecording: false,
           advancedPermissions: false, allowsOverages: false,
           canHls: false, hls: false, hlsEnabled: false, hlsCustomizationEnabled: false,
+          invisibleHost: false,
         },
         limits: {
           monthlyMinutesIncluded: 600, transcodeMinutes: 60, maxGuests: 5,
@@ -235,6 +238,7 @@ router.post("/plans/seed", async (req, res) => {
           recording: true, rtmp: true, multistream: true, dualRecording: true,
           advancedPermissions: false, allowsOverages: true,
           canHls: true, hls: true, hlsEnabled: true, hlsCustomizationEnabled: true,
+          invisibleHost: true,
         },
         limits: {
           monthlyMinutesIncluded: 2400, transcodeMinutes: 300, maxGuests: 10,
@@ -252,6 +256,7 @@ router.post("/plans/seed", async (req, res) => {
           recording: true, rtmp: true, multistream: true, dualRecording: true,
           advancedPermissions: false, allowsOverages: true,
           canHls: true, hls: true, hlsEnabled: true, hlsCustomizationEnabled: true,
+          invisibleHost: true,
         },
         limits: {
           monthlyMinutesIncluded: 6000, transcodeMinutes: 1000, maxGuests: 50,
@@ -270,6 +275,7 @@ router.post("/plans/seed", async (req, res) => {
           recording: true, rtmp: true, multistream: true, dualRecording: true,
           advancedPermissions: false, allowsOverages: true,
           canHls: true, hls: true, hlsEnabled: true, hlsCustomizationEnabled: true,
+          invisibleHost: true,
         },
         limits: {
           monthlyMinutesIncluded: 99999, transcodeMinutes: 99999, maxGuests: 100,
@@ -1179,6 +1185,7 @@ router.get("/features", async (req, res) => {
       { name: "audioMixerEnabled", enabled: false },
       { name: "advancedScreenShareEnabled", enabled: false },
       { name: "mixedAudioPublishEnabled", enabled: false },
+      { name: "invisibleHostEnabled", enabled: false },
     ];
 
     const byName = new Map<string, any>();

@@ -68,6 +68,7 @@ const PLANS = {
       hlsCustomizationEnabled: false,
       monetization: false,
       payPerView: false,
+      invisibleHost: false,
     },
     limits: {
       monthlyMinutesIncluded: 180,   // 3 hours
@@ -107,6 +108,7 @@ const PLANS = {
       hlsCustomizationEnabled: false,
       monetization: false,
       payPerView: false,
+      invisibleHost: false,
     },
     limits: {
       monthlyMinutesIncluded: 360,   // 6 hours
@@ -146,6 +148,7 @@ const PLANS = {
       hlsCustomizationEnabled: false,
       monetization: false,
       payPerView: false,
+      invisibleHost: false,
     },
     limits: {
       monthlyMinutesIncluded: 600,   // 10 hours
@@ -185,6 +188,7 @@ const PLANS = {
       hlsCustomizationEnabled: true,
       monetization: true,
       payPerView: true,
+      invisibleHost: true,
     },
     limits: {
       monthlyMinutesIncluded: 2400,  // 40 hours
@@ -224,6 +228,7 @@ const PLANS = {
       hlsCustomizationEnabled: true,
       monetization: true,
       payPerView: true,
+      invisibleHost: true,
     },
     limits: {
       monthlyMinutesIncluded: 6000,
@@ -265,6 +270,7 @@ const PLANS = {
       hlsCustomizationEnabled: true,
       monetization: true,
       payPerView: true,
+      invisibleHost: true,
     },
     limits: {
       monthlyMinutesIncluded: 99999,
