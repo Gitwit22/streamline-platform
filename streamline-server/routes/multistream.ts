@@ -424,9 +424,13 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
           audioBitrate: 128 * 1000,
         } as const;
 
-        // Layout preset: keep it predictable; defaults to speaker for a portrait feed.
-        // Note: videoFit is best-effort; LiveKit composite layouts are template-driven.
-        const instagramLayout = instagramLayoutPreset === "instagram_reels_9x16" ? "speaker-dark" : "speaker-dark";
+        // Layout: single-speaker fills the entire vertical canvas with the active
+        // speaker / screen-share, which is the best fit for Instagram's 9:16 feed.
+        // "speaker-dark" leaves a participant grid that wastes space in portrait.
+        const instagramLayout =
+          instagramLayoutPreset === "instagram_reels_9x16"
+            ? "single-speaker-dark"
+            : "single-speaker-dark";
 
         if (process.env.AUTH_DEBUG === "1") {
           console.log("[livekit-debug] startRoomCompositeEgress (instagram)", {

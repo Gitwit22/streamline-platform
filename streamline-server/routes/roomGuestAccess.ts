@@ -11,6 +11,7 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { signGuestSession } from "../middleware/guestSession";
 import { roleToParticipantPermission, applyPresenceModeToGrant } from "../lib/livekitPermissions";
 import { isValidPresenceMode, normalizePresenceMode, buildPresenceMetadata, type PresenceMode } from "../lib/presenceMode";
+import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { isAdmin } from "../middleware/adminAuth";
 import { resolveHostName } from "../lib/resolveHostName";
 
@@ -961,10 +962,23 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // Authenticated room owners (and future moderator/cohost roles) may use
     // non-normal presence modes.  Guests cannot.
     const rawPresenceMode = req.body?.presenceMode;
-    const presenceMode: PresenceMode =
+    let presenceMode: PresenceMode =
       user && isOwner && isValidPresenceMode(rawPresenceMode)
         ? normalizePresenceMode(rawPresenceMode)
         : "normal";
+
+    // Server-side gate: invisible host requires the plan entitlement.
+    // If the plan doesn't include it, silently downgrade to "normal".
+    if (presenceMode === "invisible" && user) {
+      try {
+        const ent = await getEffectiveEntitlements(user.uid);
+        if (!ent.features.invisibleHost) {
+          presenceMode = "normal";
+        }
+      } catch {
+        presenceMode = "normal";
+      }
+    }
 
     // Determine LiveKit role based on authentication
     // - Authenticated users: host (if owner) or participant

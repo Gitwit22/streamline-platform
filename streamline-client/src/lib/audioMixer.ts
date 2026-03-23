@@ -83,7 +83,7 @@ const DEFAULT_BUS_STATE: Record<BusId, BusState> = {
     outputs: { monitor: true, program: true },
   },
   screenShareBus: {
-    gain: 0.7,
+    gain: 0.85,
     muted: false,
     solo: false,
     duckingPriority: 0,
@@ -156,6 +156,9 @@ export class AudioMixer {
   // Per-bus Web Audio nodes
   private gainNodes = new Map<BusId, GainNode>();
 
+  // Screen-share audio processing (compressor + limiter)
+  private screenShareCompressor: DynamicsCompressorNode | null = null;
+
   // Output buses
   private monitorGain: GainNode | null = null;
   private programGain: GainNode | null = null;
@@ -217,7 +220,22 @@ export class AudioMixer {
       // Ducking gain sits between busGain and the output nodes
       const duckGain = this.ctx.createGain();
       this.duckGains.set(busId, duckGain);
-      busGain.connect(duckGain);
+
+      // For screenShareBus, insert a compressor/limiter to tame volume
+      // spikes and smooth out inconsistent system audio levels.
+      if (busId === "screenShareBus") {
+        const comp = this.ctx.createDynamicsCompressor();
+        comp.threshold.value = -24;   // start compressing earlier
+        comp.knee.value = 12;
+        comp.ratio.value = 6;         // moderate squeeze
+        comp.attack.value = 0.003;    // fast attack for transients
+        comp.release.value = 0.15;    // smooth release
+        this.screenShareCompressor = comp;
+        busGain.connect(comp);
+        comp.connect(duckGain);
+      } else {
+        busGain.connect(duckGain);
+      }
 
       // Analyser for ducking level detection
       const analyser = this.ctx.createAnalyser();
@@ -245,6 +263,11 @@ export class AudioMixer {
     this.sources.clear();
 
     this.disconnectMusicElement();
+
+    if (this.screenShareCompressor) {
+      try { this.screenShareCompressor.disconnect(); } catch { /* ok */ }
+      this.screenShareCompressor = null;
+    }
 
     if (this.ctx && this.ctx.state !== "closed") {
       void this.ctx.close();

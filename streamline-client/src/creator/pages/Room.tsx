@@ -12,7 +12,7 @@ import {
   useLocalParticipantPermissions,
   useParticipants,
 } from "@livekit/components-react";
-import { RoomEvent, Track, ConnectionState } from "livekit-client";
+import { RoomEvent, Track, ConnectionState, type RoomOptions } from "livekit-client";
 import {
   apiStartRecording,
   apiStopRecording,
@@ -46,6 +46,24 @@ import { recordingEvents } from "../../lib/recordingEvents";
 import { detectInAppBrowser } from "../../lib/detectInAppBrowser";
 
 const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
+
+// Optimised screen-share audio: disable browser processing that mangles
+// system/tab audio and prefer stereo capture so music & game audio sounds
+// clean rather than "shotty".
+const ROOM_OPTIONS: RoomOptions = {
+  screenShareCaptureDefaults: {
+    audio: {
+      autoGainControl: false,
+      echoCancellation: false,
+      noiseSuppression: false,
+      channelCount: 2,
+      sampleRate: 48000,
+    },
+    selfBrowserSurface: "include",
+    systemAudio: "include",
+    surfaceSwitching: "include",
+  },
+};
 
 // Telemetry tracker for measuring guest invite flow performance
 function GuestTelemetryTracker({ roomId, isViewer }: { roomId: string | null; isViewer: boolean }) {
@@ -923,6 +941,7 @@ type LiveKitShellProps = {
   onActiveSharerChange?: (name: string | null) => void;
   audioMixerEnabled: boolean;
   advancedScreenShareEnabled: boolean;
+  presenceMode: "normal" | "invisible";
 };
 
 function LiveKitShell({
@@ -953,6 +972,7 @@ function LiveKitShell({
   onActiveSharerChange,
   audioMixerEnabled,
   advancedScreenShareEnabled,
+  presenceMode,
 }: LiveKitShellProps) {
   const [guestStatus, setGuestStatus] = useState<GuestStatus>(null);
   const statusRef = useRef<GuestStatus>(null);
@@ -1090,6 +1110,7 @@ function LiveKitShell({
       connect={true}
       audio={true}
       video={true}
+      options={ROOM_OPTIONS}
       connectOptions={undefined}
       onConnected={() => {
         console.log('[Room] 🔗 LiveKit onConnected callback fired', { 
@@ -1174,6 +1195,10 @@ function LiveKitShell({
           >
             🎥 Connected as guest — you can enable mic/cam below
           </div>
+        )}
+        {/* When host is invisible, hide their local video tile completely */}
+        {presenceMode === "invisible" && (
+          <style>{`[data-lk-local-participant="true"] { display: none !important; }`}</style>
         )}
         <div
           style={{ width: "100%", height: "100%" }}
@@ -4154,6 +4179,7 @@ function RoomPage() {
           onActiveSharerChange={setActiveSharerName}
           audioMixerEnabled={featureAccess.audioMixer.allowed}
           advancedScreenShareEnabled={featureAccess.advancedScreenShare.allowed}
+          presenceMode={presenceMode}
         />
       )}
 

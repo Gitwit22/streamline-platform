@@ -13,6 +13,8 @@ export type PlatformFlags = {
   monetizationEnabled?: boolean;
   /** Platform-wide PPV kill-switch (opt-in, default disabled). */
   payPerViewEnabled?: boolean;
+  /** Invisible host mode (opt-in, default disabled). */
+  invisibleHostEnabled?: boolean;
   [key: string]: any;
 };
 

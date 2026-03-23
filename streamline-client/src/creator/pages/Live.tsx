@@ -289,6 +289,166 @@ export default function Live() {
     }
   }, [reloadViewerConfig, fetchHlsStatus]);
 
+  // Attach HLS playback (source + player wiring) once per playlist URL.
+  // Mute/volume are applied in a separate effect so toggling audio does
+  // NOT recreate the player or reset the stream.
+  // - Safari/iOS: native HLS via video.src
+  // - Chrome/Firefox/Edge: hls.js
+  //
+  // NOTE: This hook MUST live before any conditional returns (isIgMode, etc.)
+  // so that React hook call order is consistent across all renders.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!playlistUrl || !video) return;
+    if (manifestReadiness !== "ready") return;
+
+    // reset state for a fresh attach
+    setError(null);
+
+    if (canNativeHls(video)) {
+      video.src = playlistUrl;
+      video.muted = isMuted;
+      video.volume = clampVolume(volume);
+
+      const onMeta = () => {
+        snapToLiveEdge(video);
+        void video.play().catch(() => {
+          // autoplay might be blocked until user interacts
+        });
+      };
+
+      video.addEventListener("loadedmetadata", onMeta, { once: true });
+      return () => {
+        try {
+          video.pause();
+        } catch {
+          // ignore
+        }
+        try {
+          video.removeAttribute("src");
+          video.load();
+        } catch {
+          // ignore
+        }
+      };
+    }
+
+    if (Hls.isSupported()) {
+      const hls = new Hls({
+        liveSyncDurationCount: 6,
+        liveMaxLatencyDurationCount: 12,
+        maxBufferLength: 30,
+        backBufferLength: 30,
+        fragLoadingRetryDelay: 1000,
+        fragLoadingMaxRetry: 6,
+        levelLoadingMaxRetry: 6,
+        enableWorker: true,
+        lowLatencyMode: true,
+      });
+
+      hlsRef.current = hls;
+
+      hls.loadSource(playlistUrl);
+      hls.attachMedia(video);
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video.muted = isMuted;
+        video.volume = clampVolume(volume);
+
+        const onMeta = () => {
+          snapToLiveEdge(video);
+          void video.play().catch(() => {
+            // autoplay blocked until user interacts
+          });
+        };
+
+        video.addEventListener("loadedmetadata", onMeta, { once: true });
+      });
+
+      hls.on(Hls.Events.ERROR, (evt, data) => {
+        try {
+          const currentTime = video.currentTime;
+          const bufferedEnd = video.buffered && video.buffered.length ? video.buffered.end(video.buffered.length - 1) : currentTime;
+          const bufferHealth = bufferedEnd - currentTime;
+          console.warn("[hls] ERROR", {
+            event: evt,
+            details: data?.details,
+            fatal: data?.fatal,
+            reason: data?.reason,
+            bufferHealth,
+          });
+        } catch {
+          // ignore diagnostics errors
+        }
+
+        if (data?.fatal) {
+          setStatus("error");
+          setError("Stream playback error");
+          try {
+            hls.destroy();
+          } catch {
+            // ignore
+          }
+        }
+      });
+
+      hls.on(Hls.Events.FRAG_BUFFERED, () => {
+        try {
+          const currentTime = video.currentTime;
+          const bufferedEnd = video.buffered && video.buffered.length ? video.buffered.end(video.buffered.length - 1) : currentTime;
+          const bufferHealth = bufferedEnd - currentTime;
+          console.debug("[hls] FRAG_BUFFERED", { bufferHealth });
+        } catch {
+          // ignore
+        }
+      });
+
+      hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => {
+        try {
+          console.info("[hls] LEVEL_SWITCHED", { level: data?.level });
+        } catch {
+          // ignore
+        }
+      });
+
+      return () => {
+        try {
+          hls.destroy();
+        } catch {
+          // ignore
+        }
+
+        if (hlsRef.current === hls) {
+          hlsRef.current = null;
+        }
+
+        try {
+          video.pause();
+        } catch {
+          // ignore
+        }
+        try {
+          video.removeAttribute("src");
+          video.load();
+        } catch {
+          // ignore
+        }
+      };
+    } else {
+      setStatus("error");
+      setError("HLS not supported in this browser.");
+    }
+  }, [playlistUrl, manifestReadiness, playerNonce]);
+
+  // Apply audio settings ONLY (no src/hls work here). This ensures mute/volume
+  // changes never recreate the player or reload the stream.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.muted = isMuted;
+    v.volume = Math.min(1, Math.max(0, volume));
+  }, [isMuted, volume]);
+
   const toggleMute = () => {
     setIsMuted((prev) => !prev);
   };
@@ -383,178 +543,6 @@ export default function Live() {
       </div>
     );
   }
-
-  // Attach HLS playback (source + player wiring) once per playlist URL.
-  // Mute/volume are applied in a separate effect so toggling audio does
-  // NOT recreate the player or reset the stream.
-  // - Safari/iOS: native HLS via video.src
-  // - Chrome/Firefox/Edge: hls.js
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!playlistUrl || !video) return;
-    if (manifestReadiness !== "ready") return;
-
-    // reset state for a fresh attach
-    setError(null);
-
-    if (canNativeHls(video)) {
-      video.src = playlistUrl;
-      video.muted = isMuted;
-      video.volume = clampVolume(volume);
-
-      const onMeta = () => {
-        snapToLiveEdge(video);
-        void video.play().catch(() => {
-          // autoplay might be blocked until user interacts
-        });
-      };
-
-      video.addEventListener("loadedmetadata", onMeta, { once: true });
-      return () => {
-        try {
-          video.pause();
-        } catch {
-          // ignore
-        }
-        try {
-          video.removeAttribute("src");
-          video.load();
-        } catch {
-          // ignore
-        }
-      };
-    }
-
-    if (Hls.isSupported()) {
-      const hls = new Hls({
-        // Keep playback near the live edge with a slightly larger safety buffer.
-        // This helps hide small delivery jitters.
-        liveSyncDurationCount: 6,
-        liveMaxLatencyDurationCount: 12,
-
-        // Increase forward buffer so brief network blips don't immediately stall playback.
-        maxBufferLength: 30,
-
-        // Avoid aggressive flushing of already-played content.
-        backBufferLength: 30,
-
-        // Make fragment loading a bit more tolerant of transient failures.
-        fragLoadingRetryDelay: 1000,
-        fragLoadingMaxRetry: 6,
-        levelLoadingMaxRetry: 6,
-
-        enableWorker: true,
-        lowLatencyMode: true,
-      });
-
-      hlsRef.current = hls;
-
-      hls.loadSource(playlistUrl);
-      hls.attachMedia(video);
-
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        video.muted = isMuted;
-        video.volume = clampVolume(volume);
-
-        const onMeta = () => {
-          snapToLiveEdge(video);
-          void video.play().catch(() => {
-            // autoplay blocked until user interacts
-          });
-        };
-
-        video.addEventListener("loadedmetadata", onMeta, { once: true });
-      });
-
-      hls.on(Hls.Events.ERROR, (evt, data) => {
-        // Basic diagnostics to understand "choppy" behavior buckets.
-        try {
-          const currentTime = video.currentTime;
-          const bufferedEnd = video.buffered && video.buffered.length ? video.buffered.end(video.buffered.length - 1) : currentTime;
-          const bufferHealth = bufferedEnd - currentTime;
-          // eslint-disable-next-line no-console
-          console.warn("[hls] ERROR", {
-            event: evt,
-            details: data?.details,
-            fatal: data?.fatal,
-            reason: data?.reason,
-            bufferHealth,
-          });
-        } catch {
-          // ignore diagnostics errors
-        }
-
-        if (data?.fatal) {
-          setStatus("error");
-          setError("Stream playback error");
-          try {
-            hls.destroy();
-          } catch {
-            // ignore
-          }
-        }
-      });
-
-      // Fragment-level diagnostics: track buffer health as segments are appended.
-      hls.on(Hls.Events.FRAG_BUFFERED, () => {
-        try {
-          const currentTime = video.currentTime;
-          const bufferedEnd = video.buffered && video.buffered.length ? video.buffered.end(video.buffered.length - 1) : currentTime;
-          const bufferHealth = bufferedEnd - currentTime;
-          // eslint-disable-next-line no-console
-          console.debug("[hls] FRAG_BUFFERED", { bufferHealth });
-        } catch {
-          // ignore
-        }
-      });
-
-      // Level switch diagnostics (if ABR is active in the future).
-      hls.on(Hls.Events.LEVEL_SWITCHED, (_e, data) => {
-        try {
-          // eslint-disable-next-line no-console
-          console.info("[hls] LEVEL_SWITCHED", { level: data?.level });
-        } catch {
-          // ignore
-        }
-      });
-
-      return () => {
-        try {
-          hls.destroy();
-        } catch {
-          // ignore
-        }
-
-        if (hlsRef.current === hls) {
-          hlsRef.current = null;
-        }
-
-        try {
-          video.pause();
-        } catch {
-          // ignore
-        }
-        try {
-          video.removeAttribute("src");
-          video.load();
-        } catch {
-          // ignore
-        }
-      };
-    } else {
-      setStatus("error");
-      setError("HLS not supported in this browser.");
-    }
-  }, [playlistUrl, manifestReadiness, playerNonce]);
-
-  // Apply audio settings ONLY (no src/hls work here). This ensures mute/volume
-  // changes never recreate the player or reload the stream.
-  useEffect(() => {
-    const v = videoRef.current;
-    if (!v) return;
-    v.muted = isMuted;
-    v.volume = Math.min(1, Math.max(0, volume));
-  }, [isMuted, volume]);
 
   const toggleFullscreen = () => {
     const v = videoRef.current;

@@ -38,6 +38,8 @@ export type CanonicalPlan = {
     monetization: boolean;
     // payPerView: can create ticketed / PPV events (requires monetization + hls)
     payPerView: boolean;
+    // invisibleHost: host can join rooms in invisible mode (no tile, observe-only)
+    invisibleHost: boolean;
   };
   caps: {
     // null/missing = unlimited
@@ -319,6 +321,11 @@ export function normalizePlan(id: string, doc: any | undefined | null): Canonica
           rawFeatures.ppv ??
           rawData.payPerViewEnabled ??
           rawData.ppvEnabled
+      ),
+      invisibleHost: toBool(
+        rawFeatures.invisibleHost ??
+          rawData.invisibleHostEnabled ??
+          rawData.invisibleHost
       ),
     },
     caps: {

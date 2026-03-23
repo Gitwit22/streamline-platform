@@ -12,7 +12,7 @@ import {
   useLocalParticipantPermissions,
   useParticipants,
 } from "@livekit/components-react";
-import { RoomEvent, Track, ConnectionState } from "livekit-client";
+import { RoomEvent, Track, ConnectionState, type RoomOptions } from "livekit-client";
 import {
   apiStartRecording,
   apiStopRecording,
@@ -41,6 +41,24 @@ import { fetchDestinations, preflight, type DestinationItem } from "../services/
 import { detectInAppBrowser, getInAppBrowserName } from "../lib/detectInAppBrowser";
 
 const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
+
+// Optimised screen-share audio: disable browser processing that mangles
+// system/tab audio and prefer stereo capture so music & game audio sounds
+// clean rather than "shotty".
+const ROOM_OPTIONS: RoomOptions = {
+  screenShareCaptureDefaults: {
+    audio: {
+      autoGainControl: false,
+      echoCancellation: false,
+      noiseSuppression: false,
+      channelCount: 2,
+      sampleRate: 48000,
+    },
+    selfBrowserSurface: "include",
+    systemAudio: "include",
+    surfaceSwitching: "include",
+  },
+};
 
 // Telemetry tracker for measuring guest invite flow performance
 function GuestTelemetryTracker({ roomId, isViewer }: { roomId: string | null; isViewer: boolean }) {
@@ -1325,6 +1343,7 @@ function LiveKitShell({
       connect={true}
       audio={true}
       video={true}
+      options={ROOM_OPTIONS}
       connectOptions={undefined}
       onConnected={() => {
         console.log('[Room] 🔗 LiveKit onConnected callback fired', { 

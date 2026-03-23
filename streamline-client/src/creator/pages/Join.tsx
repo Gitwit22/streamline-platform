@@ -158,6 +158,8 @@ export default function Join() {
   // Platform-level HLS flag (controls enablement of Saved Room join when HLS is disabled)
   // Default to false so HLS-only UI is disabled until account flags load.
   const [platformHlsEnabled, setPlatformHlsEnabled] = useState<boolean>(false);
+  // Platform-level invisible host flag (opt-in, default disabled)
+  const [platformInvisibleHostEnabled, setPlatformInvisibleHostEnabled] = useState<boolean>(false);
 
   // Use /api/auth/me for admin/test-mode status
   const { user: authUser, loading: authLoading } = useAuthMe();
@@ -267,6 +269,9 @@ export default function Join() {
           setPlatformHlsEnabled(platformFlags.hlsEnabled);
         } else {
           setPlatformHlsEnabled(true);
+        }
+        if (typeof platformFlags.invisibleHostEnabled === "boolean") {
+          setPlatformInvisibleHostEnabled(platformFlags.invisibleHostEnabled);
         }
       } catch {
         if (!cancelled) setPlatformHlsEnabled(true);
@@ -1182,7 +1187,8 @@ export default function Join() {
             )}
 
             {/* HOST: Presence mode selector (how you join the room) */}
-            {!isParticipant && (
+            {/* Only shown when invisible host is enabled by both the platform flag AND the plan */}
+            {!isParticipant && platformInvisibleHostEnabled && !!(effectiveEntitlements as any)?.features?.invisibleHost && (
               <div style={{ marginBottom: "20px" }}>
                 <div style={{ fontSize: "12px", color: "#9ca3af", marginBottom: "6px" }}>Start as</div>
                 <div

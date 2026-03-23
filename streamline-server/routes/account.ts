@@ -237,6 +237,7 @@ async function getSegmentedUiFlags() {
     mixedAudioPublishSnap,
     monetizationSnap,
     payPerViewSnap,
+    invisibleHostSnap,
   ] = await Promise.all([
     firestore.collection("featureFlags").doc("contentLibraryEnabled").get(),
     firestore.collection("featureFlags").doc("projectsEnabled").get(),
@@ -248,6 +249,7 @@ async function getSegmentedUiFlags() {
     firestore.collection("featureFlags").doc("mixedAudioPublishEnabled").get(),
     firestore.collection("featureFlags").doc("monetizationEnabled").get(),
     firestore.collection("featureFlags").doc("payPerViewEnabled").get(),
+    firestore.collection("featureFlags").doc("invisibleHostEnabled").get(),
   ]);
 
   // Default to ENABLED when the Firestore document doesn't exist.
@@ -279,6 +281,7 @@ async function getSegmentedUiFlags() {
     mixedAudioPublishEnabled: resolveOptIn(mixedAudioPublishSnap),
     monetizationEnabled: resolveOptIn(monetizationSnap),
     payPerViewEnabled: resolveOptIn(payPerViewSnap),
+    invisibleHostEnabled: resolveOptIn(invisibleHostSnap),
   };
 }
 // Advanced permissions have been fully removed in favor of a single,
@@ -661,6 +664,9 @@ router.get("/me", async (req, res) => {
           // Monetization / PPV plan-level entitlements
           monetization: !!(features as any).monetization,
           payPerView: !!(features as any).payPerView,
+
+          // Invisible host mode (plan-level)
+          invisibleHost: !!(features as any).invisibleHost,
 
           // Editing (plans are truth)
           editing: planEditingAccess,
