@@ -13,7 +13,6 @@ import billingRoutes from "./routes/billing";
 import recordingsRoutes from "./routes/recordings";
 import usageRoutes from "./routes/usageRoutes";
 import plansRoutes from "./routes/plans";
-import roomTokenRoute from "./routes/roomToken";
 import roomsCreateRoutes from "./routes/roomsCreate";
 import invitesRoutes from "./routes/invites";
 import roomInvitesRoutes from "./routes/roomInvites";

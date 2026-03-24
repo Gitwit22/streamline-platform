@@ -5,6 +5,8 @@ export type GuestSessionClaims = {
   inviteId: string;
   roomId: string;
   role: "guest" | "participant"; // guest = invite-based, participant = authenticated
+  /** Display name persisted in the session so token refresh can recover it. */
+  displayName?: string;
   iat?: number;
   exp?: number;
 };
@@ -76,10 +78,13 @@ export function tryGetGuestSession(req: Request): GuestSessionClaims | null {
       role = "guest"; // Map legacy "viewer" to "guest" for RTC participants
     }
     if (!inviteId || !roomId || !role) return null;
+    // Extract displayName if present in the JWT (added for Phase 4 display name persistence)
+    const displayName = typeof decoded?.displayName === "string" ? decoded.displayName.trim() : undefined;
     return {
       inviteId,
       roomId,
       role,
+      displayName: displayName || undefined,
       iat: typeof decoded?.iat === "number" ? decoded.iat : undefined,
       exp: typeof decoded?.exp === "number" ? decoded.exp : undefined,
     };

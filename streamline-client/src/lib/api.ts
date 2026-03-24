@@ -259,18 +259,6 @@ export async function apiFetchAuth(
   return res;
 }
 
-export async function getToken(
-  roomId: string,
-  userId: string,
-  role: "host" | "guest"
-) {
-  const res = await apiFetch("/v1/rooms/token", {
-    method: "POST",
-    body: JSON.stringify({ roomId, userId, role }),
-  });
-  return res.json() as Promise<{ token: string; wsUrl: string }>;
-}
-
 export async function apiStartRecording(
   roomId: string,
   mode: "cloud" | "dual" = "cloud",
