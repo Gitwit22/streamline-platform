@@ -20,6 +20,7 @@ import { stripe } from "../lib/stripe";
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { FieldValue } from "firebase-admin/firestore";
 import { createSavedVideoFromRecording } from "./myContent";
+import { reserveStorageUsage } from "../usageHelper";
 import {
   S3Client,
   HeadObjectCommand,
@@ -1280,7 +1281,31 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       updates.errorMessage = errorMessage;
     }
 
+    // Mark storage as counted if transitioning to ready with a known file size.
+    // This flag prevents double-counting if the post-stop head-check also fires.
+    const alreadyCounted = recordingData.storageCounted === true;
+    if (finalStatus === "ready" && typeof fileSize === "number" && fileSize > 0 && !alreadyCounted) {
+      updates.storageCounted = true;
+    }
+
     await recordingRef.update(updates);
+
+    // Count storage for this recording (only once, when transitioning to ready)
+    if (finalStatus === "ready" && typeof fileSize === "number" && fileSize > 0 && !alreadyCounted) {
+      const recUserId = typeof recordingData.userId === "string" ? recordingData.userId : "";
+      if (recUserId) {
+        try {
+          await reserveStorageUsage(recUserId, fileSize, {
+            caller: "webhook.egress_ended",
+            recordingId,
+          });
+        } catch (e: any) {
+          console.error("[livekit-webhook] STORAGE ACCOUNTING FAILED for recording:", {
+            userId: recUserId, recordingId, fileSize, error: e?.message || e,
+          });
+        }
+      }
+    }
 
     // Best-effort: keep room latest recording pointer in sync.
     try {

@@ -19,7 +19,7 @@ import multer from "multer";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { uploadVideo, deleteFile } from "../lib/storageClient";
-import { checkStorageLimit, updateStorageUsage } from "../usageHelper";
+import { reserveStorageIfAvailable, releaseReservedStorage, releaseStorageUsage } from "../usageHelper";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 
@@ -101,13 +101,32 @@ router.delete("/:id", async (req: Request, res: Response) => {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    // Delete storage if it was an upload
+    // Capture file size before deletion for storage accounting
+    const sizeBytes = typeof data.sizeBytes === "number" ? data.sizeBytes : 0;
+
+    // Delete storage if it was an upload (has a storagePath)
     const storagePath = typeof data.storagePath === "string" ? data.storagePath : null;
     if (storagePath) {
       try {
         await deleteFile(storagePath);
       } catch (e: any) {
         console.warn("[my-content] storage delete failed:", e?.message || e);
+      }
+
+      // Release storage quota after R2 bytes are removed
+      if (sizeBytes > 0) {
+        try {
+          await releaseStorageUsage(userId, sizeBytes, {
+            caller: "myContent.DELETE",
+            docId: req.params.id,
+            storagePath,
+          });
+        } catch (e: any) {
+          console.error("[my-content] storage release failed:", {
+            userId, docId: req.params.id, sizeBytes, storagePath,
+            error: e?.message || e,
+          });
+        }
       }
     }
 
@@ -245,13 +264,16 @@ router.post(
         return res.status(400).json({ error: "Only video files are accepted" });
       }
 
-      // Check storage limits
-      try {
-        await checkStorageLimit(userId, file.size);
-      } catch (e: any) {
+      // Transactional reservation: atomically check limit + increment counter.
+      // This closes the race where two concurrent uploads could both pass a
+      // separate check-then-increment sequence.
+      const reservation = await reserveStorageIfAvailable(userId, file.size, {
+        caller: "myContent.upload",
+      });
+      if (!reservation.reserved) {
         return res.status(409).json({
           error: LIMIT_ERRORS.LIMIT_EXCEEDED,
-          details: e?.message || "Storage limit exceeded",
+          details: reservation.reason || "Storage limit exceeded",
         });
       }
 
@@ -264,13 +286,23 @@ router.post(
       const ext = file.originalname.split(".").pop() || "mp4";
       const storagePath = `my-content/${userId}/${timestamp}-${safeName}.${ext}`;
 
-      const publicUrl = await uploadVideo(file.buffer, storagePath, file.mimetype);
-
-      // Update storage usage (best-effort)
+      let publicUrl: string;
       try {
-        await updateStorageUsage(userId, file.size);
-      } catch {
-        console.warn("[my-content] storage usage update failed (non-critical)");
+        publicUrl = await uploadVideo(file.buffer, storagePath, file.mimetype);
+      } catch (uploadErr: any) {
+        // Upload failed — release the reserved bytes so they aren't stranded.
+        try {
+          await releaseReservedStorage(userId, file.size, {
+            caller: "myContent.upload.rollback",
+            storagePath,
+          });
+        } catch (releaseErr: any) {
+          console.error("[my-content] CRITICAL: failed to release reservation after upload failure", {
+            userId, storagePath, fileSizeBytes: file.size,
+            uploadError: uploadErr?.message, releaseError: releaseErr?.message,
+          });
+        }
+        throw uploadErr; // Re-throw so outer catch returns 500
       }
 
       const now = new Date();

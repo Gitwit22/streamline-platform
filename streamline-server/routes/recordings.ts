@@ -42,6 +42,7 @@ import { deleteFiles, deletePrefix } from "../lib/storageClient";
 import { resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { createSavedVideoFromRecording } from "./myContent";
+import { releaseStorageUsage, reserveStorageUsage } from "../usageHelper";
 
 const router = Router();
 
@@ -1629,14 +1630,36 @@ router.post(
         try {
           const size = await r2HeadObjectSize(objectKey);
           if (size > 0) {
+            // Re-read the doc to check storageCounted flag (webhook may have arrived first)
+            const freshSnap = await recordingRef.get();
+            const freshData = freshSnap.exists ? (freshSnap.data() || {}) : {} as any;
+            const alreadyCounted = freshData.storageCounted === true;
+
             await recordingRef.update({
               status: "ready",
               downloadReady: true,
               readyAt: new Date(),
               fileSize: size,
               updatedAt: new Date(),
+              // Mark storage as counted to prevent double-counting by webhook
+              ...(!alreadyCounted ? { storageCounted: true } : {}),
             });
             console.log(`[recordings/stop] ✅ File confirmed via head-check: ${objectKey} (${size} bytes)`);
+
+            // Count storage for this recording (only if not already counted by webhook)
+            if (!alreadyCounted && uid) {
+              try {
+                await reserveStorageUsage(uid, size, {
+                  caller: "recordings.stop.headcheck",
+                  recordingId,
+                  objectKey,
+                });
+              } catch (e: any) {
+                console.error("[recordings/stop] storage accounting failed:", {
+                  userId: uid, recordingId, size, error: e?.message || e,
+                });
+              }
+            }
 
             // Auto-create saved_video so recording appears in My Content
             try {
@@ -1801,7 +1824,25 @@ router.delete("/:id", requireAuth, requireMyContentRecordingsEnabled as any, asy
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
+    // Capture file size before deletion for storage accounting
+    const fileSize = typeof data.fileSize === "number" ? data.fileSize : 0;
+    const storageReleased = data.storageReleased === true;
+
     const storage = await deleteRecordingStorage(data);
+
+    // Release storage quota after R2 bytes are removed (guard against double-release)
+    if (fileSize > 0 && !storageReleased) {
+      try {
+        await releaseStorageUsage(uid, fileSize, {
+          caller: "recordings.DELETE",
+          recordingId,
+        });
+      } catch (e: any) {
+        console.error("[recordings] storage release failed:", {
+          userId: uid, recordingId, fileSize, error: e?.message || e,
+        });
+      }
+    }
 
     // Best-effort: if the room pointer points to this recording, clear it.
     try {
@@ -1855,6 +1896,7 @@ router.delete("/:id", requireAuth, requireMyContentRecordingsEnabled as any, asy
           deletedAt: new Date(),
           updatedAt: new Date(),
           downloadReady: false,
+          storageReleased: true,
         },
         { merge: true }
       );

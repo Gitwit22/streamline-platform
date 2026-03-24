@@ -392,8 +392,8 @@ export default function Join() {
           um?.usage?.transcodeMinutes ??
           0,
         maxBroadcastMinutes: data?.plan?.limits?.transcodeMinutes ?? 0,
-        storageUsed: um?.storageGB ?? um?.usage?.storageGB ?? 0,
-        maxStorage: data?.plan?.limits?.storageGB ?? 0,
+        storageUsed: um?.storageGB ?? data?.storageUsedGB ?? um?.usage?.storageGB ?? 0,
+        maxStorage: data?.plan?.limits?.storageGB ?? data?.storageLimitGB ?? 0,
         planId: canonicalPlanId,
       });
       setUsageLoading(false);

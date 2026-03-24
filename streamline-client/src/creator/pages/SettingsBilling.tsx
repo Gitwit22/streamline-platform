@@ -888,8 +888,8 @@ export default function SettingsBilling() {
           limit: Number(limits.maxDestinations ?? 0),
         },
         storage: {
-          used: 0,
-          limit: Number(limits.storageGB ?? 0) || (data?.plan?.id === "pro" ? 100 : data?.plan?.id === "starter" ? 10 : 1),
+          used: Number(data?.storageUsedGB ?? 0),
+          limit: Number(limits.storageGB ?? data?.storageLimitGB ?? 0) || (data?.plan?.id === "pro" ? 100 : data?.plan?.id === "starter" ? 10 : 1),
         },
         projects: {
           used: 0,
