@@ -1931,17 +1931,10 @@ function RoomPage() {
 
     const willBeHost = createdRooms.includes(candidateKey) || localIsAdmin;
     setIsHost(willBeHost);
-    const storedRole = (() => {
-      try {
-        return localStorage.getItem("sl_current_role") || "guest";
-      } catch {
-        return "guest";
-      }
-    })();
-    const nextRole = willBeHost ? "host" : storedRole;
+    const nextRole = willBeHost ? "host" : "guest";
     setUserRole(nextRole);
     try {
-      if (willBeHost) localStorage.setItem("sl_current_role", "host");
+      localStorage.setItem("sl_current_role", nextRole);
       setInviteToken(localStorage.getItem("sl_invite_token") || null);
     } catch {
       // ignore
