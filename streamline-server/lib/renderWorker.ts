@@ -18,7 +18,7 @@ import https from "https";
 import http from "http";
 import { logger } from "./logger";
 import { uploadVideo } from "./storageClient";
-import { reserveStorageIfAvailable, releaseReservedStorage } from "../usageHelper";
+import { reserveStorageIfAvailable, releaseReservedStorage, reserveStorageUsage } from "../usageHelper";
 import {
   claimNextJob,
   updateExportJob,
@@ -382,7 +382,6 @@ export async function processExportJob(job: ExportJobDoc): Promise<void> {
     // non-transactional path so the counter stays accurate even if over-limit.
     if (!reservation.reserved) {
       try {
-        const { reserveStorageUsage } = await import("../usageHelper.js");
         await reserveStorageUsage(job.userId, outputBuffer.byteLength, {
           caller: "renderWorker.overlimit",
           jobId,
