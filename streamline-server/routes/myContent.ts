@@ -19,7 +19,7 @@ import multer from "multer";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { uploadVideo, deleteFile } from "../lib/storageClient";
-import { checkStorageLimit, updateStorageUsage, reserveStorageUsage, releaseStorageUsage } from "../usageHelper";
+import { reserveStorageIfAvailable, releaseReservedStorage, releaseStorageUsage } from "../usageHelper";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 
@@ -264,13 +264,16 @@ router.post(
         return res.status(400).json({ error: "Only video files are accepted" });
       }
 
-      // Check storage limits
-      try {
-        await checkStorageLimit(userId, file.size);
-      } catch (e: any) {
+      // Transactional reservation: atomically check limit + increment counter.
+      // This closes the race where two concurrent uploads could both pass a
+      // separate check-then-increment sequence.
+      const reservation = await reserveStorageIfAvailable(userId, file.size, {
+        caller: "myContent.upload",
+      });
+      if (!reservation.reserved) {
         return res.status(409).json({
           error: LIMIT_ERRORS.LIMIT_EXCEEDED,
-          details: e?.message || "Storage limit exceeded",
+          details: reservation.reason || "Storage limit exceeded",
         });
       }
 
@@ -283,24 +286,23 @@ router.post(
       const ext = file.originalname.split(".").pop() || "mp4";
       const storagePath = `my-content/${userId}/${timestamp}-${safeName}.${ext}`;
 
-      const publicUrl = await uploadVideo(file.buffer, storagePath, file.mimetype);
-
-      // Update storage usage — this is critical for correctness.
-      // If the accounting write fails, log a structured error so it can be
-      // reconciled later, but still return the upload as successful since
-      // the bytes are already persisted in R2.
+      let publicUrl: string;
       try {
-        await reserveStorageUsage(userId, file.size, {
-          caller: "myContent.upload",
-          storagePath,
-        });
-      } catch (e: any) {
-        console.error("[my-content] STORAGE ACCOUNTING FAILED — needs reconciliation", {
-          userId,
-          storagePath,
-          fileSizeBytes: file.size,
-          error: e?.message || e,
-        });
+        publicUrl = await uploadVideo(file.buffer, storagePath, file.mimetype);
+      } catch (uploadErr: any) {
+        // Upload failed — release the reserved bytes so they aren't stranded.
+        try {
+          await releaseReservedStorage(userId, file.size, {
+            caller: "myContent.upload.rollback",
+            storagePath,
+          });
+        } catch (releaseErr: any) {
+          console.error("[my-content] CRITICAL: failed to release reservation after upload failure", {
+            userId, storagePath, fileSizeBytes: file.size,
+            uploadError: uploadErr?.message, releaseError: releaseErr?.message,
+          });
+        }
+        throw uploadErr; // Re-throw so outer catch returns 500
       }
 
       const now = new Date();

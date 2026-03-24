@@ -1,8 +1,11 @@
 // server/usageHelper.ts
 //
 // Storage accounting lifecycle:
-//   1. reserveStorageUsage / increment — called when bytes are successfully
-//      committed to R2 (uploads, recordings confirmed ready, exports).
+//   1. reserveStorageIfAvailable / reserveStorageUsage — called when bytes are
+//      about to be or have been committed to R2.  reserveStorageIfAvailable is
+//      the preferred path: it atomically checks the plan limit and increments
+//      the counter inside a single Firestore transaction, closing the race
+//      window that existed with the old check-then-increment two-step.
 //   2. releaseStorageUsage / decrement — called when bytes are actually removed
 //      from R2 (deletes, maintenance purges).
 //   3. A future reconciliation tool can recompute storageUsedBytes from ground
@@ -13,10 +16,12 @@
 
 import { firestore } from "./firebaseAdmin";
 import { FieldValue } from "firebase-admin/firestore";
-import { computeNextResetDate, resolveMaxStorageBytesFromPlan } from "./lib/storagePure";
+import { computeNextResetDate, resolveMaxStorageBytesFromPlan, canReserveStorage } from "./lib/storagePure";
+import type { ReservationCheck } from "./lib/storagePure";
 
 // Re-export pure helpers so callers can import from one place
-export { computeNextResetDate, resolveMaxStorageBytesFromPlan } from "./lib/storagePure";
+export { computeNextResetDate, resolveMaxStorageBytesFromPlan, canReserveStorage } from "./lib/storagePure";
+export type { ReservationCheck } from "./lib/storagePure";
 
 /**
  * Central function to add usage for a user
@@ -322,4 +327,101 @@ export async function getMaxStorageBytes(userId: string): Promise<number> {
   const planData = planSnap.data() as any;
 
   return resolveMaxStorageBytesFromPlan(planData);
+}
+
+// ─── Transactional Reservation ───────────────────────────────────────────────
+
+/**
+ * Result of a transactional reservation attempt.
+ */
+export type StorageReservationResult = ReservationCheck & {
+  reserved: boolean;
+};
+
+/**
+ * Atomically reserve `fileSizeBytes` of storage for `userId`.
+ *
+ * This runs inside a single Firestore transaction that:
+ *   1. Reads the user doc (current usage) and the plan doc (limit).
+ *   2. Checks whether currentUsed + fileSizeBytes <= limit.
+ *   3. If allowed, increments the counter inside the transaction.
+ *   4. If not, aborts without mutating.
+ *
+ * Because both the read and the write happen inside the same transaction,
+ * two concurrent callers cannot both succeed when only one "slot" remains.
+ *
+ * Returns a result indicating whether the reservation was granted plus
+ * diagnostic fields (currentBytes, limitBytes, etc.).
+ *
+ * Throws only on infrastructure errors (Firestore outage, missing user).
+ * A limit-exceeded rejection is returned as { reserved: false, allowed: false }.
+ */
+export async function reserveStorageIfAvailable(
+  userId: string,
+  fileSizeBytes: number,
+  context?: Record<string, any>,
+): Promise<StorageReservationResult> {
+  if (!userId) throw new Error("reserveStorageIfAvailable: userId is required");
+  if (!Number.isFinite(fileSizeBytes) || fileSizeBytes <= 0) {
+    throw new Error("reserveStorageIfAvailable: fileSizeBytes must be a positive finite number");
+  }
+
+  const userRef = firestore.collection("users").doc(userId);
+
+  const result = await firestore.runTransaction(async (tx) => {
+    const userSnap = await tx.get(userRef);
+    if (!userSnap.exists) {
+      throw new Error(`User ${userId} not found`);
+    }
+
+    const userData = userSnap.data() as any;
+    const currentBytes = Math.max(0, Number(userData?.usage?.storageUsedBytes) || 0);
+
+    // Resolve plan limit
+    const planId = (userData.planId || userData.plan || "free") as string;
+    const planSnap = await tx.get(firestore.collection("plans").doc(planId));
+    const planData = planSnap.exists ? (planSnap.data() as any) : {};
+    const limitBytes = resolveMaxStorageBytesFromPlan(planData);
+
+    const check = canReserveStorage(currentBytes, fileSizeBytes, limitBytes);
+
+    if (!check.allowed) {
+      // Return without mutating — reservation denied.
+      return { ...check, reserved: false } as StorageReservationResult;
+    }
+
+    // Atomically increment the counter inside the transaction.
+    tx.set(
+      userRef,
+      {
+        usage: {
+          storageUsedBytes: FieldValue.increment(fileSizeBytes),
+          lastStorageUpdate: new Date(),
+        },
+      },
+      { merge: true },
+    );
+
+    console.log(`[storage] reserved ${fileSizeBytes} bytes for user ${userId}`, context);
+    return { ...check, reserved: true } as StorageReservationResult;
+  });
+
+  if (!result.reserved) {
+    console.log(`[storage] reservation denied for user ${userId}: ${result.reason}`, context);
+  }
+
+  return result;
+}
+
+/**
+ * Release a previously reserved amount when an upload fails after reservation.
+ * This is a thin wrapper around releaseStorageUsage that adds clear logging
+ * to distinguish rollback-releases from normal delete-releases.
+ */
+export async function releaseReservedStorage(
+  userId: string,
+  fileSizeBytes: number,
+  context?: Record<string, any>,
+): Promise<void> {
+  await releaseStorageUsage(userId, fileSizeBytes, { op: "release_reservation", ...context });
 }

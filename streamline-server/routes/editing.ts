@@ -4,7 +4,7 @@ import { firestore as db } from "../firebaseAdmin";
 import multer from "multer";
 import { uploadVideo, getSignedDownloadUrl, deleteFile } from "../lib/storageClient";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
-import { checkStorageLimit, updateStorageUsage, reserveStorageUsage, releaseStorageUsage, getCurrentStorageUsage } from "../usageHelper";
+import { reserveStorageIfAvailable, releaseReservedStorage, releaseStorageUsage, reserveStorageUsage, getCurrentStorageUsage } from "../usageHelper";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
@@ -245,13 +245,14 @@ router.post(
       console.log(`📦 Size: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
       console.log(`👤 User: ${userId}`);
 
-      // Check storage limits
-      try {
-        await checkStorageLimit(userId, file.size);
-      } catch (err: any) {
+      // Transactional reservation: atomically check limit + increment counter.
+      const reservation = await reserveStorageIfAvailable(userId, file.size, {
+        caller: "editing.upload",
+      });
+      if (!reservation.reserved) {
         return res.status(409).json({
           error: LIMIT_ERRORS.LIMIT_EXCEEDED,
-          details: err?.message || "Storage limit exceeded",
+          details: reservation.reason || "Storage limit exceeded",
         });
       }
 
@@ -264,28 +265,30 @@ router.post(
       console.log(`☁️ Uploading to: ${path}`);
 
       // Upload to R2/S3
-      const publicUrl = await uploadVideo(
-        file.buffer,
-        path,
-        file.mimetype
-      );
+      let publicUrl: string;
+      try {
+        publicUrl = await uploadVideo(
+          file.buffer,
+          path,
+          file.mimetype
+        );
+      } catch (uploadErr: any) {
+        // Upload failed — release the reserved bytes so they aren't stranded.
+        try {
+          await releaseReservedStorage(userId, file.size, {
+            caller: "editing.upload.rollback",
+            storagePath: path,
+          });
+        } catch (releaseErr: any) {
+          console.error("[editing] CRITICAL: failed to release reservation after upload failure", {
+            userId, storagePath: path, fileSizeBytes: file.size,
+            uploadError: uploadErr?.message, releaseError: releaseErr?.message,
+          });
+        }
+        throw uploadErr;
+      }
 
       console.log(`✅ Upload complete: ${publicUrl}`);
-
-      // Update storage usage — critical for correctness.
-      try {
-        await reserveStorageUsage(userId, file.size, {
-          caller: "editing.upload",
-          storagePath: path,
-        });
-      } catch (err: any) {
-        console.error("[editing] STORAGE ACCOUNTING FAILED — needs reconciliation", {
-          userId,
-          storagePath: path,
-          fileSizeBytes: file.size,
-          error: err?.message || err,
-        });
-      }
 
       // Create asset in Firestore
       const assetData = {
@@ -1431,33 +1434,37 @@ router.post("/render", async (req: Request, res: Response) => {
       try {
         const buffer = Buffer.from(renderedBuffer);
         
-        // Check storage limit
-        try {
-          await checkStorageLimit(userId, buffer.byteLength);
-        } catch (err: any) {
+        // Transactional reservation: atomically check limit + increment counter.
+        const reservation = await reserveStorageIfAvailable(userId, buffer.byteLength, {
+          caller: "editing.render",
+          recordingId,
+        });
+        if (!reservation.reserved) {
           return res.status(409).json({
             error: LIMIT_ERRORS.LIMIT_EXCEEDED,
-            details: err?.message || "Storage limit exceeded",
+            details: reservation.reason || "Storage limit exceeded",
           });
         }
 
         // Upload to R2
         const exportPath = `exports/${userId}/${recordingId}/${Date.now()}.mp4`;
-        const publicUrl = await uploadVideo(buffer, exportPath, "video/mp4");
-
-        // Update storage usage — critical for correctness.
+        let publicUrl: string;
         try {
-          await reserveStorageUsage(userId, buffer.byteLength, {
-            caller: "editing.export",
-            exportPath,
-          });
-        } catch (err: any) {
-          console.error("[editing] STORAGE ACCOUNTING FAILED on export — needs reconciliation", {
-            userId,
-            exportPath,
-            fileSizeBytes: buffer.byteLength,
-            error: err?.message || err,
-          });
+          publicUrl = await uploadVideo(buffer, exportPath, "video/mp4");
+        } catch (uploadErr: any) {
+          // Upload failed — release the reserved bytes.
+          try {
+            await releaseReservedStorage(userId, buffer.byteLength, {
+              caller: "editing.render.rollback",
+              exportPath,
+            });
+          } catch (releaseErr: any) {
+            console.error("[editing] CRITICAL: failed to release reservation after render upload failure", {
+              userId, exportPath, fileSizeBytes: buffer.byteLength,
+              uploadError: uploadErr?.message, releaseError: releaseErr?.message,
+            });
+          }
+          throw uploadErr;
         }
 
         // Update recording with rendered path and URL

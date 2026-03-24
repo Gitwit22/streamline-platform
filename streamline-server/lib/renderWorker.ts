@@ -18,7 +18,7 @@ import https from "https";
 import http from "http";
 import { logger } from "./logger";
 import { uploadVideo } from "./storageClient";
-import { reserveStorageUsage } from "../usageHelper";
+import { reserveStorageIfAvailable, releaseReservedStorage } from "../usageHelper";
 import {
   claimNextJob,
   updateExportJob,
@@ -338,18 +338,60 @@ export async function processExportJob(job: ExportJobDoc): Promise<void> {
     const contentType =
       container === "webm" ? "video/webm" : container === "mov" ? "video/quicktime" : "video/mp4";
 
-    const publicUrl = await uploadVideo(outputBuffer, remotePath, contentType);
+    // Transactional reservation: atomically check limit + increment.
+    // For background worker jobs we log clearly but do not abort the entire
+    // render — the user cannot retry in real-time.  If the reservation is
+    // rejected the job still completes with a warning.
+    const reservation = await reserveStorageIfAvailable(job.userId, outputBuffer.byteLength, {
+      caller: "renderWorker",
+      jobId,
+      remotePath,
+    });
 
-    // Update storage usage — critical for correctness.
+    if (!reservation.reserved) {
+      logger.warn({ jobId, userId: job.userId, remotePath, size: outputBuffer.byteLength, reason: reservation.reason },
+        "Storage limit exceeded — export will complete but bytes may exceed plan limit");
+      // We still upload and complete the job.  The user will see usage over limit
+      // and can delete old content.  This matches the product expectation that
+      // a render that already ran should not be silently discarded.
+    }
+
+    let publicUrl: string;
     try {
-      await reserveStorageUsage(job.userId, outputBuffer.byteLength, {
-        caller: "renderWorker",
-        jobId,
-        remotePath,
-      });
-    } catch (e: any) {
-      logger.error({ jobId, userId: job.userId, remotePath, size: outputBuffer.byteLength, error: e?.message || String(e) },
-        "STORAGE ACCOUNTING FAILED on export — needs reconciliation");
+      publicUrl = await uploadVideo(outputBuffer, remotePath, contentType);
+    } catch (uploadErr: any) {
+      // Upload failed — release reserved bytes if we had reserved them.
+      if (reservation.reserved) {
+        try {
+          await releaseReservedStorage(job.userId, outputBuffer.byteLength, {
+            caller: "renderWorker.rollback",
+            jobId,
+            remotePath,
+          });
+        } catch (releaseErr: any) {
+          logger.error({ jobId, userId: job.userId, remotePath, size: outputBuffer.byteLength,
+            uploadError: uploadErr?.message, releaseError: releaseErr?.message },
+            "CRITICAL: failed to release reservation after render upload failure");
+        }
+      }
+      throw uploadErr;
+    }
+
+    // If the reservation was not granted above (limit exceeded), we still
+    // need to account for the bytes that were actually stored.  Use the
+    // non-transactional path so the counter stays accurate even if over-limit.
+    if (!reservation.reserved) {
+      try {
+        const { reserveStorageUsage } = await import("../usageHelper.js");
+        await reserveStorageUsage(job.userId, outputBuffer.byteLength, {
+          caller: "renderWorker.overlimit",
+          jobId,
+          remotePath,
+        });
+      } catch (e: any) {
+        logger.error({ jobId, userId: job.userId, remotePath, size: outputBuffer.byteLength, error: e?.message || String(e) },
+          "STORAGE ACCOUNTING FAILED on over-limit export — needs reconciliation");
+      }
     }
 
     // --- Step 5: Complete ---
