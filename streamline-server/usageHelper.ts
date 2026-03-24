@@ -13,30 +13,10 @@
 
 import { firestore } from "./firebaseAdmin";
 import { FieldValue } from "firebase-admin/firestore";
+import { computeNextResetDate, resolveMaxStorageBytesFromPlan } from "./lib/storagePure";
 
-/**
- * Helper to compute the billing period reset date based on user.createdAt
- */
-export function computeNextResetDate(userCreatedAt: Date | string, fromDate: Date = new Date()): Date {
-  const createdDate = typeof userCreatedAt === "string" ? new Date(userCreatedAt) : userCreatedAt;
-  const createdDay = createdDate.getDate();
-
-  const thisMonthReset = new Date(
-    fromDate.getFullYear(),
-    fromDate.getMonth(),
-    createdDay
-  );
-
-  const nextMonthReset = new Date(
-    fromDate.getFullYear(),
-    fromDate.getMonth() + 1,
-    createdDay
-  );
-
-  // If today's date is past this month's reset day, next reset is next month
-  const finalReset = fromDate.getDate() >= createdDay ? nextMonthReset : thisMonthReset;
-  return finalReset;
-}
+// Re-export pure helpers so callers can import from one place
+export { computeNextResetDate, resolveMaxStorageBytesFromPlan } from "./lib/storagePure";
 
 /**
  * Central function to add usage for a user
@@ -342,29 +322,4 @@ export async function getMaxStorageBytes(userId: string): Promise<number> {
   const planData = planSnap.data() as any;
 
   return resolveMaxStorageBytesFromPlan(planData);
-}
-
-/**
- * Extract max storage bytes from a plan document (pure helper, no Firestore reads).
- */
-export function resolveMaxStorageBytesFromPlan(planData: any): number {
-  const GB = 1024 * 1024 * 1024;
-  const editing = (planData || {}).editing || {};
-
-  const candidates: Array<{ val: any; unit: "gb" | "bytes" }> = [
-    { val: editing.maxStorageGB, unit: "gb" },
-    { val: editing.maxStorageBytes, unit: "bytes" },
-    { val: (planData || {}).maxStorageGB, unit: "gb" },
-    { val: (planData || {}).maxStorageBytes, unit: "bytes" },
-  ];
-
-  for (const { val, unit } of candidates) {
-    if (val !== undefined && val !== null) {
-      const n = Number(val);
-      if (Number.isFinite(n) && n > 0) {
-        return unit === "gb" ? Math.round(n * GB) : Math.round(n);
-      }
-    }
-  }
-  return 0;
 }
