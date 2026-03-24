@@ -541,20 +541,29 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
         lastRedeemedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      // Backward compatibility: treat old "viewer" role as "guest" for /room flows
-      // Security: Explicitly validate known roles, reject unknown/corrupted values
-      // Normalize role: defensive parse, trim whitespace, lowercase
+      // Security: Explicitly validate known roles, reject unknown/corrupted values.
+      // Active product flows (roomInvites.ts, invites.ts) never mint host invites.
+      // A host role in an invite doc is treated as invalid state (likely DB tampering),
+      // not a recoverable case — reject explicitly rather than silently downgrading.
       const inviteRole = String(data.role ?? "").trim().toLowerCase();
-      let role: "guest" | "host";
+      let role: "guest";
       if (inviteRole === "host") {
-        role = "host";
+        // Host invites are impossible through active flows; treat as invalid/suspicious.
+        logPayload.reason = "host_role_in_invite";
+        logPayload.invalidRole = data.role;
+        console.error("[join-now] SECURITY: invite doc has role=host — rejecting as invalid state", {
+          inviteId,
+          roomId,
+          rawRole: data.role,
+        });
+        return { ok: false as const, status: 403 as const, error: "INVALID_INVITE_ROLE" };
       } else if (inviteRole === "guest" || inviteRole === "participant" || inviteRole === "viewer") {
         role = "guest"; // Map participant/viewer to guest for RTC join
       } else {
         // Unknown/corrupted role - reject for security
         logPayload.reason = "invalid_role";
         logPayload.invalidRole = data.role;
-        return { ok: false as const, status: 401 as const, error: "INVALID_ROLE" };
+        return { ok: false as const, status: 403 as const, error: "INVALID_ROLE" };
       }
 
       return { ok: true as const, roomId, role, maxUses, useCount: useCount + 1 };
@@ -657,10 +666,9 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       ttl: livekitTtl,
     });
 
-    // SECURITY: join-now is unauthenticated; never mint host-level tokens.
-    // "viewer" is already normalized to "guest" in the redeem step above.
-    const mintedRole: "guest" | "participant" | "host" =
-      inviteRole === "host" ? "guest" : inviteRole;
+    // SECURITY: join-now is unauthenticated; inviteRole is always "guest"
+    // (host role is rejected in the redeem step above).
+    const mintedRole: "guest" = "guest";
     const grant = roleGrant(mintedRole);
     at.addGrant({ room: livekitRoomName, ...grant } as any);
 
@@ -671,11 +679,7 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     // Guest session TTL: 2 hours (longer than LiveKit token, allows token refresh)
     // CRITICAL: Guest session must expire AFTER LiveKit token so re-minting works
     const guestSessionTtl = "2h";
-    // Guest sessions only support "guest" | "participant" roles
-    // "viewer" is already normalized to "guest" in the redeem step above.
-    const guestSessionRole: "guest" | "participant" =
-      inviteRole === "host" ? "guest" : inviteRole;
-    const guestSessionToken = signGuestSession({ inviteId, roomId, role: guestSessionRole }, guestSessionTtl);
+    const guestSessionToken = signGuestSession({ inviteId, roomId, role: "guest", displayName }, guestSessionTtl);
     logPayload.guestSessionTtl = guestSessionTtl;
 
     // Step 5: Create room access token
@@ -956,7 +960,19 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       return res.status(500).json({ code: "misconfigured", error: "LiveKit keys missing", missing });
     }
 
-    const displayName = sanitizeDisplayName(String(req.body?.displayName || req.body?.identity || "Guest")).trim() || "Guest";
+    // Display name resolution priority:
+    // 1. Explicit request body displayName (client re-sends on refresh)
+    // 2. Guest session JWT displayName (survives localStorage loss)
+    // 3. Request body identity (legacy fallback)
+    // 4. Auto-generated Guest-XXXXXX as last resort
+    const rawDisplayName = String(req.body?.displayName || "").trim();
+    const sessionDisplayName = guest?.displayName || "";
+    const identityFallback = String(req.body?.identity || "").trim();
+    const resolvedName = rawDisplayName
+      || sessionDisplayName
+      || identityFallback
+      || `Guest-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const displayName = sanitizeDisplayName(resolvedName).trim() || `Guest-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 
     // Validate and normalize presence mode (default to "normal", "silent" → "invisible")
     // Authenticated room owners (and future moderator/cohost roles) may use
@@ -1304,7 +1320,7 @@ router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
 
       // Create a synthetic guest session (no invite ID — direct join)
       const guestSessionToken = signGuestSession(
-        { inviteId: `direct:${roomId}:${identity}`, roomId, role: "guest" },
+        { inviteId: `direct:${roomId}:${identity}`, roomId, role: "guest", displayName },
         "2h",
       );
 

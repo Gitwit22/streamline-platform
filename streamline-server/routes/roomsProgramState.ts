@@ -24,40 +24,66 @@ function isHostOrCohost(role?: string): boolean {
 // ---------------------------------------------------------------------------
 // Broadcast program state to all room participants via LiveKit room metadata
 // ---------------------------------------------------------------------------
-async function broadcastProgramState(
+const BROADCAST_MAX_RETRIES = 3;
+const BROADCAST_BASE_DELAY_MS = 200;
+
+async function broadcastProgramStateOnce(
   livekitRoomName: string,
   programState: ProgramState,
 ): Promise<void> {
-  try {
-    const sdk = await getLiveKitSdk();
-    const RoomServiceClient = (sdk as any).RoomServiceClient;
-    if (
-      !RoomServiceClient ||
-      !process.env.LIVEKIT_URL ||
-      !process.env.LIVEKIT_API_KEY ||
-      !process.env.LIVEKIT_API_SECRET
-    ) {
-      return;
-    }
-    const svc = new RoomServiceClient(
-      process.env.LIVEKIT_URL,
-      process.env.LIVEKIT_API_KEY,
-      process.env.LIVEKIT_API_SECRET,
-    );
-    // Room metadata is a JSON string read by all participants (incl. compositor)
-    const rooms = await svc.listRooms([livekitRoomName]);
-    if (!rooms || rooms.length === 0) return;
+  const sdk = await getLiveKitSdk();
+  const RoomServiceClient = (sdk as any).RoomServiceClient;
+  if (
+    !RoomServiceClient ||
+    !process.env.LIVEKIT_URL ||
+    !process.env.LIVEKIT_API_KEY ||
+    !process.env.LIVEKIT_API_SECRET
+  ) {
+    return;
+  }
+  const svc = new RoomServiceClient(
+    process.env.LIVEKIT_URL,
+    process.env.LIVEKIT_API_KEY,
+    process.env.LIVEKIT_API_SECRET,
+  );
+  // Room metadata is a JSON string read by all participants (incl. compositor)
+  const rooms = await svc.listRooms([livekitRoomName]);
+  if (!rooms || rooms.length === 0) return;
 
-    const existing = rooms[0].metadata
-      ? JSON.parse(rooms[0].metadata)
-      : {};
-    const merged = { ...existing, programState };
-    await svc.updateRoomMetadata(
-      livekitRoomName,
-      JSON.stringify(merged),
-    );
-  } catch (err) {
-    console.warn("[programState] broadcastProgramState failed", err);
+  const existing = rooms[0].metadata
+    ? JSON.parse(rooms[0].metadata)
+    : {};
+  const merged = { ...existing, programState };
+  await svc.updateRoomMetadata(
+    livekitRoomName,
+    JSON.stringify(merged),
+  );
+}
+
+async function broadcastProgramStateWithRetry(
+  livekitRoomName: string,
+  programState: ProgramState,
+): Promise<void> {
+  for (let attempt = 1; attempt <= BROADCAST_MAX_RETRIES; attempt++) {
+    try {
+      await broadcastProgramStateOnce(livekitRoomName, programState);
+      return; // success
+    } catch (err) {
+      const isLastAttempt = attempt === BROADCAST_MAX_RETRIES;
+      if (isLastAttempt) {
+        console.error(
+          `[programState] broadcastProgramState failed after ${BROADCAST_MAX_RETRIES} attempts`,
+          { livekitRoomName, error: (err as any)?.message || String(err) },
+        );
+      } else {
+        const delay = BROADCAST_BASE_DELAY_MS * attempt;
+        console.warn(
+          `[programState] broadcastProgramState attempt ${attempt}/${BROADCAST_MAX_RETRIES} failed, retrying in ${delay}ms`,
+          { livekitRoomName, error: (err as any)?.message || String(err) },
+        );
+        await new Promise((r) => setTimeout(r, delay));
+      }
+    }
   }
 }
 
@@ -161,8 +187,9 @@ router.patch(
         access.livekitRoomName ||
         ((snap.data() as any)?.livekitRoomName as string | undefined);
       if (livekitRoomName) {
-        // Fire-and-forget; don't block the HTTP response
-        broadcastProgramState(livekitRoomName, merged).catch(() => {});
+        // Don't block the HTTP response, but use retry logic for reliability.
+        // Failures are logged inside broadcastProgramStateWithRetry.
+        broadcastProgramStateWithRetry(livekitRoomName, merged).catch(() => {});
       }
 
       return res.json({ ok: true, roomId, programState: merged });
@@ -174,3 +201,6 @@ router.patch(
 );
 
 export default router;
+
+// Exported for testing
+export { broadcastProgramStateWithRetry, BROADCAST_MAX_RETRIES, BROADCAST_BASE_DELAY_MS };
