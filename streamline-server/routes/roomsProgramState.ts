@@ -76,7 +76,7 @@ async function broadcastProgramStateWithRetry(
           { livekitRoomName, error: (err as any)?.message || String(err) },
         );
       } else {
-        const delay = BROADCAST_BASE_DELAY_MS * attempt;
+        const delay = BROADCAST_BASE_DELAY_MS * Math.pow(2, attempt - 1);
         console.warn(
           `[programState] broadcastProgramState attempt ${attempt}/${BROADCAST_MAX_RETRIES} failed, retrying in ${delay}ms`,
           { livekitRoomName, error: (err as any)?.message || String(err) },
