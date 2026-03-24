@@ -19,7 +19,7 @@ import multer from "multer";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { uploadVideo, deleteFile } from "../lib/storageClient";
-import { checkStorageLimit, updateStorageUsage } from "../usageHelper";
+import { checkStorageLimit, updateStorageUsage, reserveStorageUsage, releaseStorageUsage } from "../usageHelper";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 
@@ -101,13 +101,32 @@ router.delete("/:id", async (req: Request, res: Response) => {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    // Delete storage if it was an upload
+    // Capture file size before deletion for storage accounting
+    const sizeBytes = typeof data.sizeBytes === "number" ? data.sizeBytes : 0;
+
+    // Delete storage if it was an upload (has a storagePath)
     const storagePath = typeof data.storagePath === "string" ? data.storagePath : null;
     if (storagePath) {
       try {
         await deleteFile(storagePath);
       } catch (e: any) {
         console.warn("[my-content] storage delete failed:", e?.message || e);
+      }
+
+      // Release storage quota after R2 bytes are removed
+      if (sizeBytes > 0) {
+        try {
+          await releaseStorageUsage(userId, sizeBytes, {
+            caller: "myContent.DELETE",
+            docId: req.params.id,
+            storagePath,
+          });
+        } catch (e: any) {
+          console.error("[my-content] storage release failed:", {
+            userId, docId: req.params.id, sizeBytes, storagePath,
+            error: e?.message || e,
+          });
+        }
       }
     }
 
@@ -266,11 +285,22 @@ router.post(
 
       const publicUrl = await uploadVideo(file.buffer, storagePath, file.mimetype);
 
-      // Update storage usage (best-effort)
+      // Update storage usage — this is critical for correctness.
+      // If the accounting write fails, log a structured error so it can be
+      // reconciled later, but still return the upload as successful since
+      // the bytes are already persisted in R2.
       try {
-        await updateStorageUsage(userId, file.size);
-      } catch {
-        console.warn("[my-content] storage usage update failed (non-critical)");
+        await reserveStorageUsage(userId, file.size, {
+          caller: "myContent.upload",
+          storagePath,
+        });
+      } catch (e: any) {
+        console.error("[my-content] STORAGE ACCOUNTING FAILED — needs reconciliation", {
+          userId,
+          storagePath,
+          fileSizeBytes: file.size,
+          error: e?.message || e,
+        });
       }
 
       const now = new Date();

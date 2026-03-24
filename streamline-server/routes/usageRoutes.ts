@@ -7,6 +7,7 @@ import { getCurrentMonthKey } from "../lib/usageTracker";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { getCurrentStorageUsage, resolveMaxStorageBytesFromPlan } from "../usageHelper";
 
 // Helper function to get the next reset date (start of next month)
 function getNextResetDate(): Date {
@@ -210,6 +211,13 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
 
   const resetDateISO = getNextResetDate().toISOString();
 
+  // ── Storage accounting ──
+  const storageUsedBytes = await getCurrentStorageUsage(uid);
+  const maxStorageBytes = resolveMaxStorageBytesFromPlan(plan.raw || {});
+  const GB = 1024 * 1024 * 1024;
+  const storageUsedGB = Math.round((storageUsedBytes / GB) * 100) / 100;
+  const storageLimitGB = Math.round((maxStorageBytes / GB) * 100) / 100;
+
   return {
     status: 200,
     body: {
@@ -219,6 +227,12 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
       resetDate: resetDateISO,
       participantMinutes: participantUsed,
       transcodeMinutes: transcodeUsed,
+
+      // Storage accounting fields (bytes are source of truth, GB for display)
+      storageUsedBytes,
+      storageLimitBytes: maxStorageBytes,
+      storageUsedGB,
+      storageLimitGB,
 
       billing: {
         overagesEnabled,
@@ -239,6 +253,7 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
           participantMinutes: participantLimit,
           transcodeMinutes: transcodeLimit,
           maxGuests: Number(plan.limits.maxGuests || 0),
+          storageGB: storageLimitGB,
         },
       },
 

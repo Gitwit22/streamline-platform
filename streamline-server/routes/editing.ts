@@ -4,7 +4,7 @@ import { firestore as db } from "../firebaseAdmin";
 import multer from "multer";
 import { uploadVideo, getSignedDownloadUrl, deleteFile } from "../lib/storageClient";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
-import { checkStorageLimit, updateStorageUsage } from "../usageHelper";
+import { checkStorageLimit, updateStorageUsage, reserveStorageUsage, releaseStorageUsage } from "../usageHelper";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
@@ -272,11 +272,19 @@ router.post(
 
       console.log(`✅ Upload complete: ${publicUrl}`);
 
-      // Update storage usage (best-effort)
+      // Update storage usage — critical for correctness.
       try {
-        await updateStorageUsage(userId, file.size);
-      } catch (err) {
-        console.log("⚠️ Storage usage update failed (non-critical)");
+        await reserveStorageUsage(userId, file.size, {
+          caller: "editing.upload",
+          storagePath: path,
+        });
+      } catch (err: any) {
+        console.error("[editing] STORAGE ACCOUNTING FAILED — needs reconciliation", {
+          userId,
+          storagePath: path,
+          fileSizeBytes: file.size,
+          error: err?.message || err,
+        });
       }
 
       // Create asset in Firestore
@@ -510,7 +518,24 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
         return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
       }
 
+      // Capture file size before deletion
+      const fileSize = typeof data?.fileSize === "number" ? data.fileSize : 0;
+
       const storage = await deleteRecordingStorage(data);
+
+      // Release storage quota after R2 bytes are removed
+      if (fileSize > 0) {
+        try {
+          await releaseStorageUsage(userId, fileSize, {
+            caller: "editing.DELETE.recording",
+            docId: id,
+          });
+        } catch (e: any) {
+          console.error("[editing] storage release failed for recording asset:", {
+            userId, docId: id, fileSize, error: e?.message || e,
+          });
+        }
+      }
 
       // Delete from Firestore
       await db.collection("recordings").doc(id).delete();
@@ -531,12 +556,30 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
+    // Capture file size before deletion
+    const fileSize = typeof uploadData?.fileSize === "number" ? uploadData.fileSize : 0;
+
     const storagePath = typeof uploadData?.storagePath === "string" ? uploadData.storagePath : null;
     if (storagePath) {
       try {
         await deleteFile(storagePath);
       } catch (e: any) {
         console.warn("[editing] failed to delete asset storage", e?.message || e);
+      }
+
+      // Release storage quota after R2 bytes are removed
+      if (fileSize > 0) {
+        try {
+          await releaseStorageUsage(userId, fileSize, {
+            caller: "editing.DELETE.upload",
+            docId: id,
+            storagePath,
+          });
+        } catch (e: any) {
+          console.error("[editing] storage release failed for uploaded asset:", {
+            userId, docId: id, fileSize, storagePath, error: e?.message || e,
+          });
+        }
       }
     }
 
@@ -1402,11 +1445,19 @@ router.post("/render", async (req: Request, res: Response) => {
         const exportPath = `exports/${userId}/${recordingId}/${Date.now()}.mp4`;
         const publicUrl = await uploadVideo(buffer, exportPath, "video/mp4");
 
-        // Update storage usage (best-effort)
+        // Update storage usage — critical for correctness.
         try {
-          await updateStorageUsage(userId, buffer.byteLength);
-        } catch (err) {
-          console.log("⚠️ Storage usage update failed (non-critical)");
+          await reserveStorageUsage(userId, buffer.byteLength, {
+            caller: "editing.export",
+            exportPath,
+          });
+        } catch (err: any) {
+          console.error("[editing] STORAGE ACCOUNTING FAILED on export — needs reconciliation", {
+            userId,
+            exportPath,
+            fileSizeBytes: buffer.byteLength,
+            error: err?.message || err,
+          });
         }
 
         // Update recording with rendered path and URL
@@ -1633,6 +1684,11 @@ router.get("/plan-info", async (req: Request, res: Response) => {
     const plan = await getEditingPlanInfo(userId);
     const projectCount = await countUserProjects(userId);
 
+    // Include real current storage usage so the client can show actual state
+    const { getCurrentStorageUsage } = await import("../usageHelper.js");
+    const storageUsedBytes = await getCurrentStorageUsage(userId);
+    const GB = 1024 * 1024 * 1024;
+
     return res.json({
       planId: plan.planId,
       access: plan.access,
@@ -1641,6 +1697,8 @@ router.get("/plan-info", async (req: Request, res: Response) => {
       maxStorageGB: plan.maxStorageGB,
       maxTracks: plan.maxTracks ?? null,
       maxResolution: plan.maxResolution ?? null,
+      storageUsedBytes,
+      storageUsedGB: Math.round((storageUsedBytes / GB) * 100) / 100,
     });
   } catch (err: any) {
     console.error("Plan info error:", err);

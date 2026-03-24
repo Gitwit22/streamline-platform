@@ -18,7 +18,7 @@ import https from "https";
 import http from "http";
 import { logger } from "./logger";
 import { uploadVideo } from "./storageClient";
-import { updateStorageUsage } from "../usageHelper";
+import { reserveStorageUsage } from "../usageHelper";
 import {
   claimNextJob,
   updateExportJob,
@@ -340,11 +340,16 @@ export async function processExportJob(job: ExportJobDoc): Promise<void> {
 
     const publicUrl = await uploadVideo(outputBuffer, remotePath, contentType);
 
-    // Update storage usage (best-effort)
+    // Update storage usage — critical for correctness.
     try {
-      await updateStorageUsage(job.userId, outputBuffer.byteLength);
-    } catch {
-      logger.warn({ jobId }, "Storage usage update failed (non-critical)");
+      await reserveStorageUsage(job.userId, outputBuffer.byteLength, {
+        caller: "renderWorker",
+        jobId,
+        remotePath,
+      });
+    } catch (e: any) {
+      logger.error({ jobId, userId: job.userId, remotePath, size: outputBuffer.byteLength, error: e?.message || String(e) },
+        "STORAGE ACCOUNTING FAILED on export — needs reconciliation");
     }
 
     // --- Step 5: Complete ---

@@ -1,5 +1,18 @@
 // server/usageHelper.ts
+//
+// Storage accounting lifecycle:
+//   1. reserveStorageUsage / increment — called when bytes are successfully
+//      committed to R2 (uploads, recordings confirmed ready, exports).
+//   2. releaseStorageUsage / decrement — called when bytes are actually removed
+//      from R2 (deletes, maintenance purges).
+//   3. A future reconciliation tool can recompute storageUsedBytes from ground
+//      truth (R2 + Firestore collections), but runtime paths must be correct.
+//
+// All counter mutations use FieldValue.increment() for atomicity. The counter
+// is floored at zero after decrements to prevent negative drift.
+
 import { firestore } from "./firebaseAdmin";
+import { FieldValue } from "firebase-admin/firestore";
 
 /**
  * Helper to compute the billing period reset date based on user.createdAt
@@ -227,28 +240,131 @@ export async function checkStorageLimit(userId: string, fileSizeBytes: number): 
 
 /**
  * Update storage usage after successful upload
+ * Uses FieldValue.increment() for atomic, race-safe counter updates.
  */
 export async function updateStorageUsage(userId: string, fileSizeBytes: number): Promise<void> {
-  try {
-    const userRef = firestore.collection("users").doc(userId);
-    const userSnap = await userRef.get();
+  await reserveStorageUsage(userId, fileSizeBytes, { caller: "updateStorageUsage" });
+}
 
-    if (!userSnap.exists) {
-      throw new Error(`User ${userId} not found`);
+// ─── Atomic Storage Accounting Layer ─────────────────────────────────────────
+
+/**
+ * Apply an atomic delta (positive or negative) to usage.storageUsedBytes.
+ * Uses FieldValue.increment() so concurrent callers never lose updates.
+ * After a negative delta, floors the counter at zero to prevent drift below 0.
+ */
+export async function applyStorageUsageDelta(
+  userId: string,
+  deltaBytes: number,
+  context?: Record<string, any>,
+): Promise<void> {
+  if (!userId) throw new Error("applyStorageUsageDelta: userId is required");
+  if (!Number.isFinite(deltaBytes) || deltaBytes === 0) return;
+
+  const userRef = firestore.collection("users").doc(userId);
+
+  // Atomic increment (works for both positive and negative values)
+  await userRef.set(
+    {
+      usage: {
+        storageUsedBytes: FieldValue.increment(deltaBytes),
+        lastStorageUpdate: new Date(),
+      },
+    },
+    { merge: true },
+  );
+
+  // Floor at zero: if we decremented, the counter may have gone negative.
+  // Read-then-conditionally-fix is acceptable here because negative values
+  // are a consistency concern, not a correctness hot-path.
+  if (deltaBytes < 0) {
+    const snap = await userRef.get();
+    const current = (snap.data() as any)?.usage?.storageUsedBytes;
+    if (typeof current === "number" && current < 0) {
+      await userRef.update({ "usage.storageUsedBytes": 0 });
+      console.warn(`[storage] Floored storageUsedBytes to 0 for user ${userId} (was ${current})`, context);
     }
-
-    const userData = userSnap.data() as any;
-    const usage = (userData.usage || {}) as any;
-    const currentStorageBytes = usage.storageUsedBytes || 0;
-
-    await userRef.update({
-      "usage.storageUsedBytes": currentStorageBytes + fileSizeBytes,
-      "usage.lastStorageUpdate": new Date(),
-    });
-
-    console.log(`✅ Updated storage usage for ${userId}`);
-  } catch (err) {
-    console.error("updateStorageUsage error:", err);
-    throw err;
   }
+
+  const action = deltaBytes > 0 ? "increment" : "decrement";
+  console.log(`[storage] ${action} ${Math.abs(deltaBytes)} bytes for user ${userId}`, context);
+}
+
+/**
+ * Increment storage usage when bytes are successfully committed to R2.
+ * Called after uploads, recording-ready confirmation, and export completion.
+ */
+export async function reserveStorageUsage(
+  userId: string,
+  fileSizeBytes: number,
+  context?: Record<string, any>,
+): Promise<void> {
+  if (!Number.isFinite(fileSizeBytes) || fileSizeBytes <= 0) return;
+  await applyStorageUsageDelta(userId, fileSizeBytes, { op: "reserve", ...context });
+}
+
+/**
+ * Decrement storage usage when bytes are actually removed from R2.
+ * Called after successful R2 deletion (delete paths, maintenance purges).
+ */
+export async function releaseStorageUsage(
+  userId: string,
+  fileSizeBytes: number,
+  context?: Record<string, any>,
+): Promise<void> {
+  if (!Number.isFinite(fileSizeBytes) || fileSizeBytes <= 0) return;
+  await applyStorageUsageDelta(userId, -fileSizeBytes, { op: "release", ...context });
+}
+
+/**
+ * Read the current storageUsedBytes for a user. Returns 0 if not set.
+ */
+export async function getCurrentStorageUsage(userId: string): Promise<number> {
+  if (!userId) return 0;
+  const snap = await firestore.collection("users").doc(userId).get();
+  if (!snap.exists) return 0;
+  const val = (snap.data() as any)?.usage?.storageUsedBytes;
+  return typeof val === "number" && Number.isFinite(val) ? Math.max(0, val) : 0;
+}
+
+/**
+ * Resolve the plan's max storage limit in bytes for a given user.
+ * Checks editing.maxStorageGB, editing.maxStorageBytes, top-level maxStorageGB/Bytes.
+ */
+export async function getMaxStorageBytes(userId: string): Promise<number> {
+  const userSnap = await firestore.collection("users").doc(userId).get();
+  if (!userSnap.exists) return 0;
+  const userData = userSnap.data() as any;
+  const planId = (userData.planId || userData.plan || "free") as string;
+
+  const planSnap = await firestore.collection("plans").doc(planId).get();
+  if (!planSnap.exists) return 0;
+  const planData = planSnap.data() as any;
+
+  return resolveMaxStorageBytesFromPlan(planData);
+}
+
+/**
+ * Extract max storage bytes from a plan document (pure helper, no Firestore reads).
+ */
+export function resolveMaxStorageBytesFromPlan(planData: any): number {
+  const GB = 1024 * 1024 * 1024;
+  const editing = (planData || {}).editing || {};
+
+  const candidates: Array<{ val: any; unit: "gb" | "bytes" }> = [
+    { val: editing.maxStorageGB, unit: "gb" },
+    { val: editing.maxStorageBytes, unit: "bytes" },
+    { val: (planData || {}).maxStorageGB, unit: "gb" },
+    { val: (planData || {}).maxStorageBytes, unit: "bytes" },
+  ];
+
+  for (const { val, unit } of candidates) {
+    if (val !== undefined && val !== null) {
+      const n = Number(val);
+      if (Number.isFinite(n) && n > 0) {
+        return unit === "gb" ? Math.round(n * GB) : Math.round(n);
+      }
+    }
+  }
+  return 0;
 }
