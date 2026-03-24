@@ -4,7 +4,7 @@ import { firestore as db } from "../firebaseAdmin";
 import multer from "multer";
 import { uploadVideo, getSignedDownloadUrl, deleteFile } from "../lib/storageClient";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
-import { checkStorageLimit, updateStorageUsage, reserveStorageUsage, releaseStorageUsage } from "../usageHelper";
+import { checkStorageLimit, updateStorageUsage, reserveStorageUsage, releaseStorageUsage, getCurrentStorageUsage } from "../usageHelper";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
@@ -1685,7 +1685,6 @@ router.get("/plan-info", async (req: Request, res: Response) => {
     const projectCount = await countUserProjects(userId);
 
     // Include real current storage usage so the client can show actual state
-    const { getCurrentStorageUsage } = await import("../usageHelper.js");
     const storageUsedBytes = await getCurrentStorageUsage(userId);
     const GB = 1024 * 1024 * 1024;
 

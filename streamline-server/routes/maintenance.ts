@@ -198,7 +198,9 @@ async function purgeDeletedAccounts(now: Date): Promise<{ purgedCount: number }>
           try {
             await deleteRecordingStorage(recData);
             await recDoc.ref.set({ status: "deleted", storageReleased: true, deletedAt: now, updatedAt: now }, { merge: true });
-          } catch {}
+          } catch (e: any) {
+            console.warn("[maintenance/purge-deleted-accounts] recording cleanup failed", { uid, recordingId: recDoc.id, error: e?.message || e });
+          }
         }
         if (totalBytes > 0) {
           try {
@@ -230,17 +232,25 @@ async function purgeDeletedAccounts(now: Date): Promise<{ purgedCount: number }>
             try {
               await deleteFile(storagePath);
               if (sizeBytes > 0) totalBytes += sizeBytes;
-            } catch {}
+            } catch (e: any) {
+              console.warn("[maintenance/purge-deleted-accounts] saved_video file delete failed", { uid, storagePath, error: e?.message || e });
+            }
           }
-          try { await svDoc.ref.delete(); } catch {}
+          try { await svDoc.ref.delete(); } catch (e: any) {
+            console.warn("[maintenance/purge-deleted-accounts] saved_video doc delete failed", { uid, docId: svDoc.id, error: e?.message || e });
+          }
         }
         // Note: storage release for deleted user is best-effort since user doc is being deleted
         if (totalBytes > 0) {
           try {
             await releaseStorageUsage(uid, totalBytes, { caller: "maintenance.purgeDeletedAccounts.savedVideos" });
-          } catch {}
+          } catch (e: any) {
+            console.warn("[maintenance/purge-deleted-accounts] saved_videos storage release failed", { uid, totalBytes, error: e?.message || e });
+          }
         }
-      } catch {}
+      } catch (e: any) {
+        console.warn("[maintenance/purge-deleted-accounts] failed to clean saved_videos", { uid, error: e?.message || e });
+      }
 
       // users/{uid}/rolePresets
       try {
