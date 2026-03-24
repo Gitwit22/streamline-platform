@@ -120,7 +120,7 @@ Storage accounting in the StreamLine platform is **not production-safe in its cu
 ### B4. No Reconciliation Mechanism
 
 - **Severity**: HIGH
-- **Files/Functions**: Entire codebase — searched for `reconcil`, `recalculate.*storage`, `recompute.*storage`
+- **Files/Functions**: Entire codebase — searched for `reconcil*` (prefix match for reconcile/reconciliation), `recalculate.*storage`, `recompute.*storage`
 - **What happens**: There is **no** admin endpoint, background script, cron job, or worker that recalculates `usage.storageUsedBytes` from ground truth (actual R2 objects, Firestore collections `editing_assets`, `saved_videos`, `recordings`).
 - **Existing reconciliation endpoints**:
   - `POST /api/rooms/:roomId/recordings/reconcile` — reconciles recording **status** (not storage bytes). It verifies R2 file existence and updates the recording doc's `status` and `fileSize`, but does not touch `usage.storageUsedBytes`.
