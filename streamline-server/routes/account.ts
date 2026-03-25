@@ -36,9 +36,9 @@ const DEFAULT_MEDIA_PREFS = {
 
 const DEFAULT_COHOST_PROFILE = {
   label: "Co-Host",
-  canStream: true,
-  canRecord: true,
-  canDestinations: true,
+  canStream: false,
+  canRecord: false,
+  canDestinations: false,
   canModerate: false,
   canLayout: true,
   canScreenShare: true,

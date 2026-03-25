@@ -100,9 +100,9 @@ const SYSTEM_ROLE_PRESETS: Record<
     canMuteGuests: true,
     canRemoveGuests: true,
     canInviteLinks: true,
-    canManageDestinations: true,
-    canStartStopStream: true,
-    canStartStopRecording: true,
+    canManageDestinations: false,
+    canStartStopStream: false,
+    canStartStopRecording: false,
     canViewAnalytics: false,
     canChangeLayoutScene: true,
   },
@@ -666,8 +666,13 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
         livekitApplied = false;
         livekitReason = "not_found";
       } else {
-        console.error("[roomControls] livekit apply-permissions failed", err);
-        return res.status(500).json({ error: "livekit_role_update_failed" });
+        // Firestore controls were already persisted — the participant will
+        // receive the update via the SSE controls stream regardless.  Don't
+        // return 500 for a LiveKit-only failure; instead surface a warning
+        // in the response so the host UI can still show "Role updated."
+        console.error("[roomControls] livekit apply-permissions failed (Firestore persisted, SSE will deliver)", err);
+        livekitApplied = false;
+        livekitReason = "livekit_push_failed";
       }
     }
 
