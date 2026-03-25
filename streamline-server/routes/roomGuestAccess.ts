@@ -206,12 +206,10 @@ async function enforceCapacityOrRespond(params: {
   }
 
   const participantCount = await getParticipantCount(livekitRoomName);
-  if (participantCount === null) {
-    await releaseCapacityLock(roomId, lockOwner);
-    res.status(503).json({ error: "capacity_check_unavailable" });
-    return { ok: false };
-  }
-  if (participantCount >= cap) {
+  // If LiveKit returns null (room not created yet / idle), treat as 0 participants.
+  // An idle room that hasn't been started in LiveKit has no participants.
+  const effectiveCount = participantCount ?? 0;
+  if (effectiveCount >= cap) {
     await releaseCapacityLock(roomId, lockOwner);
     res.status(429).json({ error: "room_full" });
     return { ok: false };
@@ -1149,6 +1147,29 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
 });
 
 /**
+ * Derive a normalized room lifecycle status from the raw Firestore room document.
+ *   - "live"  → room.status === "live"
+ *   - "ended" → room.status === "ended" (host explicitly ended the session)
+ *   - "idle"  → everything else (created but not yet started, or paused)
+ *
+ * When the room document is missing entirely, callers should use "not_found".
+ */
+function deriveRoomStatus(room: Record<string, any> | null): "idle" | "live" | "ended" | "not_found" {
+  if (!room) return "not_found";
+  const raw = typeof room.status === "string" ? room.status.trim().toLowerCase() : "";
+  if (raw === "live") return "live";
+  if (raw === "ended" || raw === "closed" || raw === "archived") return "ended";
+  return "idle";
+}
+
+function deriveDebugReason(roomStatus: string, room: Record<string, any> | null, extra?: string): string | undefined {
+  if (roomStatus === "not_found") return "room_not_found";
+  if (roomStatus === "ended") return `room_marked_${room?.status ?? "ended"}`;
+  if (roomStatus === "idle") return "room_idle_not_started";
+  return extra || undefined;
+}
+
+/**
  * GET /api/rooms/:roomId/info
  * Auth: NONE — fully public
  * Returns basic room metadata so the join page can render room name,
@@ -1160,21 +1181,35 @@ router.get("/rooms/:roomId/info", async (req: any, res) => {
     if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
     const snap = await firestore.collection("rooms").doc(roomId).get();
-    if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
+    if (!snap.exists) {
+      return res.status(404).json({
+        error: PERMISSION_ERRORS.ROOM_NOT_FOUND,
+        roomStatus: "not_found" as const,
+        guestJoinAllowed: false,
+        debugReason: "room_not_found",
+      });
+    }
 
     const room = (snap.data() as any) || {};
-    const status = room.status === "live" ? "live" : "idle";
+    const roomStatus = deriveRoomStatus(room);
     const allowGuests = typeof room.allowGuests === "boolean" ? room.allowGuests : true;
+    const guestJoinAllowed = roomStatus === "live" && allowGuests;
     const roomName = String(room.roomName || room.name || roomId);
     const hostName = await resolveHostName(room.ownerId);
+    const roomType = room.roomType === "hls" || room.hlsConfig?.enabled === true ? "hls" : "rtc";
+    const debugReason = deriveDebugReason(roomStatus, room);
 
     // Only return safe, public info — never expose owner IDs, secrets, or internal fields
     return res.json({
       roomId,
       roomName,
-      status,
+      status: roomStatus === "live" ? "live" : "idle", // backward compat
+      roomStatus,
       allowGuests,
+      guestJoinAllowed,
       hostName,
+      roomType,
+      debugReason,
     });
   } catch (err) {
     console.error("/api/rooms/:roomId/info error", err);
@@ -1214,13 +1249,24 @@ router.get("/invites/:inviteId/info", async (req: any, res) => {
     // Resolve room info
     const roomId = String(invite.roomId || "");
     const roomSnap = roomId ? await firestore.collection("rooms").doc(roomId).get() : null;
-    const room = roomSnap?.exists ? (roomSnap.data() as any) || {} : {};
-    const roomName = String(room.roomName || room.name || roomId || "Room");
-    const allowGuests = typeof room.allowGuests === "boolean" ? room.allowGuests : true;
-    const status = room.status === "live" ? "live" : "idle";
+    const roomExists = !!roomSnap?.exists;
+    const room = roomExists ? (roomSnap!.data() as any) || {} : null;
+    const roomName = String(room?.roomName || room?.name || roomId || "Room");
+    const allowGuests = typeof room?.allowGuests === "boolean" ? room.allowGuests : true;
+    const roomStatus = roomExists ? deriveRoomStatus(room) : "not_found";
+    const roomType = room?.roomType === "hls" || room?.hlsConfig?.enabled === true ? "hls" : "rtc";
+    const guestJoinAllowed = inviteValid && roomStatus === "live" && allowGuests;
+
+    // Debug reason for non-live states
+    let debugReason: string | undefined;
+    if (!inviteValid) {
+      debugReason = revoked ? "invite_revoked" : expired ? "invite_expired" : maxUsesReached ? "invite_max_uses_reached" : "invite_invalid";
+    } else {
+      debugReason = deriveDebugReason(roomStatus, room);
+    }
 
     // Resolve host name from room owner
-    const hostName = await resolveHostName(room.ownerId);
+    const hostName = await resolveHostName(room?.ownerId);
 
     return res.json({
       inviteId,
@@ -1228,9 +1274,13 @@ router.get("/invites/:inviteId/info", async (req: any, res) => {
       roomName,
       hostName,
       role: invite.role || "guest",
-      status,
+      status: roomStatus === "live" ? "live" : "idle", // backward compat
+      roomStatus,
       allowGuests,
+      guestJoinAllowed,
       inviteValid,
+      roomType,
+      debugReason,
     });
   } catch (err) {
     console.error("/api/invites/:inviteId/info error", err);

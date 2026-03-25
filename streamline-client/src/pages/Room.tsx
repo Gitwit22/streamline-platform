@@ -1570,11 +1570,26 @@ function RoomPage() {
       // ignore parse errors and fall back
     }
     const cachedName = localStorage.getItem("sl_displayName") ?? "";
+    if (cachedName) return cachedName;
 
-    // Do NOT auto-generate names for guests. If a visitor arrives via an invite
-    // link (even with a guest session token), require them to pick a name once
-    // on entry unless they already have a cached/profile name.
-    return cachedName;
+    // If InviteRedeem pre-cached a LiveKit token, use its displayName so we
+    // don't flash the name-entry gate before the room loads.
+    try {
+      const candidateRoom = routeRoomId;
+      if (candidateRoom) {
+        const cached = sessionStorage.getItem(`sl_lk_token:${candidateRoom}`);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (typeof parsed?.displayName === "string" && parsed.displayName.trim()) {
+            const name = parsed.displayName.trim();
+            localStorage.setItem("sl_displayName", name);
+            return name;
+          }
+        }
+      }
+    } catch { /* ignore */ }
+
+    return "";
   });
   const [pendingName, setPendingName] = useState(displayName);
   const [token, setToken] = useState<string | null>(null);
@@ -1616,7 +1631,15 @@ function RoomPage() {
   const [guestJoinMode, setGuestJoinMode] = useState<"select" | "name-input">("select");
   const [guestJoinLoading, setGuestJoinLoading] = useState(false);
   const [guestJoinError, setGuestJoinError] = useState<string | null>(null);
-  const [publicRoomInfo, setPublicRoomInfo] = useState<{ roomName: string; status: string; allowGuests: boolean; hostName?: string } | null>(null);
+  const [publicRoomInfo, setPublicRoomInfo] = useState<{
+    roomName: string; status: string; allowGuests: boolean;
+    hostName?: string; roomType?: string;
+    roomStatus?: string; guestJoinAllowed?: boolean; debugReason?: string;
+  } | null>(null);
+  const [roomInfoNotFound, setRoomInfoNotFound] = useState(false);
+  const [isStaleWaiting, setIsStaleWaiting] = useState(false);
+  const staleWaitingStartRef = useRef<number | null>(null);
+  const STALE_WAIT_MS = 15 * 60 * 1000;
 
   // Presence mode: passed from Join page via route state or localStorage
   const [presenceMode, setPresenceMode] = useState<"normal" | "invisible">(() => {
@@ -1896,22 +1919,58 @@ function RoomPage() {
     setMaxRecordingMinutesPerClip(null);
   }, [roomId]);
 
-  // Fetch public room info for the join page (no auth required)
+  // Fetch public room info for the join page (no auth required).
+  // Auto-polls every 5s when room is idle and user is on the join gate.
   useEffect(() => {
     if (!roomId) return;
     let cancelled = false;
-    (async () => {
+
+    const fetchRoomInfo = async () => {
       try {
         const res = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/info`);
-        if (!res.ok || cancelled) return;
+        if (cancelled) return;
+        if (res.status === 404) {
+          if (!cancelled) {
+            setRoomInfoNotFound(true);
+            setPublicRoomInfo(null);
+          }
+          return;
+        }
+        if (!res.ok) return;
         const data = await res.json();
-        if (!cancelled) setPublicRoomInfo(data);
+        if (!cancelled) {
+          setPublicRoomInfo(data);
+          setRoomInfoNotFound(false);
+
+          // Use roomStatus when available (new backend), fall back to status
+          const rs = data.roomStatus || data.status;
+          // If room transitioned to ended during polling, stop polling
+          if (rs === "ended" || rs === "not_found") {
+            setRoomInfoNotFound(rs === "not_found");
+          }
+        }
       } catch {
         // non-critical — join page still works without this
       }
-    })();
-    return () => { cancelled = true; };
-  }, [roomId]);
+    };
+
+    fetchRoomInfo();
+
+    // Poll while on the join gate (no displayName) and room isn't live/ended yet
+    const pollId = setInterval(() => {
+      const rs = publicRoomInfo?.roomStatus || publicRoomInfo?.status;
+      if (!displayName && rs !== "live" && rs !== "ended") {
+        fetchRoomInfo();
+        // Stale-link guard: track how long we've been waiting
+        if (!staleWaitingStartRef.current) staleWaitingStartRef.current = Date.now();
+        if (Date.now() - staleWaitingStartRef.current >= STALE_WAIT_MS) {
+          setIsStaleWaiting(true);
+        }
+      }
+    }, 5000);
+
+    return () => { cancelled = true; clearInterval(pollId); };
+  }, [roomId, displayName, publicRoomInfo?.roomStatus, publicRoomInfo?.status]);
 
   useEffect(() => {
     setHostCheckReady(true);
@@ -3875,7 +3934,10 @@ function RoomPage() {
 
   if (!displayName) {
     const joinRoomName = publicRoomInfo?.roomName || roomName || routeRoomId || "this room";
-    const roomIsLive = publicRoomInfo?.status === "live";
+    // Use roomStatus (new backend) with fallback to status (backward compat)
+    const roomStatus = publicRoomInfo?.roomStatus || publicRoomInfo?.status || "";
+    const roomIsLive = roomStatus === "live";
+    const roomIsEnded = roomStatus === "ended";
     const guestsAllowed = publicRoomInfo?.allowGuests !== false;
 
     const handleGuestDirectJoin = async (name: string) => {
@@ -4023,6 +4085,61 @@ function RoomPage() {
           )}
         </div>
 
+        {/* === Room not found / ended / closed === */}
+        {isDirectGuest && (roomInfoNotFound || roomIsEnded) && (
+          <div
+            style={{
+              background: 'rgba(39, 39, 42, 0.5)',
+              borderRadius: '1rem',
+              padding: '2rem',
+              width: '100%',
+              maxWidth: '400px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '1rem',
+              border: '1px solid rgba(63, 63, 70, 0.8)',
+              backdropFilter: 'blur(20px)',
+              position: 'relative',
+              zIndex: 1,
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+              textAlign: 'center',
+            }}
+          >
+            <h1 style={{
+              fontSize: '1.25rem',
+              fontWeight: '600',
+              color: '#ffffff',
+              margin: 0,
+            }}>
+              Room is not open
+            </h1>
+            <p style={{
+              fontSize: '0.9rem',
+              color: 'rgba(255,255,255,0.6)',
+              lineHeight: 1.5,
+              margin: 0,
+            }}>
+              This room is currently closed or has already ended.
+            </p>
+            <button
+              type="button"
+              onClick={() => nav('/')}
+              style={{
+                padding: '0.75rem',
+                borderRadius: '0.75rem',
+                background: 'rgba(255, 255, 255, 0.08)',
+                color: '#ffffff',
+                fontWeight: '600',
+                border: '1px solid rgba(255, 255, 255, 0.2)',
+                cursor: 'pointer',
+                fontSize: '0.875rem',
+              }}
+            >
+              Return home
+            </button>
+          </div>
+        )}
+
         {/* In-app browser warning */}
         {detectInAppBrowser() && (
           <div style={{
@@ -4044,7 +4161,9 @@ function RoomPage() {
           </div>
         )}
 
-        {/* === Authenticated or invite-based user: simple name entry === */}
+        {/* === Authenticated or invite-based user: simple name entry ===
+             InviteRedeem already validated the invite and room state.
+             Room.tsx trusts that path — no re-validation needed here. */}
         {!isDirectGuest && (
           <form
             style={{
@@ -4124,8 +4243,98 @@ function RoomPage() {
           </form>
         )}
 
-        {/* === Direct guest (no auth, no invite): Join as Guest / Login === */}
-        {isDirectGuest && guestJoinMode === "select" && (
+        {/* === Direct guest: Room idle — waiting for host === */}
+        {isDirectGuest && !roomIsLive && !roomIsEnded && !roomInfoNotFound && publicRoomInfo && (
+          <div
+            style={{
+              background: 'rgba(39, 39, 42, 0.5)',
+              borderRadius: '1rem',
+              padding: '2rem',
+              width: '100%',
+              maxWidth: '400px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '1rem',
+              border: '1px solid rgba(63, 63, 70, 0.8)',
+              backdropFilter: 'blur(20px)',
+              position: 'relative',
+              zIndex: 1,
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+              textAlign: 'center',
+            }}
+          >
+            <div style={{
+              width: 40, height: 40, margin: '0 auto',
+              borderRadius: '50%',
+              border: '3px solid rgba(99,102,241,0.3)',
+              borderTopColor: '#6366f1',
+              animation: 'sl-spin 1s linear infinite',
+            }} />
+            <style>{`@keyframes sl-spin { to { transform: rotate(360deg); } }`}</style>
+
+            <h1 style={{
+              fontSize: '1.25rem',
+              fontWeight: '600',
+              color: '#ffffff',
+              margin: 0,
+            }}>
+              Room has not started yet
+            </h1>
+            <p style={{
+              fontSize: '0.9rem',
+              color: 'rgba(255,255,255,0.6)',
+              lineHeight: 1.5,
+              margin: 0,
+            }}>
+              {isStaleWaiting
+                ? "This room has still not started. The host may not be live yet."
+                : "The host has not opened this room yet. Please wait for the session to begin."}
+            </p>
+            <p style={{ fontSize: '0.75rem', opacity: 0.4, margin: 0 }}>
+              Checking automatically…
+            </p>
+
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                style={{
+                  flex: 1,
+                  padding: '0.75rem',
+                  borderRadius: '0.75rem',
+                  background: 'rgba(255, 255, 255, 0.08)',
+                  color: '#ffffff',
+                  fontWeight: '600',
+                  border: '1px solid rgba(255, 255, 255, 0.2)',
+                  cursor: 'pointer',
+                  fontSize: '0.875rem',
+                }}
+              >
+                Refresh
+              </button>
+              <button
+                type="button"
+                onClick={() => nav('/')}
+                style={{
+                  flex: 1,
+                  padding: '0.75rem',
+                  borderRadius: '0.75rem',
+                  background: 'rgba(255, 255, 255, 0.08)',
+                  color: '#ffffff',
+                  fontWeight: '600',
+                  border: '1px solid rgba(255, 255, 255, 0.2)',
+                  cursor: 'pointer',
+                  fontSize: '0.875rem',
+                }}
+              >
+                Return home
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* === Direct guest: room is live — show join form directly === */}
+        {isDirectGuest && !roomIsEnded && !roomInfoNotFound && (roomIsLive || !publicRoomInfo) && guestJoinMode === "select" && (
           <div
             style={{
               background: 'rgba(39, 39, 42, 0.5)',
@@ -4208,7 +4417,7 @@ function RoomPage() {
         )}
 
         {/* === Direct guest: name input step === */}
-        {isDirectGuest && guestJoinMode === "name-input" && (
+        {isDirectGuest && !roomIsEnded && !roomInfoNotFound && (roomIsLive || !publicRoomInfo) && guestJoinMode === "name-input" && (
           <form
             style={{
               background: 'rgba(39, 39, 42, 0.5)',

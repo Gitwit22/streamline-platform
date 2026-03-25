@@ -758,6 +758,24 @@ app.post("/api/roomModeration/remove-all", requireAuth, requireRoomAccessToken a
     }
 
     const removedCount = results.filter((r) => r.removed).length;
+
+    // Mark the room as "ended" so guests see "session has ended" instead of
+    // "room has not started yet".  The host is the only caller of remove-all
+    // (requires canRemoveGuests), so this is always the right lifecycle transition.
+    try {
+      await db.collection("rooms").doc(roomId).set(
+        {
+          status: "ended",
+          endedAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    } catch (statusErr) {
+      // Best-effort — don't fail the kick operation if status update fails
+      console.warn("[remove-all] failed to set room status=ended", { roomId, err: (statusErr as any)?.message });
+    }
+
     return res.json({ ok: true, removedCount, results });
   } catch (e: any) {
     console.error("remove-all error", e);

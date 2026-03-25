@@ -1324,11 +1324,26 @@ function RoomPage() {
       // ignore parse errors and fall back
     }
     const cachedName = localStorage.getItem("sl_displayName") ?? "";
+    if (cachedName) return cachedName;
 
-    // Do NOT auto-generate names for guests. If a visitor arrives via an invite
-    // link (even with a guest session token), require them to pick a name once
-    // on entry unless they already have a cached/profile name.
-    return cachedName;
+    // If InviteRedeem pre-cached a LiveKit token, use its displayName so we
+    // don't flash the name-entry gate before the room loads.
+    try {
+      const candidateRoom = routeRoomId;
+      if (candidateRoom) {
+        const cached = sessionStorage.getItem(`sl_lk_token:${candidateRoom}`);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (typeof parsed?.displayName === "string" && parsed.displayName.trim()) {
+            const name = parsed.displayName.trim();
+            localStorage.setItem("sl_displayName", name);
+            return name;
+          }
+        }
+      }
+    } catch { /* ignore */ }
+
+    return "";
   });
   const [pendingName, setPendingName] = useState(displayName);
   const [token, setToken] = useState<string | null>(null);
