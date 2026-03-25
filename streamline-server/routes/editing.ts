@@ -1247,9 +1247,25 @@ router.get("/recordings/:id", async (req: Request, res: Response) => {
     if (data?.userId !== userId) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
+
+    // Generate a presigned playback URL from the R2 object key.
+    // The raw videoUrl in Firestore is either empty (stream recordings never
+    // set it) or a private bucket URL that 403s.  A short-lived signed URL
+    // lets the <video> element play the file directly.
+    let videoUrl = data?.videoUrl || "";
+    const storageKey = data?.objectKey || data?.downloadPath;
+    if (storageKey && data?.status === "ready") {
+      try {
+        videoUrl = await getSignedDownloadUrl(storageKey, 3600);
+      } catch (e) {
+        console.warn("[editing] signed-url generation failed for recording", id, e);
+      }
+    }
+
     res.json({
       id: recordingDoc.id,
       ...data,
+      videoUrl,
       createdAt: data?.createdAt?.toDate?.()?.toISOString()
     });
   } catch (err: any) {
@@ -1286,6 +1302,21 @@ router.get("/list", async (req: Request, res: Response) => {
         const bTime = new Date(b.createdAt || 0).getTime();
         return bTime - aTime;
       });
+
+    // Generate presigned playback URLs for ready recordings whose videoUrl
+    // is missing or points to a private R2 bucket path.
+    await Promise.all(
+      recordings.map(async (rec: any) => {
+        const storageKey = rec.objectKey || rec.downloadPath;
+        if (storageKey && rec.status === "ready") {
+          try {
+            rec.videoUrl = await getSignedDownloadUrl(storageKey, 3600);
+          } catch (e) {
+            console.warn("[editing] signed-url generation failed for", rec.id, e);
+          }
+        }
+      }),
+    );
 
     res.json(recordings);
   } catch (err) {
