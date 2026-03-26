@@ -2,13 +2,13 @@ import "dotenv/config";
 import express from "express";
 import cors, { type CorsOptions } from "cors";
 import cookieParser from "cookie-parser";
+import helmet from "helmet";
 import pinoHttp from "pino-http";
 import webhookRouter from "./routes/webhook";
 import authRoutes from "./routes/auth";
 import adminRoutes from './routes/admin';
 import accountRoutes from "./routes/account";
 import { requireAuth } from "./middleware/requireAuth";
-import authRouter from "./routes/auth";
 import billingRoutes from "./routes/billing";
 import recordingsRoutes from "./routes/recordings";
 import usageRoutes from "./routes/usageRoutes";
@@ -47,13 +47,10 @@ import { getEffectiveEntitlements } from "./lib/effectiveEntitlements";
 import { evaluateUsageGate } from "./lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "./lib/usageOveragesWriter";
 import admin from "firebase-admin";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import hlsRoutes from "./routes/hls";
 import publicHlsRoutes from "./routes/publicHls";
 import publicRoomsHlsConfigRoutes from "./routes/publicRoomsHlsConfig";
 import monetizationRoutes from "./routes/monetization";
-import { sanitizeDisplayName } from "./lib/sanitizeDisplayName";
 import { resolveRoomIdentity } from "./lib/roomIdentity";
 import { assertRoomPerm, RoomPermissionError } from "./lib/rolePermissions";
 import { PERMISSION_ERRORS } from "./lib/permissionErrors";
@@ -86,6 +83,20 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 
 
 const app = express();
+
+// Trust the first proxy (Render / reverse proxy) for accurate req.ip
+app.set("trust proxy", 1);
+
+// Security headers – compatibility-first configuration.
+// contentSecurityPolicy is disabled to avoid breaking embeds, HLS playback,
+// and cross-origin media; crossOriginEmbedderPolicy off for the same reason.
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 
 function normalizeControlsDocId(raw: any): string {
   const id = String(raw || "").trim();
@@ -230,9 +241,6 @@ app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
 
 // Monetization v1 (PPV, PWYW, Donations for HLS rooms)
 app.use("/api/monetization", monetizationRoutes);
-
-// Internal maintenance/admin utilities
-app.use("/api/maintenance", maintenanceRoutes);
 
 // Onboarding/reset endpoints (guarded; demo-safe)
 app.use("/api/onboarding", onboardingRoutes);
@@ -788,235 +796,6 @@ app.post("/api/roomModeration/remove-all", requireAuth, requireRoomAccessToken a
 // AUTH ENDPOINTS
 // =============================================================================
 
-// Helper function to calculate next reset date based on signup date
-function calculateNextResetDate(createdAt: Date): Date {
-  const now = new Date();
-  const signupDay = createdAt.getDate();
-  
-  // Next reset is on the same day next month
-  const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, signupDay);
-  
-  // If we've already passed this month's reset day, use next month
-  if (now.getDate() >= signupDay) {
-    return new Date(now.getFullYear(), now.getMonth() + 2, signupDay);
-  }
-  
-  return nextMonth;
-}
-
-// Signup
-app.post("/api/auth/signup", async (req, res) => {
-  try {
-    const {
-      email,
-      password,
-      displayName,
-      timeZone,
-      skipOnboarding,
-      defaultResolution,
-      defaultDestinations,
-      defaultPrivacy,
-    } = req.body as {
-      email?: string;
-      password?: string;
-      displayName?: string;
-      timeZone?: string;
-      skipOnboarding?: boolean;
-      defaultResolution?: string;
-      defaultDestinations?: { youtube?: boolean; facebook?: boolean, twitch?: boolean };
-      defaultPrivacy?: string;
-    };
-
-    console.log("🔐 Signup request:", { email, displayName, timeZone });
-
-    if (!email || !password) {
-      return res.status(400).json({ error: "email and password are required" });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({ error: "password must be at least 6 characters" });
-    }
-
-    const existingSnap = await db
-      .collection("users")
-      .where("email", "==", email.trim().toLowerCase())
-      .limit(1)
-      .get();
-
-    if (!existingSnap.empty) {
-      const existingDoc = existingSnap.docs[0];
-      const existingData = existingDoc.data() as any;
-      if (existingData.accountStatus === "deleted") {
-        // Clear email on the old soft-deleted doc so it won't block the new account
-        await db.collection("users").doc(existingDoc.id).update({
-          email: `deleted_${existingDoc.id}@purged`,
-        });
-      } else {
-        return res.status(409).json({ error: "email already in use" });
-      }
-    }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-    const now = new Date();
-    const monthKey = getCurrentMonthKey();
-
-    // =============================================================================
-    // CREATE USER DOCUMENT WITH COMPLETE STRUCTURE
-    // =============================================================================
-
-    // Build userData (DO NOT store passwordHash)
-const userData: any = {
-  email: email.trim().toLowerCase(),
-  displayName: sanitizeDisplayName(displayName).trim(),
-  timeZone: timeZone || "America/Chicago",
-
-  // Plan assignment
-  planId: "free",
-  plan: "free", // optional legacy fallback
-  planUpdatedAt: now,
-
-  // Social connections
-  youtubeConnected: false,
-  facebookConnected: false,
-  twitchConnected: false,
-
-  // Timestamps
-  createdAt: now,
-  updatedAt: now,
-
-  // Onboarding
-  onboardingCompleted: !skipOnboarding,
-
-  // Billing configuration
-  billing: {
-    anniversaryDay: now.getDate(),
-    nextResetAt: calculateNextResetDate(now),
-
-    // ✅ overages defaults (keep here)
-    overagesEnabled: false,
-    billingEnabled: false,
-    overageRatePerMin: 0,
-  },
-
-  // Usage metadata
-  usageMeta: {
-    activeMonthKey: monthKey,
-    lastResetAt: now,
-    ytdMinutes: 0,
-  },
-
-  admin: { isAdmin: false },
-
-  preferences: skipOnboarding
-    ? {}
-    : {
-        defaultResolution: defaultResolution || "720p",
-        defaultDestinations: {
-          youtube: defaultDestinations?.youtube ?? false,
-          facebook: defaultDestinations?.facebook ?? false,
-          twitch: defaultDestinations?.twitch ?? false,
-        },
-        defaultPrivacy: defaultPrivacy || "public",
-      },
-};
-
-// Legacy fields (optional)
-if (!skipOnboarding) {
-  userData.defaultResolution = userData.preferences.defaultResolution;
-  userData.defaultDestinations = userData.preferences.defaultDestinations;
-  if (defaultPrivacy) userData.defaultPrivacy = defaultPrivacy;
-}
-
-// 1) Create Firebase Auth user (this generates UID)
-const userRecord = await admin.auth().createUser({
-  email: userData.email,
-  password, // must be in scope
-  displayName: userData.displayName,
-});
-
-const uid = userRecord.uid;
-
-// 2) Create Firestore user doc at users/{uid}
-const userRef = db.collection("users").doc(uid);
-
-await userRef.set({
-  ...userData,
-  id: uid,  // optional
-  uid: uid, // optional but helpful
-
-  // ✅ optional mirror for older code that checks root
-  overagesEnabled: userData.billing.overagesEnabled,
-});
-
-console.log("✅ User document created:", uid);
-
-
-    // =============================================================================
-    // INITIALIZE MONTHLY USAGE DOCUMENT
-    // =============================================================================
-
-    const usageData = {
-      uid: userRef.id,
-      monthKey,
-      periodStart: now,
-      periodEnd: null, // Will be set when month ends
-      
-      totals: {
-        streamMinutes: 0,
-        participantMinutes: 0,
-        transcodeMinutes: 0,
-        overageMinutes: 0,
-      },
-      
-      lastSession: null,
-      
-      source: "server", // Mark as server-written for security
-      updatedAt: now,
-    };
-
-    await db.collection("usageMonthly").doc(`${userRef.id}_${monthKey}`).set(usageData);
-    console.log("✅ Monthly usage document initialized");
-
-    // =============================================================================
-    // RETURN SUCCESS RESPONSE
-    // =============================================================================
-
-    const user = {
-      id: userRef.id,
-      uid: userRef.id, // Include both for compatibility
-      email: userData.email,
-      displayName: userData.displayName,
-      planId: userData.planId,
-      plan: userData.plan,
-      timeZone: userData.timeZone,
-      onboardingCompleted: userData.onboardingCompleted,
-      defaultResolution: userData.defaultResolution || null,
-      defaultDestinations: userData.defaultDestinations || null,
-      defaultPrivacy: userData.defaultPrivacy || null,
-      youtubeConnected: userData.youtubeConnected,
-      facebookConnected: userData.facebookConnected,
-      createdAt: userData.createdAt.toISOString ? userData.createdAt.toISOString() : userData.createdAt,
-    };
-
-    const token = jwt.sign(user, JWT_SECRET, { expiresIn: "7d" });
-
-    console.log("✅ Signup successful for:", email);
-
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    });
-    // Also return token in response for frontend fallback (non-httpOnly)
-    return res.json({ user, token });
-  } catch (err) {
-    console.error("❌ Signup error:", err);
-    return res.status(500).json({ error: "internal server error" });
-  }
-});
-
-// Login
 // NOTE: /api/auth/login and /api/auth/signup are now handled exclusively by
 // routes/auth.ts via app.use("/api/auth", authRoutes). The legacy inline
 // implementations that signed different JWT payloads have been removed to
@@ -1033,24 +812,21 @@ app.get("/api/health", (_req, res) => {
 // NOTE: /api/usage/summary is implemented in routes/usageRoutes.ts
 // and is requireAuth-protected with a stable payload.
 
-app.post("/api/usage/streamEnded", async (req, res) => {
+app.post("/api/usage/streamEnded", requireAuth, async (req, res) => {
   try {
-    const authedUid = (req as any).user?.uid as string | undefined;
-    const { uid: bodyUid, minutes, guestCount } = req.body as {
+    const uid = (req as any).user?.uid as string | undefined;
+    const { minutes, guestCount } = req.body as {
       uid?: string;
       minutes?: number;
       guestCount?: number;
       transcodeMinutes?: number;
     };
 
-    const uid = bodyUid || authedUid;
     if (!uid) {
       return res.status(400).json({ error: "uid required" });
     }
 
     console.log("[usage] streamEnded start", {
-      authedUid,
-      bodyUid,
       uid,
       minutes,
       guestCount,
