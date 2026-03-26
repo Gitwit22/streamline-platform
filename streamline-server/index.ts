@@ -816,14 +816,13 @@ app.post("/api/usage/streamEnded", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid as string | undefined;
     const { minutes, guestCount } = req.body as {
-      uid?: string;
       minutes?: number;
       guestCount?: number;
       transcodeMinutes?: number;
     };
 
     if (!uid) {
-      return res.status(400).json({ error: "uid required" });
+      return res.status(401).json({ error: "authentication required" });
     }
 
     console.log("[usage] streamEnded start", {
