@@ -44,6 +44,15 @@ import { fetchDestinations, preflight, type DestinationItem } from "../../servic
 import { normalizeUiRolePresetId } from "../../lib/roles";
 import { recordingEvents } from "../../lib/recordingEvents";
 import { detectInAppBrowser } from "../../lib/detectInAppBrowser";
+import { apiUpdateProgramState, apiGetProgramState } from "../../lib/api";
+import type { ProgramState } from "../../lib/programState";
+import { DEFAULT_PROGRAM_STATE } from "../../lib/programState";
+import {
+  type StudioLayoutPresetId,
+  getPresetSlots,
+  suggestPreset,
+  PRESET_INFO,
+} from "../../lib/studioLayout";
 
 const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
 
@@ -936,6 +945,184 @@ function getOrCreateUid() {
   }
   return uid;
 }
+
+// ---------------------------------------------------------------------------
+// LayoutPickerPanel – in-room broadcast layout selector
+// Lives inside <LiveKitRoom> so it can use useParticipants().
+// ---------------------------------------------------------------------------
+
+function LayoutPickerPanel({
+  roomId,
+  roomAccessToken,
+  open,
+  onClose,
+}: {
+  roomId: string;
+  roomAccessToken: string;
+  open: boolean;
+  onClose: () => void;
+}) {
+  const participants = useParticipants();
+  const participantCount = participants.length;
+
+  const [activePreset, setActivePreset] = useState<StudioLayoutPresetId | null>(null);
+  const [programState, setProgramState] = useState<ProgramState>(DEFAULT_PROGRAM_STATE);
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const prevCountRef = useRef(participantCount);
+
+  // Load program state on mount
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await apiGetProgramState(roomId, roomAccessToken);
+        if (!cancelled && data.programState) {
+          setProgramState(data.programState);
+          setActivePreset(data.programState.programLayout as StudioLayoutPresetId | null);
+        }
+      } catch { /* keep defaults */ }
+      finally { if (!cancelled) setLoaded(true); }
+    })();
+    return () => { cancelled = true; };
+  }, [roomId, roomAccessToken]);
+
+  // Auto-suggest when participant count changes
+  useEffect(() => {
+    if (!loaded) return;
+    if (participantCount === prevCountRef.current) return;
+    prevCountRef.current = participantCount;
+
+    const suggested = suggestPreset(participantCount);
+    // Only auto-apply if no preset has been manually chosen yet, or if
+    // the current preset has fewer slots than participants.
+    if (activePreset === null || activePreset === undefined) {
+      applyPreset(suggested);
+    } else {
+      const currentSlots = getPresetSlots(activePreset);
+      if (currentSlots.length < participantCount) {
+        applyPreset(suggested);
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [participantCount, loaded]);
+
+  const applyPreset = async (presetId: StudioLayoutPresetId) => {
+    const slots = getPresetSlots(presetId);
+    const identities = participants
+      .slice(0, slots.length)
+      .map((p) => p.identity);
+
+    setActivePreset(presetId);
+    setSaving(true);
+
+    const patch: Partial<ProgramState> = {
+      programLayout: presetId,
+      programSlots: slots,
+      programParticipants: identities,
+    };
+
+    setProgramState((prev) => ({ ...prev, ...patch }));
+
+    try {
+      await apiUpdateProgramState(roomId, roomAccessToken, patch);
+    } catch (err) {
+      console.error("[LayoutPicker] Failed to update program state", err);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!open) return null;
+
+  return (
+    <div
+      style={{
+        position: "absolute",
+        top: 8,
+        right: 8,
+        width: 280,
+        maxHeight: "calc(100% - 16px)",
+        overflowY: "auto",
+        zIndex: 30,
+        borderRadius: 12,
+        border: "1px solid rgba(234,179,8,0.3)",
+        background: "rgba(15,23,42,0.96)",
+        backdropFilter: "blur(12px)",
+        padding: 14,
+        color: "#e2e8f0",
+        boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ fontWeight: 700, fontSize: 13 }}>
+          🎬 Broadcast Layout
+        </div>
+        <button
+          onClick={onClose}
+          style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: 16, padding: 0 }}
+        >
+          ✕
+        </button>
+      </div>
+
+      <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 10 }}>
+        Controls the composed output sent to YouTube, Twitch, and Facebook.
+        {participantCount > 0 && (
+          <span style={{ display: "block", marginTop: 4, color: "#facc15" }}>
+            {participantCount} participant{participantCount !== 1 ? "s" : ""} in room
+          </span>
+        )}
+      </div>
+
+      {saving && (
+        <div style={{ fontSize: 11, color: "#facc15", marginBottom: 6 }}>Applying…</div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+        {PRESET_INFO.map((preset) => {
+          const isActive = activePreset === preset.id;
+          const fits = preset.slotCount >= participantCount || participantCount === 0;
+          return (
+            <button
+              key={preset.id}
+              onClick={() => applyPreset(preset.id)}
+              title={preset.description}
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                gap: 4,
+                padding: "10px 6px",
+                borderRadius: 8,
+                border: isActive
+                  ? "2px solid #facc15"
+                  : "1px solid rgba(255,255,255,0.1)",
+                background: isActive
+                  ? "rgba(234,179,8,0.12)"
+                  : "rgba(255,255,255,0.03)",
+                color: isActive ? "#facc15" : fits ? "#e2e8f0" : "#64748b",
+                cursor: "pointer",
+                transition: "all 0.2s ease",
+                fontSize: 11,
+                fontWeight: isActive ? 700 : 500,
+                opacity: fits ? 1 : 0.5,
+              }}
+            >
+              <span style={{ fontSize: 20 }}>{preset.icon}</span>
+              <span>{preset.label}</span>
+              <span style={{ fontSize: 9, color: "#64748b" }}>
+                {preset.slotCount} slot{preset.slotCount !== 1 ? "s" : ""}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
  
 type LiveKitShellProps = {
   token: string;
@@ -966,6 +1153,8 @@ type LiveKitShellProps = {
   audioMixerEnabled: boolean;
   advancedScreenShareEnabled: boolean;
   presenceMode: "normal" | "invisible";
+  showLayoutPicker: boolean;
+  onToggleLayoutPicker: () => void;
 };
 
 function LiveKitShell({
@@ -997,6 +1186,8 @@ function LiveKitShell({
   audioMixerEnabled,
   advancedScreenShareEnabled,
   presenceMode,
+  showLayoutPicker,
+  onToggleLayoutPicker,
 }: LiveKitShellProps) {
   const [guestStatus, setGuestStatus] = useState<GuestStatus>(null);
   const statusRef = useRef<GuestStatus>(null);
@@ -1174,6 +1365,14 @@ function LiveKitShell({
         <ReconnectCommandListener />
         {audioMixerEnabled && <MixerBridge />}
         {advancedScreenShareEnabled && <ScreenSharePopout mode={screenShareMode} onActiveSharerChange={onActiveSharerChange} />}
+        {isHost && roomId && roomAccessToken && (
+          <LayoutPickerPanel
+            roomId={roomId}
+            roomAccessToken={roomAccessToken}
+            open={showLayoutPicker}
+            onClose={onToggleLayoutPicker}
+          />
+        )}
         {isHost && !isViewer && (
           <div
             style={{
@@ -1377,6 +1576,7 @@ function RoomPage() {
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [showMixer, setShowMixer] = useState(false);
   const [showScreenShareRouter, setShowScreenShareRouter] = useState(false);
+  const [showLayoutPicker, setShowLayoutPicker] = useState(false);
   const [screenShareMode, setScreenShareModeRaw] = useState<ScreenShareRouteMode>("off");
   const [activeSharerName, setActiveSharerName] = useState<string | null>(null);
   const [egressId, setEgressId] = useState<string | null>(null);
@@ -4124,6 +4324,30 @@ function RoomPage() {
               </button>
             )}
 
+            {isHost && (
+              <button
+                onClick={() => setShowLayoutPicker(v => !v)}
+                style={{
+                  fontSize: '0.75rem',
+                  padding: '0.5rem 0.75rem',
+                  border: showLayoutPicker
+                    ? '1px solid rgba(234, 179, 8, 0.7)'
+                    : '1px solid rgba(234, 179, 8, 0.35)',
+                  borderRadius: '0.375rem',
+                  background: showLayoutPicker
+                    ? 'rgba(234, 179, 8, 0.18)'
+                    : 'rgba(234, 179, 8, 0.06)',
+                  color: '#facc15',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease',
+                  fontWeight: '500'
+                }}
+                title="Broadcast layout — controls what viewers see on YouTube / Twitch / Facebook"
+              >
+                🎬 Layout
+              </button>
+            )}
+
             {canManageStream && (
               <>
                 <div style={{ display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.75rem', color: '#ffffff' }}>
@@ -4212,6 +4436,8 @@ function RoomPage() {
           audioMixerEnabled={featureAccess.audioMixer.allowed}
           advancedScreenShareEnabled={featureAccess.advancedScreenShare.allowed}
           presenceMode={presenceMode}
+          showLayoutPicker={showLayoutPicker}
+          onToggleLayoutPicker={() => setShowLayoutPicker(v => !v)}
         />
       )}
 

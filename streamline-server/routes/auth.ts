@@ -147,6 +147,11 @@ router.post("/login", async (req, res) => {
     const doc = snap.docs[0];
     const user = doc.data() as any;
 
+    // Reject login to deleted accounts
+    if (user.accountStatus === "deleted") {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
     // Verify password
     const storedHash = user.passwordHash;
     if (!storedHash) {
@@ -206,6 +211,11 @@ router.post("/legacy-login", async (req, res) => {
     const doc = snap.docs[0];
     const uid = doc.id;
     const user = (doc.data() || {}) as any;
+
+    // Reject login to deleted accounts
+    if (user.accountStatus === "deleted") {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
     // 2) Verify legacy password
     const storedHash = user.passwordHash;
@@ -307,7 +317,16 @@ router.post("/signup", async (req, res) => {
       .get();
 
     if (!existing.empty) {
-      return res.status(409).json({ error: "Email already in use" });
+      const existingDoc = existing.docs[0];
+      const existingData = existingDoc.data() as any;
+      if (existingData.accountStatus === "deleted") {
+        // Clear email on the old soft-deleted doc so it won't block the new account
+        await db.collection("users").doc(existingDoc.id).update({
+          email: `deleted_${existingDoc.id}@purged`,
+        });
+      } else {
+        return res.status(409).json({ error: "Email already in use" });
+      }
     }
 
     const passwordHash = await bcrypt.hash(String(password), 10);

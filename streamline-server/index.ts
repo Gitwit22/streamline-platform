@@ -844,7 +844,16 @@ app.post("/api/auth/signup", async (req, res) => {
       .get();
 
     if (!existingSnap.empty) {
-      return res.status(409).json({ error: "email already in use" });
+      const existingDoc = existingSnap.docs[0];
+      const existingData = existingDoc.data() as any;
+      if (existingData.accountStatus === "deleted") {
+        // Clear email on the old soft-deleted doc so it won't block the new account
+        await db.collection("users").doc(existingDoc.id).update({
+          email: `deleted_${existingDoc.id}@purged`,
+        });
+      } else {
+        return res.status(409).json({ error: "email already in use" });
+      }
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
