@@ -8,8 +8,8 @@
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
   html, body {
-    width: 1280px;
-    height: 720px;
+    width: 100%;
+    height: 100%;
     overflow: hidden;
     background: #0a0a0a;
     font-family: system-ui, -apple-system, sans-serif;
@@ -21,6 +21,8 @@
     height: 720px;
     overflow: hidden;
     background: #0a0a0a;
+    transform-origin: top left;
+    /* Scaled dynamically by JS to fill the actual encoding viewport */
   }
 
   .slot {
@@ -155,9 +157,9 @@
       }
       if (participantCount === 3) {
         return [
-          { id: "slot1", x: 320, y: 10, width: 620, height: 345, zIndex: 1 },
-          { id: "slot2", x: 20, y: 365, width: 620, height: 345, zIndex: 1 },
-          { id: "slot3", x: 640, y: 365, width: 620, height: 345, zIndex: 1 },
+          { id: "slot1", x: 328, y: 10, width: 625, height: 345, zIndex: 1 },
+          { id: "slot2", x: 10, y: 365, width: 625, height: 345, zIndex: 1 },
+          { id: "slot3", x: 645, y: 365, width: 625, height: 345, zIndex: 1 },
         ];
       }
       return [
@@ -310,6 +312,18 @@
       console.log("[compositor] metadata changed, re-rendering");
       render();
     });
+
+    // ─── Scale the 1 280×720 reference canvas to fill the actual viewport ───
+    // LiveKit sets the browser viewport to the encoding dimensions (e.g.
+    // 1 920×1 080 for HD).  We keep the slot coordinates on the 1 280×720
+    // reference grid and use a CSS transform to stretch the canvas to match.
+    function scaleCanvas() {
+      const sw = window.innerWidth / 1280;
+      const sh = window.innerHeight / 720;
+      canvas.style.transform = `scale(${sw}, ${sh})`;
+    }
+    window.addEventListener("resize", scaleCanvas);
+    scaleCanvas();
 
     // ─── Connect and start ───
     await room.connect(wsUrl, token);

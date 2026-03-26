@@ -82,9 +82,9 @@ const PRESETS: Record<StudioLayoutPresetId, LayoutSlot[]> = {
   ],
 
   three_grid: [
-    { id: "slot1", x: 320, y: 10, width: 620, height: 345, zIndex: 1 },
-    { id: "slot2", x: 20, y: 365, width: 620, height: 345, zIndex: 1 },
-    { id: "slot3", x: 640, y: 365, width: 620, height: 345, zIndex: 1 },
+    { id: "slot1", x: 328, y: 10, width: 625, height: 345, zIndex: 1 },
+    { id: "slot2", x: 10, y: 365, width: 625, height: 345, zIndex: 1 },
+    { id: "slot3", x: 645, y: 365, width: 625, height: 345, zIndex: 1 },
   ],
 
   four_grid: [
