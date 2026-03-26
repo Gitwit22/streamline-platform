@@ -604,16 +604,40 @@ function MediaDeviceErrorHandler({ onError }: { onError: (error: any) => void })
 
   useEffect(() => {
     if (!room) return;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 
     const handleError = (error: any) => {
       console.error('[MediaDeviceError]', error);
-      onError(error);
+
+      // Permission-denied is never transient — show immediately.
+      const name = error?.name || String(error);
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        onError(error);
+        return;
+      }
+
+      // For all other errors, delay briefly. LiveKit often auto-retries
+      // with fallback constraints and succeeds within ~2 s. If by then
+      // the local participant has an active audio or video track the
+      // error was transient — suppress it.
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        const lp = room.localParticipant;
+        const hasAudio = lp?.audioTrackPublications?.size > 0;
+        const hasVideo = lp?.videoTrackPublications?.size > 0;
+        if (hasAudio || hasVideo) {
+          return;
+        }
+        onError(error);
+      }, 2500);
     };
 
     room.on(RoomEvent.MediaDevicesError, handleError);
 
     return () => {
       room.off(RoomEvent.MediaDevicesError, handleError);
+      if (pendingTimer) clearTimeout(pendingTimer);
     };
   }, [room, onError]);
 
