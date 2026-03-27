@@ -999,7 +999,7 @@ function LayoutPickerPanel({
     if (activePreset === null || activePreset === undefined) {
       applyPreset(suggested);
     } else {
-      const currentSlots = getPresetSlots(activePreset);
+      const currentSlots = getPresetSlots(activePreset, participantCount);
       if (currentSlots.length !== participantCount) {
         applyPreset(suggested);
       }
@@ -1008,7 +1008,7 @@ function LayoutPickerPanel({
   }, [participantCount, loaded]);
 
   const applyPreset = async (presetId: StudioLayoutPresetId) => {
-    const slots = getPresetSlots(presetId);
+    const slots = getPresetSlots(presetId, participantCount);
     const identities = participants
       .slice(0, slots.length)
       .map((p) => p.identity);
@@ -1082,7 +1082,9 @@ function LayoutPickerPanel({
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
         {PRESET_INFO.map((preset) => {
           const isActive = activePreset === preset.id;
-          const fits = preset.slotCount >= participantCount || participantCount === 0;
+          const supportsAdaptiveCount = preset.id === "four_grid";
+          const fits = supportsAdaptiveCount || preset.slotCount >= participantCount || participantCount === 0;
+          const shownSlotCount = supportsAdaptiveCount ? Math.max(4, participantCount) : preset.slotCount;
           return (
             <button
               key={preset.id}
@@ -1112,7 +1114,7 @@ function LayoutPickerPanel({
               <span style={{ fontSize: 20 }}>{preset.icon}</span>
               <span>{preset.label}</span>
               <span style={{ fontSize: 9, color: "#64748b" }}>
-                {preset.slotCount} slot{preset.slotCount !== 1 ? "s" : ""}
+                {shownSlotCount} slot{shownSlotCount !== 1 ? "s" : ""}
               </span>
             </button>
           );

@@ -145,6 +145,52 @@
     }
 
     // ─── Build the default layout when no program state is set ───
+    function buildAdaptiveGridSlots(participantCount) {
+      const count = Math.max(1, Math.floor(participantCount || 1));
+      if (count <= 4) {
+        return [
+          { id: "slot1", x: 20, y: 10, width: 610, height: 345, zIndex: 1 },
+          { id: "slot2", x: 650, y: 10, width: 610, height: 345, zIndex: 1 },
+          { id: "slot3", x: 20, y: 365, width: 610, height: 345, zIndex: 1 },
+          { id: "slot4", x: 650, y: 365, width: 610, height: 345, zIndex: 1 },
+        ].slice(0, count);
+      }
+
+      const outerX = 20;
+      const outerY = 10;
+      const gapX = 10;
+      const gapY = 10;
+      const cols = Math.max(2, Math.ceil(Math.sqrt(count * (1280 / 720))));
+      const rows = Math.ceil(count / cols);
+
+      const usableWidth = 1280 - outerX * 2;
+      const usableHeight = 720 - outerY * 2;
+      const tileWidth = Math.floor((usableWidth - gapX * (cols - 1)) / cols);
+      const tileHeight = Math.floor((usableHeight - gapY * (rows - 1)) / rows);
+
+      const slots = [];
+      for (let i = 0; i < count; i++) {
+        const row = Math.floor(i / cols);
+        const col = i % cols;
+        const isLastRow = row === rows - 1;
+        const itemsInLastRow = count - cols * (rows - 1);
+        const rowCols = isLastRow && itemsInLastRow > 0 ? itemsInLastRow : cols;
+        const rowWidth = rowCols * tileWidth + (rowCols - 1) * gapX;
+        const startX = Math.floor((1280 - rowWidth) / 2);
+
+        slots.push({
+          id: `slot${i + 1}`,
+          x: startX + col * (tileWidth + gapX),
+          y: outerY + row * (tileHeight + gapY),
+          width: tileWidth,
+          height: tileHeight,
+          zIndex: 1,
+        });
+      }
+
+      return slots;
+    }
+
     function getDefaultSlots(participantCount) {
       if (participantCount <= 1) {
         return [{ id: "slot1", x: 0, y: 0, width: 1280, height: 720, zIndex: 1 }];
@@ -162,12 +208,7 @@
           { id: "slot3", x: 645, y: 365, width: 625, height: 345, zIndex: 1 },
         ];
       }
-      return [
-        { id: "slot1", x: 20, y: 10, width: 610, height: 345, zIndex: 1 },
-        { id: "slot2", x: 650, y: 10, width: 610, height: 345, zIndex: 1 },
-        { id: "slot3", x: 20, y: 365, width: 610, height: 345, zIndex: 1 },
-        { id: "slot4", x: 650, y: 365, width: 610, height: 345, zIndex: 1 },
-      ];
+      return buildAdaptiveGridSlots(participantCount);
     }
 
     // ─── Main render ───

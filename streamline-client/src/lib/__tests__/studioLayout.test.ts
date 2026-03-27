@@ -72,9 +72,9 @@ describe("shouldSuggestChange", () => {
     expect(shouldSuggestChange("floating_guest", 4)).toBeNull();
   });
 
-  it("returns null when current preset has enough slots", () => {
+  it("returns null when current preset has matching slots", () => {
     expect(shouldSuggestChange("side_by_side", 2)).toBeNull();
-    expect(shouldSuggestChange("four_grid", 3)).toBeNull();
+    expect(shouldSuggestChange("four_grid", 3)).toBe("three_grid");
   });
 
   it("suggests a better preset when current has too few slots", () => {
@@ -107,6 +107,19 @@ describe("getPresetSlots", () => {
   it("solo has 1 slot, four_grid has 4 slots", () => {
     expect(getPresetSlots("solo")).toHaveLength(1);
     expect(getPresetSlots("four_grid")).toHaveLength(4);
+  });
+
+  it("four_grid adapts to participant counts above 4", () => {
+    const slots = getPresetSlots("four_grid", 8);
+    expect(slots).toHaveLength(8);
+    for (const s of slots) {
+      expect(s.x).toBeGreaterThanOrEqual(0);
+      expect(s.y).toBeGreaterThanOrEqual(0);
+      expect(s.width).toBeGreaterThan(0);
+      expect(s.height).toBeGreaterThan(0);
+      expect(s.x + s.width).toBeLessThanOrEqual(CANVAS_WIDTH);
+      expect(s.y + s.height).toBeLessThanOrEqual(CANVAS_HEIGHT);
+    }
   });
 
   it("slots stay within canvas bounds", () => {

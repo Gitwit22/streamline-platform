@@ -105,7 +105,50 @@ const PRESETS: Record<StudioLayoutPresetId, LayoutSlot[]> = {
   ],
 };
 
-export function getPresetSlots(presetId: StudioLayoutPresetId): LayoutSlot[] {
+function buildAdaptiveGridSlots(participantCount: number): LayoutSlot[] {
+  const count = Math.max(1, Math.floor(participantCount));
+  if (count <= 4) return PRESETS.four_grid.map((s) => ({ ...s }));
+
+  const outerX = 20;
+  const outerY = 10;
+  const gapX = 10;
+  const gapY = 10;
+
+  const cols = Math.max(2, Math.ceil(Math.sqrt(count * (CANVAS_WIDTH / CANVAS_HEIGHT))));
+  const rows = Math.ceil(count / cols);
+
+  const usableWidth = CANVAS_WIDTH - outerX * 2;
+  const usableHeight = CANVAS_HEIGHT - outerY * 2;
+  const tileWidth = Math.floor((usableWidth - gapX * (cols - 1)) / cols);
+  const tileHeight = Math.floor((usableHeight - gapY * (rows - 1)) / rows);
+
+  const slots: LayoutSlot[] = [];
+  for (let i = 0; i < count; i++) {
+    const row = Math.floor(i / cols);
+    const col = i % cols;
+    const isLastRow = row === rows - 1;
+    const itemsInLastRow = count - cols * (rows - 1);
+    const rowCols = isLastRow && itemsInLastRow > 0 ? itemsInLastRow : cols;
+    const rowWidth = rowCols * tileWidth + (rowCols - 1) * gapX;
+    const startX = Math.floor((CANVAS_WIDTH - rowWidth) / 2);
+
+    slots.push({
+      id: `slot${i + 1}`,
+      x: startX + col * (tileWidth + gapX),
+      y: outerY + row * (tileHeight + gapY),
+      width: tileWidth,
+      height: tileHeight,
+      zIndex: 1,
+    });
+  }
+
+  return slots;
+}
+
+export function getPresetSlots(presetId: StudioLayoutPresetId, participantCount?: number): LayoutSlot[] {
+  if (presetId === "four_grid" && typeof participantCount === "number" && participantCount > 4) {
+    return buildAdaptiveGridSlots(participantCount);
+  }
   const slots = PRESETS[presetId];
   if (!slots) return [];
   // Return deep copies so callers can't mutate the canonical definitions.
