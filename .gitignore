@@ -4,7 +4,14 @@ dist-node/
 **/dist/
 **/dist-node/
 .env
+.env.*
+!.env.example
 .env.local
+streamline-server/.env
+streamline-server/.env.*
+!streamline-server/.env.example
+streamline-client/.env
+streamline-client/.env.*
 *.log
 .DS_Store
 .vscode/settings.json
