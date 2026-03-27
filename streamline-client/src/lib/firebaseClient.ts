@@ -5,6 +5,7 @@ import {
   type Auth,
   type User,
   signInWithCustomToken,
+  signInWithEmailAndPassword,
   sendPasswordResetEmail,
   type ActionCodeSettings,
 } from "firebase/auth";
@@ -91,6 +92,11 @@ export async function getFirebaseIdToken(opts?: { forceRefresh?: boolean }): Pro
 export async function firebaseSignInWithCustomToken(customToken: string) {
   const auth = getFirebaseAuth();
   return signInWithCustomToken(auth, customToken);
+}
+
+export async function firebaseSignInWithEmailAndPassword(email: string, password: string) {
+  const auth = getFirebaseAuth();
+  return signInWithEmailAndPassword(auth, email, password);
 }
 
 export async function firebaseSendPasswordReset(email: string, actionCodeSettings?: ActionCodeSettings) {

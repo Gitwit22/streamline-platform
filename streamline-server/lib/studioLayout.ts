@@ -63,12 +63,12 @@ export const CANVAS_HEIGHT = 720;
 
 const PRESETS: Record<StudioLayoutPresetId, LayoutSlot[]> = {
   solo: [
-    { id: "slot1", x: 240, y: 0, width: 800, height: 720, zIndex: 1 },
+    { id: "slot1", x: 0, y: 0, width: 1280, height: 720, zIndex: 1 },
   ],
 
   side_by_side: [
-    { id: "slot1", x: 20, y: 60, width: 610, height: 600, zIndex: 1 },
-    { id: "slot2", x: 650, y: 60, width: 610, height: 600, zIndex: 1 },
+    { id: "slot1", x: 0, y: 0, width: 635, height: 720, zIndex: 1 },
+    { id: "slot2", x: 645, y: 0, width: 635, height: 720, zIndex: 1 },
   ],
 
   host_large_guest_small: [
@@ -184,11 +184,12 @@ export function shouldSuggestChange(
     return null;
   }
 
-  // If the number of slots in the current preset already fits, keep it.
+  // If the slot count matches the participant count exactly, the layout fits.
   const currentSlots = PRESETS[currentPresetId];
-  if (currentSlots && currentSlots.length >= participantCount) return null;
+  if (currentSlots && currentSlots.length === participantCount) return null;
 
-  // The current preset does not have enough slots – suggest a better one.
+  // Suggest both scaling up (too few slots) and scaling down (too many
+  // slots → empty black space on the composed output).
   return suggestion === currentPresetId ? null : suggestion;
 }
 

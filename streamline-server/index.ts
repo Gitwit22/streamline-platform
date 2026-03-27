@@ -796,10 +796,10 @@ app.post("/api/roomModeration/remove-all", requireAuth, requireRoomAccessToken a
 // AUTH ENDPOINTS
 // =============================================================================
 
-// NOTE: /api/auth/login and /api/auth/signup are now handled exclusively by
-// routes/auth.ts via app.use("/api/auth", authRoutes). The legacy inline
-// implementations that signed different JWT payloads have been removed to
-// ensure a single, consistent auth flow.
+// NOTE: /api/auth/login, /api/auth/signup, and /api/auth/legacy-login are
+// handled exclusively by routes/auth.ts via app.use("/api/auth", authRoutes).
+// The legacy inline signup that created Firebase Auth users without storing
+// passwordHash in Firestore has been removed to prevent auth drift.
 
 // =============================================================================
 // USAGE TRACKING

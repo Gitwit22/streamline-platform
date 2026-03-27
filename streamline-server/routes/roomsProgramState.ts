@@ -182,14 +182,20 @@ router.patch(
         { merge: true },
       );
 
-      // Broadcast to LiveKit room metadata for real-time sync
+      // Broadcast to LiveKit room metadata for real-time sync.
+      // Await the broadcast so the HTTP response only returns once the
+      // compositor has (or will imminently have) the updated metadata.
       const livekitRoomName =
         access.livekitRoomName ||
         ((snap.data() as any)?.livekitRoomName as string | undefined);
       if (livekitRoomName) {
-        // Don't block the HTTP response, but use retry logic for reliability.
-        // Failures are logged inside broadcastProgramStateWithRetry.
-        broadcastProgramStateWithRetry(livekitRoomName, merged).catch(() => {});
+        try {
+          await broadcastProgramStateWithRetry(livekitRoomName, merged);
+        } catch (err) {
+          // Log but don't fail the request — Firestore is already updated
+          // and the compositor's poll fallback will pick it up.
+          console.warn("[programState] broadcast failed, compositor poll will catch up", err);
+        }
       }
 
       return res.json({ ok: true, roomId, programState: merged });

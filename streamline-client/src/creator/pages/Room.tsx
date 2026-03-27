@@ -995,12 +995,12 @@ function LayoutPickerPanel({
 
     const suggested = suggestPreset(participantCount);
     // Only auto-apply if no preset has been manually chosen yet, or if
-    // the current preset has fewer slots than participants.
+    // the current preset slot count doesn't match the participant count.
     if (activePreset === null || activePreset === undefined) {
       applyPreset(suggested);
     } else {
       const currentSlots = getPresetSlots(activePreset);
-      if (currentSlots.length < participantCount) {
+      if (currentSlots.length !== participantCount) {
         applyPreset(suggested);
       }
     }

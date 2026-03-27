@@ -1,7 +1,7 @@
 import React, { FormEvent, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { apiFetch, apiFetchAuth, clearAuthStorage } from "../lib/api";
-import { firebaseSendPasswordReset, firebaseSignInWithCustomToken, isFirebaseWebConfigured } from "../lib/firebaseClient";
+import { firebaseSendPasswordReset, firebaseSignInWithCustomToken, firebaseSignInWithEmailAndPassword, isFirebaseWebConfigured } from "../lib/firebaseClient";
 
 // Email validation function
 function validateEmail(email: string): boolean {
@@ -118,42 +118,72 @@ export const LoginPage: React.FC = () => {
         } catch {}
 
       } else {
-        const res = await apiFetch(
-          "/api/auth/legacy-login",
-          {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, password }),
-          },
-          { allowNonOk: true }
-        );
-
-        if (!res.ok) {
-          if (res.status === 401 || res.status === 403) {
-            clearAuthStorage();
+        // Firebase is configured. Try direct signInWithEmailAndPassword first —
+        // this handles users who have a Firebase Auth account (e.g. signed up
+        // via the original inline signup) but no passwordHash in Firestore.
+        let firebaseDirectOk = false;
+        try {
+          await firebaseSignInWithEmailAndPassword(email.trim().toLowerCase(), password);
+          firebaseDirectOk = true;
+        } catch (fbErr: any) {
+          const fbCode = String(fbErr?.code || "");
+          // If the user simply doesn't exist in Firebase Auth, fall through
+          // to legacy-login which will create the Firebase account on the fly.
+          if (fbCode !== "auth/user-not-found" && fbCode !== "auth/invalid-credential") {
+            // Genuine auth failure (wrong password, disabled, etc.)
+            const friendlyMsg =
+              fbCode === "auth/wrong-password" || fbCode === "auth/invalid-credential"
+                ? "Invalid credentials"
+                : fbCode === "auth/too-many-requests"
+                  ? "Too many attempts. Please try again later."
+                  : fbCode === "auth/user-disabled"
+                    ? "This account has been disabled."
+                    : "Invalid credentials";
+            setError(friendlyMsg);
+            setLoading(false);
+            return;
           }
-          const ct = res.headers.get("content-type") || "";
-          const errBody = ct.includes("application/json") ? await res.json().catch(() => ({})) : {};
-          const msg = (errBody as any)?.error || (res.status === 409 ? "Email conflict. Contact support." : "Invalid credentials");
-          setError(msg);
-          setLoading(false);
-          return;
         }
 
-        const payload = await res.json().catch(() => null as any);
-        const customToken = String(payload?.customToken || "").trim();
-        if (!customToken) {
-          setError("Login failed: missing customToken");
-          setLoading(false);
-          return;
+        if (!firebaseDirectOk) {
+          // User not in Firebase Auth yet — use legacy-login to lazy-migrate.
+          const res = await apiFetch(
+            "/api/auth/legacy-login",
+            {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password }),
+            },
+            { allowNonOk: true }
+          );
+
+          if (!res.ok) {
+            if (res.status === 401 || res.status === 403) {
+              clearAuthStorage();
+            }
+            const ct = res.headers.get("content-type") || "";
+            const errBody = ct.includes("application/json") ? await res.json().catch(() => ({})) : {};
+            const msg = (errBody as any)?.error || (res.status === 409 ? "Email conflict. Contact support." : "Invalid credentials");
+            setError(msg);
+            setLoading(false);
+            return;
+          }
+
+          const payload = await res.json().catch(() => null as any);
+          const customToken = String(payload?.customToken || "").trim();
+          if (!customToken) {
+            setError("Login failed: missing customToken");
+            setLoading(false);
+            return;
+          }
+
+          await firebaseSignInWithCustomToken(customToken);
         }
 
         // Clear legacy header token so we don't send stale Authorization values.
         try {
           localStorage.removeItem("authToken");
         } catch {}
-
-        await firebaseSignInWithCustomToken(customToken);
       }
 
       // Hydrate user from canonical /api/account/me. If this fails,

@@ -147,12 +147,12 @@
     // ─── Build the default layout when no program state is set ───
     function getDefaultSlots(participantCount) {
       if (participantCount <= 1) {
-        return [{ id: "slot1", x: 240, y: 0, width: 800, height: 720, zIndex: 1 }];
+        return [{ id: "slot1", x: 0, y: 0, width: 1280, height: 720, zIndex: 1 }];
       }
       if (participantCount === 2) {
         return [
-          { id: "slot1", x: 20, y: 60, width: 610, height: 600, zIndex: 1 },
-          { id: "slot2", x: 650, y: 60, width: 610, height: 600, zIndex: 1 },
+          { id: "slot1", x: 0, y: 0, width: 635, height: 720, zIndex: 1 },
+          { id: "slot2", x: 645, y: 0, width: 635, height: 720, zIndex: 1 },
         ];
       }
       if (participantCount === 3) {
@@ -182,13 +182,20 @@
       let identities;
 
       if (ps && ps.programSlots && ps.programSlots.length > 0) {
-        // Use program state
-        slots = ps.programSlots;
-        if (ps.programParticipants && ps.programParticipants.length > 0) {
-          identities = ps.programParticipants;
-        } else {
-          // Map by join order
+        // Use program state, but fall back to the default layout when
+        // there are more program slots than actual participants.  This
+        // prevents large black empty areas on the composed output (e.g.
+        // a 2-person layout selected but only 1 person is streaming).
+        if (remotes.length > 0 && remotes.length < ps.programSlots.length) {
+          slots = getDefaultSlots(remotes.length);
           identities = remotes.map((p) => p.identity);
+        } else {
+          slots = ps.programSlots;
+          if (ps.programParticipants && ps.programParticipants.length > 0) {
+            identities = ps.programParticipants;
+          } else {
+            identities = remotes.map((p) => p.identity);
+          }
         }
       } else {
         // Fallback: auto-layout by participant count
@@ -312,6 +319,27 @@
       console.log("[compositor] metadata changed, re-rendering");
       render();
     });
+
+    // ─── Periodic metadata poll ───
+    // Safety net: if the RoomMetadataChanged event is missed (e.g. due to
+    // network blip), re-check metadata every 2 seconds and re-render when
+    // the programState has changed since the last render.
+    let lastRenderedPsJson = "";
+    setInterval(() => {
+      try {
+        const ps = parseProgramState();
+        const psJson = JSON.stringify(ps || {});
+        if (psJson !== lastRenderedPsJson) {
+          console.log("[compositor] poll detected change, re-rendering");
+          lastRenderedPsJson = psJson;
+          render();
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+    // Initialise the snapshot so the first poll doesn't cause a spurious re-render
+    try {
+      lastRenderedPsJson = JSON.stringify(parseProgramState() || {});
+    } catch { /* ignore */ }
 
     // ─── Scale the 1 280×720 reference canvas to fill the actual viewport ───
     // LiveKit sets the browser viewport to the encoding dimensions (e.g.
