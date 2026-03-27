@@ -2,13 +2,13 @@ import "dotenv/config";
 import express from "express";
 import cors, { type CorsOptions } from "cors";
 import cookieParser from "cookie-parser";
+import helmet from "helmet";
 import pinoHttp from "pino-http";
 import webhookRouter from "./routes/webhook";
 import authRoutes from "./routes/auth";
 import adminRoutes from './routes/admin';
 import accountRoutes from "./routes/account";
 import { requireAuth } from "./middleware/requireAuth";
-import authRouter from "./routes/auth";
 import billingRoutes from "./routes/billing";
 import recordingsRoutes from "./routes/recordings";
 import usageRoutes from "./routes/usageRoutes";
@@ -47,13 +47,10 @@ import { getEffectiveEntitlements } from "./lib/effectiveEntitlements";
 import { evaluateUsageGate } from "./lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "./lib/usageOveragesWriter";
 import admin from "firebase-admin";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import hlsRoutes from "./routes/hls";
 import publicHlsRoutes from "./routes/publicHls";
 import publicRoomsHlsConfigRoutes from "./routes/publicRoomsHlsConfig";
 import monetizationRoutes from "./routes/monetization";
-import { sanitizeDisplayName } from "./lib/sanitizeDisplayName";
 import { resolveRoomIdentity } from "./lib/roomIdentity";
 import { assertRoomPerm, RoomPermissionError } from "./lib/rolePermissions";
 import { PERMISSION_ERRORS } from "./lib/permissionErrors";
@@ -86,6 +83,20 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 
 
 const app = express();
+
+// Trust the first proxy (Render / reverse proxy) for accurate req.ip
+app.set("trust proxy", 1);
+
+// Security headers – compatibility-first configuration.
+// contentSecurityPolicy is disabled to avoid breaking embeds, HLS playback,
+// and cross-origin media; crossOriginEmbedderPolicy off for the same reason.
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 
 function normalizeControlsDocId(raw: any): string {
   const id = String(raw || "").trim();
@@ -230,9 +241,6 @@ app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
 
 // Monetization v1 (PPV, PWYW, Donations for HLS rooms)
 app.use("/api/monetization", monetizationRoutes);
-
-// Internal maintenance/admin utilities
-app.use("/api/maintenance", maintenanceRoutes);
 
 // Onboarding/reset endpoints (guarded; demo-safe)
 app.use("/api/onboarding", onboardingRoutes);
@@ -804,24 +812,20 @@ app.get("/api/health", (_req, res) => {
 // NOTE: /api/usage/summary is implemented in routes/usageRoutes.ts
 // and is requireAuth-protected with a stable payload.
 
-app.post("/api/usage/streamEnded", async (req, res) => {
+app.post("/api/usage/streamEnded", requireAuth, async (req, res) => {
   try {
-    const authedUid = (req as any).user?.uid as string | undefined;
-    const { uid: bodyUid, minutes, guestCount } = req.body as {
-      uid?: string;
+    const uid = (req as any).user?.uid as string | undefined;
+    const { minutes, guestCount } = req.body as {
       minutes?: number;
       guestCount?: number;
       transcodeMinutes?: number;
     };
 
-    const uid = bodyUid || authedUid;
     if (!uid) {
-      return res.status(400).json({ error: "uid required" });
+      return res.status(401).json({ error: "authentication required" });
     }
 
     console.log("[usage] streamEnded start", {
-      authedUid,
-      bodyUid,
       uid,
       minutes,
       guestCount,

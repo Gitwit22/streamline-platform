@@ -41,7 +41,7 @@ function getRoomAccessSecret(): string {
 }
 
 export function verifyRoomAccessToken(rawToken: string): RoomAccessClaims {
-  const decoded = jwt.verify(rawToken, getRoomAccessSecret());
+  const decoded = jwt.verify(rawToken, getRoomAccessSecret(), { algorithms: ["HS256"] });
   return decoded as RoomAccessClaims;
 }
 
