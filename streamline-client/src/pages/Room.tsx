@@ -1560,9 +1560,15 @@ function LiveKitShell({
               onClose={onCloseStudioLayout}
               onProgramStateChange={(presetId: StudioLayoutPresetId | "custom" | null, slots: LayoutSlot[]) => {
                 if (!roomId || !roomAccessToken) return;
+                // Include programParticipants so the compositor knows which
+                // identities map to which slots in the composed output.
+                const identities = studioParticipants
+                  .slice(0, slots.length)
+                  .map((p: any) => p.identity);
                 apiUpdateProgramState(roomId, roomAccessToken, {
                   programLayout: presetId,
                   programSlots: slots,
+                  programParticipants: identities,
                 }).catch((err) => console.warn("[Room] program state update failed", err));
               }}
             />
