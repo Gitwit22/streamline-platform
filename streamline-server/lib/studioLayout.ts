@@ -35,7 +35,8 @@ export type StudioLayoutPresetId =
   | "three_grid"
   | "four_grid"
   | "screen_share_speaker"
-  | "floating_guest";
+  | "floating_guest"
+  | "floating_host";
 
 export type StudioLayoutAdjustMode = "manual" | "auto" | "suggest";
 
@@ -67,8 +68,8 @@ const PRESETS: Record<StudioLayoutPresetId, LayoutSlot[]> = {
   ],
 
   side_by_side: [
-    { id: "slot1", x: 0, y: 0, width: 635, height: 720, zIndex: 1 },
-    { id: "slot2", x: 645, y: 0, width: 635, height: 720, zIndex: 1 },
+    { id: "slot1", x: 0, y: 0, width: 640, height: 720, zIndex: 1 },
+    { id: "slot2", x: 640, y: 0, width: 640, height: 720, zIndex: 1 },
   ],
 
   host_large_guest_small: [
@@ -77,8 +78,8 @@ const PRESETS: Record<StudioLayoutPresetId, LayoutSlot[]> = {
   ],
 
   two_up_split: [
-    { id: "slot1", x: 0, y: 0, width: 640, height: 720, zIndex: 1 },
-    { id: "slot2", x: 640, y: 0, width: 640, height: 720, zIndex: 1 },
+    { id: "slot1", x: 20, y: 20, width: 732, height: 680, zIndex: 1 },
+    { id: "slot2", x: 772, y: 20, width: 488, height: 680, zIndex: 1 },
   ],
 
   three_grid: [
@@ -100,6 +101,11 @@ const PRESETS: Record<StudioLayoutPresetId, LayoutSlot[]> = {
   ],
 
   floating_guest: [
+    { id: "slot1", x: 0, y: 0, width: 1280, height: 720, zIndex: 1 },
+    { id: "slot2", x: 940, y: 470, width: 320, height: 230, zIndex: 2 },
+  ],
+
+  floating_host: [
     { id: "slot1", x: 0, y: 0, width: 1280, height: 720, zIndex: 1 },
     { id: "slot2", x: 940, y: 470, width: 320, height: 230, zIndex: 2 },
   ],
@@ -176,6 +182,7 @@ const PRESET_LABELS: Record<StudioLayoutPresetId, string> = {
   four_grid: "4-Person Grid",
   screen_share_speaker: "Screen Share + Speaker",
   floating_guest: "Floating Guest",
+  floating_host: "Floating Host",
 };
 
 export function getPresetLabel(presetId: StudioLayoutPresetId): string {
@@ -222,7 +229,8 @@ export function shouldSuggestChange(
   // Never suggest screen-share or floating presets be auto-replaced.
   if (
     currentPresetId === "screen_share_speaker" ||
-    currentPresetId === "floating_guest"
+    currentPresetId === "floating_guest" ||
+    currentPresetId === "floating_host"
   ) {
     return null;
   }

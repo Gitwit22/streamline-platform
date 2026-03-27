@@ -956,14 +956,36 @@ function LayoutPickerPanel({
   roomAccessToken,
   open,
   onClose,
+  onActivePresetChange,
 }: {
   roomId: string;
   roomAccessToken: string;
   open: boolean;
   onClose: () => void;
+  onActivePresetChange?: (presetId: StudioLayoutPresetId | null) => void;
 }) {
+  const { localParticipant } = useLocalParticipant();
   const participants = useParticipants();
-  const participantCount = participants.length;
+  const participantIdentities = useMemo(
+    () => participants.map((p) => p.identity).filter((id): id is string => !!id),
+    [participants],
+  );
+  const orderedIdentities = useMemo(() => {
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    const localIdentity = localParticipant?.identity;
+    if (localIdentity) {
+      seen.add(localIdentity);
+      ids.push(localIdentity);
+    }
+    for (const id of participantIdentities) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    return ids;
+  }, [localParticipant?.identity, participantIdentities]);
+  const participantCount = orderedIdentities.length;
 
   const [activePreset, setActivePreset] = useState<StudioLayoutPresetId | null>(null);
   const [programState, setProgramState] = useState<ProgramState>(DEFAULT_PROGRAM_STATE);
@@ -979,13 +1001,15 @@ function LayoutPickerPanel({
         const data = await apiGetProgramState(roomId, roomAccessToken);
         if (!cancelled && data.programState) {
           setProgramState(data.programState);
-          setActivePreset(data.programState.programLayout as StudioLayoutPresetId | null);
+          const loadedPreset = data.programState.programLayout as StudioLayoutPresetId | null;
+          setActivePreset(loadedPreset);
+          onActivePresetChange?.(loadedPreset);
         }
       } catch { /* keep defaults */ }
       finally { if (!cancelled) setLoaded(true); }
     })();
     return () => { cancelled = true; };
-  }, [roomId, roomAccessToken]);
+  }, [roomId, roomAccessToken, onActivePresetChange]);
 
   // Auto-suggest when participant count changes
   useEffect(() => {
@@ -1009,11 +1033,28 @@ function LayoutPickerPanel({
 
   const applyPreset = async (presetId: StudioLayoutPresetId) => {
     const slots = getPresetSlots(presetId, participantCount);
-    const identities = participants
-      .slice(0, slots.length)
-      .map((p) => p.identity);
+    const hostIdentity = localParticipant?.identity ?? null;
+    const guestIdentities = orderedIdentities.filter((id) => id !== hostIdentity);
+
+    let identities: string[] = orderedIdentities;
+    if (presetId === "floating_guest" || presetId === "host_large_guest_small") {
+      identities = [
+        ...(hostIdentity ? [hostIdentity] : []),
+        ...guestIdentities,
+      ];
+    } else if (presetId === "floating_host") {
+      const primaryGuest = guestIdentities[0] ?? hostIdentity;
+      identities = [
+        ...(primaryGuest ? [primaryGuest] : []),
+        ...(hostIdentity ? [hostIdentity] : []),
+        ...guestIdentities.slice(primaryGuest ? 1 : 0),
+      ];
+    }
+
+    identities = identities.slice(0, slots.length);
 
     setActivePreset(presetId);
+    onActivePresetChange?.(presetId);
     setSaving(true);
 
     const patch: Partial<ProgramState> = {
@@ -1192,6 +1233,7 @@ function LiveKitShell({
   onToggleLayoutPicker,
 }: LiveKitShellProps) {
   const [guestStatus, setGuestStatus] = useState<GuestStatus>(null);
+  const [roomPreviewPreset, setRoomPreviewPreset] = useState<StudioLayoutPresetId | null>(null);
   const statusRef = useRef<GuestStatus>(null);
   const mediaRootRef = useRef<HTMLDivElement | null>(null);
 
@@ -1321,7 +1363,9 @@ function LiveKitShell({
         subjectToControls && !controlsAllowPublishAudio ? " sl-controls-no-audio" : ""
       }${subjectToControls && !controlsTileVisible ? " sl-controls-hide-self" : ""}${
         subjectToControls && !controlsAllowScreenShare ? " sl-controls-no-screen" : ""
-      }${advancedScreenShareEnabled ? ` sl-screen-${screenShareMode}` : ""}`}
+      }${advancedScreenShareEnabled ? ` sl-screen-${screenShareMode}` : ""}${
+        roomPreviewPreset ? ` sl-program-${roomPreviewPreset}` : ""
+      }`}
       token={token}
       serverUrl={serverUrl}
       connect={true}
@@ -1373,6 +1417,7 @@ function LiveKitShell({
             roomAccessToken={roomAccessToken}
             open={showLayoutPicker}
             onClose={onToggleLayoutPicker}
+            onActivePresetChange={setRoomPreviewPreset}
           />
         )}
         {isHost && !isViewer && (

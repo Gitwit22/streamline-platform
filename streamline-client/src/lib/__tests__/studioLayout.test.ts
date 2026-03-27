@@ -70,6 +70,7 @@ describe("shouldSuggestChange", () => {
   it("returns null for screen_share and floating presets", () => {
     expect(shouldSuggestChange("screen_share_speaker", 4)).toBeNull();
     expect(shouldSuggestChange("floating_guest", 4)).toBeNull();
+    expect(shouldSuggestChange("floating_host", 4)).toBeNull();
   });
 
   it("returns null when current preset has matching slots", () => {

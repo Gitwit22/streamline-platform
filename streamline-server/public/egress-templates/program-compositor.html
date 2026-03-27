@@ -36,7 +36,8 @@
   .slot video {
     width: 100%;
     height: 100%;
-    object-fit: cover;
+    object-fit: contain;
+    background: #000;
     display: block;
   }
 
@@ -197,8 +198,8 @@
       }
       if (participantCount === 2) {
         return [
-          { id: "slot1", x: 0, y: 0, width: 635, height: 720, zIndex: 1 },
-          { id: "slot2", x: 645, y: 0, width: 635, height: 720, zIndex: 1 },
+          { id: "slot1", x: 0, y: 0, width: 640, height: 720, zIndex: 1 },
+          { id: "slot2", x: 640, y: 0, width: 640, height: 720, zIndex: 1 },
         ];
       }
       if (participantCount === 3) {
