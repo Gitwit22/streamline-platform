@@ -8,6 +8,7 @@ import { apiFetch, apiFetchAuth, clearAuthStorage } from "../../lib/api";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
 import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
 import { usageLabels } from "../../lib/usageLabels";
+import { TourProvider, useTour } from "../../components/tour/TourProvider";
 
 
 type SavedEmbedSummary = {
@@ -588,6 +589,7 @@ export default function Join() {
       : 0;
 
   return (
+    <TourProvider tourName="dashboard">
     <div
       style={{
         minHeight: "100vh",
@@ -661,6 +663,7 @@ export default function Join() {
           >
             {/* Usage Stats */}
             <div
+              data-tour="usage-meter"
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -952,6 +955,8 @@ export default function Join() {
                   🛠 Admin Dashboard
                 </button>
               )}
+
+              <HelpButton />
             </div>
 
               
@@ -1295,6 +1300,7 @@ export default function Join() {
             {/* SUBMIT BUTTON */}
             <button
               type="submit"
+              data-tour="create-room-btn"
               style={{
                 width: "100%",
                 padding: "16px",
@@ -1519,5 +1525,44 @@ export default function Join() {
         }
       `}</style>
     </div>
+    </TourProvider>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/*  Help button (restart tour)                                        */
+/* ------------------------------------------------------------------ */
+
+function HelpButton() {
+  const { restartTour } = useTour();
+
+  return (
+    <button
+      data-tour="help-button"
+      onClick={restartTour}
+      title="Restart guided tour"
+      style={{
+        fontSize: "13px",
+        padding: "8px 16px",
+        background: "rgba(255,255,255,0.05)",
+        border: "1px solid rgba(255,255,255,0.2)",
+        borderRadius: "8px",
+        color: "#fff",
+        cursor: "pointer",
+        fontWeight: 600,
+        whiteSpace: "nowrap",
+        transition: "all 0.3s ease",
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.background = "rgba(255,255,255,0.1)";
+        e.currentTarget.style.borderColor = "rgba(59,130,246,0.6)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = "rgba(255,255,255,0.05)";
+        e.currentTarget.style.borderColor = "rgba(255,255,255,0.2)";
+      }}
+    >
+      ❓ Help
+    </button>
   );
 }
