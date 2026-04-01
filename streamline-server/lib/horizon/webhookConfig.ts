@@ -8,6 +8,7 @@
  *   HORIZON_WEBHOOK_TIMEOUT  — request timeout in ms      (default: 5000)
  *   HORIZON_WEBHOOK_RETRIES  — max retries on transient failures (default: 2)
  */
+import { timingSafeEqual } from "node:crypto";
 
 const DEFAULT_CHAT_EVENT_URL = "http://10.0.0.27:3000/api/streamline/chat-event";
 const DEFAULT_VOICE_EVENT_URL = "http://10.0.0.27:3000/api/streamline/voice-event";
@@ -40,13 +41,17 @@ export function getHorizonWebhookConfig(): HorizonWebhookConfig {
   return cfg;
 }
 
-/** Verify an inbound bearer token against the configured webhook secret. */
+/** Verify an inbound bearer token against the configured webhook secret.
+ *  Uses constant-time comparison to prevent timing attacks. */
 export function verifyHorizonSecret(bearerToken: string | undefined): boolean {
   const secret = getHorizonWebhookConfig().webhookSecret;
   if (!secret) return true; // no secret configured → allow (internal network trust)
   if (!bearerToken) return false;
   const raw = bearerToken.startsWith("Bearer ") ? bearerToken.slice(7) : bearerToken;
-  return raw === secret;
+  const a = Buffer.from(raw);
+  const b = Buffer.from(secret);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 /* ── helpers ──────────────────────────────────────────────────────────── */
