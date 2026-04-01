@@ -28,6 +28,7 @@ const ALL_PRESET_IDS = [
   "four_grid",
   "screen_share_speaker",
   "floating_guest",
+  "floating_host",
 ] as const;
 
 type StudioLayoutPresetId = (typeof ALL_PRESET_IDS)[number];
@@ -56,6 +57,7 @@ const PRESETS_SLOT_COUNT: Record<StudioLayoutPresetId, number> = {
   four_grid: 4,
   screen_share_speaker: 2,
   floating_guest: 2,
+  floating_host: 2,
 };
 
 function shouldSuggestChange(
@@ -64,7 +66,11 @@ function shouldSuggestChange(
 ): StudioLayoutPresetId | null {
   const suggestion = suggestPreset(participantCount);
   if (currentPresetId === "custom" || currentPresetId === null) return null;
-  if (currentPresetId === "screen_share_speaker" || currentPresetId === "floating_guest") return null;
+  if (
+    currentPresetId === "screen_share_speaker" ||
+    currentPresetId === "floating_guest" ||
+    currentPresetId === "floating_host"
+  ) return null;
   const count = PRESETS_SLOT_COUNT[currentPresetId];
   if (count !== undefined && count >= participantCount) return null;
   return suggestion === currentPresetId ? null : suggestion;
@@ -221,6 +227,7 @@ test("shouldSuggestChange returns null for custom layouts", () => {
 test("shouldSuggestChange returns null for screen_share and floating presets", () => {
   assert.equal(shouldSuggestChange("screen_share_speaker", 4), null);
   assert.equal(shouldSuggestChange("floating_guest", 4), null);
+  assert.equal(shouldSuggestChange("floating_host", 4), null);
 });
 
 test("shouldSuggestChange returns null when current preset already fits", () => {

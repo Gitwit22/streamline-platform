@@ -1,8 +1,8 @@
 import { computeEffectiveFeatureAccess } from "./effectiveFeatureAccess";
 
 export const usageLabels = {
-  inRoomMinutes: "In-room minutes",
-  broadcastMinutes: "Streaming minutes",
+  inRoomMinutes: "Room minutes",
+  broadcastMinutes: "Broadcast minutes",
   recordingMinutes: "Recording minutes",
 } as const;
 

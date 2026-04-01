@@ -171,7 +171,7 @@ button:focus-visible {
   .sl-layout [data-lk-layout] > * video {
     width: 100% !important;
     height: 100% !important;
-    object-fit: cover;
+    object-fit: contain;
   }
 
   /* Screen share spans both columns */
@@ -196,6 +196,55 @@ button:focus-visible {
 
 /* Desktop: allow LiveKit to control screen-share tile visuals; no extra overlay */
 @media (min-width: 769px) {
+}
+
+/* Show the full shared screen instead of cropping edges. */
+.sl-layout [data-lk-layout] [data-lk-source="screen_share"] video {
+  object-fit: contain !important;
+  background: #000;
+}
+
+/* Optional in-room preview sync for key 2-person broadcast presets. */
+.sl-layout.sl-program-side_by_side [data-lk-layout] {
+  display: grid !important;
+  grid-template-columns: 1fr 1fr !important;
+  gap: 0 !important;
+}
+
+.sl-layout.sl-program-two_up_split [data-lk-layout] {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) !important;
+  gap: 20px !important;
+  padding: 20px !important;
+}
+
+.sl-layout.sl-program-floating_guest [data-lk-layout],
+.sl-layout.sl-program-floating_host [data-lk-layout] {
+  position: relative !important;
+  display: block !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.sl-layout.sl-program-floating_guest [data-lk-layout] > *:first-child,
+.sl-layout.sl-program-floating_host [data-lk-layout] > *:first-child {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.sl-layout.sl-program-floating_guest [data-lk-layout] > *:nth-child(2),
+.sl-layout.sl-program-floating_host [data-lk-layout] > *:nth-child(2) {
+  position: absolute !important;
+  right: 16px !important;
+  bottom: 16px !important;
+  width: min(22vw, 320px) !important;
+  height: min(16vw, 230px) !important;
+  z-index: 3 !important;
+  border-radius: 10px !important;
+  overflow: hidden !important;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45) !important;
 }
 
 /* ======================================

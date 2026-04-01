@@ -957,14 +957,36 @@ function LayoutPickerPanel({
   roomAccessToken,
   open,
   onClose,
+  onActivePresetChange,
 }: {
   roomId: string;
   roomAccessToken: string;
   open: boolean;
   onClose: () => void;
+  onActivePresetChange?: (presetId: StudioLayoutPresetId | null) => void;
 }) {
+  const { localParticipant } = useLocalParticipant();
   const participants = useParticipants();
-  const participantCount = participants.length;
+  const participantIdentities = useMemo(
+    () => participants.map((p) => p.identity).filter((id): id is string => !!id),
+    [participants],
+  );
+  const orderedIdentities = useMemo(() => {
+    const seen = new Set<string>();
+    const ids: string[] = [];
+    const localIdentity = localParticipant?.identity;
+    if (localIdentity) {
+      seen.add(localIdentity);
+      ids.push(localIdentity);
+    }
+    for (const id of participantIdentities) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      ids.push(id);
+    }
+    return ids;
+  }, [localParticipant?.identity, participantIdentities]);
+  const participantCount = orderedIdentities.length;
 
   const [activePreset, setActivePreset] = useState<StudioLayoutPresetId | null>(null);
   const [programState, setProgramState] = useState<ProgramState>(DEFAULT_PROGRAM_STATE);
@@ -980,13 +1002,15 @@ function LayoutPickerPanel({
         const data = await apiGetProgramState(roomId, roomAccessToken);
         if (!cancelled && data.programState) {
           setProgramState(data.programState);
-          setActivePreset(data.programState.programLayout as StudioLayoutPresetId | null);
+          const loadedPreset = data.programState.programLayout as StudioLayoutPresetId | null;
+          setActivePreset(loadedPreset);
+          onActivePresetChange?.(loadedPreset);
         }
       } catch { /* keep defaults */ }
       finally { if (!cancelled) setLoaded(true); }
     })();
     return () => { cancelled = true; };
-  }, [roomId, roomAccessToken]);
+  }, [roomId, roomAccessToken, onActivePresetChange]);
 
   // Auto-suggest when participant count changes
   useEffect(() => {
@@ -1000,7 +1024,7 @@ function LayoutPickerPanel({
     if (activePreset === null || activePreset === undefined) {
       applyPreset(suggested);
     } else {
-      const currentSlots = getPresetSlots(activePreset);
+      const currentSlots = getPresetSlots(activePreset, participantCount);
       if (currentSlots.length !== participantCount) {
         applyPreset(suggested);
       }
@@ -1009,12 +1033,29 @@ function LayoutPickerPanel({
   }, [participantCount, loaded]);
 
   const applyPreset = async (presetId: StudioLayoutPresetId) => {
-    const slots = getPresetSlots(presetId);
-    const identities = participants
-      .slice(0, slots.length)
-      .map((p) => p.identity);
+    const slots = getPresetSlots(presetId, participantCount);
+    const hostIdentity = localParticipant?.identity ?? null;
+    const guestIdentities = orderedIdentities.filter((id) => id !== hostIdentity);
+
+    let identities: string[] = orderedIdentities;
+    if (presetId === "floating_guest" || presetId === "host_large_guest_small") {
+      identities = [
+        ...(hostIdentity ? [hostIdentity] : []),
+        ...guestIdentities,
+      ];
+    } else if (presetId === "floating_host") {
+      const primaryGuest = guestIdentities[0] ?? hostIdentity;
+      identities = [
+        ...(primaryGuest ? [primaryGuest] : []),
+        ...(hostIdentity ? [hostIdentity] : []),
+        ...guestIdentities.slice(primaryGuest ? 1 : 0),
+      ];
+    }
+
+    identities = identities.slice(0, slots.length);
 
     setActivePreset(presetId);
+    onActivePresetChange?.(presetId);
     setSaving(true);
 
     const patch: Partial<ProgramState> = {
@@ -1083,7 +1124,9 @@ function LayoutPickerPanel({
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
         {PRESET_INFO.map((preset) => {
           const isActive = activePreset === preset.id;
-          const fits = preset.slotCount >= participantCount || participantCount === 0;
+          const supportsAdaptiveCount = preset.id === "four_grid";
+          const fits = supportsAdaptiveCount || preset.slotCount >= participantCount || participantCount === 0;
+          const shownSlotCount = supportsAdaptiveCount ? Math.max(4, participantCount) : preset.slotCount;
           return (
             <button
               key={preset.id}
@@ -1113,7 +1156,7 @@ function LayoutPickerPanel({
               <span style={{ fontSize: 20 }}>{preset.icon}</span>
               <span>{preset.label}</span>
               <span style={{ fontSize: 9, color: "#64748b" }}>
-                {preset.slotCount} slot{preset.slotCount !== 1 ? "s" : ""}
+                {shownSlotCount} slot{shownSlotCount !== 1 ? "s" : ""}
               </span>
             </button>
           );
@@ -1191,6 +1234,7 @@ function LiveKitShell({
   onToggleLayoutPicker,
 }: LiveKitShellProps) {
   const [guestStatus, setGuestStatus] = useState<GuestStatus>(null);
+  const [roomPreviewPreset, setRoomPreviewPreset] = useState<StudioLayoutPresetId | null>(null);
   const statusRef = useRef<GuestStatus>(null);
   const mediaRootRef = useRef<HTMLDivElement | null>(null);
 
@@ -1320,7 +1364,9 @@ function LiveKitShell({
         subjectToControls && !controlsAllowPublishAudio ? " sl-controls-no-audio" : ""
       }${subjectToControls && !controlsTileVisible ? " sl-controls-hide-self" : ""}${
         subjectToControls && !controlsAllowScreenShare ? " sl-controls-no-screen" : ""
-      }${advancedScreenShareEnabled ? ` sl-screen-${screenShareMode}` : ""}`}
+      }${advancedScreenShareEnabled ? ` sl-screen-${screenShareMode}` : ""}${
+        roomPreviewPreset ? ` sl-program-${roomPreviewPreset}` : ""
+      }`}
       token={token}
       serverUrl={serverUrl}
       connect={true}
@@ -1372,6 +1418,7 @@ function LiveKitShell({
             roomAccessToken={roomAccessToken}
             open={showLayoutPicker}
             onClose={onToggleLayoutPicker}
+            onActivePresetChange={setRoomPreviewPreset}
           />
         )}
         {isHost && !isViewer && (

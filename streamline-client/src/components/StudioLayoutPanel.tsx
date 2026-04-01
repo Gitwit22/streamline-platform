@@ -95,13 +95,13 @@ export default function StudioLayoutPanel({
           // No saved layout – seed from participant count
           const preset = suggestPreset(initialCount);
           setActivePresetId(preset);
-          setSlots(getPresetSlots(preset));
+          setSlots(getPresetSlots(preset, initialCount));
         }
       } catch {
         // API failure – seed locally
         const preset = suggestPreset(initialCount);
         setActivePresetId(preset);
-        setSlots(getPresetSlots(preset));
+        setSlots(getPresetSlots(preset, initialCount));
       } finally {
         if (!cancelled) setLoaded(true);
       }
@@ -113,7 +113,7 @@ export default function StudioLayoutPanel({
 
   const applyPreset = useCallback(
     async (presetId: StudioLayoutPresetId) => {
-      const newSlots = getPresetSlots(presetId);
+      const newSlots = getPresetSlots(presetId, participantCount);
       setActivePresetId(presetId);
       setSlots(newSlots);
       setEditMode(false);
@@ -135,7 +135,7 @@ export default function StudioLayoutPanel({
         setSaving(false);
       }
     },
-    [roomId, roomAccessToken, adjustMode, showToast, onProgramStateChange],
+    [roomId, roomAccessToken, adjustMode, showToast, onProgramStateChange, participantCount],
   );
 
   // -- auto-suggest when participant count changes -------------------------
@@ -336,6 +336,8 @@ export default function StudioLayoutPanel({
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
           {PRESET_INFO.map((p) => {
             const active = activePresetId === p.id;
+            const adaptive = p.id === "four_grid";
+            const shownSlotCount = adaptive ? Math.max(4, participantCount) : p.slotCount;
             return (
               <button
                 key={p.id}
@@ -349,7 +351,7 @@ export default function StudioLayoutPanel({
               >
                 <span style={{ fontSize: 18 }}>{p.icon}</span>
                 <span style={{ fontSize: 11, fontWeight: 600 }}>{p.label}</span>
-                <span style={{ fontSize: 10, color: "#94a3b8" }}>{p.slotCount} slot{p.slotCount > 1 ? "s" : ""}</span>
+                <span style={{ fontSize: 10, color: "#94a3b8" }}>{shownSlotCount} slot{shownSlotCount > 1 ? "s" : ""}</span>
               </button>
             );
           })}
