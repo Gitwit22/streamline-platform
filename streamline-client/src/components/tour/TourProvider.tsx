@@ -8,10 +8,11 @@ import { tourMap, type TourName } from "../../tours/streamlineTours";
 /* ------------------------------------------------------------------ */
 
 const storageKey = (name: TourName) => `tour-${name}`;
+const TOUR_DONE = "done";
 
 function isTourCompleted(name: TourName): boolean {
   try {
-    return localStorage.getItem(storageKey(name)) === "done";
+    return localStorage.getItem(storageKey(name)) === TOUR_DONE;
   } catch {
     return false;
   }
@@ -19,7 +20,7 @@ function isTourCompleted(name: TourName): boolean {
 
 function markTourCompleted(name: TourName): void {
   try {
-    localStorage.setItem(storageKey(name), "done");
+    localStorage.setItem(storageKey(name), TOUR_DONE);
   } catch {
     /* storage unavailable – silently ignore */
   }
