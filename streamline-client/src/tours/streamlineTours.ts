@@ -2,6 +2,12 @@ import type { Step } from "react-joyride";
 
 export const dashboardTour: Step[] = [
   {
+    target: "body",
+    content: "Tour started. Click Next to walk through the main controls.",
+    placement: "center",
+    disableBeacon: true,
+  },
+  {
     target: '[data-tour="create-room-btn"]',
     content: "Click here to create a new room.",
     placement: "bottom",
@@ -20,6 +26,12 @@ export const dashboardTour: Step[] = [
 ];
 
 export const studioTour: Step[] = [
+  {
+    target: "body",
+    content: "Tour started. Click Next to walk through the studio controls.",
+    placement: "center",
+    disableBeacon: true,
+  },
   {
     target: '[data-tour="end-room-button"]',
     content: "End the room when finished.",

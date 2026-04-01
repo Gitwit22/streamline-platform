@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useCallback } from "react";
+import React, { createContext, useContext, useState, useCallback, useEffect, useMemo } from "react";
 import { Joyride, STATUS, ACTIONS, EVENTS } from "react-joyride";
 import type { CallBackProps, Step } from "react-joyride";
 import { tourMap, type TourName } from "../../tours/streamlineTours";
@@ -100,11 +100,36 @@ export function TourProvider({ tourName, children }: TourProviderProps) {
   // Start automatically if tour hasn't been completed
   const [run, setRun] = useState(() => !isTourCompleted(tourName));
   const [stepIndex, setStepIndex] = useState(0);
+  const [showStartBanner, setShowStartBanner] = useState(false);
+
+  const activeSteps = useMemo(() => {
+    if (typeof document === "undefined") return steps;
+    return steps.filter((step) => {
+      if (typeof step.target !== "string") return true;
+      if (step.target === "body" || step.target === "html") return true;
+      return Boolean(document.querySelector(step.target));
+    });
+  }, [steps, run, stepIndex]);
+
+  useEffect(() => {
+    if (run && activeSteps.length === 0) {
+      setRun(false);
+      setStepIndex(0);
+    }
+  }, [run, activeSteps.length]);
+
+  useEffect(() => {
+    if (!showStartBanner) return;
+    const timeoutId = window.setTimeout(() => setShowStartBanner(false), 1800);
+    return () => window.clearTimeout(timeoutId);
+  }, [showStartBanner]);
 
   const restartTour = useCallback(() => {
     clearTourCompleted(tourName);
     setStepIndex(0);
-    setRun(true);
+    setShowStartBanner(true);
+    setRun(false);
+    window.requestAnimationFrame(() => setRun(true));
   }, [tourName]);
 
   const handleCallback = useCallback(
@@ -123,20 +148,54 @@ export function TourProvider({ tourName, children }: TourProviderProps) {
         return;
       }
 
-      // Normal step navigation
-      if (type === EVENTS.STEP_AFTER) {
-        setStepIndex(index + (action === ACTIONS.PREV ? -1 : 1));
+      // Controlled mode must advance both on STEP_AFTER and TARGET_NOT_FOUND.
+      if (type === EVENTS.STEP_AFTER || type === EVENTS.TARGET_NOT_FOUND) {
+        const nextIndex = index + (action === ACTIONS.PREV ? -1 : 1);
+        if (nextIndex < 0) {
+          setStepIndex(0);
+          return;
+        }
+
+        if (nextIndex >= activeSteps.length) {
+          markTourCompleted(tourName);
+          setRun(false);
+          setStepIndex(0);
+          return;
+        }
+
+        setStepIndex(nextIndex);
       }
     },
-    [tourName],
+    [tourName, activeSteps.length],
   );
 
   return (
     <TourContext.Provider value={{ restartTour, activeTour: tourName }}>
       {children}
-      {steps.length > 0 && (
+      {showStartBanner && (
+        <div
+          style={{
+            position: "fixed",
+            top: "20px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 11000,
+            padding: "10px 14px",
+            borderRadius: "10px",
+            border: "1px solid rgba(220, 38, 38, 0.55)",
+            background: "rgba(17, 24, 39, 0.95)",
+            color: "#f9fafb",
+            fontSize: "13px",
+            fontWeight: 600,
+            boxShadow: "0 10px 24px rgba(0, 0, 0, 0.35)",
+          }}
+        >
+          Guided tour started
+        </div>
+      )}
+      {activeSteps.length > 0 && (
         <Joyride
-          steps={steps}
+          steps={activeSteps}
           run={run}
           stepIndex={stepIndex}
           continuous
@@ -151,7 +210,7 @@ export function TourProvider({ tourName, children }: TourProviderProps) {
             next: "Next",
             skip: "Skip tour",
           }}
-          disableScrolling
+          scrollToFirstStep
         />
       )}
     </TourContext.Provider>
