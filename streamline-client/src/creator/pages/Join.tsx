@@ -7,6 +7,7 @@ import { useNavigate, useSearchParams,} from "react-router-dom";
 import { apiFetch, apiFetchAuth, clearAuthStorage } from "../../lib/api";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
 import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
+import { usageLabels } from "../../lib/usageLabels";
 
 
 type SavedEmbedSummary = {
@@ -678,7 +679,7 @@ export default function Join() {
                     marginBottom: "4px",
                   }}
                 >
-                  Streaming minutes
+                  {usageLabels.inRoomMinutes}
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                   <div style={{ fontSize: "18px", fontWeight: 700 }}>

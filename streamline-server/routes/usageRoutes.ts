@@ -59,7 +59,6 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
 
   // If missing, do NOT fail—return a zeroed shape so the UI is stable.
   const legacyUsage = userData.usage || {};
-  const legacyHours = Number(legacyUsage.hoursStreamedThisMonth || 0);
 
   // ── Billing-period boundary check ──
   // If billing.currentPeriodEnd is in the past the billing period has rolled
@@ -70,10 +69,9 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
   const billingPeriodExpired =
     typeof billingPeriodEnd === "number" && billingPeriodEnd > 0 && billingPeriodEnd < Date.now();
 
-  const legacyParticipantMinutes = billingPeriodExpired
-    ? 0
-    : Math.max(0, Math.round(legacyHours * 60));
-
+  // Legacy hours are no longer used to seed new monthly docs (the monthKey
+  // change is the period reset), but the billing-period-expired flag is still
+  // used by the lazy-reset path for existing docs.
   let usageMonthly: any;
   if (usageSnap.exists) {
     usageMonthly = usageSnap.data() as any;
@@ -119,18 +117,23 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
       );
     }
   } else {
+    // New monthly doc: the monthKey change IS the period reset, so
+    // currentPeriod counters must start at 0. Legacy hoursStreamedThisMonth
+    // is not reliably reset at month boundaries and must NOT seed the new
+    // period (this was the bug that caused in-room minutes to carry over
+    // while broadcast minutes correctly started at 0).
     const legacyYtdMinutes = Math.max(0, Math.round(Number(legacyUsage.ytdHours || 0) * 60));
     usageMonthly = {
       uid,
       monthKey,
       usage: {
-        participantMinutes: legacyParticipantMinutes,
+        participantMinutes: 0,
         transcodeMinutes: 0,
         hlsMinutes: 0,
         minutes: {
           live: {
-            currentPeriod: legacyParticipantMinutes,
-            lifetime: legacyParticipantMinutes,
+            currentPeriod: 0,
+            lifetime: legacyYtdMinutes,
           },
           recording: {
             currentPeriod: 0,
