@@ -30,6 +30,7 @@ import AudioMixerModal from "../components/AudioMixerModal";
 import MixerBridge from "../components/MixerBridge";
 import ScreenShareRouter, { type ScreenShareRouteMode } from "../components/ScreenShareRouter";
 import ScreenSharePopout from "../components/ScreenSharePopout";
+import { TourProvider } from "../../components/tour/TourProvider";
 import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
 import { useHlsStatus } from "../hooks/useHlsStatus";
@@ -4164,6 +4165,7 @@ function RoomPage() {
           <button
             onClick={handleEndStream}
             disabled={recordingStatus === "stopping"}
+            data-tour="end-room-button"
             className="px-4 py-2 bg-red-600 hover:bg-red-700 rounded font-semibold text-sm transition disabled:opacity-50"
           >
             {recordingStatus === "stopping" ? "⏳ Exiting..." : "Exit Room"}
@@ -4174,6 +4176,7 @@ function RoomPage() {
           {canInviteLinks && (
             <button
               onClick={() => setInviteModalOpen(true)}
+              data-tour="invite-button"
               style={{
                 fontSize: '0.75rem',
                 padding: '0.5rem 0.75rem',
@@ -4303,6 +4306,7 @@ function RoomPage() {
             {isHost && featureAccess.advancedScreenShare.allowed && (
               <button
                 onClick={() => setShowScreenShareRouter(v => !v)}
+                data-tour="screen-share"
                 style={{
                   fontSize: '0.75rem',
                   padding: '0.5rem 0.75rem',
@@ -4327,6 +4331,7 @@ function RoomPage() {
             {isHost && (
               <button
                 onClick={() => setShowLayoutPicker(v => !v)}
+                data-tour="layout-controls"
                 style={{
                   fontSize: '0.75rem',
                   padding: '0.5rem 0.75rem',
@@ -4365,6 +4370,7 @@ function RoomPage() {
 
                 <button
                   onClick={() => setShowStreamSetup(v => !v)}
+                  data-tour="go-live-button"
                   style={{
                     padding: '0.375rem 0.75rem',
                     fontSize: '0.75rem',
@@ -4681,4 +4687,10 @@ function RoomPage() {
   );
 };
 
-export default RoomPage;
+export default function RoomPageWithTour() {
+  return (
+    <TourProvider tourName="studio">
+      <RoomPage />
+    </TourProvider>
+  );
+}
