@@ -184,7 +184,14 @@ export async function forwardBinary(
  */
 export function forwardChatEvent(payload: Record<string, unknown>, requestId?: string): void {
   const cfg = getHorizonWebhookConfig();
-  forwardJson(cfg.chatEventUrl, payload, { requestId }).catch((err) => {
+  logger.debug({ requestId, url: cfg.chatEventUrl, roomId: payload.roomId }, "[monitoring:outbound] dispatching chat event to Horizon");
+  forwardJson(cfg.chatEventUrl, payload, { requestId }).then((result) => {
+    if (result.ok) {
+      logger.debug({ requestId, elapsedMs: result.elapsedMs }, "[monitoring:outbound] chat event delivered to Horizon");
+    } else {
+      logger.warn({ requestId, status: result.status, reason: result.reason, elapsedMs: result.elapsedMs }, "[monitoring:outbound] chat event delivery to Horizon failed");
+    }
+  }).catch((err) => {
     logger.error({ err, requestId }, "forwardChatEvent unexpected error");
   });
 }
@@ -198,7 +205,14 @@ export function forwardVoiceEvent(
   meta: { contentType: string; roomId: string; userId: string; username: string; requestId?: string },
 ): void {
   const cfg = getHorizonWebhookConfig();
-  forwardBinary(cfg.voiceEventUrl, audio, meta).catch((err) => {
+  logger.debug({ requestId: meta.requestId, url: cfg.voiceEventUrl, roomId: meta.roomId }, "[monitoring:outbound] dispatching voice event to Horizon");
+  forwardBinary(cfg.voiceEventUrl, audio, meta).then((result) => {
+    if (result.ok) {
+      logger.debug({ requestId: meta.requestId, elapsedMs: result.elapsedMs }, "[monitoring:outbound] voice event delivered to Horizon");
+    } else {
+      logger.warn({ requestId: meta.requestId, status: result.status, reason: result.reason, elapsedMs: result.elapsedMs }, "[monitoring:outbound] voice event delivery to Horizon failed");
+    }
+  }).catch((err) => {
     logger.error({ err, requestId: meta.requestId }, "forwardVoiceEvent unexpected error");
   });
 }
