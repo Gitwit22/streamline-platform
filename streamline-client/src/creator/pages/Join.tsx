@@ -678,7 +678,7 @@ export default function Join() {
                     marginBottom: "4px",
                   }}
                 >
-                  Streaming minutes
+                  Room minutes
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
                   <div style={{ fontSize: "18px", fontWeight: 700 }}>
