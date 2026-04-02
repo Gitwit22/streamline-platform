@@ -15,10 +15,6 @@ function cleanupTourArtifacts(): void {
     node.style.removeProperty("touch-action");
     node.style.removeProperty("cursor");
   });
-
-  document.querySelectorAll(".react-joyride__overlay, .react-joyride__spotlight, .react-joyride__tooltip, .react-joyride__beacon, [data-test-id='overlay'], [data-test-id='spotlight']").forEach((node) => {
-    node.parentElement?.removeChild(node);
-  });
 }
 
 /* ------------------------------------------------------------------ */
