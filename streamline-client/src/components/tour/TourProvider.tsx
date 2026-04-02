@@ -3,35 +3,22 @@ import { Joyride, STATUS, ACTIONS, EVENTS } from "react-joyride";
 import type { CallBackProps, Step } from "react-joyride";
 import { tourMap, type TourName } from "../../tours/streamlineTours";
 
-/* ------------------------------------------------------------------ */
-/*  localStorage helpers                                              */
-/* ------------------------------------------------------------------ */
+function cleanupTourArtifacts(): void {
+  if (typeof document === "undefined") return;
 
-const storageKey = (name: TourName) => `tour-${name}`;
-const TOUR_DONE = "done";
+  const root = document.documentElement;
+  const body = document.body;
 
-function isTourCompleted(name: TourName): boolean {
-  try {
-    return localStorage.getItem(storageKey(name)) === TOUR_DONE;
-  } catch {
-    return false;
-  }
-}
+  [root, body].forEach((node) => {
+    node.style.removeProperty("overflow");
+    node.style.removeProperty("pointer-events");
+    node.style.removeProperty("touch-action");
+    node.style.removeProperty("cursor");
+  });
 
-function markTourCompleted(name: TourName): void {
-  try {
-    localStorage.setItem(storageKey(name), TOUR_DONE);
-  } catch {
-    /* storage unavailable – silently ignore */
-  }
-}
-
-function clearTourCompleted(name: TourName): void {
-  try {
-    localStorage.removeItem(storageKey(name));
-  } catch {
-    /* storage unavailable */
-  }
+  document.querySelectorAll(".react-joyride__overlay, .react-joyride__spotlight, .react-joyride__tooltip, .react-joyride__beacon, [data-test-id='overlay'], [data-test-id='spotlight']").forEach((node) => {
+    node.parentElement?.removeChild(node);
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -39,14 +26,26 @@ function clearTourCompleted(name: TourName): void {
 /* ------------------------------------------------------------------ */
 
 interface TourContextValue {
-  /** Restart the tour for the current page */
-  restartTour: () => void;
+  /** Start the tour for the current page */
+  startTour: () => void;
+  /** Stop the tour and clear any blocking overlay state */
+  stopTour: () => void;
+  /** Whether the help dropdown is open */
+  helpMenuOpen: boolean;
+  /** Whether the tour is currently active */
+  tourActive: boolean;
+  /** Toggle the help dropdown */
+  setHelpMenuOpen: React.Dispatch<React.SetStateAction<boolean>>;
   /** The name of the active tour (if any) */
   activeTour: TourName | null;
 }
 
 const TourContext = createContext<TourContextValue>({
-  restartTour: () => {},
+  startTour: () => {},
+  stopTour: () => {},
+  helpMenuOpen: false,
+  tourActive: false,
+  setHelpMenuOpen: () => {},
   activeTour: null,
 });
 
@@ -97,10 +96,10 @@ interface TourProviderProps {
 export function TourProvider({ tourName, children }: TourProviderProps) {
   const steps: Step[] = tourMap[tourName] ?? [];
 
-  // Start automatically if tour hasn't been completed
-  const [run, setRun] = useState(() => !isTourCompleted(tourName));
+  const [helpMenuOpen, setHelpMenuOpen] = useState(false);
+  const [tourActive, setTourActive] = useState(false);
   const [stepIndex, setStepIndex] = useState(0);
-  const [showStartBanner, setShowStartBanner] = useState(false);
+  const [tourSessionKey, setTourSessionKey] = useState(0);
 
   const activeSteps = useMemo(() => {
     if (typeof document === "undefined") return steps;
@@ -109,46 +108,58 @@ export function TourProvider({ tourName, children }: TourProviderProps) {
       if (step.target === "body" || step.target === "html") return true;
       return Boolean(document.querySelector(step.target));
     });
-  }, [steps, run, stepIndex]);
+  }, [steps, tourActive, stepIndex]);
 
   useEffect(() => {
-    if (run && activeSteps.length === 0) {
-      setRun(false);
+    if (tourActive && activeSteps.length === 0) {
+      setTourActive(false);
       setStepIndex(0);
+      cleanupTourArtifacts();
     }
-  }, [run, activeSteps.length]);
+  }, [tourActive, activeSteps.length]);
 
   useEffect(() => {
-    if (!showStartBanner) return;
-    const timeoutId = window.setTimeout(() => setShowStartBanner(false), 1800);
-    return () => window.clearTimeout(timeoutId);
-  }, [showStartBanner]);
+    if (!tourActive) {
+      cleanupTourArtifacts();
+    }
+  }, [tourActive]);
 
-  const restartTour = useCallback(() => {
-    clearTourCompleted(tourName);
+  useEffect(() => {
+    return () => {
+      cleanupTourArtifacts();
+    };
+  }, []);
+
+  const stopTour = useCallback(() => {
+    setTourActive(false);
     setStepIndex(0);
-    setShowStartBanner(true);
-    setRun(false);
-    window.requestAnimationFrame(() => setRun(true));
-  }, [tourName]);
+    cleanupTourArtifacts();
+    window.requestAnimationFrame(() => cleanupTourArtifacts());
+  }, []);
+
+  const startTour = useCallback(() => {
+    cleanupTourArtifacts();
+    setHelpMenuOpen(false);
+    setStepIndex(0);
+    setTourSessionKey((current) => current + 1);
+    setTourActive(false);
+    window.requestAnimationFrame(() => setTourActive(true));
+  }, []);
 
   const handleCallback = useCallback(
     (data: CallBackProps) => {
       const { status, action, type, index } = data;
 
-      // Tour finished or skipped
       if (
         status === STATUS.FINISHED ||
         status === STATUS.SKIPPED ||
-        (action === ACTIONS.CLOSE && type === EVENTS.STEP_AFTER)
+        action === ACTIONS.CLOSE ||
+        type === "tour:end"
       ) {
-        markTourCompleted(tourName);
-        setRun(false);
-        setStepIndex(0);
+        stopTour();
         return;
       }
 
-      // Controlled mode must advance both on STEP_AFTER and TARGET_NOT_FOUND.
       if (type === EVENTS.STEP_AFTER || type === EVENTS.TARGET_NOT_FOUND) {
         const nextIndex = index + (action === ACTIONS.PREV ? -1 : 1);
         if (nextIndex < 0) {
@@ -157,52 +168,40 @@ export function TourProvider({ tourName, children }: TourProviderProps) {
         }
 
         if (nextIndex >= activeSteps.length) {
-          markTourCompleted(tourName);
-          setRun(false);
-          setStepIndex(0);
+          stopTour();
           return;
         }
 
         setStepIndex(nextIndex);
       }
     },
-    [tourName, activeSteps.length],
+    [activeSteps.length, stopTour],
   );
 
   return (
-    <TourContext.Provider value={{ restartTour, activeTour: tourName }}>
+    <TourContext.Provider
+      value={{
+        startTour,
+        stopTour,
+        helpMenuOpen,
+        tourActive,
+        setHelpMenuOpen,
+        activeTour: tourActive ? tourName : null,
+      }}
+    >
       {children}
-      {showStartBanner && (
-        <div
-          style={{
-            position: "fixed",
-            top: "20px",
-            left: "50%",
-            transform: "translateX(-50%)",
-            zIndex: 11000,
-            padding: "10px 14px",
-            borderRadius: "10px",
-            border: "1px solid rgba(220, 38, 38, 0.55)",
-            background: "rgba(17, 24, 39, 0.95)",
-            color: "#f9fafb",
-            fontSize: "13px",
-            fontWeight: 600,
-            boxShadow: "0 10px 24px rgba(0, 0, 0, 0.35)",
-          }}
-        >
-          Guided tour started
-        </div>
-      )}
       {activeSteps.length > 0 && (
         <Joyride
+          key={`${tourName}-${tourSessionKey}`}
           steps={activeSteps}
-          run={run}
+          run={tourActive}
           stepIndex={stepIndex}
           continuous
           showSkipButton
           showProgress
           callback={handleCallback}
           styles={joyrideStyles}
+          disableScrolling={false}
           locale={{
             back: "Back",
             close: "Close",

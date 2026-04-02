@@ -30,7 +30,7 @@ import AudioMixerModal from "../components/AudioMixerModal";
 import MixerBridge from "../components/MixerBridge";
 import ScreenShareRouter, { type ScreenShareRouteMode } from "../components/ScreenShareRouter";
 import ScreenSharePopout from "../components/ScreenSharePopout";
-import { TourProvider } from "../../components/tour/TourProvider";
+import { TourProvider, useTour } from "../../components/tour/TourProvider";
 import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
 import { useHlsStatus } from "../hooks/useHlsStatus";
@@ -4453,6 +4453,8 @@ function RoomPage() {
                 Setup Stream
               </button>
             )}
+
+            <StudioHelpButton />
           </div>
         )}
       </div>
@@ -4739,5 +4741,132 @@ export default function RoomPageWithTour() {
     <TourProvider tourName="studio">
       <RoomPage />
     </TourProvider>
+  );
+}
+
+function StudioHelpButton() {
+  const nav = useNavigate();
+  const {
+    startTour,
+    helpMenuOpen,
+    setHelpMenuOpen,
+    tourActive,
+  } = useTour();
+  const helpMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!helpMenuOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!helpMenuOpen) return;
+      if (helpMenuRef.current?.contains(event.target as Node)) return;
+      setHelpMenuOpen(false);
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setHelpMenuOpen(false);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [helpMenuOpen, setHelpMenuOpen]);
+
+  const menuButtonStyle = {
+    fontSize: '0.75rem',
+    padding: '0.5rem 0.75rem',
+    borderRadius: '0.375rem',
+    cursor: 'pointer',
+    transition: 'all 0.3s ease',
+    fontWeight: '500',
+  } as const;
+
+  return (
+    <>
+      <div ref={helpMenuRef} data-tour="help-button" style={{ position: 'relative' }}>
+        <button
+          type="button"
+          onClick={() => setHelpMenuOpen((open) => !open)}
+          aria-haspopup="menu"
+          aria-expanded={helpMenuOpen}
+          style={{
+            ...menuButtonStyle,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            border: helpMenuOpen
+              ? '1px solid rgba(59, 130, 246, 0.7)'
+              : '1px solid rgba(255, 255, 255, 0.4)',
+            background: helpMenuOpen
+              ? 'rgba(255, 255, 255, 0.12)'
+              : 'rgba(255, 255, 255, 0.05)',
+            color: '#ffffff',
+          }}
+        >
+          <span>Help</span>
+          <span style={{ fontSize: '0.65rem', opacity: 0.75 }}>{helpMenuOpen ? '▲' : '▼'}</span>
+        </button>
+
+        {helpMenuOpen && (
+          <div
+            role="menu"
+            aria-label="Help actions"
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 10px)',
+              right: 0,
+              width: '200px',
+              padding: '0.5rem',
+              borderRadius: '0.75rem',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              background: 'rgba(15, 23, 42, 0.96)',
+              backdropFilter: 'blur(20px)',
+              boxShadow: '0 18px 48px rgba(0,0,0,0.38)',
+              zIndex: 1200,
+            }}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => startTour()}
+              style={{
+                ...menuButtonStyle,
+                width: '100%',
+                textAlign: 'left',
+                border: '1px solid rgba(220, 38, 38, 0.28)',
+                background: tourActive ? 'rgba(220, 38, 38, 0.18)' : 'rgba(220, 38, 38, 0.1)',
+                color: '#fca5a5',
+                marginBottom: '0.5rem',
+              }}
+            >
+              Start Tour
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setHelpMenuOpen(false);
+                nav("/help", { state: { returnTo: "/room", originLabel: "Studio" } });
+              }}
+              style={{
+                ...menuButtonStyle,
+                width: '100%',
+                textAlign: 'left',
+                border: '1px solid rgba(255, 255, 255, 0.12)',
+                background: 'rgba(255, 255, 255, 0.04)',
+                color: '#e5e7eb',
+              }}
+            >
+              Help Guide
+            </button>
+          </div>
+        )}
+      </div>
+    </>
   );
 }

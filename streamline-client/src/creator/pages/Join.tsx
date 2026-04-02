@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useAuthMe, isAuthUserInTestMode } from "../../hooks/useAuthMe";
 import { PLAN_IDS, PlanId, isPlanId } from "../../lib/planIds";
 import { API_BASE } from "../../lib/apiBase";
@@ -1530,39 +1530,148 @@ export default function Join() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Help button (restart tour)                                        */
+/*  Help button and guide                                              */
 /* ------------------------------------------------------------------ */
 
 function HelpButton() {
-  const { restartTour } = useTour();
+  const nav = useNavigate();
+  const {
+    startTour,
+    helpMenuOpen,
+    setHelpMenuOpen,
+    tourActive,
+  } = useTour();
+  const helpMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!helpMenuOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!helpMenuOpen) return;
+      if (helpMenuRef.current?.contains(event.target as Node)) return;
+      setHelpMenuOpen(false);
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setHelpMenuOpen(false);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [helpMenuOpen, setHelpMenuOpen]);
+
+  const baseButtonStyle = {
+    fontSize: "13px",
+    padding: "8px 16px",
+    borderRadius: "8px",
+    cursor: "pointer",
+    fontWeight: 600,
+    whiteSpace: "nowrap",
+    transition: "all 0.3s ease",
+  } as const;
 
   return (
-    <button
-      data-tour="help-button"
-      onClick={restartTour}
-      title="Restart guided tour"
-      style={{
-        fontSize: "13px",
-        padding: "8px 16px",
-        background: "rgba(255,255,255,0.05)",
-        border: "1px solid rgba(255,255,255,0.2)",
-        borderRadius: "8px",
-        color: "#fff",
-        cursor: "pointer",
-        fontWeight: 600,
-        whiteSpace: "nowrap",
-        transition: "all 0.3s ease",
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.background = "rgba(255,255,255,0.1)";
-        e.currentTarget.style.borderColor = "rgba(59,130,246,0.6)";
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = "rgba(255,255,255,0.05)";
-        e.currentTarget.style.borderColor = "rgba(255,255,255,0.2)";
-      }}
-    >
-      ❓ Help
-    </button>
+    <>
+      <div
+        ref={helpMenuRef}
+        data-tour="help-button"
+        style={{ position: "relative" }}
+      >
+        <button
+          type="button"
+          onClick={() => setHelpMenuOpen((open) => !open)}
+          aria-haspopup="menu"
+          aria-expanded={helpMenuOpen}
+          aria-label="Open help menu"
+          title="Open help menu"
+          style={{
+            ...baseButtonStyle,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "8px",
+            background: helpMenuOpen ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.05)",
+            border: helpMenuOpen
+              ? "1px solid rgba(59,130,246,0.6)"
+              : "1px solid rgba(255,255,255,0.2)",
+            color: "#fff",
+            boxShadow: helpMenuOpen ? "0 10px 24px rgba(15, 23, 42, 0.32)" : "none",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "rgba(255,255,255,0.1)";
+            e.currentTarget.style.borderColor = "rgba(59,130,246,0.6)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = helpMenuOpen ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.05)";
+            e.currentTarget.style.borderColor = helpMenuOpen
+              ? "rgba(59,130,246,0.6)"
+              : "rgba(255,255,255,0.2)";
+          }}
+        >
+          <span>❓ Help</span>
+          <span style={{ fontSize: "11px", opacity: 0.75 }}>{helpMenuOpen ? "▲" : "▼"}</span>
+        </button>
+
+        {helpMenuOpen && (
+          <div
+            role="menu"
+            aria-label="Help actions"
+            style={{
+              position: "absolute",
+              top: "calc(100% + 10px)",
+              right: 0,
+              width: "200px",
+              padding: "8px",
+              borderRadius: "12px",
+              border: "1px solid rgba(255,255,255,0.12)",
+              background: "rgba(15, 23, 42, 0.96)",
+              backdropFilter: "blur(20px)",
+              boxShadow: "0 18px 48px rgba(0,0,0,0.38)",
+              zIndex: 80,
+            }}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => startTour()}
+              style={{
+                width: "100%",
+                textAlign: "left",
+                ...baseButtonStyle,
+                background: tourActive ? "rgba(220, 38, 38, 0.18)" : "rgba(220, 38, 38, 0.1)",
+                border: "1px solid rgba(220, 38, 38, 0.28)",
+                color: "#fca5a5",
+                marginBottom: "8px",
+              }}
+            >
+              Start Tour
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setHelpMenuOpen(false);
+                nav("/help", { state: { returnTo: "/join", originLabel: "Join" } });
+              }}
+              style={{
+                width: "100%",
+                textAlign: "left",
+                ...baseButtonStyle,
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.12)",
+                color: "#e5e7eb",
+              }}
+            >
+              Help Guide
+            </button>
+          </div>
+        )}
+      </div>
+    </>
   );
 }
