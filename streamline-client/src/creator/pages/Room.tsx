@@ -4966,24 +4966,141 @@ function StudioHelpButton() {
             </div>
 
             <div style={{ padding: '0.9rem 1rem 1rem 1rem', overflowY: 'auto', display: 'grid', gap: '0.75rem' }}>
+              <div style={{ border: '1px solid rgba(245, 158, 11, 0.28)', background: 'rgba(245, 158, 11, 0.1)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fcd34d', fontSize: '0.82rem' }}>PREPARE - Before Going Live</div>
+              </div>
+
               <div style={{ border: '1px solid rgba(248, 113, 113, 0.25)', background: 'rgba(220, 38, 38, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
-                <div style={{ fontWeight: 700, color: '#fecaca', fontSize: '0.85rem' }}>1. Start with layout + audio checks</div>
-                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
-                  Set your broadcast layout, then confirm microphone levels in the mixer before going live.
+                <div style={{ fontWeight: 700, color: '#fecaca', fontSize: '0.85rem' }}>1) Start with Layout + Audio Checks</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Select layout first (Grid, Speaker, Single view).</li>
+                  <li>Confirm every guest is visible.</li>
+                  <li>Open mixer and verify mic levels move cleanly.</li>
+                  <li>Confirm screen share audio is audible when used.</li>
+                  <li>Mute unused microphones.</li>
+                </ul>
+                <div style={{ marginTop: '0.45rem', color: '#fca5a5', fontSize: '0.76rem', fontWeight: 600 }}>
+                  Most broadcast issues start with bad audio. Check this first.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(192, 132, 252, 0.28)', background: 'rgba(147, 51, 234, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#e9d5ff', fontSize: '0.85rem' }}>2) Confirm Cameras and Names</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Cameras ON for visible guests.</li>
+                  <li>Names are correct and not duplicated.</li>
+                  <li>Background distractions are minimized.</li>
+                  <li>Focused participant is correct for highlight layouts.</li>
+                </ul>
+                <div style={{ marginTop: '0.45rem', color: '#ddd6fe', fontSize: '0.76rem' }}>
+                  Frozen guest tip: ask them to toggle camera OFF then ON.
                 </div>
               </div>
 
               <div style={{ border: '1px solid rgba(96, 165, 250, 0.25)', background: 'rgba(59, 130, 246, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
-                <div style={{ fontWeight: 700, color: '#bfdbfe', fontSize: '0.85rem' }}>2. Use Invite Links for guests</div>
-                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
-                  Send links from the top bar and confirm guests are visible before you start stream or recording.
-                </div>
+                <div style={{ fontWeight: 700, color: '#bfdbfe', fontSize: '0.85rem' }}>3) Use Invite Links for Guests</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Send invite links from top bar.</li>
+                  <li>Wait for camera connected, audio detected, and stable video.</li>
+                  <li>Do not go live until guests are fully connected.</li>
+                </ul>
+              </div>
+
+              <div style={{ border: '1px solid rgba(74, 222, 128, 0.3)', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#bbf7d0', fontSize: '0.82rem' }}>GO LIVE - Start the Broadcast</div>
               </div>
 
               <div style={{ border: '1px solid rgba(74, 222, 128, 0.25)', background: 'rgba(34, 197, 94, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
-                <div style={{ fontWeight: 700, color: '#bbf7d0', fontSize: '0.85rem' }}>3. Go live after preview looks right</div>
+                <div style={{ fontWeight: 700, color: '#bbf7d0', fontSize: '0.85rem' }}>4) Go Live After Preview Looks Right</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Destination status must show ready.</li>
+                  <li>Preview layout and audio levels must be stable.</li>
+                  <li>Screen share visible (if used).</li>
+                  <li>Then click Go Live.</li>
+                </ul>
+              </div>
+
+              <div style={{ border: '1px solid rgba(45, 212, 191, 0.25)', background: 'rgba(20, 184, 166, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#99f6e4', fontSize: '0.85rem' }}>5) Watch the Program Window</div>
                 <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
-                  Open stream setup, verify destination status, then start live. Keep this guide open as a checklist.
+                  Treat the program window as source of truth. If it looks wrong there, viewers see it wrong.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(56, 189, 248, 0.28)', background: 'rgba(14, 165, 233, 0.09)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#bae6fd', fontSize: '0.82rem' }}>DURING BROADCAST - Live Management</div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(56, 189, 248, 0.25)', background: 'rgba(14, 165, 233, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#bae6fd', fontSize: '0.85rem' }}>6) Switching Layouts Mid-Show</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  Change layout when guests change, focus shifts, or screen share starts. Pause briefly before switching to keep viewers oriented.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(167, 139, 250, 0.25)', background: 'rgba(139, 92, 246, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#ddd6fe', fontSize: '0.85rem' }}>7) Managing Guests</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Mute noisy guests quickly.</li>
+                  <li>Remove disconnected users.</li>
+                  <li>Adjust layout as participants change.</li>
+                  <li>If a guest drops, send a new invite link.</li>
+                </ul>
+              </div>
+
+              <div style={{ border: '1px solid rgba(244, 114, 182, 0.25)', background: 'rgba(236, 72, 153, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fbcfe8', fontSize: '0.85rem' }}>8) Screen Sharing Tips</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Close unnecessary windows before sharing.</li>
+                  <li>Select the correct tab/window and audio source.</li>
+                  <li>After sharing, verify visibility in program window.</li>
+                </ul>
+              </div>
+
+              <div style={{ border: '1px solid rgba(251, 146, 60, 0.3)', background: 'rgba(234, 88, 12, 0.1)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fdba74', fontSize: '0.82rem' }}>ENDING - Closing the Session</div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(251, 146, 60, 0.25)', background: 'rgba(234, 88, 12, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fdba74', fontSize: '0.85rem' }}>9) Ending Your Broadcast</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  Click Stop Broadcast, confirm shutdown, then wait for recording finalization. Do not close browser immediately.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(251, 191, 36, 0.25)', background: 'rgba(234, 179, 8, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fde68a', fontSize: '0.85rem' }}>10) Confirm Recording Saved</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Recording entry exists.</li>
+                  <li>Playback opens and works.</li>
+                  <li>File is saved correctly.</li>
+                  <li>If save fails, report immediately.</li>
+                </ul>
+              </div>
+
+              <div style={{ border: '1px solid rgba(239, 68, 68, 0.3)', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fca5a5', fontSize: '0.82rem' }}>Quick Trouble Fixes</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  No Audio: mic device + browser permissions + mixer levels, then refresh/rejoin.<br />
+                  Camera Missing: permission + correct device, then restart camera/refresh.<br />
+                  Screen Share Missing: confirm correct window/tab and restart share.<br />
+                  Black Output: verify layout + active camera + program preview, then switch layout once.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(94, 234, 212, 0.3)', background: 'rgba(13, 148, 136, 0.1)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#99f6e4', fontSize: '0.82rem' }}>Producer Workflow</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  Before: start room, add host, confirm layout, test audio, prep destinations.<br />
+                  During: monitor program feed, adjust layout, manage guests.<br />
+                  After: stop stream, confirm recording.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(125, 211, 252, 0.28)', background: 'rgba(2, 132, 199, 0.1)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#bae6fd', fontSize: '0.82rem' }}>Streaming Destinations Check</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  Before streaming, verify YouTube, Twitch, and Facebook connections are linked and status shows ready.
                 </div>
               </div>
 
