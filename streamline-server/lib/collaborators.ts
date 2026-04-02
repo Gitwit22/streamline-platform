@@ -105,13 +105,32 @@ export async function findUserByEmail(email: string): Promise<{ uid: string; dat
   if (!normalized) return null;
 
   const snap = await firestore.collection("users").where("email", "==", normalized).limit(1).get();
-  if (snap.empty) return null;
+  if (!snap.empty) {
+    const doc = snap.docs[0];
+    return {
+      uid: doc.id,
+      data: (doc.data() as Record<string, any>) || {},
+    };
+  }
 
-  const doc = snap.docs[0];
-  return {
-    uid: doc.id,
-    data: (doc.data() as Record<string, any>) || {},
-  };
+  try {
+    const authUser = await admin.auth().getUserByEmail(normalized);
+    if (!authUser?.uid) return null;
+
+    const userDoc = await firestore.collection("users").doc(authUser.uid).get();
+    const existingData = userDoc.exists ? ((userDoc.data() as Record<string, any>) || {}) : {};
+
+    return {
+      uid: authUser.uid,
+      data: {
+        ...existingData,
+        email: normalizeEmail(existingData.email || authUser.email || normalized),
+        displayName: existingData.displayName || authUser.displayName || null,
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 export async function getRelationshipById(id: string): Promise<{ id: string; data: CollaboratorRelationshipDoc } | null> {
