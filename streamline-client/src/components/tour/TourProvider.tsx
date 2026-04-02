@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useMemo } from "react";
-import { Joyride, STATUS, ACTIONS, EVENTS } from "react-joyride";
-import type { CallBackProps, Step } from "react-joyride";
+import { Joyride, STATUS, ACTIONS, EVENTS } from "../../lib/vendor/reactJoyride";
+import type { CallBackProps, Step } from "../../lib/vendor/reactJoyride";
 import { tourMap, type TourName } from "../../tours/streamlineTours";
 
 function cleanupTourArtifacts(): void {
@@ -154,7 +154,7 @@ export function TourProvider({ tourName, children }: TourProviderProps) {
         status === STATUS.FINISHED ||
         status === STATUS.SKIPPED ||
         action === ACTIONS.CLOSE ||
-        type === "tour:end"
+        type === EVENTS.TOUR_END
       ) {
         stopTour();
         return;
@@ -199,7 +199,7 @@ export function TourProvider({ tourName, children }: TourProviderProps) {
           continuous
           showSkipButton
           showProgress
-          callback={handleCallback}
+          onEvent={handleCallback}
           styles={joyrideStyles}
           disableScrolling={false}
           locale={{

@@ -50,6 +50,31 @@ export const DEFAULT_COLLABORATOR_PERMISSIONS: CollaboratorPermissions = {
   manageStreaming: true,
 };
 
+let cachedCollaboratorDelegationEnabled: boolean | null = null;
+let cachedCollaboratorDelegationEnabledAt = 0;
+const COLLABORATOR_FLAG_TTL_MS = 30_000;
+
+export async function getCollaboratorDelegationEnabled(): Promise<boolean> {
+  const now = Date.now();
+  if (
+    cachedCollaboratorDelegationEnabled !== null &&
+    now - cachedCollaboratorDelegationEnabledAt < COLLABORATOR_FLAG_TTL_MS
+  ) {
+    return cachedCollaboratorDelegationEnabled;
+  }
+
+  try {
+    const snap = await firestore.collection("featureFlags").doc("collaboratorDelegationEnabled").get();
+    const data = snap.exists ? ((snap.data() as any) || {}) : {};
+    cachedCollaboratorDelegationEnabled = data.enabled === true;
+  } catch {
+    cachedCollaboratorDelegationEnabled = false;
+  }
+
+  cachedCollaboratorDelegationEnabledAt = now;
+  return cachedCollaboratorDelegationEnabled;
+}
+
 function normalizeBoolean(value: any, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback;
 }
@@ -112,6 +137,19 @@ export async function resolveOwnerActingContext(req: any): Promise<OwnerActingCo
 
   const rawHeader = req?.headers?.["x-owner-context-uid"] ?? req?.headers?.["X-Owner-Context-Uid"];
   const requestedOwnerUid = String(rawHeader || req?.body?.actingOwnerUid || "").trim();
+
+  const delegationEnabled = await getCollaboratorDelegationEnabled();
+  if (!delegationEnabled) {
+    return {
+      actorUid,
+      ownerUid: actorUid,
+      isDelegated: false,
+      relationshipId: null,
+      ownerDisplayName: null,
+      ownerEmail: null,
+      permissions: null,
+    };
+  }
 
   if (!requestedOwnerUid || requestedOwnerUid === actorUid) {
     return {

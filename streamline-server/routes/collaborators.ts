@@ -5,6 +5,7 @@ import { firestore } from "../firebaseAdmin";
 import {
   DEFAULT_COLLABORATOR_PERMISSIONS,
   findUserByEmail,
+  getCollaboratorDelegationEnabled,
   getCollaboratorRelationshipId,
   getRelationshipById,
   normalizeCollaboratorPermissions,
@@ -12,6 +13,14 @@ import {
 } from "../lib/collaborators";
 
 const router = Router();
+
+router.use(async (_req, res, next) => {
+  const enabled = await getCollaboratorDelegationEnabled();
+  if (!enabled) {
+    return res.status(404).json({ error: "feature_not_found" });
+  }
+  return next();
+});
 
 function serializeRelationship(doc: { id: string; data: any }, viewerUid: string) {
   const data = doc.data || {};

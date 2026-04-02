@@ -15,6 +15,8 @@ export type PlatformFlags = {
   payPerViewEnabled?: boolean;
   /** Invisible host mode (opt-in, default disabled). */
   invisibleHostEnabled?: boolean;
+  /** Owner/collaborator delegated production mode (opt-in, default disabled). */
+  collaboratorDelegationEnabled?: boolean;
   [key: string]: any;
 };
 

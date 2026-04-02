@@ -174,6 +174,7 @@ export default function Join() {
   const [platformHlsEnabled, setPlatformHlsEnabled] = useState<boolean>(false);
   // Platform-level invisible host flag (opt-in, default disabled)
   const [platformInvisibleHostEnabled, setPlatformInvisibleHostEnabled] = useState<boolean>(false);
+  const [platformCollaboratorDelegationEnabled, setPlatformCollaboratorDelegationEnabled] = useState<boolean>(false);
 
   // Use /api/auth/me for admin/test-mode status
   const { user: authUser, loading: authLoading } = useAuthMe();
@@ -287,6 +288,11 @@ export default function Join() {
         if (typeof platformFlags.invisibleHostEnabled === "boolean") {
           setPlatformInvisibleHostEnabled(platformFlags.invisibleHostEnabled);
         }
+        if (typeof platformFlags.collaboratorDelegationEnabled === "boolean") {
+          setPlatformCollaboratorDelegationEnabled(platformFlags.collaboratorDelegationEnabled === true);
+        } else {
+          setPlatformCollaboratorDelegationEnabled(false);
+        }
       } catch {
         if (!cancelled) setPlatformHlsEnabled(true);
       }
@@ -356,7 +362,7 @@ export default function Join() {
   }, [isParticipant]);
 
   useEffect(() => {
-    if (isParticipant) return;
+    if (isParticipant || !platformCollaboratorDelegationEnabled) return;
     let cancelled = false;
 
     (async () => {
@@ -391,7 +397,15 @@ export default function Join() {
     return () => {
       cancelled = true;
     };
-  }, [isParticipant]);
+  }, [isParticipant, platformCollaboratorDelegationEnabled]);
+
+  useEffect(() => {
+    if (platformCollaboratorDelegationEnabled) return;
+    setCollaboratorsData(null);
+    setCollaboratorsError(null);
+    setSelectedOwnerUid(null);
+    clearSelectedOwnerContext();
+  }, [platformCollaboratorDelegationEnabled]);
 
   const linkedOwners = collaboratorsData?.linkedOwners || [];
   const selectedOwner = linkedOwners.find((item) => item.ownerUid === selectedOwnerUid) || null;
@@ -1187,7 +1201,7 @@ export default function Join() {
             </div>
 
             {/* ROOM NAME (hosts only; participants never edit this) */}
-            {!isParticipant && !searchParams.get("room") && (
+            {!isParticipant && !searchParams.get("room") && platformCollaboratorDelegationEnabled && (
               <>
                 {(linkedOwners.length > 0 || collaboratorsLoading || collaboratorsError) && (
                   <div style={{ marginBottom: "24px" }}>

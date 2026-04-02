@@ -283,6 +283,7 @@ export default function SettingsBilling() {
   const [platformRecordingEnabled, setPlatformRecordingEnabled] = useState<boolean>(true);
   const [platformMonetizationEnabled, setPlatformMonetizationEnabled] = useState<boolean>(false);
   const [platformPayPerViewEnabled, setPlatformPayPerViewEnabled] = useState<boolean>(false);
+  const [platformCollaboratorDelegationEnabled, setPlatformCollaboratorDelegationEnabled] = useState<boolean>(false);
 
   // Track which room is currently selected in the HLS tab so we can show per-room monetization toggles
   const [hlsSelectedRoomId, setHlsSelectedRoomId] = useState<string | null>(null);
@@ -409,10 +410,13 @@ export default function SettingsBilling() {
     if (activeTab === "hls" && platformHlsSettingsTabEnabled === false) {
       setActiveTab("plan");
     }
-  }, [activeTab, platformTranscodeEnabled, platformHlsSettingsTabEnabled]);
+    if (activeTab === "collaborators" && platformCollaboratorDelegationEnabled === false) {
+      setActiveTab("plan");
+    }
+  }, [activeTab, platformTranscodeEnabled, platformHlsSettingsTabEnabled, platformCollaboratorDelegationEnabled]);
 
   useEffect(() => {
-    if (activeTab !== "collaborators") return;
+    if (activeTab !== "collaborators" || !platformCollaboratorDelegationEnabled) return;
     let cancelled = false;
 
     (async () => {
@@ -437,7 +441,7 @@ export default function SettingsBilling() {
     return () => {
       cancelled = true;
     };
-  }, [activeTab]);
+  }, [activeTab, platformCollaboratorDelegationEnabled]);
 
   const runCollaboratorAction = async (path: string, body?: Record<string, any>, onDone?: () => void) => {
     setCollaboratorActionLoading(path);
@@ -750,6 +754,7 @@ export default function SettingsBilling() {
           // Monetization/PPV flags default to disabled (opt-in).
           setPlatformMonetizationEnabled(pf.monetizationEnabled === true);
           setPlatformPayPerViewEnabled(pf.payPerViewEnabled === true);
+          setPlatformCollaboratorDelegationEnabled(pf.collaboratorDelegationEnabled === true);
           const hlsTabFlag =
             typeof pf.hlsSettingsTab === "boolean"
               ? pf.hlsSettingsTab
@@ -764,6 +769,7 @@ export default function SettingsBilling() {
           setPlatformHlsSettingsTabEnabled(true);
           setPlatformMonetizationEnabled(false);
           setPlatformPayPerViewEnabled(false);
+          setPlatformCollaboratorDelegationEnabled(false);
         }
 
         if (Array.isArray(data.plans) && data.plans.length) {
@@ -2058,20 +2064,24 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
             </button>
           )}
           {platformHlsSettingsTabEnabled !== false && (
-            <button
-              type="button"
-              style={activeTab === "hls" ? { ...S.tab, ...S.tabActive } : S.tab}
-              onClick={() => setActiveTab("hls")}
-            >
-              HLS
-            </button>
-            <button
-              type="button"
-              style={activeTab === "collaborators" ? { ...S.tab, ...S.tabActive } : S.tab}
-              onClick={() => setActiveTab("collaborators")}
-            >
-              Collaborators
-            </button>
+            <>
+              <button
+                type="button"
+                style={activeTab === "hls" ? { ...S.tab, ...S.tabActive } : S.tab}
+                onClick={() => setActiveTab("hls")}
+              >
+                HLS
+              </button>
+              {platformCollaboratorDelegationEnabled && (
+                <button
+                  type="button"
+                  style={activeTab === "collaborators" ? { ...S.tab, ...S.tabActive } : S.tab}
+                  onClick={() => setActiveTab("collaborators")}
+                >
+                  Collaborators
+                </button>
+              )}
+            </>
           )}
           <button
             type="button"
@@ -2275,7 +2285,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                       </div>
                     ))}
 
-                    {activeTab === "collaborators" && (
+                    {activeTab === "collaborators" && platformCollaboratorDelegationEnabled && (
                       <div style={{ ...S.card, opacity: isBlocked ? 0.6 : 1 }}>
                         <div style={S.cardHeader}>
                           <h2 style={S.cardTitle}>🤝 Collaborators</h2>

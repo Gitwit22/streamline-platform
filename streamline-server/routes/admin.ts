@@ -1186,6 +1186,7 @@ router.get("/features", async (req, res) => {
       { name: "advancedScreenShareEnabled", enabled: false },
       { name: "mixedAudioPublishEnabled", enabled: false },
       { name: "invisibleHostEnabled", enabled: false },
+      { name: "collaboratorDelegationEnabled", enabled: false },
     ];
 
     const byName = new Map<string, any>();
