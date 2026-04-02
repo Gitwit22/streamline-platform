@@ -1,37 +1,20 @@
-import React, { createContext, useContext, useState, useCallback } from "react";
-import { Joyride, STATUS, ACTIONS, EVENTS } from "react-joyride";
-import type { CallBackProps, Step } from "react-joyride";
+import React, { createContext, useContext, useState, useCallback, useEffect, useMemo } from "react";
+import { Joyride, STATUS, ACTIONS, EVENTS } from "../../lib/vendor/reactJoyride";
+import type { CallBackProps, Step } from "../../lib/vendor/reactJoyride";
 import { tourMap, type TourName } from "../../tours/streamlineTours";
 
-/* ------------------------------------------------------------------ */
-/*  localStorage helpers                                              */
-/* ------------------------------------------------------------------ */
+function cleanupTourArtifacts(): void {
+  if (typeof document === "undefined") return;
 
-const storageKey = (name: TourName) => `tour-${name}`;
-const TOUR_DONE = "done";
+  const root = document.documentElement;
+  const body = document.body;
 
-function isTourCompleted(name: TourName): boolean {
-  try {
-    return localStorage.getItem(storageKey(name)) === TOUR_DONE;
-  } catch {
-    return false;
-  }
-}
-
-function markTourCompleted(name: TourName): void {
-  try {
-    localStorage.setItem(storageKey(name), TOUR_DONE);
-  } catch {
-    /* storage unavailable – silently ignore */
-  }
-}
-
-function clearTourCompleted(name: TourName): void {
-  try {
-    localStorage.removeItem(storageKey(name));
-  } catch {
-    /* storage unavailable */
-  }
+  [root, body].forEach((node) => {
+    node.style.removeProperty("overflow");
+    node.style.removeProperty("pointer-events");
+    node.style.removeProperty("touch-action");
+    node.style.removeProperty("cursor");
+  });
 }
 
 /* ------------------------------------------------------------------ */
@@ -39,14 +22,26 @@ function clearTourCompleted(name: TourName): void {
 /* ------------------------------------------------------------------ */
 
 interface TourContextValue {
-  /** Restart the tour for the current page */
-  restartTour: () => void;
+  /** Start the tour for the current page */
+  startTour: () => void;
+  /** Stop the tour and clear any blocking overlay state */
+  stopTour: () => void;
+  /** Whether the help dropdown is open */
+  helpMenuOpen: boolean;
+  /** Whether the tour is currently active */
+  tourActive: boolean;
+  /** Toggle the help dropdown */
+  setHelpMenuOpen: React.Dispatch<React.SetStateAction<boolean>>;
   /** The name of the active tour (if any) */
   activeTour: TourName | null;
 }
 
 const TourContext = createContext<TourContextValue>({
-  restartTour: () => {},
+  startTour: () => {},
+  stopTour: () => {},
+  helpMenuOpen: false,
+  tourActive: false,
+  setHelpMenuOpen: () => {},
   activeTour: null,
 });
 
@@ -97,53 +92,112 @@ interface TourProviderProps {
 export function TourProvider({ tourName, children }: TourProviderProps) {
   const steps: Step[] = tourMap[tourName] ?? [];
 
-  // Start automatically if tour hasn't been completed
-  const [run, setRun] = useState(() => !isTourCompleted(tourName));
+  const [helpMenuOpen, setHelpMenuOpen] = useState(false);
+  const [tourActive, setTourActive] = useState(false);
   const [stepIndex, setStepIndex] = useState(0);
+  const [tourSessionKey, setTourSessionKey] = useState(0);
 
-  const restartTour = useCallback(() => {
-    clearTourCompleted(tourName);
+  const activeSteps = useMemo(() => {
+    if (typeof document === "undefined") return steps;
+    return steps.filter((step) => {
+      if (typeof step.target !== "string") return true;
+      if (step.target === "body" || step.target === "html") return true;
+      return Boolean(document.querySelector(step.target));
+    });
+  }, [steps, tourActive, stepIndex]);
+
+  useEffect(() => {
+    if (tourActive && activeSteps.length === 0) {
+      setTourActive(false);
+      setStepIndex(0);
+      cleanupTourArtifacts();
+    }
+  }, [tourActive, activeSteps.length]);
+
+  useEffect(() => {
+    if (!tourActive) {
+      cleanupTourArtifacts();
+    }
+  }, [tourActive]);
+
+  useEffect(() => {
+    return () => {
+      cleanupTourArtifacts();
+    };
+  }, []);
+
+  const stopTour = useCallback(() => {
+    setTourActive(false);
     setStepIndex(0);
-    setRun(true);
-  }, [tourName]);
+    cleanupTourArtifacts();
+    window.requestAnimationFrame(() => cleanupTourArtifacts());
+  }, []);
+
+  const startTour = useCallback(() => {
+    cleanupTourArtifacts();
+    setHelpMenuOpen(false);
+    setStepIndex(0);
+    setTourSessionKey((current) => current + 1);
+    setTourActive(false);
+    window.requestAnimationFrame(() => setTourActive(true));
+  }, []);
 
   const handleCallback = useCallback(
     (data: CallBackProps) => {
       const { status, action, type, index } = data;
 
-      // Tour finished or skipped
       if (
         status === STATUS.FINISHED ||
         status === STATUS.SKIPPED ||
-        (action === ACTIONS.CLOSE && type === EVENTS.STEP_AFTER)
+        action === ACTIONS.CLOSE ||
+        type === EVENTS.TOUR_END
       ) {
-        markTourCompleted(tourName);
-        setRun(false);
-        setStepIndex(0);
+        stopTour();
         return;
       }
 
-      // Normal step navigation
-      if (type === EVENTS.STEP_AFTER) {
-        setStepIndex(index + (action === ACTIONS.PREV ? -1 : 1));
+      if (type === EVENTS.STEP_AFTER || type === EVENTS.TARGET_NOT_FOUND) {
+        const nextIndex = index + (action === ACTIONS.PREV ? -1 : 1);
+        if (nextIndex < 0) {
+          setStepIndex(0);
+          return;
+        }
+
+        if (nextIndex >= activeSteps.length) {
+          stopTour();
+          return;
+        }
+
+        setStepIndex(nextIndex);
       }
     },
-    [tourName],
+    [activeSteps.length, stopTour],
   );
 
   return (
-    <TourContext.Provider value={{ restartTour, activeTour: tourName }}>
+    <TourContext.Provider
+      value={{
+        startTour,
+        stopTour,
+        helpMenuOpen,
+        tourActive,
+        setHelpMenuOpen,
+        activeTour: tourActive ? tourName : null,
+      }}
+    >
       {children}
-      {steps.length > 0 && (
+      {activeSteps.length > 0 && (
         <Joyride
-          steps={steps}
-          run={run}
+          key={`${tourName}-${tourSessionKey}`}
+          steps={activeSteps}
+          run={tourActive}
           stepIndex={stepIndex}
           continuous
           showSkipButton
           showProgress
-          callback={handleCallback}
+          onEvent={handleCallback}
           styles={joyrideStyles}
+          disableScrolling={false}
           locale={{
             back: "Back",
             close: "Close",
@@ -151,7 +205,7 @@ export function TourProvider({ tourName, children }: TourProviderProps) {
             next: "Next",
             skip: "Skip tour",
           }}
-          disableScrolling
+          scrollToFirstStep
         />
       )}
     </TourContext.Provider>

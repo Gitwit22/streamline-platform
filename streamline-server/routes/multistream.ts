@@ -15,6 +15,7 @@ import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { evaluateUsageGate } from "../lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
 import { OUTPUT_FORMAT_DIMENSIONS } from "../lib/roomLayout";
+import { logDelegatedRoomAction } from "../lib/collaborators";
 
 // livekit-server-sdk is ESM; use dynamic import so CommonJS builds work on Render
 let _lkMod: any | null = null;
@@ -93,6 +94,9 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
 
     const roomId = canonicalRoomId;
     const roomName = livekitRoomName;
+    const roomSnap = await firestore.collection("rooms").doc(roomId).get();
+    const roomDoc = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+    const ownerUid = String(roomDoc.ownerId || uid).trim() || uid;
 
     try {
       await assertRoomPerm(req as any, roomId, "canDestinations");
@@ -103,7 +107,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       throw err;
     }
 
-    const streamDocId = `${uid}_${roomId}`; // canonical
+    const streamDocId = `${ownerUid}_${roomId}`; // canonical
     const ref = firestore.collection("activeStreams").doc(streamDocId);
 
     // if your client sends individual keys or destination IDs:
@@ -157,11 +161,11 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
     
 
     // Load user (optional, but fine)
-    const userSnap = await firestore.collection("users").doc(uid).get();
+    const userSnap = await firestore.collection("users").doc(ownerUid).get();
     if (!userSnap.exists) return res.status(401).json({ error: "User not found" });
-    const planId = await getUserPlanId(uid);
+    const planId = await getUserPlanId(ownerUid);
 
-    const featureAccess = await canAccessFeature((req as any).account || uid, "multistream");
+    const featureAccess = await canAccessFeature(ownerUid, "multistream");
     if (!featureAccess.allowed) {
       return res.status(403).json({
         error: (featureAccess.code as any) || LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
@@ -171,9 +175,9 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
 
     // Monthly usage gate: block non-overage plans; allow Pro and log totals.
     try {
-      const entitlements = await getEffectiveEntitlements(uid);
+      const entitlements = await getEffectiveEntitlements(ownerUid);
       const monthKey = getCurrentMonthKey();
-      const usageDocId = `${uid}_${monthKey}`;
+      const usageDocId = `${ownerUid}_${monthKey}`;
       const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
       const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
       const usage = existing.usage || {};
@@ -198,7 +202,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
 
       if (decision.shouldLogOverages && decision.overageTotals) {
         await upsertUsageMonthlyOverageTotals({
-          uid,
+          uid: ownerUid,
           monthKey,
           totals: decision.overageTotals,
         });
@@ -213,7 +217,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
     const encodingOptions = toEncodingOptions(preset, "stream");
 
     // Destination cap enforcement (plan-based)
-    const maxDestinations = await getPlanLimit(uid, "maxDestinations");
+    const maxDestinations = await getPlanLimit(ownerUid, "maxDestinations");
     if (maxDestinations !== undefined && maxDestinations > 0 && destIds.length > maxDestinations) {
       // Canonicalize: use a local constant for now, or add to LIMIT_ERRORS if desired
       const DESTINATION_LIMIT_EXCEEDED = "destination_limit_exceeded";
@@ -483,7 +487,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       // Save to Firestore only after success
       await ref.set(
         {
-          uid,
+          uid: ownerUid,
           roomId,
           roomName,
           youtubeStreamKey: youtubeStreamKey || null,
@@ -529,7 +533,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
             .set(
               {
                 egressId: String(row.id),
-                uid,
+                uid: ownerUid,
                 roomId,
                 roomName,
                 kind: "multistream",
@@ -544,6 +548,16 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         }
       } catch (e) {
         console.warn("[multistream:start] failed to write egressSessions", (e as any)?.message || e);
+      }
+
+      if (ownerUid !== uid) {
+        await logDelegatedRoomAction({
+          actedByUid: uid,
+          ownerUid,
+          roomId,
+          action: "multistream_start",
+          metadata: { destinationCount: destIds.length },
+        }).catch(() => {});
       }
 
       // Ensure non-empty JSON body
@@ -582,6 +596,9 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
 
     const roomId = canonicalRoomId;
     const roomName = livekitRoomName;
+    const roomSnap = await firestore.collection("rooms").doc(roomId).get();
+    const roomDoc = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+    const ownerUid = String(roomDoc.ownerId || uid).trim() || uid;
 
     try {
       await assertRoomPerm(req as any, roomId, "canDestinations");
@@ -592,7 +609,7 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
       throw err;
     }
 
-    const streamDocId = `${uid}_${roomId}`;
+    const streamDocId = `${ownerUid}_${roomId}`;
     const ref = firestore.collection("activeStreams").doc(streamDocId);
     let doc = await ref.get();
     let egressId: string | null = null;
@@ -604,7 +621,7 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
       egressIds = (data as any)?.egressIds || null;
     } else {
       // Legacy fallback: older docs were keyed by uid_roomName
-      const legacyStreamDocId = `${uid}_${roomName}`;
+      const legacyStreamDocId = `${ownerUid}_${roomName}`;
       const legacyRef = firestore.collection("activeStreams").doc(legacyStreamDocId);
       const legacyDoc = await legacyRef.get();
       if (legacyDoc.exists) {
@@ -632,7 +649,7 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
       const candidate = querySnap.docs[0];
       const data = (candidate.data() || {}) as any;
 
-      const ownerUid = data.uid;
+      const activeUid = data.uid;
       const ownerRoomId = typeof data.roomId === "string" ? data.roomId.trim() : undefined;
       const ownerRoomName = typeof data.roomName === "string" ? data.roomName.trim() : undefined;
 
@@ -642,11 +659,11 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
           ? ownerRoomName === roomName
           : candidate.id === streamDocId;
 
-      if (ownerUid !== uid || !roomMatches) {
+      if (activeUid !== ownerUid || !roomMatches) {
         console.info("[multistream:stop] egressId owner/room mismatch; denying stop", {
-          uid,
+          uid: ownerUid,
           roomId,
-          activeUid: ownerUid,
+          activeUid,
           activeRoomName: ownerRoomName || null,
         });
         return res.status(404).json({ error: "No active multistream found for this egressId" });
@@ -714,7 +731,7 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
           if (billedMinutes <= 0) return;
 
           const monthKey = getCurrentMonthKey();
-          const usageRef = firestore.collection("usageMonthly").doc(`${uid}_${monthKey}`);
+          const usageRef = firestore.collection("usageMonthly").doc(`${ownerUid}_${monthKey}`);
           const usageSnap = await tx.get(usageRef);
           const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
           const usage = existing.usage || {};
@@ -733,7 +750,7 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
           tx.set(
             usageRef,
             {
-              uid,
+              uid: ownerUid,
               monthKey,
               usage: {
                 ...usage,
@@ -787,6 +804,14 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
     const anyHardError = stopResults.some((r) => r.status === "error");
     if (!anyHardError) {
       await foundRef.delete();
+      if (ownerUid !== uid) {
+        await logDelegatedRoomAction({
+          actedByUid: uid,
+          ownerUid,
+          roomId,
+          action: "multistream_stop",
+        }).catch(() => {});
+      }
       return res.json({ success: true, status: "stopped", results: stopResults });
     }
 

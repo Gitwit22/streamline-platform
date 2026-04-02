@@ -8,6 +8,7 @@ import webhookRouter from "./routes/webhook";
 import authRoutes from "./routes/auth";
 import adminRoutes from './routes/admin';
 import accountRoutes from "./routes/account";
+import collaboratorsRoutes from "./routes/collaborators";
 import { requireAuth } from "./middleware/requireAuth";
 import billingRoutes from "./routes/billing";
 import recordingsRoutes from "./routes/recordings";
@@ -69,6 +70,7 @@ import alertRoutes from "./routes/alertRoutes";
 import skillsIntegrationRoutes from "./routes/skillsIntegration";
 import supportActionsRoutes from "./routes/supportActions";
 import supportTicketsRoutes from "./routes/supportTickets";
+import supportPublicRoutes from "./routes/supportPublic";
 import { attachHorizonWs } from "./routes/horizonWs";
 import horizonRoomHooks from "./routes/horizon/roomHooks";
 import horizonBotApi from "./routes/horizon/botApi";
@@ -160,6 +162,8 @@ const corsOptions: CorsOptions = {
     // Explicitly allow both typical header casings to satisfy browser preflight checks.
     "x-room-access-token",
     "X-Room-Access-Token",
+    "x-owner-context-uid",
+    "X-Owner-Context-Uid",
     // Legacy invite JWT (join links) used for guest RTC join/status without auth.
     "x-invite-token",
     "X-Invite-Token",
@@ -209,6 +213,8 @@ app.use(
 
 app.use("/api/auth", authRoutes);
 app.use("/api/account", accountRoutes);
+app.use("/api/collaborators", collaboratorsRoutes);
+app.use("/api/support/tickets", supportPublicRoutes);
 
 // Admin routes
 app.use("/api/admin", adminRoutes);

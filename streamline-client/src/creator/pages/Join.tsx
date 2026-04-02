@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useAuthMe, isAuthUserInTestMode } from "../../hooks/useAuthMe";
 import { PLAN_IDS, PlanId, isPlanId } from "../../lib/planIds";
 import { API_BASE } from "../../lib/apiBase";
@@ -9,6 +9,13 @@ import { useFeatureAccess } from "../../hooks/useFeatureAccess";
 import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
 import { usageLabels } from "../../lib/usageLabels";
 import { TourProvider, useTour } from "../../components/tour/TourProvider";
+import {
+  clearSelectedOwnerContext,
+  getSelectedOwnerContext,
+  setSelectedOwnerContext,
+  type CollaboratorsPayload,
+  type LinkedOwnerAccount,
+} from "../../lib/producerDelegation";
 
 
 type SavedEmbedSummary = {
@@ -149,6 +156,11 @@ export default function Join() {
   const [savedEmbedsLoading, setSavedEmbedsLoading] = useState(false);
   const [savedEmbedsError, setSavedEmbedsError] = useState<string | null>(null);
   const [selectedSavedEmbedId, setSelectedSavedEmbedId] = useState<string>("");
+  const [collaboratorsData, setCollaboratorsData] = useState<CollaboratorsPayload | null>(null);
+  const [collaboratorsLoading, setCollaboratorsLoading] = useState(false);
+  const [collaboratorsError, setCollaboratorsError] = useState<string | null>(null);
+  const [collaboratorActionId, setCollaboratorActionId] = useState<string | null>(null);
+  const [selectedOwnerUid, setSelectedOwnerUid] = useState<string | null>(() => getSelectedOwnerContext().ownerUid);
 
   const [joinMode, setJoinMode] = useState<"new" | "saved">("new");
 
@@ -162,6 +174,7 @@ export default function Join() {
   const [platformHlsEnabled, setPlatformHlsEnabled] = useState<boolean>(false);
   // Platform-level invisible host flag (opt-in, default disabled)
   const [platformInvisibleHostEnabled, setPlatformInvisibleHostEnabled] = useState<boolean>(false);
+  const [platformCollaboratorDelegationEnabled, setPlatformCollaboratorDelegationEnabled] = useState<boolean>(false);
 
   // Use /api/auth/me for admin/test-mode status
   const { user: authUser, loading: authLoading } = useAuthMe();
@@ -275,6 +288,11 @@ export default function Join() {
         if (typeof platformFlags.invisibleHostEnabled === "boolean") {
           setPlatformInvisibleHostEnabled(platformFlags.invisibleHostEnabled);
         }
+        if (typeof platformFlags.collaboratorDelegationEnabled === "boolean") {
+          setPlatformCollaboratorDelegationEnabled(platformFlags.collaboratorDelegationEnabled === true);
+        } else {
+          setPlatformCollaboratorDelegationEnabled(false);
+        }
       } catch {
         if (!cancelled) setPlatformHlsEnabled(true);
       }
@@ -342,6 +360,78 @@ export default function Join() {
       cancelled = true;
     };
   }, [isParticipant]);
+
+  useEffect(() => {
+    if (isParticipant || !platformCollaboratorDelegationEnabled) return;
+    let cancelled = false;
+
+    (async () => {
+      setCollaboratorsLoading(true);
+      setCollaboratorsError(null);
+      try {
+        const res = await apiFetchAuth(`${API_BASE}/api/collaborators/me`, { method: "GET" }, { allowNonOk: true });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(payload?.error || "Failed to load collaborators");
+        }
+        if (cancelled) return;
+        const next = (payload || null) as CollaboratorsPayload | null;
+        setCollaboratorsData(next);
+
+        const stored = getSelectedOwnerContext();
+        const stillLinked = (next?.linkedOwners || []).some((item) => item.ownerUid === stored.ownerUid);
+        if (stored.ownerUid && !stillLinked) {
+          clearSelectedOwnerContext();
+          setSelectedOwnerUid(null);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setCollaboratorsError(err?.message || "Failed to load collaborators");
+          setCollaboratorsData(null);
+        }
+      } finally {
+        if (!cancelled) setCollaboratorsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isParticipant, platformCollaboratorDelegationEnabled]);
+
+  useEffect(() => {
+    if (platformCollaboratorDelegationEnabled) return;
+    setCollaboratorsData(null);
+    setCollaboratorsError(null);
+    setSelectedOwnerUid(null);
+    clearSelectedOwnerContext();
+  }, [platformCollaboratorDelegationEnabled]);
+
+  const linkedOwners = collaboratorsData?.linkedOwners || [];
+  const selectedOwner = linkedOwners.find((item) => item.ownerUid === selectedOwnerUid) || null;
+
+  async function handleCollaboratorInviteAction(relationshipId: string, action: "accept" | "decline") {
+    setCollaboratorActionId(relationshipId);
+    try {
+      const res = await apiFetchAuth(`${API_BASE}/api/collaborators/${encodeURIComponent(relationshipId)}/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      }, { allowNonOk: true });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(payload?.error || `Failed to ${action} invite`);
+      }
+      const reload = await apiFetchAuth(`${API_BASE}/api/collaborators/me`, { method: "GET" }, { allowNonOk: true });
+      const next = await reload.json().catch(() => null);
+      if (reload.ok) {
+        setCollaboratorsData((next || null) as CollaboratorsPayload | null);
+      }
+    } catch (err: any) {
+      alert(err?.message || `Failed to ${action} invite`);
+    } finally {
+      setCollaboratorActionId(null);
+    }
+  }
 
   useEffect(() => {
     if (isParticipant) return; // never override invite room
@@ -486,7 +576,10 @@ export default function Join() {
 
         const res = await apiFetchAuth(`${API_BASE}/api/rooms/create`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            ...(selectedOwnerUid ? { "x-owner-context-uid": selectedOwnerUid } : {}),
+          },
           body: JSON.stringify({
             livekitRoomName: roomLabel,
             roomType: "rtc",
@@ -527,6 +620,16 @@ export default function Join() {
           localStorage.setItem("sl_presence_mode", hostPresenceMode);
         } else {
           localStorage.removeItem("sl_presence_mode");
+        }
+
+        if (selectedOwnerUid && selectedOwner) {
+          setSelectedOwnerContext({
+            ownerUid: selectedOwner.ownerUid,
+            ownerDisplayName: selectedOwner.ownerDisplayName,
+            ownerEmail: selectedOwner.ownerEmail,
+          });
+        } else {
+          clearSelectedOwnerContext();
         }
 
         nav(`/room/${encodeURIComponent(roomId)}`, {
@@ -1098,6 +1201,137 @@ export default function Join() {
             </div>
 
             {/* ROOM NAME (hosts only; participants never edit this) */}
+            {!isParticipant && !searchParams.get("room") && platformCollaboratorDelegationEnabled && (
+              <>
+                {(linkedOwners.length > 0 || collaboratorsLoading || collaboratorsError) && (
+                  <div style={{ marginBottom: "24px" }}>
+                    <label
+                      style={{
+                        display: "block",
+                        fontSize: "13px",
+                        fontWeight: 500,
+                        color: "#9ca3af",
+                        marginBottom: "8px",
+                      }}
+                    >
+                      Produce for
+                    </label>
+                    <select
+                      value={selectedOwnerUid || ""}
+                      onChange={(e) => {
+                        const nextUid = e.target.value || null;
+                        setSelectedOwnerUid(nextUid);
+                        const nextOwner = linkedOwners.find((item) => item.ownerUid === nextUid) || null;
+                        if (nextOwner) {
+                          setSelectedOwnerContext({
+                            ownerUid: nextOwner.ownerUid,
+                            ownerDisplayName: nextOwner.ownerDisplayName,
+                            ownerEmail: nextOwner.ownerEmail,
+                          });
+                        } else {
+                          clearSelectedOwnerContext();
+                        }
+                      }}
+                      disabled={collaboratorsLoading}
+                      style={{
+                        width: "100%",
+                        padding: "14px 16px",
+                        background: "rgba(0, 0, 0, 0.4)",
+                        border: "1px solid rgba(255, 255, 255, 0.1)",
+                        borderRadius: "12px",
+                        color: "#ffffff",
+                        fontSize: "15px",
+                        outline: "none",
+                      }}
+                    >
+                      <option value="">My account</option>
+                      {linkedOwners.map((owner) => (
+                        <option key={owner.ownerUid} value={owner.ownerUid}>
+                          {owner.ownerDisplayName || owner.ownerEmail || owner.ownerUid}
+                        </option>
+                      ))}
+                    </select>
+                    {selectedOwner && (
+                      <div style={{ marginTop: "8px", fontSize: "12px", color: "#fbbf24" }}>
+                        Producing with {selectedOwner.ownerDisplayName || selectedOwner.ownerEmail || "owner"}'s billing and plan context.
+                      </div>
+                    )}
+                    {collaboratorsError && (
+                      <div style={{ marginTop: "8px", fontSize: "12px", color: "#fecaca" }}>{collaboratorsError}</div>
+                    )}
+                  </div>
+                )}
+
+                {(collaboratorsData?.incoming || []).filter((item) => item.status === "pending").length > 0 && (
+                  <div
+                    style={{
+                      marginBottom: "24px",
+                      borderRadius: "16px",
+                      border: "1px solid rgba(251, 191, 36, 0.24)",
+                      background: "rgba(120, 53, 15, 0.22)",
+                      padding: "16px",
+                    }}
+                  >
+                    <div style={{ fontSize: "13px", fontWeight: 700, color: "#fde68a", marginBottom: "10px" }}>
+                      Pending collaborator invites
+                    </div>
+                    {(collaboratorsData?.incoming || []).filter((item) => item.status === "pending").map((invite) => (
+                      <div
+                        key={invite.id}
+                        style={{
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "space-between",
+                          gap: "12px",
+                          padding: "10px 0",
+                          borderTop: "1px solid rgba(255,255,255,0.08)",
+                        }}
+                      >
+                        <div>
+                          <div style={{ fontSize: "14px", color: "#fff" }}>{invite.counterpartyLabel}</div>
+                          <div style={{ fontSize: "12px", color: "#fcd34d" }}>Invite to produce on behalf of this account</div>
+                        </div>
+                        <div style={{ display: "flex", gap: "8px" }}>
+                          <button
+                            type="button"
+                            disabled={collaboratorActionId === invite.id}
+                            onClick={() => handleCollaboratorInviteAction(invite.id, "accept")}
+                            style={{
+                              padding: "8px 12px",
+                              borderRadius: "10px",
+                              border: "none",
+                              background: "#22c55e",
+                              color: "#08130d",
+                              fontWeight: 700,
+                              cursor: "pointer",
+                            }}
+                          >
+                            Accept
+                          </button>
+                          <button
+                            type="button"
+                            disabled={collaboratorActionId === invite.id}
+                            onClick={() => handleCollaboratorInviteAction(invite.id, "decline")}
+                            style={{
+                              padding: "8px 12px",
+                              borderRadius: "10px",
+                              border: "1px solid rgba(255,255,255,0.12)",
+                              background: "transparent",
+                              color: "#fff",
+                              fontWeight: 600,
+                              cursor: "pointer",
+                            }}
+                          >
+                            Decline
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+
             {!isParticipant && !searchParams.get("room") && (
               <div style={{ marginBottom: "24px" }}>
                 <label
@@ -1530,39 +1764,148 @@ export default function Join() {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Help button (restart tour)                                        */
+/*  Help button and guide                                              */
 /* ------------------------------------------------------------------ */
 
 function HelpButton() {
-  const { restartTour } = useTour();
+  const nav = useNavigate();
+  const {
+    startTour,
+    helpMenuOpen,
+    setHelpMenuOpen,
+    tourActive,
+  } = useTour();
+  const helpMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!helpMenuOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!helpMenuOpen) return;
+      if (helpMenuRef.current?.contains(event.target as Node)) return;
+      setHelpMenuOpen(false);
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setHelpMenuOpen(false);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [helpMenuOpen, setHelpMenuOpen]);
+
+  const baseButtonStyle = {
+    fontSize: "13px",
+    padding: "8px 16px",
+    borderRadius: "8px",
+    cursor: "pointer",
+    fontWeight: 600,
+    whiteSpace: "nowrap",
+    transition: "all 0.3s ease",
+  } as const;
 
   return (
-    <button
-      data-tour="help-button"
-      onClick={restartTour}
-      title="Restart guided tour"
-      style={{
-        fontSize: "13px",
-        padding: "8px 16px",
-        background: "rgba(255,255,255,0.05)",
-        border: "1px solid rgba(255,255,255,0.2)",
-        borderRadius: "8px",
-        color: "#fff",
-        cursor: "pointer",
-        fontWeight: 600,
-        whiteSpace: "nowrap",
-        transition: "all 0.3s ease",
-      }}
-      onMouseEnter={(e) => {
-        e.currentTarget.style.background = "rgba(255,255,255,0.1)";
-        e.currentTarget.style.borderColor = "rgba(59,130,246,0.6)";
-      }}
-      onMouseLeave={(e) => {
-        e.currentTarget.style.background = "rgba(255,255,255,0.05)";
-        e.currentTarget.style.borderColor = "rgba(255,255,255,0.2)";
-      }}
-    >
-      ❓ Help
-    </button>
+    <>
+      <div
+        ref={helpMenuRef}
+        data-tour="help-button"
+        style={{ position: "relative" }}
+      >
+        <button
+          type="button"
+          onClick={() => setHelpMenuOpen((open) => !open)}
+          aria-haspopup="menu"
+          aria-expanded={helpMenuOpen}
+          aria-label="Open help menu"
+          title="Open help menu"
+          style={{
+            ...baseButtonStyle,
+            display: "inline-flex",
+            alignItems: "center",
+            gap: "8px",
+            background: helpMenuOpen ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.05)",
+            border: helpMenuOpen
+              ? "1px solid rgba(59,130,246,0.6)"
+              : "1px solid rgba(255,255,255,0.2)",
+            color: "#fff",
+            boxShadow: helpMenuOpen ? "0 10px 24px rgba(15, 23, 42, 0.32)" : "none",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.background = "rgba(255,255,255,0.1)";
+            e.currentTarget.style.borderColor = "rgba(59,130,246,0.6)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.background = helpMenuOpen ? "rgba(255,255,255,0.1)" : "rgba(255,255,255,0.05)";
+            e.currentTarget.style.borderColor = helpMenuOpen
+              ? "rgba(59,130,246,0.6)"
+              : "rgba(255,255,255,0.2)";
+          }}
+        >
+          <span>❓ Help</span>
+          <span style={{ fontSize: "11px", opacity: 0.75 }}>{helpMenuOpen ? "▲" : "▼"}</span>
+        </button>
+
+        {helpMenuOpen && (
+          <div
+            role="menu"
+            aria-label="Help actions"
+            style={{
+              position: "absolute",
+              top: "calc(100% + 10px)",
+              right: 0,
+              width: "200px",
+              padding: "8px",
+              borderRadius: "12px",
+              border: "1px solid rgba(255,255,255,0.12)",
+              background: "rgba(15, 23, 42, 0.96)",
+              backdropFilter: "blur(20px)",
+              boxShadow: "0 18px 48px rgba(0,0,0,0.38)",
+              zIndex: 80,
+            }}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => startTour()}
+              style={{
+                width: "100%",
+                textAlign: "left",
+                ...baseButtonStyle,
+                background: tourActive ? "rgba(220, 38, 38, 0.18)" : "rgba(220, 38, 38, 0.1)",
+                border: "1px solid rgba(220, 38, 38, 0.28)",
+                color: "#fca5a5",
+                marginBottom: "8px",
+              }}
+            >
+              Start Tour
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setHelpMenuOpen(false);
+                nav("/help", { state: { returnTo: "/join", originLabel: "Join" } });
+              }}
+              style={{
+                width: "100%",
+                textAlign: "left",
+                ...baseButtonStyle,
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.12)",
+                color: "#e5e7eb",
+              }}
+            >
+              Help Guide
+            </button>
+          </div>
+        )}
+      </div>
+    </>
   );
 }

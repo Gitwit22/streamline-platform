@@ -5,6 +5,7 @@ import { API_BASE } from "../../lib/apiBase";
 import { apiFetchAuth } from "../../lib/api";
 import { APP_BASE } from "../../lib/appBase";
 import { getHlsStatus, startHls, stopHls } from "../../services/hls";
+import { getSelectedOwnerContext } from "../../lib/producerDelegation";
 import { useDestinationsStartPayload } from "../hooks/useDestinationsStartPayload";
 import CollapsibleSection from "./CollapsibleSection";
 import { getFeatureErrorMessage } from "../../lib/featureErrors";
@@ -300,10 +301,12 @@ export default function StreamSetupModalV2({
     let cancelled = false;
     (async () => {
       try {
+        const ownerUid = getSelectedOwnerContext().ownerUid;
         const res = await apiFetchAuth(
           `${API_BASE}/api/rooms/${encodeURIComponent(hlsRoomId)}/active-embed`,
           {
             cache: "no-store",
+            headers: ownerUid ? { "x-owner-context-uid": ownerUid } : undefined,
           },
           { allowNonOk: true }
         );
