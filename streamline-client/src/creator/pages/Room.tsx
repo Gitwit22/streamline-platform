@@ -4779,7 +4779,6 @@ export default function RoomPageWithTour() {
 }
 
 function StudioHelpButton() {
-  const nav = useNavigate();
   const {
     startTour,
     helpMenuOpen,
@@ -4787,9 +4786,10 @@ function StudioHelpButton() {
     tourActive,
   } = useTour();
   const helpMenuRef = useRef<HTMLDivElement | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
 
   useEffect(() => {
-    if (!helpMenuOpen) return;
+    if (!helpMenuOpen && !guideOpen) return;
 
     const handlePointerDown = (event: MouseEvent) => {
       if (!helpMenuOpen) return;
@@ -4800,6 +4800,7 @@ function StudioHelpButton() {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       setHelpMenuOpen(false);
+      setGuideOpen(false);
     };
 
     document.addEventListener("mousedown", handlePointerDown);
@@ -4809,7 +4810,7 @@ function StudioHelpButton() {
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("keydown", handleEscape);
     };
-  }, [helpMenuOpen, setHelpMenuOpen]);
+  }, [helpMenuOpen, guideOpen, setHelpMenuOpen]);
 
   const menuButtonStyle = {
     fontSize: '0.75rem',
@@ -4867,7 +4868,10 @@ function StudioHelpButton() {
             <button
               type="button"
               role="menuitem"
-              onClick={() => startTour()}
+              onClick={() => {
+                setHelpMenuOpen(false);
+                startTour();
+              }}
               style={{
                 ...menuButtonStyle,
                 width: '100%',
@@ -4885,15 +4889,15 @@ function StudioHelpButton() {
               role="menuitem"
               onClick={() => {
                 setHelpMenuOpen(false);
-                nav("/help", { state: { returnTo: "/room", originLabel: "Studio" } });
+                setGuideOpen(true);
               }}
               style={{
                 ...menuButtonStyle,
                 width: '100%',
                 textAlign: 'left',
-                border: '1px solid rgba(255, 255, 255, 0.12)',
-                background: 'rgba(255, 255, 255, 0.04)',
-                color: '#e5e7eb',
+                border: '1px solid rgba(59, 130, 246, 0.35)',
+                background: 'rgba(59, 130, 246, 0.12)',
+                color: '#bfdbfe',
               }}
             >
               Help Guide
@@ -4901,6 +4905,120 @@ function StudioHelpButton() {
           </div>
         )}
       </div>
+
+      {guideOpen && (
+        <>
+          <button
+            type="button"
+            aria-label="Close help guide"
+            onClick={() => setGuideOpen(false)}
+            style={{
+              position: 'fixed',
+              inset: 0,
+              border: 'none',
+              padding: 0,
+              margin: 0,
+              background: 'rgba(2, 6, 23, 0.55)',
+              zIndex: 1998,
+              cursor: 'pointer',
+            }}
+          />
+          <aside
+            aria-label="Studio help guide"
+            style={{
+              position: 'fixed',
+              top: 0,
+              right: 0,
+              width: 'min(420px, 92vw)',
+              height: '100vh',
+              background: 'linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(2, 6, 23, 0.98))',
+              borderLeft: '1px solid rgba(148, 163, 184, 0.35)',
+              boxShadow: '-24px 0 60px rgba(0, 0, 0, 0.42)',
+              zIndex: 1999,
+              display: 'flex',
+              flexDirection: 'column',
+              animation: 'slideInGuide 220ms ease-out',
+            }}
+          >
+            <div style={{ padding: '1rem 1rem 0.75rem 1rem', borderBottom: '1px solid rgba(148, 163, 184, 0.2)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700, color: '#e2e8f0' }}>Studio Help Guide</h3>
+                <button
+                  type="button"
+                  onClick={() => setGuideOpen(false)}
+                  style={{
+                    border: '1px solid rgba(148, 163, 184, 0.35)',
+                    background: 'rgba(15, 23, 42, 0.6)',
+                    color: '#e2e8f0',
+                    borderRadius: '0.5rem',
+                    padding: '0.35rem 0.55rem',
+                    cursor: 'pointer',
+                    fontSize: '0.75rem',
+                    fontWeight: 600,
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+              <p style={{ margin: '0.5rem 0 0 0', color: '#94a3b8', fontSize: '0.8rem' }}>
+                Quick reminders while you are live. No page switch required.
+              </p>
+            </div>
+
+            <div style={{ padding: '0.9rem 1rem 1rem 1rem', overflowY: 'auto', display: 'grid', gap: '0.75rem' }}>
+              <div style={{ border: '1px solid rgba(248, 113, 113, 0.25)', background: 'rgba(220, 38, 38, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fecaca', fontSize: '0.85rem' }}>1. Start with layout + audio checks</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  Set your broadcast layout, then confirm microphone levels in the mixer before going live.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(96, 165, 250, 0.25)', background: 'rgba(59, 130, 246, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#bfdbfe', fontSize: '0.85rem' }}>2. Use Invite Links for guests</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  Send links from the top bar and confirm guests are visible before you start stream or recording.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(74, 222, 128, 0.25)', background: 'rgba(34, 197, 94, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#bbf7d0', fontSize: '0.85rem' }}>3. Go live after preview looks right</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  Open stream setup, verify destination status, then start live. Keep this guide open as a checklist.
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setGuideOpen(false);
+                  startTour();
+                }}
+                style={{
+                  marginTop: '0.25rem',
+                  border: '1px solid rgba(220, 38, 38, 0.35)',
+                  background: 'rgba(220, 38, 38, 0.16)',
+                  color: '#fecaca',
+                  borderRadius: '0.6rem',
+                  padding: '0.65rem 0.75rem',
+                  cursor: 'pointer',
+                  fontWeight: 700,
+                  fontSize: '0.8rem',
+                  textAlign: 'left',
+                }}
+              >
+                Start the interactive studio tour
+              </button>
+            </div>
+          </aside>
+
+          <style>{`
+            @keyframes slideInGuide {
+              from { transform: translateX(100%); opacity: 0.5; }
+              to { transform: translateX(0); opacity: 1; }
+            }
+          `}</style>
+        </>
+      )}
     </>
   );
 }

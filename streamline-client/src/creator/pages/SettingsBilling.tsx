@@ -3250,7 +3250,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                       }}
                       style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: "#0f172a", color: "#e2e8f0" }}
                     >
-                      {(["speaker", "grid", "carousel"] as const).map((m) => (
+                      {(["speaker", "grid", "carousel", "pip"] as const).map((m) => (
                         <option key={m} value={m}>
                           {m.charAt(0).toUpperCase() + m.slice(1)}
                         </option>
