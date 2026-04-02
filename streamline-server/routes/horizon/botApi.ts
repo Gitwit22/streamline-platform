@@ -193,10 +193,11 @@ router.post(
  * ═══════════════════════════════════════════════════════════════════════ */
 
 router.get("/support/status", requireBotAuth, (_req: Request, res: Response) => {
-  res.json({
+  const responsePayload = {
     ok: true,
     timestamp: new Date().toISOString(),
     service: "StreamLine Horizon Integration",
+    version: BOT_API_VERSION,
   };
 
   logSupportPayload("status", responsePayload);
@@ -254,23 +255,6 @@ router.get("/support/rooms/:roomId", requireBotAuth, async (req: Request, res: R
     }
 
     const room = normalizeSupportRoomDetail(roomSnap.id, roomSnap.data());
-    const d = roomSnap.data() as any;
-    const room = {
-      id: roomSnap.id,
-      name: d.name || null,
-      status: d.status || "unknown",
-      hostUid: d.hostUid || null,
-      participantCount: d.participantCount ?? 0,
-      createdAt: tsIso(d.createdAt),
-      updatedAt: tsIso(d.updatedAt),
-      isLive: d.status === "live",
-      chat: d.chat
-        ? {
-            enabled: d.chat.enabled ?? false,
-            activeSessionId: d.chat.activeSessionId || null,
-          }
-        : null,
-    };
 
     logger.info({ requestId, roomId }, "horizon support room detail fetched");
     logSupportPayload("room-detail", room, { requestId, roomId });
@@ -372,12 +356,17 @@ function normalizeSupportRoom(roomId: string, data: any) {
 }
 
 function normalizeSupportRoomDetail(roomId: string, data: any) {
+  const status = normalizeSupportRoomStatus(data);
+
   return {
     id: roomId,
     name: toRequiredString(data?.name),
-    status: normalizeSupportRoomStatus(data),
+    status,
     hostUid: toNullableString(data?.hostUid),
     participantCount: toNumber(data?.participantCount),
+    createdAt: tsIso(data?.createdAt),
+    updatedAt: tsIso(data?.updatedAt),
+    isLive: status === "live",
     chat: {
       enabled: toBoolean(data?.chat?.enabled),
       activeSessionId: toNullableString(data?.chat?.activeSessionId),

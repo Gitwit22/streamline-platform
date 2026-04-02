@@ -163,7 +163,7 @@ router.post("/submit", async (req, res) => {
   const emailHash = email ? hashValue(email) : null;
 
   const rateLimit = await enforceRateLimit({ ipHash, emailHash });
-  if (!rateLimit.ok) {
+  if ("retryAfterSec" in rateLimit) {
     return res.status(429).json({ error: "rate_limited", retryAfterSec: rateLimit.retryAfterSec });
   }
 
