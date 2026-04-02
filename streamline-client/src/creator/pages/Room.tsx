@@ -32,6 +32,7 @@ import ScreenShareRouter, { type ScreenShareRouteMode } from "../components/Scre
 import ScreenSharePopout from "../components/ScreenSharePopout";
 import { TourProvider, useTour } from "../../components/tour/TourProvider";
 import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
+import { getSelectedOwnerContext } from "../../lib/producerDelegation";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
 import { useHlsStatus } from "../hooks/useHlsStatus";
 import { normalizeStartLivePayloadFromDestinationsKeys } from "../hooks/useDestinationsStartPayload";
@@ -1654,6 +1655,11 @@ function RoomPage() {
     "Session expired — re-auth to enable host tools."
   );
   const [roomTokenMode, setRoomTokenMode] = useState<"unknown" | "auth" | "guest">("unknown");
+  const [actingContextBanner, setActingContextBanner] = useState<{ ownerUid: string | null; ownerLabel: string | null; isDelegated: boolean }>({
+    ownerUid: null,
+    ownerLabel: null,
+    isDelegated: false,
+  });
   const roomTokenMintInFlightRef = useRef(false);
 
   // Presence mode: passed from Join page via route state or localStorage
@@ -2530,6 +2536,7 @@ function RoomPage() {
         });
         const inviteTokenFromUrl = new URLSearchParams(window.location.search).get("t");
         const inviteTokenForJoin = (!guestSessionToken ? (inviteTokenFromUrl || inviteToken || null) : null)?.trim?.() || null;
+        const selectedOwnerContext = getSelectedOwnerContext();
         const buildRoomTokenRequest = () => {
           const canonicalRoomId = roomId || "";
           const endpoint = `${API_BASE}/api/rooms/${encodeURIComponent(canonicalRoomId)}/token`;
@@ -2573,6 +2580,7 @@ function RoomPage() {
               {
                 method: "POST",
                 headers: {
+                  ...(selectedOwnerContext.ownerUid ? { "x-owner-context-uid": selectedOwnerContext.ownerUid } : {}),
                   ...(inviteTokenForJoin ? { "x-invite-token": inviteTokenForJoin } : {}),
                 },
                 body: JSON.stringify(payload),
@@ -2746,6 +2754,16 @@ function RoomPage() {
         }
         if (data.effectiveEntitlements || data.platformFlags) {
           applyEntitlementsAndPlatform(data.effectiveEntitlements, data.platformFlags || {});
+        }
+        if (data?.actingContext && typeof data.actingContext === "object") {
+          const ownerLabel = data.actingContext.ownerDisplayName || data.actingContext.ownerEmail || null;
+          setActingContextBanner({
+            ownerUid: typeof data.actingContext.ownerUid === "string" ? data.actingContext.ownerUid : null,
+            ownerLabel,
+            isDelegated: !!data.actingContext.isDelegated,
+          });
+        } else {
+          setActingContextBanner({ ownerUid: null, ownerLabel: null, isDelegated: false });
         }
         const {
           token: lkToken,
@@ -4219,6 +4237,22 @@ function RoomPage() {
           </button>
 
           <span className="text-sm opacity-80">{roomName}</span>
+
+          {actingContextBanner.isDelegated && actingContextBanner.ownerLabel && (
+            <div
+              style={{
+                fontSize: "12px",
+                padding: "6px 10px",
+                borderRadius: "999px",
+                background: "rgba(251, 191, 36, 0.14)",
+                border: "1px solid rgba(251, 191, 36, 0.3)",
+                color: "#fde68a",
+                fontWeight: 600,
+              }}
+            >
+              Producing for {actingContextBanner.ownerLabel}
+            </div>
+          )}
 
           {canInviteLinks && (
             <button

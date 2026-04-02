@@ -38,6 +38,7 @@ import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { evaluateUsageGate } from "../lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
+import { logDelegatedRoomAction } from "../lib/collaborators";
 import { deleteFiles, deletePrefix } from "../lib/storageClient";
 import { resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
@@ -745,18 +746,6 @@ router.post(
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
-    // Feature access gate
-    const featureAccess = await canAccessFeature((req as any).account || uid, "recording");
-    if (!featureAccess.allowed) {
-      console.warn(`[recordings/start] feature access denied uid=${uid}`, featureAccess);
-      return res.status(403).json({
-        success: false,
-        error: featureAccess.code || LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
-        reason: featureAccess.reason || "Recording requires upgrade",
-        _diag: featureAccess._diag,
-      });
-    }
-
     // Validate request
     const {
       roomId: rawRoomId,
@@ -799,10 +788,22 @@ router.post(
     const roomRef = firestore.collection("rooms").doc(roomId);
     const roomSnap = await roomRef.get();
     let roomDoc = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+    const ownerUid = String(roomDoc.ownerId || uid).trim() || uid;
+
+    const featureAccess = await canAccessFeature(ownerUid, "recording");
+    if (!featureAccess.allowed) {
+      console.warn(`[recordings/start] feature access denied ownerUid=${ownerUid} actorUid=${uid}`, featureAccess);
+      return res.status(403).json({
+        success: false,
+        error: featureAccess.code || LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
+        reason: featureAccess.reason || "Recording requires upgrade",
+        _diag: featureAccess._diag,
+      });
+    }
 
     if (!roomDoc.roomLayout) {
       try {
-        const userSnap = await firestore.collection("users").doc(uid).get();
+        const userSnap = await firestore.collection("users").doc(ownerUid).get();
         const userData = userSnap.exists ? ((userSnap.data() as any) || {}) : {};
         const mediaPrefs = (userData as any).mediaPrefs || {};
         const candidate = mediaPrefs.defaultRoomLayout;
@@ -823,14 +824,14 @@ router.post(
     const recordingClass = rawRecordingClass === "emergency" ? "emergency" : null;
 
     // Plan + features (canonical limits via EffectiveEntitlements)
-    const entitlements = await getEffectiveEntitlements(uid);
+    const entitlements = await getEffectiveEntitlements(ownerUid);
     const planId = entitlements.planId;
     const plan = entitlements.plan.raw || {};
 
     // Monthly usage gate: block non-overage plans; allow Pro and log totals.
     try {
       const monthKey = getCurrentMonthKey();
-      const usageDocId = `${uid}_${monthKey}`;
+      const usageDocId = `${ownerUid}_${monthKey}`;
       const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
       const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
       const usage = existing.usage || {};
@@ -878,7 +879,7 @@ router.post(
 
       if (decision.shouldLogOverages && decision.overageTotals) {
         await upsertUsageMonthlyOverageTotals({
-          uid,
+          uid: ownerUid,
           monthKey,
           totals: decision.overageTotals,
         });
@@ -900,8 +901,8 @@ router.post(
     }
 
     // If a stream is live, lower recording quality to stream preset when required
-    const streamDocIdNew = `${uid}_${roomId}`;
-    const streamDocIdLegacy = `${uid}_${roomAccess.roomName || roomId}`;
+    const streamDocIdNew = `${ownerUid}_${roomId}`;
+    const streamDocIdLegacy = `${ownerUid}_${roomAccess.roomName || roomId}`;
     let streamDocId = streamDocIdNew;
     let activeStreamPresetId: string | null = null;
     let hasActiveStream = false;
@@ -953,7 +954,7 @@ router.post(
     // Best-effort: attach orgId for reporting.
     let orgId: string | null = null;
     try {
-      const uSnap = await firestore.collection("users").doc(uid).get();
+      const uSnap = await firestore.collection("users").doc(ownerUid).get();
       if (uSnap.exists) {
         const u = (uSnap.data() as any) || {};
         const rawOrgId = u?.orgId ?? u?.org?.id ?? u?.org?.orgId;
@@ -963,15 +964,28 @@ router.post(
       // non-fatal
     }
 
-    const { objectKey, prefix: r2Prefix } = generateRecordingPath(uid, roomId, recordingId, "");
+    const { objectKey, prefix: r2Prefix } = generateRecordingPath(ownerUid, roomId, recordingId, "");
     const recordingRef = firestore.collection("recordings").doc(recordingId);
 
     const isEmergency = recordingClass === "emergency";
     const emergencyCurrentRef = firestore
       .collection("users")
-      .doc(uid)
+      .doc(ownerUid)
       .collection("emergencyRecording")
       .doc("current");
+
+    if (ownerUid !== uid) {
+      await logDelegatedRoomAction({
+        actedByUid: uid,
+        ownerUid,
+        roomId,
+        action: "recording_start",
+        metadata: {
+          mode,
+          recordingClass,
+        },
+      }).catch(() => {});
+    }
 
     const emergencyExpiresAt = new Date(now.getTime() + EMERGENCY_RETENTION_MS);
     const emergencyExpiresAtMs = emergencyExpiresAt.getTime();
