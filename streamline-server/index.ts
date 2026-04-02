@@ -70,6 +70,7 @@ import alertRoutes from "./routes/alertRoutes";
 import skillsIntegrationRoutes from "./routes/skillsIntegration";
 import supportActionsRoutes from "./routes/supportActions";
 import supportTicketsRoutes from "./routes/supportTickets";
+import supportPublicRoutes from "./routes/supportPublic";
 import { attachHorizonWs } from "./routes/horizonWs";
 import horizonRoomHooks from "./routes/horizon/roomHooks";
 import horizonBotApi from "./routes/horizon/botApi";
@@ -212,6 +213,7 @@ app.use(
 app.use("/api/auth", authRoutes);
 app.use("/api/account", accountRoutes);
 app.use("/api/collaborators", collaboratorsRoutes);
+app.use("/api/support/tickets", supportPublicRoutes);
 
 // Admin routes
 app.use("/api/admin", adminRoutes);
