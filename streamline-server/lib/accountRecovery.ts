@@ -150,7 +150,7 @@ export function validateRecoverySetupInput(input: {
   questionId: unknown;
   answer: unknown;
   emergencyCode: unknown;
-  confirmEmergencyCode: unknown;
+  confirmEmergencyCode?: unknown;
 }): string | null {
   if (!isApprovedSecurityQuestionId(input.questionId)) {
     return "Select a valid security question.";
@@ -166,7 +166,7 @@ export function validateRecoverySetupInput(input: {
   }
 
   const confirmCode = normalizeEmergencyCode(input.confirmEmergencyCode);
-  if (emergencyCode !== confirmCode) {
+  if (confirmCode && emergencyCode !== confirmCode) {
     return "Emergency recovery code confirmation does not match.";
   }
 

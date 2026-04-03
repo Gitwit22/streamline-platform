@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { apiFetchAuth } from "../lib/api";
-import { SECURITY_QUESTIONS, normalizeEmergencyCode } from "../lib/accountRecovery";
+import { SECURITY_QUESTIONS, generateEmergencyRecoveryCode } from "../lib/accountRecovery";
 import { refreshAndPersistAccountMe } from "../lib/sessionUser";
 import { useAuthMe } from "../hooks/useAuthMe";
 
@@ -9,11 +9,12 @@ export const RecoverySetupPage: React.FC = () => {
   const nav = useNavigate();
   const location = useLocation();
   const { user, loading } = useAuthMe();
+  const [step, setStep] = useState<"question" | "code">("question");
   const [questionId, setQuestionId] = useState("");
   const [answer, setAnswer] = useState("");
-  const [emergencyCode, setEmergencyCode] = useState("");
-  const [confirmEmergencyCode, setConfirmEmergencyCode] = useState("");
+  const [emergencyCode, setEmergencyCode] = useState(() => generateEmergencyRecoveryCode());
   const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
   const [saving, setSaving] = useState(false);
 
   const nextPath = useMemo(() => {
@@ -35,6 +36,21 @@ export const RecoverySetupPage: React.FC = () => {
     }
   }, [loading, nav, user]);
 
+  const handleContinueToCode = () => {
+    if (!questionId) {
+      setError("Select a security question.");
+      return;
+    }
+
+    if (!String(answer || "").trim()) {
+      setError("Enter an answer for your security question.");
+      return;
+    }
+
+    setError("");
+    setStep("code");
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSaving(true);
@@ -49,7 +65,7 @@ export const RecoverySetupPage: React.FC = () => {
             questionId,
             answer,
             emergencyCode,
-            confirmEmergencyCode,
+            confirmEmergencyCode: emergencyCode,
           }),
         },
         { allowNonOk: true }
@@ -73,6 +89,20 @@ export const RecoverySetupPage: React.FC = () => {
       console.error(err);
       setError("Failed to save recovery settings.");
       setSaving(false);
+    }
+  };
+
+  const handleGenerateNewCode = () => {
+    setCopied(false);
+    setEmergencyCode(generateEmergencyRecoveryCode());
+  };
+
+  const handleCopyCode = async () => {
+    try {
+      await navigator.clipboard.writeText(emergencyCode);
+      setCopied(true);
+    } catch {
+      setCopied(false);
     }
   };
 
@@ -109,51 +139,94 @@ export const RecoverySetupPage: React.FC = () => {
           </div>
           <h1 style={{ margin: 0, fontSize: 32, marginBottom: 10 }}>Set Up Account Recovery</h1>
           <p style={{ margin: 0, color: "#b3b3b3", lineHeight: 1.6 }}>
-            Choose one security question and create a 6-digit emergency recovery code. This is required before you can continue using StreamLine.
+            {step === "question"
+              ? "Choose a security question and save your answer. Then you will be shown an emergency recovery code before you continue."
+              : "Save the generated 6-digit emergency recovery code somewhere secure before you continue into StreamLine."}
           </p>
         </div>
 
         <form onSubmit={handleSubmit}>
-          <label style={labelStyle}>Security question</label>
-          <select value={questionId} onChange={(event) => setQuestionId(event.target.value)} style={fieldStyle}>
-            <option value="">Select a question</option>
-            {SECURITY_QUESTIONS.map((question) => (
-              <option key={question.id} value={question.id}>
-                {question.text}
-              </option>
-            ))}
-          </select>
+          {step === "question" ? (
+            <>
+              <label style={labelStyle}>Security question</label>
+              <select value={questionId} onChange={(event) => setQuestionId(event.target.value)} style={fieldStyle}>
+                <option value="">Select a question</option>
+                {SECURITY_QUESTIONS.map((question) => (
+                  <option key={question.id} value={question.id} style={{ color: "#111111" }}>
+                    {question.text}
+                  </option>
+                ))}
+              </select>
 
-          <label style={{ ...labelStyle, marginTop: 18 }}>Answer</label>
-          <input
-            type="text"
-            value={answer}
-            onChange={(event) => setAnswer(event.target.value)}
-            placeholder="Enter your answer"
-            style={fieldStyle}
-          />
+              <label style={{ ...labelStyle, marginTop: 18 }}>Answer</label>
+              <input
+                type="text"
+                value={answer}
+                onChange={(event) => setAnswer(event.target.value)}
+                placeholder="Enter your answer"
+                style={fieldStyle}
+              />
+            </>
+          ) : (
+            <>
+              <div
+                style={{
+                  marginBottom: 18,
+                  padding: "12px 14px",
+                  borderRadius: 14,
+                  background: "rgba(255,255,255,0.04)",
+                  border: "1px solid rgba(255,255,255,0.08)",
+                  color: "#d4d4d4",
+                  fontSize: 13,
+                  lineHeight: 1.5,
+                }}
+              >
+                Security question saved locally for this setup. Next, save your emergency recovery code.
+              </div>
 
-          <label style={{ ...labelStyle, marginTop: 18 }}>Emergency recovery code</label>
-          <input
-            type="password"
-            inputMode="numeric"
-            maxLength={6}
-            value={emergencyCode}
-            onChange={(event) => setEmergencyCode(normalizeEmergencyCode(event.target.value).slice(0, 6))}
-            placeholder="6 digits"
-            style={fieldStyle}
-          />
+              <label style={labelStyle}>Emergency recovery code</label>
+              <div
+                style={{
+                  ...fieldStyle,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+                  letterSpacing: "0.2em",
+                }}
+              >
+                <span>{emergencyCode}</span>
+                <span style={{ color: copied ? "#86efac" : "#a3a3a3", fontSize: 12, letterSpacing: 0 }}>
+                  {copied ? "Copied" : "Save this code"}
+                </span>
+              </div>
 
-          <label style={{ ...labelStyle, marginTop: 18 }}>Confirm emergency recovery code</label>
-          <input
-            type="password"
-            inputMode="numeric"
-            maxLength={6}
-            value={confirmEmergencyCode}
-            onChange={(event) => setConfirmEmergencyCode(normalizeEmergencyCode(event.target.value).slice(0, 6))}
-            placeholder="Re-enter 6 digits"
-            style={fieldStyle}
-          />
+              <div style={{ display: "flex", gap: 12, marginTop: 12 }}>
+                <button type="button" onClick={handleCopyCode} style={secondaryButtonStyle}>
+                  Copy Code
+                </button>
+                <button type="button" onClick={handleGenerateNewCode} style={secondaryButtonStyle}>
+                  Generate New Code
+                </button>
+              </div>
+
+              <div
+                style={{
+                  marginTop: 12,
+                  padding: "12px 14px",
+                  borderRadius: 14,
+                  background: "rgba(234,88,12,0.1)",
+                  border: "1px solid rgba(249,115,22,0.2)",
+                  color: "#fed7aa",
+                  fontSize: 13,
+                  lineHeight: 1.5,
+                }}
+              >
+                Store this code somewhere safe before you continue. You will use it later if you need to recover your password.
+              </div>
+            </>
+          )}
 
           {error && (
             <div
@@ -171,9 +244,20 @@ export const RecoverySetupPage: React.FC = () => {
             </div>
           )}
 
-          <button type="submit" disabled={saving} style={submitStyle}>
-            {saving ? "Saving..." : "Save and Continue"}
-          </button>
+          {step === "question" ? (
+            <button type="button" onClick={handleContinueToCode} style={submitStyle}>
+              Continue
+            </button>
+          ) : (
+            <div style={{ display: "flex", gap: 12, marginTop: 24 }}>
+              <button type="button" onClick={() => setStep("question")} style={secondaryButtonStyle}>
+                Back
+              </button>
+              <button type="submit" disabled={saving} style={{ ...submitStyle, marginTop: 0, flex: 1 }}>
+                {saving ? "Saving..." : "Save and Continue"}
+              </button>
+            </div>
+          )}
         </form>
       </div>
     </div>
@@ -192,8 +276,8 @@ const fieldStyle: React.CSSProperties = {
   padding: "14px 16px",
   borderRadius: 14,
   border: "1px solid rgba(255,255,255,0.1)",
-  background: "rgba(255,255,255,0.04)",
-  color: "#fff",
+  background: "#ffffff",
+  color: "#111111",
   fontSize: 15,
   outline: "none",
 };
@@ -208,6 +292,18 @@ const submitStyle: React.CSSProperties = {
   color: "#fff",
   fontSize: 15,
   fontWeight: 700,
+  cursor: "pointer",
+};
+
+const secondaryButtonStyle: React.CSSProperties = {
+  flex: 1,
+  padding: "12px 14px",
+  borderRadius: 12,
+  border: "1px solid rgba(255,255,255,0.12)",
+  background: "rgba(255,255,255,0.05)",
+  color: "#fff",
+  fontSize: 13,
+  fontWeight: 600,
   cursor: "pointer",
 };
 

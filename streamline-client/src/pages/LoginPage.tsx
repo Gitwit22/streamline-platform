@@ -210,7 +210,8 @@ export const LoginPage: React.FC = () => {
       setLoading(false);
 
       if (me?.recoveryRequired === true) {
-        nav("/account-recovery/setup", { replace: true });
+        const recoveryNext = nextUrl || "/join";
+        nav(`/account-recovery/setup?next=${encodeURIComponent(recoveryNext)}`, { replace: true });
         return;
       }
 

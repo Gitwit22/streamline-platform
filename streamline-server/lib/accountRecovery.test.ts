@@ -82,6 +82,15 @@ test("recovery setup only accepts approved question ids and matching emergency c
       questionId: "first_pet",
       answer: "hello",
       emergencyCode: "123456",
+    }),
+    null
+  );
+
+  assert.equal(
+    validateRecoverySetupInput({
+      questionId: "first_pet",
+      answer: "hello",
+      emergencyCode: "123456",
       confirmEmergencyCode: "999999",
     }),
     "Emergency recovery code confirmation does not match."

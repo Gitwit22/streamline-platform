@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   SECURITY_QUESTIONS,
+  generateEmergencyRecoveryCode,
   isValidSecurityQuestionId,
   needsAccountRecoverySetup,
   normalizeEmergencyCode,
@@ -14,6 +15,10 @@ describe("accountRecovery helpers", () => {
   it("normalizes emergency recovery codes to digits only", () => {
     expect(normalizeEmergencyCode(" 12 34 56 ")).toBe("123456");
     expect(normalizeEmergencyCode("12a-34b")).toBe("1234");
+  });
+
+  it("generates a 6-digit emergency recovery code", () => {
+    expect(generateEmergencyRecoveryCode()).toMatch(/^\d{6}$/);
   });
 
   it("recognizes approved question ids only", () => {

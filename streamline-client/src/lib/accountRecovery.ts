@@ -23,6 +23,16 @@ export function normalizeEmergencyCode(code: unknown) {
     .replace(/\D/g, "");
 }
 
+export function generateEmergencyRecoveryCode() {
+  const cryptoApi = typeof globalThis !== "undefined" ? (globalThis.crypto as Crypto | undefined) : undefined;
+  if (cryptoApi?.getRandomValues) {
+    const bytes = new Uint32Array(1);
+    cryptoApi.getRandomValues(bytes);
+    return String(bytes[0] % 1_000_000).padStart(6, "0");
+  }
+  return String(Math.floor(Math.random() * 1_000_000)).padStart(6, "0");
+}
+
 export function needsAccountRecoverySetup(user: any) {
   if (!user) return false;
   if (user.recoveryRequired === true) return true;
