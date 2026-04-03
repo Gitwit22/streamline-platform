@@ -14,6 +14,13 @@ import { invalidatePlatformBillingCache } from "../lib/userAccount";
 import type { UserUsageSummary } from "../types/admin.types";
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { PLAN_IDS, PlanId, isPlanId, getAllPlanIds } from "../types/plan";
+import {
+  buildAdminPasswordResetState,
+  buildPublicPasswordResetState,
+  buildPublicRecoveryState,
+  canAdminManagePasswordReset,
+} from "../lib/accountRecovery";
+import { logAuthSecurityEvent } from "../lib/authAudit";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
@@ -46,6 +53,62 @@ router.use((req, res, next) => {
 
 router.get('/me', (req, res) => {
   res.json({ isAdmin: true, user: req.adminUser });
+});
+
+router.post("/users/:userId/enable-password-reset", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const targetRef = firestore.collection("users").doc(userId);
+    const targetSnap = await targetRef.get();
+
+    if (!targetSnap.exists) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const targetUser = targetSnap.data() || {};
+    if (isDeletedUserRecord(targetUser)) {
+      return res.status(400).json({ error: "Cannot enable password reset for a deleted user" });
+    }
+
+    const adminUid = req.adminUser?.uid || "";
+    if (!canAdminManagePasswordReset(adminUid, userId, targetUser)) {
+      return res.status(403).json({ error: "Not allowed to enable password reset for this user" });
+    }
+
+    const now = Date.now();
+    const passwordReset = buildAdminPasswordResetState(adminUid, now);
+
+    await targetRef.set(
+      {
+        passwordReset,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    await logAdminAction(adminUid, "enable_password_reset", {
+      userId,
+      expiresAt: passwordReset.expiresAt,
+    });
+    await logAuthSecurityEvent({
+      event: "admin_password_reset_enabled",
+      actorUserId: adminUid,
+      targetUserId: userId,
+      ip: req.ip || null,
+      details: {
+        expiresAt: passwordReset.expiresAt,
+      },
+    });
+
+    return res.json({
+      success: true,
+      passwordReset: buildPublicPasswordResetState(passwordReset),
+      canEnablePasswordReset: false,
+    });
+  } catch (error: any) {
+    console.error("Failed to enable password reset:", error);
+    return res.status(500).json({ error: "Failed to enable password reset" });
+  }
 });
 
 // Lightweight environment sanity endpoint for admins.
@@ -972,15 +1035,21 @@ router.get("/usage", async (req, res) => {
         const effectiveBillingEnabled = platformBillingEnabled && billingEnabled;
 
         const billingTruth = normalizeBillingTruthFromUser(userData, Date.now());
+        const canEnablePasswordReset = canAdminManagePasswordReset(req.adminUser?.uid || "", userId, userData);
 
         return {
           userId,
           email: userData.email,
           displayName: userData.displayName,
+          isAdmin: Boolean(userData.admin?.isAdmin ?? userData.isAdmin),
           planId,
           billingTruthStatus: billingTruth.status,
           stripeConnected: Boolean(billingTruth.stripeCustomerId),
           stripeCustomerId: billingTruth.stripeCustomerId,
+          passwordReset: buildPublicPasswordResetState(userData.passwordReset),
+          recovery: buildPublicRecoveryState(userData.recovery),
+          recoveryConfigured: buildPublicRecoveryState(userData.recovery).configured,
+          canEnablePasswordReset,
           billingEnabled,
           platformBillingEnabled,
           effectiveBillingEnabled,

@@ -6,6 +6,7 @@ import { clampPresetForPlan, getPresetById, getUserPlanId, MEDIA_PRESETS, MediaP
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { buildPublicPasswordResetState, buildPublicRecoveryState, needsRecoverySetup } from "../lib/accountRecovery";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import crypto from "crypto";
 import { CURRENT_TOS_VERSION } from "../lib/tos";
@@ -754,6 +755,10 @@ router.get("/me", async (req, res) => {
       id: uid,
       email: data.email || null,
       displayName: data.displayName || null,
+      passwordReset: buildPublicPasswordResetState((data as any).passwordReset),
+      recovery: buildPublicRecoveryState((data as any).recovery),
+      recoveryConfigured: !needsRecoverySetup(data),
+      recoveryRequired: needsRecoverySetup(data),
       orgId,
       orgType,
       orgName,

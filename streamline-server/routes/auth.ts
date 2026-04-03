@@ -3,6 +3,28 @@ import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { requireAuth } from "../middleware/requireAuth";
 import { auth as firebaseAuth, firestore as db } from "../firebaseAdmin";
+import { logAuthSecurityEvent } from "../lib/authAudit";
+import {
+  buildConsumedPasswordResetState,
+  buildRecoveryFailureState,
+  buildForgotPasswordStatus,
+  buildRecoveryResetState,
+  buildRecoverySetupState,
+  buildRecoveryVerifiedState,
+  hashEmergencyCode,
+  hashSecurityAnswer,
+  isEmergencyCodeRecoveryAvailable,
+  isAdminPasswordResetActive,
+  isQuestionRecoveryAvailable,
+  isRecoveryMethodLocked,
+  normalizeRecoveryState,
+  SECURITY_QUESTIONS,
+  stripSensitiveRecoveryFields,
+  validatePassword,
+  validateRecoverySetupInput,
+  verifyEmergencyCode,
+  verifySecurityAnswer,
+} from "../lib/accountRecovery";
 import { getUserAccount } from "../lib/userAccount";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
@@ -48,9 +70,83 @@ function mustGetEnv(name: string) {
 }
 
 function stripSensitiveUserFields(user: any) {
-  if (!user) return user;
-  const { passwordHash, ...safe } = user;
-  return safe;
+  return stripSensitiveRecoveryFields(user);
+}
+
+function normalizeLoginIdentifier(value: unknown) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isSupportedRecoveryMethod(value: unknown): value is "admin" | "question" | "code" {
+  return value === "admin" || value === "question" || value === "code";
+}
+
+async function findUserByLogin(login: string) {
+  const loginNorm = normalizeLoginIdentifier(login);
+  if (!loginNorm) return null;
+
+  const snap = await db
+    .collection("users")
+    .where("email", "==", loginNorm)
+    .limit(1)
+    .get();
+
+  if (snap.empty) return null;
+  return snap.docs[0];
+}
+
+function signLegacySessionToken(uid: string) {
+  const jwtSecret = mustGetEnv("JWT_SECRET");
+  return jwt.sign({ uid }, jwtSecret, { expiresIn: "7d" });
+}
+
+async function ensureFirebaseCustomToken(uid: string, email: string, password?: string) {
+  const emailNorm = normalizeLoginIdentifier(email);
+  let hasUser = false;
+
+  try {
+    const existing = await firebaseAuth.getUser(uid);
+    hasUser = true;
+    if (password) {
+      await firebaseAuth.updateUser(uid, {
+        email: emailNorm,
+        emailVerified: false,
+        password,
+      });
+    } else if (!existing.email || String(existing.email).trim().toLowerCase() !== emailNorm) {
+      await firebaseAuth.updateUser(uid, {
+        email: emailNorm,
+        emailVerified: false,
+      });
+    }
+  } catch (err: any) {
+    if (String(err?.code || "") !== "auth/user-not-found") {
+      console.warn("[auth] Failed to look up Firebase Auth user:", err?.code || err?.message || err);
+    }
+  }
+
+  if (!hasUser) {
+    try {
+      await firebaseAuth.createUser({
+        uid,
+        email: emailNorm,
+        emailVerified: false,
+        ...(password ? { password } : {}),
+      });
+    } catch (err: any) {
+      const code = String(err?.code || "");
+      if (code !== "auth/email-already-exists") {
+        console.warn("[auth] Failed to create Firebase Auth user:", err?.code || err?.message || err);
+      }
+    }
+  }
+
+  try {
+    return await firebaseAuth.createCustomToken(uid);
+  } catch (err: any) {
+    console.warn("[auth] Failed to mint Firebase custom token:", err?.code || err?.message || err);
+    return null;
+  }
 }
 
 // Health check for auth router
@@ -166,10 +262,8 @@ router.post("/login", async (req, res) => {
 
     const uid = doc.id;
 
-    const JWT_SECRET = mustGetEnv("JWT_SECRET");
-
     // Token payload must match what requireAuth expects
-    const token = jwt.sign({ uid }, JWT_SECRET, { expiresIn: "7d" });
+    const token = signLegacySessionToken(uid);
 
     // Set cookie for httpOnly auth (legacy/secondary) and return token
     // in the JSON body so the frontend can use Authorization headers.
@@ -303,6 +397,11 @@ router.post("/signup", async (req, res) => {
       return res.status(400).json({ error: "Email and password required" });
     }
 
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      return res.status(400).json({ error: passwordError });
+    }
+
     // Require explicit Terms of Service acceptance for new accounts.
     if (tosAccepted !== true) {
       return res.status(400).json({ error: "tos_required" });
@@ -348,8 +447,7 @@ router.post("/signup", async (req, res) => {
 
     await userRef.set(userData);
 
-    const JWT_SECRET = mustGetEnv("JWT_SECRET");
-    const token = jwt.sign({ uid }, JWT_SECRET, { expiresIn: "7d" });
+    const token = signLegacySessionToken(uid);
 
     // Set cookie for httpOnly auth (legacy/secondary) and return token
     // in the JSON body so the frontend can use Authorization headers.
@@ -372,6 +470,298 @@ router.post("/signup", async (req, res) => {
 router.post("/logout", (_req, res) => {
   res.clearCookie("token", { path: "/" });
   return res.json({ ok: true });
+});
+
+router.get("/recovery/questions", (_req, res) => {
+  return res.json({ questions: SECURITY_QUESTIONS });
+});
+
+router.post("/forgot-password/check", async (req, res) => {
+  try {
+    const login = normalizeLoginIdentifier((req.body || {}).login);
+    const genericMessage = "Password reset is not currently available. Contact your administrator.";
+
+    if (!login) {
+      return res.json({ canReset: false, message: genericMessage, availableMethods: [] });
+    }
+
+    const userDoc = await findUserByLogin(login);
+    if (!userDoc) {
+      return res.json({ canReset: false, message: genericMessage, availableMethods: [] });
+    }
+
+    const user = userDoc.data() || {};
+    if (user.accountStatus === "deleted") {
+      return res.json({ canReset: false, message: genericMessage, availableMethods: [] });
+    }
+
+    const forgotPasswordStatus = buildForgotPasswordStatus(user);
+    if (forgotPasswordStatus.availableMethods.length === 0) {
+      return res.json({ canReset: false, message: genericMessage, availableMethods: [] });
+    }
+
+    return res.json({
+      canReset: true,
+      method: forgotPasswordStatus.availableMethods[0],
+      availableMethods: forgotPasswordStatus.availableMethods,
+      recoveryQuestion: forgotPasswordStatus.recoveryQuestion,
+      message:
+        forgotPasswordStatus.availableMethods.includes("admin")
+          ? "Reset enabled. You can choose a new password now."
+          : "Account recovery is available. Verify your identity to choose a new password.",
+    });
+  } catch (err: any) {
+    console.error("POST /api/auth/forgot-password/check failed:", err?.message || err);
+    return res.status(500).json({ error: "forgot_password_check_failed" });
+  }
+});
+
+router.post("/forgot-password/reset", async (req, res) => {
+  try {
+    const { login, newPassword, confirmPassword } = (req.body || {}) as {
+      login?: string;
+      newPassword?: string;
+      confirmPassword?: string;
+      method?: string;
+      answer?: string;
+      emergencyCode?: string;
+    };
+    const genericMessage = "Password reset is not currently available. Contact your administrator.";
+    const loginNorm = normalizeLoginIdentifier(login);
+
+    if (!loginNorm) {
+      return res.status(400).json({ error: genericMessage });
+    }
+
+    if (String(newPassword || "") !== String(confirmPassword || "")) {
+      return res.status(400).json({ error: "Passwords do not match." });
+    }
+
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) {
+      return res.status(400).json({ error: passwordError });
+    }
+
+    const userDoc = await findUserByLogin(loginNorm);
+    if (!userDoc) {
+      return res.status(400).json({ error: genericMessage });
+    }
+
+    const user = (userDoc.data() || {}) as any;
+    if (user.accountStatus === "deleted") {
+      return res.status(400).json({ error: genericMessage });
+    }
+
+    const forgotPasswordStatus = buildForgotPasswordStatus(user, Date.now());
+    if (forgotPasswordStatus.availableMethods.length === 0) {
+      return res.status(400).json({ error: genericMessage });
+    }
+
+    const uid = userDoc.id;
+    const now = Date.now();
+    const recovery = normalizeRecoveryState(user.recovery);
+    const selectedMethod = isSupportedRecoveryMethod((req.body || {}).method)
+      ? (req.body || {}).method
+      : forgotPasswordStatus.availableMethods[0];
+
+    if (!forgotPasswordStatus.availableMethods.includes(selectedMethod)) {
+      return res.status(400).json({ error: "Selected recovery method is not available." });
+    }
+
+    let nextRecovery = recovery;
+    let requiresRecoverySetup = false;
+
+    if (selectedMethod === "admin") {
+      if (!isAdminPasswordResetActive(user.passwordReset, now)) {
+        return res.status(400).json({ error: genericMessage });
+      }
+      nextRecovery = buildRecoveryResetState(recovery, now);
+      requiresRecoverySetup = true;
+    }
+
+    if (selectedMethod === "question") {
+      if (isRecoveryMethodLocked(recovery, "question", now)) {
+        return res.status(429).json({ error: "Security question recovery is temporarily locked. Try again later or use your emergency recovery code." });
+      }
+      if (!isQuestionRecoveryAvailable(recovery, now)) {
+        return res.status(400).json({ error: "Security question recovery is not available for this account." });
+      }
+
+      const verified = await verifySecurityAnswer((req.body || {}).answer, recovery.answerHash);
+      if (!verified) {
+        nextRecovery = buildRecoveryFailureState(recovery, "question", now);
+        await userDoc.ref.set({ recovery: nextRecovery, updatedAt: now }, { merge: true });
+        await logAuthSecurityEvent({
+          event: "recovery_verification_failed",
+          actorUserId: uid,
+          targetUserId: uid,
+          ip: req.ip || null,
+          details: {
+            method: "question",
+            failedAttempts: nextRecovery.failedQuestionAttempts,
+            lockedUntil: nextRecovery.questionLockedUntil,
+          },
+        });
+        return res.status(400).json({
+          error:
+            nextRecovery.questionLockedUntil && nextRecovery.questionLockedUntil > now
+              ? "Security question recovery is temporarily locked. Try again later or use your emergency recovery code."
+              : "Recovery verification failed.",
+        });
+      }
+
+      nextRecovery = buildRecoveryVerifiedState(recovery, "question", now);
+    }
+
+    if (selectedMethod === "code") {
+      if (isRecoveryMethodLocked(recovery, "code", now)) {
+        return res.status(429).json({ error: "Emergency recovery code verification is temporarily locked. Try again later or use your security question." });
+      }
+      if (!isEmergencyCodeRecoveryAvailable(recovery, now)) {
+        return res.status(400).json({ error: "Emergency recovery code recovery is not available for this account." });
+      }
+
+      const verified = await verifyEmergencyCode((req.body || {}).emergencyCode, recovery.emergencyCodeHash);
+      if (!verified) {
+        nextRecovery = buildRecoveryFailureState(recovery, "code", now);
+        await userDoc.ref.set({ recovery: nextRecovery, updatedAt: now }, { merge: true });
+        await logAuthSecurityEvent({
+          event: "recovery_verification_failed",
+          actorUserId: uid,
+          targetUserId: uid,
+          ip: req.ip || null,
+          details: {
+            method: "code",
+            failedAttempts: nextRecovery.failedCodeAttempts,
+            lockedUntil: nextRecovery.codeLockedUntil,
+          },
+        });
+        return res.status(400).json({
+          error:
+            nextRecovery.codeLockedUntil && nextRecovery.codeLockedUntil > now
+              ? "Emergency recovery code verification is temporarily locked. Try again later or use your security question."
+              : "Recovery verification failed.",
+        });
+      }
+
+      nextRecovery = buildRecoveryVerifiedState(recovery, "code", now);
+    }
+
+    const passwordHash = await bcrypt.hash(String(newPassword), 10);
+    const nextPasswordReset = buildConsumedPasswordResetState(user.passwordReset, now);
+
+    await userDoc.ref.set(
+      {
+        passwordHash,
+        passwordReset: nextPasswordReset,
+        recovery: nextRecovery,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    const token = signLegacySessionToken(uid);
+    const customToken = await ensureFirebaseCustomToken(uid, String(user.email || loginNorm), String(newPassword));
+    res.cookie("token", token, cookieOptions());
+
+    await logAuthSecurityEvent({
+      event: "password_reset_completed",
+      actorUserId: uid,
+      targetUserId: uid,
+      ip: req.ip || null,
+      details: {
+        method: selectedMethod,
+        recoverySetupRequired: requiresRecoverySetup,
+        recoveryMethod: selectedMethod,
+      },
+    });
+
+    return res.json({
+      success: true,
+      token,
+      customToken,
+      requiresRecoverySetup,
+      user: { id: uid, ...stripSensitiveUserFields({ ...user, passwordReset: nextPasswordReset, recovery: nextRecovery }) },
+    });
+  } catch (err: any) {
+    console.error("POST /api/auth/forgot-password/reset failed:", err?.message || err);
+    return res.status(500).json({ error: "forgot_password_reset_failed" });
+  }
+});
+
+router.post("/recovery/setup", requireAuth, async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    const { questionId, answer, emergencyCode, confirmEmergencyCode } = (req.body || {}) as {
+      questionId?: string;
+      answer?: string;
+      emergencyCode?: string;
+      confirmEmergencyCode?: string;
+    };
+
+    const validationError = validateRecoverySetupInput({
+      questionId,
+      answer,
+      emergencyCode,
+      confirmEmergencyCode,
+    });
+    if (validationError) {
+      return res.status(400).json({ error: validationError });
+    }
+
+    const userRef = db.collection("users").doc(uid);
+    const userSnap = await userRef.get();
+    if (!userSnap.exists) {
+      return res.status(404).json({ error: "user_not_found" });
+    }
+
+    const user = userSnap.data() || {};
+    const now = Date.now();
+    const answerHash = await hashSecurityAnswer(answer);
+    const emergencyCodeHash = await hashEmergencyCode(emergencyCode);
+    const nextRecovery = buildRecoverySetupState(
+      {
+        questionId: questionId as any,
+        answerHash,
+        emergencyCodeHash,
+      },
+      user.recovery,
+      now
+    );
+
+    await userRef.set(
+      {
+        recovery: nextRecovery,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    await logAuthSecurityEvent({
+      event: "recovery_setup_completed",
+      actorUserId: uid,
+      targetUserId: uid,
+      ip: req.ip || null,
+      details: {
+        questionId,
+        hadExistingRecovery: normalizeRecoveryState(user.recovery).configured,
+      },
+    });
+
+    return res.json({
+      success: true,
+      recoveryConfigured: true,
+      recoveryRequired: false,
+      recovery: stripSensitiveRecoveryFields({ recovery: nextRecovery }).recovery,
+    });
+  } catch (err: any) {
+    console.error("POST /api/auth/recovery/setup failed:", err?.message || err);
+    return res.status(500).json({ error: "recovery_setup_failed" });
+  }
 });
 
 export default router;

@@ -17,6 +17,8 @@ test("buildNewUserDoc: billing defaults enabled", () => {
   assert.equal(user.billingEnabled, true);
   assert.equal(user.billingActive, false);
   assert.equal(user.billingStatus, "free");
+  assert.equal(user.passwordReset.adminAllowed, false);
+  assert.equal(user.recovery.configured, false);
 
   assert.ok(user.billingTruth);
   assert.equal(user.billingTruth.planId, "free");
