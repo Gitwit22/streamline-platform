@@ -58,6 +58,13 @@ interface User {
   email: string;
   displayName?: string;
   planId: PlanId;
+  isAdmin?: boolean;
+  admin?: {
+    isAdmin?: boolean;
+  };
+  passwordReset?: {
+    active?: boolean;
+  };
   billingEnabled?: boolean;
   minutesUsed?: number;
   bonusMinutes?: number;
@@ -378,6 +385,7 @@ export default function AdminDashboard() {
   const [plans, setPlans] = useState<Plan[]>([]);
   const [seedingPlans, setSeedingPlans] = useState(false);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
+  const [resetLoadingUserId, setResetLoadingUserId] = useState<string | null>(null);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [expandedPlan, setExpandedPlan] = useState<string | null>(null);
@@ -650,6 +658,52 @@ export default function AdminDashboard() {
       await loadUsers();
     } else {
       showToast(`Billing toggle failed: ${await describeNonOkResponse(res)}`);
+    }
+  };
+
+  const canEnablePasswordResetForUser = (user: User) => {
+    const currentUid = String((authUser as any)?.id || (authUser as any)?.uid || "");
+    const targetIsAdmin = Boolean(user.isAdmin ?? user.admin?.isAdmin);
+    if (!user?.uid) return false;
+    if (targetIsAdmin) return false;
+    if (currentUid && currentUid === user.uid) return false;
+    return true;
+  };
+
+  const enablePasswordReset = async (user: User) => {
+    if (!canEnablePasswordResetForUser(user)) {
+      showToast("Password reset can only be enabled for other non-admin users");
+      return;
+    }
+    if (resetLoadingUserId) return;
+
+    setResetLoadingUserId(user.uid);
+    try {
+      const res = await apiFetch(`/api/admin/users/${user.uid}/enable-password-reset`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) {
+        throw new Error(String(data?.error || "Failed to enable password reset"));
+      }
+
+      setUsers((current) =>
+        current.map((entry) =>
+          entry.uid === user.uid
+            ? {
+                ...entry,
+                passwordReset: data.passwordReset,
+              }
+            : entry
+        )
+      );
+      showToast(`Password reset enabled for ${user.email}`);
+    } catch (err: any) {
+      showToast(`Enable reset failed: ${err?.message || "unknown error"}`);
+    } finally {
+      setResetLoadingUserId(null);
     }
   };
 
@@ -1005,6 +1059,34 @@ export default function AdminDashboard() {
                               </button>
                               <button onClick={() => resetPlanGuards(u.uid)} style={S.actionBtn} title="Reset plan-change limits">
                                 🔄
+                              </button>
+                              <button
+                                onClick={() => enablePasswordReset(u)}
+                                style={{
+                                  ...S.actionBtn,
+                                  background: u.passwordReset?.active ? "rgba(217,119,6,0.22)" : "rgba(220,38,38,0.2)",
+                                  border: u.passwordReset?.active
+                                    ? "1px solid rgba(245,158,11,0.45)"
+                                    : "1px solid rgba(220,38,38,0.45)",
+                                  opacity:
+                                    canEnablePasswordResetForUser(u) && !u.passwordReset?.active && resetLoadingUserId !== u.uid
+                                      ? 1
+                                      : 0.55,
+                                  cursor:
+                                    canEnablePasswordResetForUser(u) && !u.passwordReset?.active && resetLoadingUserId !== u.uid
+                                      ? "pointer"
+                                      : "not-allowed",
+                                }}
+                                disabled={!canEnablePasswordResetForUser(u) || !!u.passwordReset?.active || resetLoadingUserId === u.uid}
+                                title={
+                                  !canEnablePasswordResetForUser(u)
+                                    ? "Only available for other non-admin users"
+                                    : u.passwordReset?.active
+                                    ? "Password reset already enabled"
+                                    : "Enable password reset"
+                                }
+                              >
+                                {resetLoadingUserId === u.uid ? "⏳" : u.passwordReset?.active ? "✅" : "🔐"}
                               </button>
                               <button onClick={() => deleteUser(u.uid)} style={{ ...S.actionBtn, opacity: deleteLoading ? 0.7 : 1 }} disabled={deleteLoading}>
                                 🗑️
