@@ -1035,7 +1035,7 @@ router.get("/usage", async (req, res) => {
         const effectiveBillingEnabled = platformBillingEnabled && billingEnabled;
 
         const billingTruth = normalizeBillingTruthFromUser(userData, Date.now());
-        const canEnablePasswordReset = canAdminManagePasswordReset(req.adminUser?.uid || "", userId, userData);
+        const canEnablePasswordReset = canAdminManagePasswordReset(req.adminUser!.uid, userId, userData);
 
         return {
           userId,
