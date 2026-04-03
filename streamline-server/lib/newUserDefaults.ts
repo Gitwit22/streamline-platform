@@ -1,3 +1,4 @@
+import { createEmptyPasswordResetState, createEmptyRecoveryState } from "./accountRecovery";
 import { normalizeBillingTruthFromUser } from "./billingTruth";
 import { CURRENT_TOS_VERSION } from "./tos";
 
@@ -29,6 +30,8 @@ export function buildNewUserDoc(input: NewUserDocInput) {
     // Legacy billing fields (still used by some gates/UI)
     billingActive: false,
     billingStatus: "free",
+    passwordReset: createEmptyPasswordResetState(),
+    recovery: createEmptyRecoveryState(),
 
     createdAt: now,
     timeZone: input.timeZone ? String(input.timeZone) : "America/Chicago",

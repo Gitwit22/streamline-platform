@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import { API_BASE } from "../services/apiBase";
 import { apiFetchAuth } from "../lib/api";
+import { refreshAndPersistAccountMe, persistSessionUser } from "../lib/sessionUser";
 
 // Email validation function
 function validateEmail(email: string): boolean {
@@ -102,10 +103,8 @@ export const SignupPage = () => {
       }
 
       // Store user data and token in localStorage
-      localStorage.setItem("sl_user", JSON.stringify(data.user));
+      persistSessionUser(data.user);
       localStorage.setItem("authToken", data.token);
-      localStorage.setItem("sl_userId", data.user.id || data.user.uid);
-      localStorage.setItem("sl_displayName", data.user.displayName);
 
       // Notify hooks (useEffectiveEntitlements) that auth state changed
       try {
@@ -122,6 +121,16 @@ export const SignupPage = () => {
         await apiFetchAuth("/api/account/init", { method: "POST" });
       } catch (initErr) {
         console.warn("[Signup] account init failed", initErr);
+      }
+
+      try {
+        const me = await refreshAndPersistAccountMe();
+        if (me?.recoveryRequired === true) {
+          nav("/account-recovery/setup", { replace: true });
+          return;
+        }
+      } catch (meErr) {
+        console.warn("[Signup] /api/account/me refresh failed", meErr);
       }
 
       // Redirect to next URL or dashboard

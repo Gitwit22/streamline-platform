@@ -1,7 +1,8 @@
 import React, { FormEvent, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { apiFetch, apiFetchAuth, clearAuthStorage } from "../lib/api";
-import { firebaseSendPasswordReset, firebaseSignInWithCustomToken, firebaseSignInWithEmailAndPassword, isFirebaseWebConfigured } from "../lib/firebaseClient";
+import { apiFetch, clearAuthStorage } from "../lib/api";
+import { refreshAndPersistAccountMe } from "../lib/sessionUser";
+import { firebaseSignInWithCustomToken, firebaseSignInWithEmailAndPassword, isFirebaseWebConfigured } from "../lib/firebaseClient";
 
 // Email validation function
 function validateEmail(email: string): boolean {
@@ -191,11 +192,7 @@ export const LoginPage: React.FC = () => {
       // half-authed state that causes room join "blink".
       let me: any = null;
       try {
-        const meRes = await apiFetchAuth("/api/account/me");
-        me = await meRes.json();
-        try {
-          localStorage.setItem("sl_user", JSON.stringify(me));
-        } catch {}
+        me = await refreshAndPersistAccountMe();
 
         // Notify hooks (useEffectiveEntitlements) that auth state changed
         // so they re-fetch entitlements with the new token.
@@ -212,33 +209,17 @@ export const LoginPage: React.FC = () => {
 
       setLoading(false);
 
+      if (me?.recoveryRequired === true) {
+        nav("/account-recovery/setup", { replace: true });
+        return;
+      }
+
       nav(nextUrl || "/join");
       return;
     } catch (err) {
       console.error(err);
       setError("Something went wrong. Try again.");
       setLoading(false);
-    }
-  };
-
-  const handleForgotPassword = async () => {
-    setError("");
-    const emailNorm = String(email || "").trim().toLowerCase();
-    if (!validateEmail(emailNorm)) {
-      setError("Enter your email above, then click Forgot password.");
-      return;
-    }
-
-    try {
-      const continueUrl = String(import.meta.env.VITE_FIREBASE_CONTINUE_URL || "").trim();
-      const actionCodeSettings = continueUrl
-        ? { url: continueUrl, handleCodeInApp: false }
-        : { url: window.location.origin + "/login", handleCodeInApp: false };
-      await firebaseSendPasswordReset(emailNorm, actionCodeSettings as any);
-      setError("Password reset email sent (check your inbox).");
-    } catch (err: any) {
-      const msg = String(err?.code || err?.message || "reset_failed");
-      setError(msg);
     }
   };
 
@@ -529,7 +510,9 @@ export const LoginPage: React.FC = () => {
               }}
               onClick={(e) => {
                 e.preventDefault();
-                void handleForgotPassword();
+                const emailNorm = String(email || "").trim().toLowerCase();
+                const next = emailNorm ? `?login=${encodeURIComponent(emailNorm)}` : "";
+                nav(`/forgot-password${next}`);
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.color = "#ef4444";

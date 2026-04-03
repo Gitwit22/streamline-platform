@@ -7,9 +7,13 @@ import Terms from "./pages/Terms";
 import Support from "./pages/Support";
 import BillingCanceled from "./pages/BillingCanceled";
 import BillingSuccess from "./pages/BillingSuccess";
+import ForgotPasswordPage from "./pages/ForgotPasswordPage";
 import PpvViewer from "./pages/PpvViewer";
+import RecoverySetupPage from "./pages/RecoverySetupPage";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { creatorRoutes } from "./creator/routes";
+import { useAuthMe } from "./hooks/useAuthMe";
+import { needsAccountRecoverySetup } from "./lib/accountRecovery";
 
 import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
@@ -17,6 +21,23 @@ import { clearPlatformFlagsCache } from "./lib/platformFlagsCache";
 import { useFeatureAccess } from "./hooks/useFeatureAccess";
 import { useEffectiveEntitlements } from "./hooks/useEffectiveEntitlements";
 import { cleanTrackingParams } from "./lib/cleanTrackingParams";
+
+function RecoverySetupEnforcer() {
+  const { user, loading } = useAuthMe();
+  const nav = useNavigate();
+  const location = useLocation();
+
+  useEffect(() => {
+    if (loading || !user) return;
+    if (!needsAccountRecoverySetup(user)) return;
+    if (location.pathname === "/account-recovery/setup") return;
+
+    const next = `${location.pathname}${location.search}`;
+    nav(`/account-recovery/setup?next=${encodeURIComponent(next)}`, { replace: true });
+  }, [loading, location.pathname, location.search, nav, user]);
+
+  return null;
+}
 
 
 function App() {
@@ -123,6 +144,7 @@ function App() {
 
   return (
     <>
+      <RecoverySetupEnforcer />
       {showUnauthorized && (
         <div
           style={{
@@ -175,7 +197,16 @@ function App() {
       {/* Public / auth flow */}
       <Route path="/" element={<Navigate to="/welcome" replace />} />
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       <Route path="/signup" element={<SignupPage />} />
+      <Route
+        path="/account-recovery/setup"
+        element={
+          <ProtectedRoute>
+            <RecoverySetupPage />
+          </ProtectedRoute>
+        }
+      />
       <Route path="/privacy" element={<Privacy />} />
       <Route path="/terms" element={<Terms />} />
       <Route path="/support" element={<Support />} />

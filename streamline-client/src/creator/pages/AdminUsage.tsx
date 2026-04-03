@@ -6,7 +6,19 @@ interface UsageData {
   userId: string;
   email: string;
   displayName?: string;
+  isAdmin?: boolean;
   planId: "free" | "starter" | "pro" | "basic" | "enterprise" | "internal_unlimited";
+  passwordReset?: {
+    active?: boolean;
+    requestedAt?: number | null;
+    expiresAt?: number | null;
+    usedAt?: number | null;
+  };
+  recovery?: {
+    configured?: boolean;
+  };
+  recoveryConfigured?: boolean;
+  canEnablePasswordReset?: boolean;
   billingTruthStatus?: "free" | "active" | "trialing" | "past_due" | "canceled" | string;
   stripeConnected?: boolean;
   stripeCustomerId?: string | null;
@@ -57,6 +69,7 @@ export default function AdminUsage() {
   const [grantReason, setGrantReason] = useState("");
   const [newPlan, setNewPlan] = useState<string>("free");
   const [planChangeReason, setPlanChangeReason] = useState("");
+  const [resetLoadingUserId, setResetLoadingUserId] = useState<string | null>(null);
 
   // Get admin user ID (in production, extract from JWT)
   const adminUserId = localStorage.getItem("sl_userId") || "admin";
@@ -190,6 +203,43 @@ export default function AdminUsage() {
       fetchData();
     } catch (err: any) {
       alert(`Error: ${err.message}`);
+    }
+  };
+
+  const handleEnablePasswordReset = async (user: UsageData) => {
+    if (!user.canEnablePasswordReset || resetLoadingUserId) return;
+
+    setResetLoadingUserId(user.userId);
+    try {
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/admin/users/${user.userId}/enable-password-reset`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        },
+        { allowNonOk: true }
+      );
+
+      const data = await res.json().catch(() => ({} as any));
+      if (!res.ok) {
+        throw new Error(String(data?.error || "Failed to enable password reset"));
+      }
+
+      setUsageData((current) =>
+        current.map((entry) =>
+          entry.userId === user.userId
+            ? {
+                ...entry,
+                passwordReset: data.passwordReset,
+                canEnablePasswordReset: data.canEnablePasswordReset,
+              }
+            : entry
+        )
+      );
+    } catch (err: any) {
+      alert(`Error: ${err.message}`);
+    } finally {
+      setResetLoadingUserId(null);
     }
   };
 
@@ -373,15 +423,29 @@ export default function AdminUsage() {
                       +{user.bonusMinutes}
                     </td>
                     <td className="px-4 py-3 text-center">
-                      {user.isBlocked ? (
-                        <span className="px-2 py-1 bg-red-500/20 text-red-400 rounded text-xs font-semibold">
-                          BLOCKED
-                        </span>
-                      ) : (
-                        <span className="px-2 py-1 bg-green-500/20 text-green-400 rounded text-xs font-semibold">
-                          ACTIVE
-                        </span>
-                      )}
+                      <div className="flex flex-col items-center gap-2">
+                        {user.isBlocked ? (
+                          <span className="px-2 py-1 bg-red-500/20 text-red-400 rounded text-xs font-semibold">
+                            BLOCKED
+                          </span>
+                        ) : (
+                          <span className="px-2 py-1 bg-green-500/20 text-green-400 rounded text-xs font-semibold">
+                            ACTIVE
+                          </span>
+                        )}
+                        {user.passwordReset?.active ? (
+                          <div className="text-[11px] text-amber-300 text-center">
+                            Reset Enabled
+                            <div className="text-[10px] text-amber-200/80">
+                              Expires {formatResetExpiry(user.passwordReset.expiresAt)}
+                            </div>
+                          </div>
+                        ) : user.recoveryConfigured === false ? (
+                          <div className="text-[11px] text-orange-300 text-center">Recovery setup required</div>
+                        ) : (
+                          <div className="text-[11px] text-gray-500 text-center">Recovery ready</div>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex items-center justify-center gap-2">
@@ -420,6 +484,30 @@ export default function AdminUsage() {
                           }
                         >
                           {user.billingEnabled === false ? "Billing: OFF" : "Billing: ON"}
+                        </button>
+                        <button
+                          onClick={() => handleEnablePasswordReset(user)}
+                          disabled={!user.canEnablePasswordReset || resetLoadingUserId === user.userId || !!user.passwordReset?.active}
+                          className={`px-3 py-1 rounded text-xs transition ${
+                            !user.canEnablePasswordReset
+                              ? "bg-gray-800 text-gray-500 cursor-not-allowed"
+                              : user.passwordReset?.active
+                                ? "bg-amber-700/60 text-amber-100 cursor-default"
+                                : "bg-red-700 hover:bg-red-600"
+                          }`}
+                          title={
+                            !user.canEnablePasswordReset
+                              ? "You can only enable resets for non-admin users other than yourself."
+                              : user.passwordReset?.active
+                                ? "Password reset already enabled"
+                                : "Enable one-time password reset for this user"
+                          }
+                        >
+                          {resetLoadingUserId === user.userId
+                            ? "Enabling..."
+                            : user.passwordReset?.active
+                              ? "Reset Enabled"
+                              : "Reset Password"}
                         </button>
                       </div>
                     </td>
@@ -579,4 +667,13 @@ function getPlanColor(planId: string): string {
     internal_unlimited: "bg-emerald-500/20 text-emerald-300",
   };
   return colors[planId] || colors.free;
+}
+
+function formatResetExpiry(expiresAt?: number | null) {
+  if (!expiresAt) return "soon";
+  try {
+    return new Date(expiresAt).toLocaleString();
+  } catch {
+    return "soon";
+  }
 }
