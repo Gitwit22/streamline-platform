@@ -168,6 +168,11 @@ const corsOptions: CorsOptions = {
     // Legacy invite JWT (join links) used for guest RTC join/status without auth.
     "x-invite-token",
     "X-Invite-Token",
+    // Program-scoped context headers used by Support Hub and admin APIs.
+    "x-program-id",
+    "X-Program-Id",
+    "x-active-program-id",
+    "X-Active-Program-Id",
   ],
   exposedHeaders: ["x-sl-auth-fallback", "x-sl-auth-header-invalid", "X-Request-Id"],
   optionsSuccessStatus: 204,
