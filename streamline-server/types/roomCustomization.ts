@@ -84,6 +84,12 @@ export type RoomSettingsPolicy = {
  *
  * Standard flow:  draft → setup → greenroom → intro_playing → live → ending → ended
  * Fallback flow:  draft → live  (when greenroom disabled)
+ *
+ * Terminal states: "ended" (normal), "error" (unrecoverable failure).
+ * States cannot be skipped arbitrarily — the host must advance the lifecycle
+ * forward; backward transitions are not permitted.
+ * "error" may occur at any non-terminal stage and signals that the room
+ * requires manual intervention before it can proceed.
  */
 export type RoomLifecycleState =
   | "draft"

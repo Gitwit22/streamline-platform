@@ -33,7 +33,7 @@ interface RoomInfo {
 }
 
 const POLL_INTERVAL_MS = 5_000;
-const STALE_THRESHOLD_MS = 15 * 60 * 1_000;
+const STALE_THRESHOLD_MS = 15 * 60 * 1_000; // 15 minutes
 
 export default function Greenroom() {
   const nav = useNavigate();

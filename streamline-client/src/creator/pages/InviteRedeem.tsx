@@ -130,7 +130,7 @@ export default function InviteRedeem() {
     const { greenroomMode, lifecycleState, roomId } = info;
     if (
       greenroomMode &&
-      greenroomMode !== ("off" as string) &&
+      greenroomMode !== "off" &&
       lifecycleState === "greenroom" &&
       roomId
     ) {
