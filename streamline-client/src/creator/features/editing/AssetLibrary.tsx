@@ -598,9 +598,10 @@ function RecordingCard({
 }) {
   const mins = Math.floor(recording.duration / 60);
   const secs = recording.duration % 60;
-  const dateStr = recording.createdAt
-    ? new Date(recording.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
-    : '';
+  const _d = recording.createdAt ? new Date(recording.createdAt) : null;
+  const dateStr = _d && !isNaN(_d.getTime())
+    ? _d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+    : recording.createdAt ? 'Unknown Date' : '';
 
   return (
     <div
