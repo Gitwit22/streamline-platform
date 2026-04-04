@@ -6,6 +6,7 @@ import {
   apiGetRoomCustomization,
   apiUpdateRoomCustomization,
   type RoomCustomizationConfig,
+  apiFetch,
 } from "../../lib/api";
 import { getPlatformFlagsValue } from "../../lib/platformFlagsStore";
 
@@ -18,16 +19,16 @@ import { getPlatformFlagsValue } from "../../lib/platformFlagsStore";
  * Feature-gated by platformFlags.roomCustomizationEnabled AND
  * plan feature canCustomizeRooms. Both must be true to access this page.
  *
- * Phase 2: save-only, no live rendering yet.
+ * Phase 4: layout preview cards, intro clip config + preview controls.
  */
 
 type LayoutStyle = NonNullable<RoomCustomizationConfig["layoutStyle"]>;
 
-const LAYOUT_OPTIONS: { value: LayoutStyle; label: string }[] = [
-  { value: "default", label: "Default" },
-  { value: "speaker", label: "Speaker Focus" },
-  { value: "grid", label: "Grid" },
-  { value: "host-focus", label: "Host Focus" },
+const LAYOUT_OPTIONS: { value: LayoutStyle; label: string; icon: string; desc: string }[] = [
+  { value: "default", label: "Default", icon: "⬜", desc: "Standard balanced layout" },
+  { value: "speaker", label: "Speaker Focus", icon: "🎤", desc: "Spotlight active speaker" },
+  { value: "grid", label: "Grid", icon: "⊞", desc: "Equal tiles for all participants" },
+  { value: "host-focus", label: "Host Focus", icon: "⭐", desc: "Host takes center stage" },
 ];
 
 const BANNER_DEFAULTS = { url: "", position: "bottom" as const, height: 80, opacity: 1 };
@@ -44,11 +45,18 @@ export default function RoomSetup() {
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
+  // Intro clip state
+  const [introStatus, setIntroStatus] = useState<string>("idle");
+  const [introLoading, setIntroLoading] = useState(false);
+
   // Feature gate check
   const platformFlags = getPlatformFlagsValue() || {};
   const platformEnabled = platformFlags.roomCustomizationEnabled === true;
   const planEnabled = !!(effectiveEntitlements as any)?.features?.canCustomizeRooms;
   const featureActive = platformEnabled && planEnabled;
+  const introEnabled =
+    platformFlags.roomIntroMediaV1 === true &&
+    !!(effectiveEntitlements as any)?.features?.canUseIntroClip;
 
   const isOwner = !!authUser && !authLoading;
 
@@ -68,6 +76,57 @@ export default function RoomSetup() {
       })
       .finally(() => setLoading(false));
   }, [roomId, isOwner, featureActive]);
+
+  // Fetch intro status when intro is enabled.
+  useEffect(() => {
+    if (!roomId || !isOwner || !introEnabled) return;
+    apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/intro/status`, {}, { allowNonOk: true })
+      .then(async (r) => {
+        const ct = r.headers.get("content-type") || "";
+        if (!r.ok || !ct.includes("application/json")) return;
+        const data = await r.json();
+        if (data?.intro?.status) setIntroStatus(data.intro.status);
+      })
+      .catch(() => { /* silent */ });
+  }, [roomId, isOwner, introEnabled]);
+
+  const handleIntroPlay = useCallback(async () => {
+    if (!roomId || introLoading) return;
+    setIntroLoading(true);
+    try {
+      const res = await apiFetch(
+        `/api/rooms/${encodeURIComponent(roomId)}/intro/play`,
+        { method: "POST" },
+        { allowNonOk: true }
+      );
+      const ct = res.headers.get("content-type") || "";
+      if (res.ok && ct.includes("application/json")) {
+        const data = await res.json();
+        setIntroStatus(data?.intro?.status ?? "playing");
+      }
+    } catch { /* silent */ } finally {
+      setIntroLoading(false);
+    }
+  }, [roomId, introLoading]);
+
+  const handleIntroSkip = useCallback(async () => {
+    if (!roomId || introLoading) return;
+    setIntroLoading(true);
+    try {
+      const res = await apiFetch(
+        `/api/rooms/${encodeURIComponent(roomId)}/intro/skip`,
+        { method: "POST" },
+        { allowNonOk: true }
+      );
+      const ct = res.headers.get("content-type") || "";
+      if (res.ok && ct.includes("application/json")) {
+        const data = await res.json();
+        setIntroStatus(data?.intro?.status ?? "skipped");
+      }
+    } catch { /* silent */ } finally {
+      setIntroLoading(false);
+    }
+  }, [roomId, introLoading]);
 
   const handleSave = useCallback(async () => {
     if (!roomId || saving) return;
@@ -170,22 +229,34 @@ export default function RoomSetup() {
         {/* ── Layout Style ── */}
         <section style={styles.section}>
           <h2 style={styles.sectionTitle}>Layout Style</h2>
-          <div style={styles.radioGroup}>
-            {LAYOUT_OPTIONS.map((opt) => (
-              <label key={opt.value} style={styles.radioLabel}>
-                <input
-                  type="radio"
-                  name="layoutStyle"
-                  value={opt.value}
-                  checked={(customization.layoutStyle || "default") === opt.value}
-                  onChange={() =>
+          <p style={styles.mutedText}>Choose how participants are arranged on screen.</p>
+          <div style={layoutPreviewGrid}>
+            {LAYOUT_OPTIONS.map((opt) => {
+              const selected = (customization.layoutStyle || "default") === opt.value;
+              return (
+                <button
+                  key={opt.value}
+                  onClick={() =>
                     setCustomization((prev) => ({ ...prev, layoutStyle: opt.value }))
                   }
-                  style={styles.radioInput}
-                />
-                {opt.label}
-              </label>
-            ))}
+                  style={{
+                    ...layoutPreviewCard,
+                    ...(selected ? layoutPreviewCardSelected : {}),
+                  }}
+                  aria-pressed={selected}
+                >
+                  <span style={{ fontSize: 24, display: "block", marginBottom: 6 }}>
+                    {opt.icon}
+                  </span>
+                  <span style={{ fontSize: 13, fontWeight: 600, color: selected ? "#fff" : "#bbb" }}>
+                    {opt.label}
+                  </span>
+                  <span style={{ fontSize: 11, opacity: 0.6, marginTop: 2, display: "block" }}>
+                    {opt.desc}
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </section>
 
@@ -400,6 +471,103 @@ export default function RoomSetup() {
           </div>
         </section>
 
+        {/* ── Intro Clip (Phase 5) — only visible when flag + plan are active ── */}
+        {introEnabled && (
+          <section style={styles.section}>
+            <div style={styles.sectionHeader}>
+              <h2 style={styles.sectionTitle}>Intro Clip</h2>
+              <label style={styles.toggleLabel}>
+                <input
+                  type="checkbox"
+                  checked={customization.introClip?.enabled === true}
+                  onChange={(e) =>
+                    setCustomization((prev) => ({
+                      ...prev,
+                      introClip: { ...prev.introClip, enabled: e.target.checked },
+                    }))
+                  }
+                />
+                {" "}Enabled
+              </label>
+            </div>
+            <p style={styles.mutedText}>
+              Play a short clip before your room goes live. If the clip is missing or fails,
+              the room starts normally.
+            </p>
+            {customization.introClip?.enabled && (
+              <div style={styles.fieldGroup}>
+                <label style={styles.fieldLabel}>Asset ID (from My Content)</label>
+                <input
+                  type="text"
+                  style={styles.input}
+                  placeholder="asset_abc123"
+                  value={customization.introClip?.assetId || ""}
+                  onChange={(e) =>
+                    setCustomization((prev) => ({
+                      ...prev,
+                      introClip: { ...prev.introClip, enabled: true, assetId: e.target.value },
+                    }))
+                  }
+                />
+                <label style={styles.fieldLabel}>Duration (seconds, max 300)</label>
+                <input
+                  type="number"
+                  style={styles.input}
+                  min={1}
+                  max={300}
+                  value={customization.introClip?.durationSeconds ?? ""}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    setCustomization((prev) => ({
+                      ...prev,
+                      introClip: {
+                        ...prev.introClip,
+                        enabled: true,
+                        durationSeconds: isNaN(v) ? undefined : Math.min(300, Math.max(1, v)),
+                      },
+                    }));
+                  }}
+                />
+                <label style={styles.toggleLabel}>
+                  <input
+                    type="checkbox"
+                    checked={customization.introClip?.allowHostSkip !== false}
+                    onChange={(e) =>
+                      setCustomization((prev) => ({
+                        ...prev,
+                        introClip: { ...prev.introClip, enabled: true, allowHostSkip: e.target.checked },
+                      }))
+                    }
+                  />
+                  {" "}Allow host to skip
+                </label>
+
+                {/* Preview controls — only wired up when assetId exists */}
+                <div style={{ marginTop: 12, display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" as const }}>
+                  <div style={{ fontSize: 12, color: "#888" }}>
+                    Status: <strong style={{ color: "#e0e0e0" }}>{introStatus}</strong>
+                  </div>
+                  <button
+                    style={{ ...styles.btnPrimary, padding: "6px 16px", fontSize: 13 }}
+                    disabled={introLoading || !customization.introClip?.assetId}
+                    onClick={handleIntroPlay}
+                    title={!customization.introClip?.assetId ? "Set an Asset ID first" : ""}
+                  >
+                    {introLoading ? "…" : "▶ Play Intro"}
+                  </button>
+                  <button
+                    style={{ ...styles.btnSecondary, padding: "6px 16px", fontSize: 13 }}
+                    disabled={introLoading}
+                    onClick={handleIntroSkip}
+                  >
+                    ⏭ Skip
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
+        )}
+
         {/* ── Save / Actions ── */}
         {saveError && <p style={styles.errorText}>{saveError}</p>}
         {saveSuccess && <p style={styles.successText}>Settings saved successfully.</p>}
@@ -604,4 +772,30 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "14px",
     margin: "0 0 12px",
   },
+};
+
+// ── Layout preview card styles (defined outside `styles` to avoid Record<string, CSSProperties> type issue)
+const layoutPreviewGrid: React.CSSProperties = {
+  display: "grid",
+  gridTemplateColumns: "repeat(auto-fill, minmax(140px, 1fr))",
+  gap: 10,
+  marginTop: 12,
+};
+
+const layoutPreviewCard: React.CSSProperties = {
+  background: "rgba(255,255,255,0.04)",
+  border: "1px solid rgba(255,255,255,0.1)",
+  borderRadius: 10,
+  padding: "14px 10px",
+  cursor: "pointer",
+  textAlign: "center",
+  transition: "border-color 0.15s, background 0.15s",
+  color: "#bbb",
+  lineHeight: 1.4,
+};
+
+const layoutPreviewCardSelected: React.CSSProperties = {
+  background: "rgba(200,0,0,0.12)",
+  border: "1px solid rgba(200,0,0,0.4)",
+  color: "#fff",
 };

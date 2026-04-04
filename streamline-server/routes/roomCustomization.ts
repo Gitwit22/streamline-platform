@@ -2,9 +2,42 @@ import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth";
 import { firestore as db } from "../firebaseAdmin";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import type { RoomCustomizationConfig } from "../types/roomCustomization";
 
 const router = Router();
+
+/**
+ * Public subset of RoomCustomizationConfig — safe to return to unauthenticated guests.
+ * Contains only visual/presentation fields; no secrets, runtime controls, or
+ * host-only configuration.
+ */
+type PublicRoomCustomization = {
+  banner?: {
+    enabled: boolean;
+    url: string;
+    position: "top" | "bottom";
+    height: number;
+    opacity: number;
+  };
+  roomBackground?: {
+    enabled: boolean;
+    type: "image" | "gradient" | "solid";
+    url?: string;
+    value?: string;
+    overlayOpacity?: number;
+  };
+  placeholderMedia?: {
+    enabled: boolean;
+    imageUrl: string;
+    title?: string;
+    subtitle?: string;
+  };
+  greenroom?: {
+    waitingRoomMessage?: string;
+  };
+  layoutStyle?: "default" | "speaker" | "grid" | "host-focus";
+};
 
 function normalizeRoomId(raw: string | undefined): string {
   return String(raw || "").trim();
@@ -138,6 +171,90 @@ router.put("/:roomId/customization", requireAuth as any, async (req: any, res) =
       return res.status(err.status).json({ error: err.code });
     }
     console.error("PUT /api/rooms/:roomId/customization error", err);
+    return res.status(500).json({ error: "server_error" });
+  }
+});
+
+/**
+ * GET /api/rooms/:roomId/customization/public
+ *
+ * Auth: NONE — fully public, read-only.
+ *
+ * Returns a safe subset of the room customization config for use in
+ * guest-facing pages (Greenroom waiting room, invite pages, etc.).
+ *
+ * Security: Only presentation-layer fields are returned.
+ * No secrets, IDs, or access-control data are exposed.
+ */
+router.get("/:roomId/customization/public", async (req: any, res) => {
+  const roomId = normalizeRoomId(req.params.roomId);
+  if (!roomId) {
+    return res.status(400).json({ error: "invalid_room_id" });
+  }
+
+  try {
+    const snap = await db.collection("rooms").doc(roomId).get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
+    }
+
+    const room = (snap.data() as any) || {};
+    const raw: RoomCustomizationConfig = room.settings?.customization || {};
+
+    // Extract only safe, public presentation fields.
+    // Intentionally omit introClip (runtime control), roomSfx (host-only),
+    // and any field that could reveal operational state.
+    const pub: PublicRoomCustomization = {};
+
+    if (raw.banner?.enabled) {
+      pub.banner = {
+        enabled: true,
+        url: String(raw.banner.url || ""),
+        position: raw.banner.position === "top" ? "top" : "bottom",
+        height: Number(raw.banner.height) || 80,
+        opacity: typeof raw.banner.opacity === "number" ? raw.banner.opacity : 1,
+      };
+    }
+
+    if (raw.roomBackground?.enabled) {
+      const bg = raw.roomBackground;
+      pub.roomBackground = {
+        enabled: true,
+        type: bg.type === "image" || bg.type === "gradient" ? bg.type : "solid",
+        url: typeof bg.url === "string" ? bg.url : undefined,
+        value: typeof bg.value === "string" ? bg.value : undefined,
+        overlayOpacity: typeof bg.overlayOpacity === "number" ? bg.overlayOpacity : undefined,
+      };
+    }
+
+    if (raw.placeholderMedia?.enabled) {
+      pub.placeholderMedia = {
+        enabled: true,
+        imageUrl: String(raw.placeholderMedia.imageUrl || ""),
+        title: typeof raw.placeholderMedia.title === "string" ? raw.placeholderMedia.title : undefined,
+        subtitle: typeof raw.placeholderMedia.subtitle === "string" ? raw.placeholderMedia.subtitle : undefined,
+      };
+    }
+
+    if (raw.greenroom) {
+      pub.greenroom = {
+        waitingRoomMessage: typeof raw.greenroom.waitingRoomMessage === "string"
+          ? raw.greenroom.waitingRoomMessage
+          : undefined,
+      };
+    }
+
+    if (raw.layoutStyle) {
+      pub.layoutStyle = raw.layoutStyle;
+    }
+
+    return res.json({
+      ok: true,
+      roomId,
+      customization: pub,
+    });
+  } catch (err) {
+    console.error("GET /api/rooms/:roomId/customization/public error", err);
     return res.status(500).json({ error: "server_error" });
   }
 });

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { apiFetch } from "../../lib/api";
+import RoomBrandingLayer, { type PublicRoomCustomization } from "../components/RoomBrandingLayer";
 
 /**
  * Greenroom — Guest waiting room for Phase 3 greenroom staging.
@@ -43,6 +44,7 @@ export default function Greenroom() {
   const [loading, setLoading] = useState(true);
   const [isStale, setIsStale] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [customization, setCustomization] = useState<PublicRoomCustomization | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const waitingStartRef = useRef<number | null>(null);
@@ -126,6 +128,23 @@ export default function Greenroom() {
       setInfo(data);
       setLoading(false);
       maybeRedirect(data);
+
+      // Fetch public customization for branding (best-effort, non-blocking).
+      apiFetch(
+        `/api/rooms/${encodeURIComponent(data.roomId)}/customization/public`,
+        {},
+        { allowNonOk: true }
+      )
+        .then(async (r) => {
+          if (!r.ok) return;
+          const ct = r.headers.get("content-type") || "";
+          if (!ct.includes("application/json")) return;
+          const json = await r.json();
+          if (json?.customization && !cancelled) {
+            setCustomization(json.customization as PublicRoomCustomization);
+          }
+        })
+        .catch(() => { /* branding failure is silent */ });
     })();
 
     return () => {
@@ -194,57 +213,61 @@ export default function Greenroom() {
   }
 
   // ── Waiting room UI ──────────────────────────────────────────────────────
+  const waitingMessage =
+    customization?.greenroom?.waitingRoomMessage ||
+    (isStale
+      ? "The host has not opened the room yet. They may be running late."
+      : "The host will admit you shortly. Please stand by.");
+
   return (
-    <div style={styles.page}>
-      <div style={styles.card}>
-        <div style={{ textAlign: "center", marginBottom: 24 }}>
-          <div style={styles.spinner} />
-          <style>{spinnerKeyframes}</style>
-          <h1 style={styles.title}>You're in the waiting room</h1>
-          <p style={styles.subtitle}>
-            {isStale
-              ? "The host has not opened the room yet. They may be running late."
-              : "The host will admit you shortly. Please stand by."}
-          </p>
-        </div>
-
-        {/* Room info */}
-        {info && (info.roomName || info.hostName) && (
-          <div style={styles.roomInfo}>
-            {info.roomName && (
-              <div style={styles.roomName}>{info.roomName}</div>
-            )}
-            {info.hostName && (
-              <div style={styles.hostName}>Hosted by {info.hostName}</div>
-            )}
+    <RoomBrandingLayer customization={customization}>
+      <div style={styles.page}>
+        <div style={styles.card}>
+          <div style={{ textAlign: "center", marginBottom: 24 }}>
+            <div style={styles.spinner} />
+            <style>{spinnerKeyframes}</style>
+            <h1 style={styles.title}>You're in the waiting room</h1>
+            <p style={styles.subtitle}>{waitingMessage}</p>
           </div>
-        )}
 
-        <div style={styles.hint}>Checking automatically…</div>
+          {/* Room info */}
+          {info && (info.roomName || info.hostName) && (
+            <div style={styles.roomInfo}>
+              {info.roomName && (
+                <div style={styles.roomName}>{info.roomName}</div>
+              )}
+              {info.hostName && (
+                <div style={styles.hostName}>Hosted by {info.hostName}</div>
+              )}
+            </div>
+          )}
 
-        <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
-          <button
-            style={{ ...styles.btn, flex: 1 }}
-            onClick={async () => {
-              setFetchError(null);
-              const fresh = await fetchInfo();
-              if (fresh) {
-                setInfo(fresh);
-                maybeRedirect(fresh);
-              }
-            }}
-          >
-            Refresh
-          </button>
-          <button
-            style={{ ...styles.btn, flex: 1 }}
-            onClick={() => nav("/join")}
-          >
-            Return home
-          </button>
+          <div style={styles.hint}>Checking automatically…</div>
+
+          <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
+            <button
+              style={{ ...styles.btn, flex: 1 }}
+              onClick={async () => {
+                setFetchError(null);
+                const fresh = await fetchInfo();
+                if (fresh) {
+                  setInfo(fresh);
+                  maybeRedirect(fresh);
+                }
+              }}
+            >
+              Refresh
+            </button>
+            <button
+              style={{ ...styles.btn, flex: 1 }}
+              onClick={() => nav("/join")}
+            >
+              Return home
+            </button>
+          </div>
         </div>
       </div>
-    </div>
+    </RoomBrandingLayer>
   );
 }
 
@@ -253,7 +276,6 @@ const spinnerKeyframes = `@keyframes sl-greenroom-spin { to { transform: rotate(
 const styles: Record<string, React.CSSProperties> = {
   page: {
     minHeight: "100vh",
-    background: "#0a0a0f",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
