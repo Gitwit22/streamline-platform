@@ -514,4 +514,125 @@ router.post("/purge-stale-hls", async (req, res) => {
   return res.json(result);
 });
 
+// ---------------------------------------------------------------------------
+// 24-hour recording retention
+// Deletes ready/stopped/processing recordings whose createdAt is older than
+// retentionHours (default: 24).  Active recordings (status "recording" or
+// "starting") and already-deleted recordings are skipped.
+// Supports dryRun mode: set query param dryRun=1 or env RECORDING_CLEANUP_DRY_RUN=1.
+// ---------------------------------------------------------------------------
+
+export const RECORDING_RETENTION_HOURS = 24;
+
+const ACTIVE_STATUSES = new Set(["recording", "starting"]);
+
+export async function purgeOldRecordings(
+  now: Date,
+  opts?: { limit?: number; dryRun?: boolean; retentionHours?: number }
+): Promise<{ deletedCount: number; skippedCount: number; dryRun: boolean }> {
+  const retentionHours =
+    typeof opts?.retentionHours === "number" && Number.isFinite(opts.retentionHours)
+      ? Math.max(1, opts.retentionHours)
+      : RECORDING_RETENTION_HOURS;
+  const cutoff = new Date(now.getTime() - retentionHours * 60 * 60 * 1000);
+  const limit =
+    typeof opts?.limit === "number" && Number.isFinite(opts.limit)
+      ? Math.max(1, Math.min(500, opts.limit))
+      : 200;
+  const dryRun = opts?.dryRun === true;
+
+  let snap: FirebaseFirestore.QuerySnapshot;
+  try {
+    snap = await firestore
+      .collection("recordings")
+      .where("createdAt", "<", cutoff)
+      .limit(limit)
+      .get();
+  } catch (e: any) {
+    console.warn("[maintenance/purge-old-recordings] query failed", e?.message || e);
+    return { deletedCount: 0, skippedCount: 0, dryRun };
+  }
+
+  let deletedCount = 0;
+  let skippedCount = 0;
+
+  for (const doc of snap.docs) {
+    const data = (doc.data() || {}) as any;
+    const status = String(data.status || "").toLowerCase();
+
+    // Never delete active or already-deleted recordings.
+    if (status === "deleted" || ACTIVE_STATUSES.has(status)) {
+      skippedCount += 1;
+      continue;
+    }
+
+    if (dryRun) {
+      console.log(`[maintenance/purge-old-recordings] DRY RUN — would delete recording: ${doc.id}`);
+      deletedCount += 1;
+      continue;
+    }
+
+    const fileSize = typeof data.fileSize === "number" ? data.fileSize : 0;
+    const userId = typeof data.userId === "string" ? data.userId : null;
+    const storageReleased = data.storageReleased === true;
+
+    let storageDeleted = false;
+    try {
+      await deleteRecordingStorage(data);
+      storageDeleted = true;
+    } catch (e: any) {
+      console.warn(`[maintenance/purge-old-recordings] Failed to delete recording: ${doc.id}`, e?.message || e);
+    }
+
+    if (storageDeleted && userId && fileSize > 0 && !storageReleased) {
+      try {
+        await releaseStorageUsage(userId, fileSize, {
+          caller: "maintenance.purgeOldRecordings",
+          recordingId: doc.id,
+        });
+      } catch (e: any) {
+        console.warn("[maintenance/purge-old-recordings] storage release failed", {
+          userId, recordingId: doc.id, fileSize, error: e?.message || e,
+        });
+      }
+    }
+
+    try {
+      await doc.ref.set(
+        { status: "deleted", deleteReason: "expired_24h_retention", deletedAt: now, updatedAt: now, storageReleased: storageDeleted || storageReleased },
+        { merge: true }
+      );
+      deletedCount += 1;
+      if (storageDeleted) {
+        console.log(`[maintenance/purge-old-recordings] Deleted expired recording: ${doc.id}`);
+      } else {
+        console.warn(`[maintenance/purge-old-recordings] Marked deleted in Firestore (R2 deletion had failed): ${doc.id}`);
+      }
+    } catch (e: any) {
+      console.warn("[maintenance/purge-old-recordings] failed to update Firestore", { recordingId: doc.id, error: e?.message || e });
+    }
+  }
+
+  return { deletedCount, skippedCount, dryRun };
+}
+
+// POST/GET /api/maintenance/purge-old-recordings?limit=200&dryRun=1
+router.get("/purge-old-recordings", async (req, res) => {
+  const now = new Date();
+  const limit = req.query.limit ? Number(req.query.limit) : undefined;
+  const dryRun = req.query.dryRun === "1" || req.query.dryRun === "true" ||
+    process.env.RECORDING_CLEANUP_DRY_RUN === "1";
+  const result = await purgeOldRecordings(now, { limit, dryRun });
+  return res.json({ ok: true, ...result });
+});
+
+router.post("/purge-old-recordings", async (req, res) => {
+  const now = new Date();
+  const limit = req.query.limit ? Number(req.query.limit) : undefined;
+  const dryRun = req.query.dryRun === "1" || req.query.dryRun === "true" ||
+    process.env.RECORDING_CLEANUP_DRY_RUN === "1";
+  const result = await purgeOldRecordings(now, { limit, dryRun });
+  return res.json({ ok: true, ...result });
+});
+
 export default router;

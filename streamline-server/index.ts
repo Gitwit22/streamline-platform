@@ -39,6 +39,7 @@ import projectsRoutes from "./routes/projects";
 import myContentRoutes from "./routes/myContent";
 import maintenanceRoutes from "./routes/maintenance";
 import onboardingRoutes from "./routes/onboarding";
+import { startRecordingCleanup } from "./services/recordingCleanup";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
 import { getLiveKitSdk } from "./lib/livekit"; // adjust path
@@ -1069,6 +1070,11 @@ const server = app.listen(PORT, () => {
       logger.warn({ err: (err as any)?.message }, "Export worker failed to start (non-fatal)");
     });
   }
+
+  // Start the recording retention cleanup service (runs every hour).
+  // Deletes recordings older than 24 hours from R2 and Firestore.
+  // Set RECORDING_CLEANUP_DRY_RUN=1 to preview deletions without actually removing files.
+  startRecordingCleanup();
 });
 
 // Attach Horizon WebSocket (authenticated admin-only WS)
