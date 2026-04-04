@@ -20,6 +20,128 @@ import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 
 const router = express.Router();
 
+function toMillis(value: any): number | null {
+  if (!value) return null;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 1e12 ? value : value * 1000;
+  }
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (typeof value?.toMillis === "function") {
+    const ms = value.toMillis();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (typeof value?.toDate === "function") {
+    const d = value.toDate();
+    const ms = d?.getTime?.();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  const parsed = new Date(value);
+  const ms = parsed.getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function parsePeriodRange(query: any): { startMs: number; endMs: number } {
+  const now = Date.now();
+  const period = String(query.period || "30d").trim().toLowerCase();
+  const startRaw = typeof query.start === "string" ? query.start : query.startDate;
+  const endRaw = typeof query.end === "string" ? query.end : query.endDate;
+
+  const explicitStart = toMillis(startRaw);
+  const explicitEnd = toMillis(endRaw);
+  if (explicitStart !== null || explicitEnd !== null) {
+    const startMs = explicitStart ?? now - 30 * 24 * 60 * 60 * 1000;
+    const endMs = explicitEnd ?? now;
+    return { startMs: Math.min(startMs, endMs), endMs: Math.max(startMs, endMs) };
+  }
+
+  const dayMs = 24 * 60 * 60 * 1000;
+  if (period === "today") {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return { startMs: d.getTime(), endMs: now };
+  }
+  if (period === "week" || period === "7d") {
+    return { startMs: now - 7 * dayMs, endMs: now };
+  }
+  if (period === "month") {
+    const d = new Date();
+    d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    return { startMs: d.getTime(), endMs: now };
+  }
+  if (period === "90d") {
+    return { startMs: now - 90 * dayMs, endMs: now };
+  }
+  if (period === "all") {
+    return { startMs: 0, endMs: now };
+  }
+
+  // Default and "30d"
+  return { startMs: now - 30 * dayMs, endMs: now };
+}
+
+function readPath(obj: any, path: string): any {
+  return path.split(".").reduce((acc, key) => (acc && typeof acc === "object" ? acc[key] : undefined), obj);
+}
+
+function resolveProgramContext(req: any): string | null {
+  const q = req.query || {};
+  const programRaw =
+    q.programId ||
+    q.activeProgramId ||
+    q.program ||
+    req.header?.("x-program-id") ||
+    req.header?.("x-active-program-id") ||
+    "";
+  const value = String(programRaw || "").trim();
+  return value || null;
+}
+
+function matchesProgramContext(data: any, activeProgramId: string | null): boolean {
+  if (!activeProgramId) return true;
+  const candidates = [
+    readPath(data, "programId"),
+    readPath(data, "activeProgramId"),
+    readPath(data, "program.id"),
+    readPath(data, "programContext.programId"),
+    readPath(data, "meta.programId"),
+  ]
+    .map((v) => (typeof v === "string" ? v.trim() : ""))
+    .filter(Boolean);
+  return candidates.includes(activeProgramId);
+}
+
+function isInRange(ms: number | null, startMs: number, endMs: number): boolean {
+  if (ms === null) return false;
+  return ms >= startMs && ms <= endMs;
+}
+
+function getDocMillis(data: any, fields: string[]): number | null {
+  for (const field of fields) {
+    const raw = readPath(data, field);
+    const ms = toMillis(raw);
+    if (ms !== null) return ms;
+  }
+  return null;
+}
+
+function buildMonthKeys(startMs: number, endMs: number): Set<string> {
+  const start = new Date(startMs);
+  const end = new Date(endMs);
+  const cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+  const endMonth = new Date(end.getFullYear(), end.getMonth(), 1);
+  const keys = new Set<string>();
+  while (cursor <= endMonth) {
+    const key = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`;
+    keys.add(key);
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return keys;
+}
+
 function getDeletedAtMs(raw: any): number | null {
   if (!raw) return null;
   const deletedAtMs =
@@ -902,6 +1024,8 @@ router.get("/usage", async (req, res) => {
   try {
     const limit = parseInt(req.query.limit as string) || 100;
     const planFilter = req.query.plan as PlanId | undefined;
+    const { startMs, endMs } = parsePeriodRange(req.query || {});
+    const activeProgramId = resolveProgramContext(req);
     const includeDeleted = (() => {
       const raw = String(req.query.includeDeleted || "").trim().toLowerCase();
       return raw === "1" || raw === "true" || raw === "yes";
@@ -1001,10 +1125,98 @@ router.get("/usage", async (req, res) => {
     // Sort by percent used (most blocked users first)
     usageData.sort((a, b) => b.percentUsed - a.percentUsed);
 
+    const monthKeys = buildMonthKeys(startMs, endMs);
+
+    // Period-scoped roomsCreated for Support Hub Usage card.
+    const roomsSnapshot = await firestore.collection("rooms").get();
+    const roomsCreated = roomsSnapshot.docs.reduce((count, doc) => {
+      const data = doc.data();
+      if (!matchesProgramContext(data, activeProgramId)) return count;
+      const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
+      return isInRange(createdMs, startMs, endMs) ? count + 1 : count;
+    }, 0);
+
+    const usersSnapshotAll = await firestore.collection("users").get();
+    const activeUsers = usersSnapshotAll.docs.reduce((count, doc) => {
+      const data = doc.data();
+      if (!includeDeleted && isDeletedUserRecord(data)) return count;
+      if (!matchesProgramContext(data, activeProgramId)) return count;
+      const lastActiveMs = getDocMillis(data, ["lastActive", "lastActiveAt", "updatedAt"]);
+      return isInRange(lastActiveMs, startMs, endMs) ? count + 1 : count;
+    }, 0);
+
+    const recordingsSnapshot = await firestore.collection("recordings").get();
+    const recordingsCreated = recordingsSnapshot.docs.reduce((count, doc) => {
+      const data = doc.data();
+      if (!matchesProgramContext(data, activeProgramId)) return count;
+      const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
+      return isInRange(createdMs, startMs, endMs) ? count + 1 : count;
+    }, 0);
+
+    const usageMonthlySnap = await firestore.collection("usageMonthly").get();
+    let streamMinutes = 0;
+    let hlsMinutes = 0;
+    let apiRequests = 0;
+    usageMonthlySnap.docs.forEach((doc) => {
+      const data = doc.data() as any;
+      if (!matchesProgramContext(data, activeProgramId)) return;
+      const monthKey = String(data.monthKey || doc.id.split("_").pop() || "");
+      if (!monthKeys.has(monthKey)) return;
+      const usage = data.usage || data.totals || {};
+      streamMinutes += Number(usage.participantMinutes ?? usage.streamMinutes ?? usage.minutes ?? 0);
+      hlsMinutes += Number(usage.hlsMinutes ?? 0);
+      apiRequests += Number(usage.apiRequests ?? usage.api_requests ?? 0);
+    });
+
+    let messagesSent = 0;
+    try {
+      const messageSnap = await firestore.collectionGroup("messages").get();
+      messagesSent = messageSnap.docs.reduce((count, doc) => {
+        const data = doc.data() as any;
+        const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
+        if (!isInRange(createdMs, startMs, endMs)) return count;
+        if (!activeProgramId) return count + 1;
+
+        const path = doc.ref.path.split("/");
+        const roomId = path.length >= 2 && path[0] === "rooms" ? path[1] : "";
+        if (!roomId) return count;
+        // When messages don't carry program fields, allow matching via roomId path token.
+        return roomId.includes(activeProgramId) ? count + 1 : count;
+      }, 0);
+    } catch {
+      messagesSent = 0;
+    }
+
+    let ticketsToday = 0;
+    try {
+      const ticketsSnapshot = await firestore.collection("supportTickets").get();
+      ticketsToday = ticketsSnapshot.docs.reduce((count, doc) => {
+        const data = doc.data();
+        if (!matchesProgramContext(data, activeProgramId)) return count;
+        const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
+        return isInRange(createdMs, startMs, endMs) ? count + 1 : count;
+      }, 0);
+    } catch {
+      ticketsToday = 0;
+    }
+
     res.json({
+      ticketsToday: Number(ticketsToday || 0),
+      activeUsers: Number(activeUsers || 0),
+      roomsCreated: Number(roomsCreated || 0),
+      messagesSent: Number(messagesSent || 0),
+      streamMinutes: Number(streamMinutes || 0),
+      apiRequests: Number(apiRequests || 0),
+      recordingsCreated: Number(recordingsCreated || 0),
+      hlsMinutes: Number(hlsMinutes || 0),
       usage: usageData,
       total: usageData.length,
       limit,
+      period: {
+        startMs,
+        endMs,
+      },
+      activeProgramId,
     });
   } catch (error: any) {
     console.error("Failed to fetch usage stats:", error);
