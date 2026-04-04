@@ -5,7 +5,7 @@ Date: 2026-02-03
 Status: Plan-only (no build yet)
 
 Owner repo: `Gitwit22/streamline-platform`
-Branch context: `feature/hls-dev`
+Branch context: `creator-dev`
 
 ## Goals
 
