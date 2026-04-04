@@ -17,6 +17,14 @@ export type PlatformFlags = {
   invisibleHostEnabled?: boolean;
   /** Owner/collaborator delegated production mode (opt-in, default disabled). */
   collaboratorDelegationEnabled?: boolean;
+  /** Room customization feature — banner, background, layout, placeholder (opt-in). */
+  roomCustomizationEnabled?: boolean;
+  /** Greenroom HLS waiting room staging system (opt-in). */
+  greenroomHlsEnabled?: boolean;
+  /** Intro clip playback before going live (opt-in). */
+  roomIntroMediaV1?: boolean;
+  /** Room sound effects soundboard — host-only (opt-in). */
+  roomSoundboardV1?: boolean;
   [key: string]: any;
 };
 

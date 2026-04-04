@@ -20,6 +20,10 @@ router.get("/", async (_req, res) => {
       monetizationSnap,
       payPerViewSnap,
       collaboratorDelegationSnap,
+      roomCustomizationSnap,
+      greenroomHlsSnap,
+      roomIntroMediaSnap,
+      roomSoundboardSnap,
     ] = await Promise.all([
       firestore.collection("featureFlags").doc("hlsSettingsTab").get(),
       firestore.collection("featureFlags").doc("recording").get(),
@@ -31,6 +35,10 @@ router.get("/", async (_req, res) => {
       firestore.collection("featureFlags").doc("monetizationEnabled").get(),
       firestore.collection("featureFlags").doc("payPerViewEnabled").get(),
       firestore.collection("featureFlags").doc("collaboratorDelegationEnabled").get(),
+      firestore.collection("featureFlags").doc("roomCustomizationEnabled").get(),
+      firestore.collection("featureFlags").doc("greenroomHlsEnabled").get(),
+      firestore.collection("featureFlags").doc("roomIntroMediaV1").get(),
+      firestore.collection("featureFlags").doc("roomSoundboardV1").get(),
     ]);
 
     const hlsUiData = hlsUiSnap.exists ? ((hlsUiSnap.data() as any) || {}) : {};
@@ -47,6 +55,10 @@ router.get("/", async (_req, res) => {
     const collaboratorDelegationData = collaboratorDelegationSnap.exists
       ? ((collaboratorDelegationSnap.data() as any) || {})
       : {};
+    const roomCustomizationData = roomCustomizationSnap.exists ? ((roomCustomizationSnap.data() as any) || {}) : {};
+    const greenroomHlsData = greenroomHlsSnap.exists ? ((greenroomHlsSnap.data() as any) || {}) : {};
+    const roomIntroMediaData = roomIntroMediaSnap.exists ? ((roomIntroMediaSnap.data() as any) || {}) : {};
+    const roomSoundboardData = roomSoundboardSnap.exists ? ((roomSoundboardSnap.data() as any) || {}) : {};
 
     const hlsEnabled = hlsUiData.enabled === undefined ? true : !!hlsUiData.enabled;
     const recordingEnabled = recordingUiData.enabled === undefined ? true : !!recordingUiData.enabled;
@@ -65,6 +77,12 @@ router.get("/", async (_req, res) => {
     const monetizationEnabled = monetizationData.enabled === true;
     const payPerViewEnabled = payPerViewData.enabled === true;
     const collaboratorDelegationEnabled = collaboratorDelegationData.enabled === true;
+
+    // Room customization platform flags — all opt-in (default disabled).
+    const roomCustomizationEnabled = roomCustomizationData.enabled === true;
+    const greenroomHlsEnabled = greenroomHlsData.enabled === true;
+    const roomIntroMediaV1 = roomIntroMediaData.enabled === true;
+    const roomSoundboardV1 = roomSoundboardData.enabled === true;
 
     const snap = await firestore.collection("plans").get();
     const mapped = snap.docs.map((d) => {
@@ -178,6 +196,10 @@ router.get("/", async (_req, res) => {
           monetizationEnabled,
           payPerViewEnabled,
           collaboratorDelegationEnabled,
+          roomCustomizationEnabled,
+          greenroomHlsEnabled,
+          roomIntroMediaV1,
+          roomSoundboardV1,
         },
       });
     }
@@ -199,6 +221,10 @@ router.get("/", async (_req, res) => {
         monetizationEnabled,
         payPerViewEnabled,
         collaboratorDelegationEnabled,
+        roomCustomizationEnabled,
+        greenroomHlsEnabled,
+        roomIntroMediaV1,
+        roomSoundboardV1,
       },
     });
   } catch (err: any) {
@@ -218,6 +244,10 @@ router.get("/", async (_req, res) => {
         monetizationEnabled: false,
         payPerViewEnabled: false,
         collaboratorDelegationEnabled: false,
+        roomCustomizationEnabled: false,
+        greenroomHlsEnabled: false,
+        roomIntroMediaV1: false,
+        roomSoundboardV1: false,
       },
     });
   }

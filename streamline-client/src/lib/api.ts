@@ -438,6 +438,72 @@ export async function apiUpdateRoomPolicy(
   return res.json() as Promise<{ ok: true; roomId: string; allowGuests: boolean }>;
 }
 
+// ---------------------------------------------------------------------------
+// Room Customization API
+// ---------------------------------------------------------------------------
+
+export type RoomCustomizationConfig = {
+  banner?: {
+    enabled: boolean;
+    url: string;
+    position: "top" | "bottom";
+    height: number;
+    opacity: number;
+  };
+  roomBackground?: {
+    enabled: boolean;
+    type: "image" | "gradient" | "solid";
+    url?: string;
+    value?: string;
+    overlayOpacity?: number;
+  };
+  placeholderMedia?: {
+    enabled: boolean;
+    imageUrl: string;
+    title?: string;
+    subtitle?: string;
+  };
+  layoutStyle?: "default" | "speaker" | "grid" | "host-focus";
+  introClip?: {
+    enabled: boolean;
+    assetId?: string;
+    durationSeconds?: number;
+    autoPlayBeforeLive?: boolean;
+    allowHostSkip?: boolean;
+    fadeInMs?: number;
+    fadeOutMs?: number;
+  };
+  roomSfx?: {
+    enabled: boolean;
+    volume: number;
+    cooldownMs: number;
+    allowedEffects: Array<"applause" | "boo" | "crickets" | "airhorn">;
+  };
+  greenroom?: {
+    waitingRoomMessage?: string;
+    waitingRoomBackground?: string;
+    waitingRoomMusic?: string;
+  };
+};
+
+export async function apiGetRoomCustomization(roomId: string) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/customization`, {
+    method: "GET",
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; customization: RoomCustomizationConfig }>;
+}
+
+export async function apiUpdateRoomCustomization(
+  roomId: string,
+  patch: Partial<RoomCustomizationConfig>
+) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/customization`, {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; customization: RoomCustomizationConfig }>;
+}
+
 export function clearAuthStorage() {
   if (typeof window === "undefined") return;
   try {

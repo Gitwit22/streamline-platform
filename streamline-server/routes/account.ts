@@ -240,6 +240,10 @@ async function getSegmentedUiFlags() {
     payPerViewSnap,
     invisibleHostSnap,
     collaboratorDelegationSnap,
+    roomCustomizationSnap,
+    greenroomHlsSnap,
+    roomIntroMediaSnap,
+    roomSoundboardSnap,
   ] = await Promise.all([
     firestore.collection("featureFlags").doc("contentLibraryEnabled").get(),
     firestore.collection("featureFlags").doc("projectsEnabled").get(),
@@ -253,6 +257,10 @@ async function getSegmentedUiFlags() {
     firestore.collection("featureFlags").doc("payPerViewEnabled").get(),
     firestore.collection("featureFlags").doc("invisibleHostEnabled").get(),
     firestore.collection("featureFlags").doc("collaboratorDelegationEnabled").get(),
+    firestore.collection("featureFlags").doc("roomCustomizationEnabled").get(),
+    firestore.collection("featureFlags").doc("greenroomHlsEnabled").get(),
+    firestore.collection("featureFlags").doc("roomIntroMediaV1").get(),
+    firestore.collection("featureFlags").doc("roomSoundboardV1").get(),
   ]);
 
   // Default to ENABLED when the Firestore document doesn't exist.
@@ -286,6 +294,12 @@ async function getSegmentedUiFlags() {
     payPerViewEnabled: resolveOptIn(payPerViewSnap),
     invisibleHostEnabled: resolveOptIn(invisibleHostSnap),
     collaboratorDelegationEnabled: resolveOptIn(collaboratorDelegationSnap),
+    // Room customization platform flags — all opt-in (default disabled).
+    // Set { enabled: true } in featureFlags/<name> to activate globally.
+    roomCustomizationEnabled: resolveOptIn(roomCustomizationSnap),
+    greenroomHlsEnabled: resolveOptIn(greenroomHlsSnap),
+    roomIntroMediaV1: resolveOptIn(roomIntroMediaSnap),
+    roomSoundboardV1: resolveOptIn(roomSoundboardSnap),
   };
 }
 // Advanced permissions have been fully removed in favor of a single,
