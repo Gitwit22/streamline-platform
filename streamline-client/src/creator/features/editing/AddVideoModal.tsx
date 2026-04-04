@@ -64,9 +64,11 @@ export default function AddVideoModal({ isOpen, onClose, onAdded }: Props) {
 
   const fmtDate = (iso: string) => {
     try {
-      return new Date(iso).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return "Unknown Date";
+      return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
     } catch {
-      return "";
+      return "Unknown Date";
     }
   };
 

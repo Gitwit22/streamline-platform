@@ -1,5 +1,6 @@
 import { API_BASE } from "../lib/apiBase";
 import { apiFetchAuth } from "../lib/api";
+import { getSelectedOwnerContext } from "../lib/producerDelegation";
 
 export type HlsStatus = "idle" | "starting" | "live" | "error" | string;
 
@@ -14,6 +15,10 @@ function buildAuthHeaders(roomAccessToken?: string): HeadersInit {
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
   };
+  const ownerUid = getSelectedOwnerContext().ownerUid;
+  if (ownerUid) {
+    headers["x-owner-context-uid"] = ownerUid;
+  }
   if (roomAccessToken) {
     headers["x-room-access-token"] = roomAccessToken;
   }
@@ -50,7 +55,7 @@ export async function stopHls(roomId: string, roomAccessToken?: string) {
     url,
     {
       method: "POST",
-      headers: roomAccessToken ? { "x-room-access-token": roomAccessToken } : undefined,
+      headers: buildAuthHeaders(roomAccessToken),
     },
     { allowNonOk: true }
   );
@@ -64,8 +69,7 @@ export async function stopHls(roomId: string, roomAccessToken?: string) {
 
 export async function getHlsStatus(roomId: string, roomAccessToken?: string) {
   const url = `${API_BASE}/api/hls/status/${encodeURIComponent(roomId)}`;
-  const headers = roomAccessToken ? { "x-room-access-token": roomAccessToken } : undefined;
-  const res = await apiFetchAuth(url, { headers }, { allowNonOk: true });
+  const res = await apiFetchAuth(url, { headers: buildAuthHeaders(roomAccessToken) }, { allowNonOk: true });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`status_failed_${res.status}:${text}`);

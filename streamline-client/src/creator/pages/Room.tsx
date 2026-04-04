@@ -30,8 +30,9 @@ import AudioMixerModal from "../components/AudioMixerModal";
 import MixerBridge from "../components/MixerBridge";
 import ScreenShareRouter, { type ScreenShareRouteMode } from "../components/ScreenShareRouter";
 import ScreenSharePopout from "../components/ScreenSharePopout";
-import { TourProvider } from "../../components/tour/TourProvider";
+import { TourProvider, useTour } from "../../components/tour/TourProvider";
 import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
+import { getSelectedOwnerContext } from "../../lib/producerDelegation";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
 import { useHlsStatus } from "../hooks/useHlsStatus";
 import { normalizeStartLivePayloadFromDestinationsKeys } from "../hooks/useDestinationsStartPayload";
@@ -1654,6 +1655,11 @@ function RoomPage() {
     "Session expired — re-auth to enable host tools."
   );
   const [roomTokenMode, setRoomTokenMode] = useState<"unknown" | "auth" | "guest">("unknown");
+  const [actingContextBanner, setActingContextBanner] = useState<{ ownerUid: string | null; ownerLabel: string | null; isDelegated: boolean }>({
+    ownerUid: null,
+    ownerLabel: null,
+    isDelegated: false,
+  });
   const roomTokenMintInFlightRef = useRef(false);
 
   // Presence mode: passed from Join page via route state or localStorage
@@ -2530,6 +2536,7 @@ function RoomPage() {
         });
         const inviteTokenFromUrl = new URLSearchParams(window.location.search).get("t");
         const inviteTokenForJoin = (!guestSessionToken ? (inviteTokenFromUrl || inviteToken || null) : null)?.trim?.() || null;
+        const selectedOwnerContext = getSelectedOwnerContext();
         const buildRoomTokenRequest = () => {
           const canonicalRoomId = roomId || "";
           const endpoint = `${API_BASE}/api/rooms/${encodeURIComponent(canonicalRoomId)}/token`;
@@ -2573,6 +2580,7 @@ function RoomPage() {
               {
                 method: "POST",
                 headers: {
+                  ...(selectedOwnerContext.ownerUid ? { "x-owner-context-uid": selectedOwnerContext.ownerUid } : {}),
                   ...(inviteTokenForJoin ? { "x-invite-token": inviteTokenForJoin } : {}),
                 },
                 body: JSON.stringify(payload),
@@ -2746,6 +2754,16 @@ function RoomPage() {
         }
         if (data.effectiveEntitlements || data.platformFlags) {
           applyEntitlementsAndPlatform(data.effectiveEntitlements, data.platformFlags || {});
+        }
+        if (data?.actingContext && typeof data.actingContext === "object") {
+          const ownerLabel = data.actingContext.ownerDisplayName || data.actingContext.ownerEmail || null;
+          setActingContextBanner({
+            ownerUid: typeof data.actingContext.ownerUid === "string" ? data.actingContext.ownerUid : null,
+            ownerLabel,
+            isDelegated: !!data.actingContext.isDelegated,
+          });
+        } else {
+          setActingContextBanner({ ownerUid: null, ownerLabel: null, isDelegated: false });
         }
         const {
           token: lkToken,
@@ -4220,6 +4238,22 @@ function RoomPage() {
 
           <span className="text-sm opacity-80">{roomName}</span>
 
+          {actingContextBanner.isDelegated && actingContextBanner.ownerLabel && (
+            <div
+              style={{
+                fontSize: "12px",
+                padding: "6px 10px",
+                borderRadius: "999px",
+                background: "rgba(251, 191, 36, 0.14)",
+                border: "1px solid rgba(251, 191, 36, 0.3)",
+                color: "#fde68a",
+                fontWeight: 600,
+              }}
+            >
+              Producing for {actingContextBanner.ownerLabel}
+            </div>
+          )}
+
           {canInviteLinks && (
             <button
               onClick={() => setInviteModalOpen(true)}
@@ -4453,6 +4487,8 @@ function RoomPage() {
                 Setup Stream
               </button>
             )}
+
+            <StudioHelpButton />
           </div>
         )}
       </div>
@@ -4739,5 +4775,367 @@ export default function RoomPageWithTour() {
     <TourProvider tourName="studio">
       <RoomPage />
     </TourProvider>
+  );
+}
+
+function StudioHelpButton() {
+  const {
+    startTour,
+    helpMenuOpen,
+    setHelpMenuOpen,
+    tourActive,
+  } = useTour();
+  const helpMenuRef = useRef<HTMLDivElement | null>(null);
+  const [guideOpen, setGuideOpen] = useState(false);
+
+  useEffect(() => {
+    if (!helpMenuOpen && !guideOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!helpMenuOpen) return;
+      if (helpMenuRef.current?.contains(event.target as Node)) return;
+      setHelpMenuOpen(false);
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setHelpMenuOpen(false);
+      setGuideOpen(false);
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [helpMenuOpen, guideOpen, setHelpMenuOpen]);
+
+  const menuButtonStyle = {
+    fontSize: '0.75rem',
+    padding: '0.5rem 0.75rem',
+    borderRadius: '0.375rem',
+    cursor: 'pointer',
+    transition: 'all 0.3s ease',
+    fontWeight: '500',
+  } as const;
+
+  return (
+    <>
+      <div ref={helpMenuRef} data-tour="help-button" style={{ position: 'relative' }}>
+        <button
+          type="button"
+          onClick={() => setHelpMenuOpen((open) => !open)}
+          aria-haspopup="menu"
+          aria-expanded={helpMenuOpen}
+          style={{
+            ...menuButtonStyle,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '0.5rem',
+            border: helpMenuOpen
+              ? '1px solid rgba(59, 130, 246, 0.7)'
+              : '1px solid rgba(255, 255, 255, 0.4)',
+            background: helpMenuOpen
+              ? 'rgba(255, 255, 255, 0.12)'
+              : 'rgba(255, 255, 255, 0.05)',
+            color: '#ffffff',
+          }}
+        >
+          <span>Help</span>
+          <span style={{ fontSize: '0.65rem', opacity: 0.75 }}>{helpMenuOpen ? '▲' : '▼'}</span>
+        </button>
+
+        {helpMenuOpen && (
+          <div
+            role="menu"
+            aria-label="Help actions"
+            style={{
+              position: 'absolute',
+              top: 'calc(100% + 10px)',
+              right: 0,
+              width: '200px',
+              padding: '0.5rem',
+              borderRadius: '0.75rem',
+              border: '1px solid rgba(255, 255, 255, 0.12)',
+              background: 'rgba(15, 23, 42, 0.96)',
+              backdropFilter: 'blur(20px)',
+              boxShadow: '0 18px 48px rgba(0,0,0,0.38)',
+              zIndex: 1200,
+            }}
+          >
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setHelpMenuOpen(false);
+                startTour();
+              }}
+              style={{
+                ...menuButtonStyle,
+                width: '100%',
+                textAlign: 'left',
+                border: '1px solid rgba(220, 38, 38, 0.28)',
+                background: tourActive ? 'rgba(220, 38, 38, 0.18)' : 'rgba(220, 38, 38, 0.1)',
+                color: '#fca5a5',
+                marginBottom: '0.5rem',
+              }}
+            >
+              Start Tour
+            </button>
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setHelpMenuOpen(false);
+                setGuideOpen(true);
+              }}
+              style={{
+                ...menuButtonStyle,
+                width: '100%',
+                textAlign: 'left',
+                border: '1px solid rgba(59, 130, 246, 0.35)',
+                background: 'rgba(59, 130, 246, 0.12)',
+                color: '#bfdbfe',
+              }}
+            >
+              Help Guide
+            </button>
+          </div>
+        )}
+      </div>
+
+      {guideOpen && (
+        <>
+          <button
+            type="button"
+            aria-label="Close help guide"
+            onClick={() => setGuideOpen(false)}
+            style={{
+              position: 'fixed',
+              inset: 0,
+              border: 'none',
+              padding: 0,
+              margin: 0,
+              background: 'rgba(2, 6, 23, 0.55)',
+              zIndex: 1998,
+              cursor: 'pointer',
+            }}
+          />
+          <aside
+            aria-label="Studio help guide"
+            style={{
+              position: 'fixed',
+              top: 0,
+              right: 0,
+              width: 'min(420px, 92vw)',
+              height: '100vh',
+              background: 'linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(2, 6, 23, 0.98))',
+              borderLeft: '1px solid rgba(148, 163, 184, 0.35)',
+              boxShadow: '-24px 0 60px rgba(0, 0, 0, 0.42)',
+              zIndex: 1999,
+              display: 'flex',
+              flexDirection: 'column',
+              animation: 'slideInGuide 220ms ease-out',
+            }}
+          >
+            <div style={{ padding: '1rem 1rem 0.75rem 1rem', borderBottom: '1px solid rgba(148, 163, 184, 0.2)' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: '0.75rem' }}>
+                <h3 style={{ margin: 0, fontSize: '1rem', fontWeight: 700, color: '#e2e8f0' }}>Studio Help Guide</h3>
+                <button
+                  type="button"
+                  onClick={() => setGuideOpen(false)}
+                  style={{
+                    border: '1px solid rgba(148, 163, 184, 0.35)',
+                    background: 'rgba(15, 23, 42, 0.6)',
+                    color: '#e2e8f0',
+                    borderRadius: '0.5rem',
+                    padding: '0.35rem 0.55rem',
+                    cursor: 'pointer',
+                    fontSize: '0.75rem',
+                    fontWeight: 600,
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+              <p style={{ margin: '0.5rem 0 0 0', color: '#94a3b8', fontSize: '0.8rem' }}>
+                Quick reminders while you are live. No page switch required.
+              </p>
+            </div>
+
+            <div style={{ padding: '0.9rem 1rem 1rem 1rem', overflowY: 'auto', display: 'grid', gap: '0.75rem' }}>
+              <div style={{ border: '1px solid rgba(245, 158, 11, 0.28)', background: 'rgba(245, 158, 11, 0.1)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fcd34d', fontSize: '0.82rem' }}>PREPARE - Before Going Live</div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(248, 113, 113, 0.25)', background: 'rgba(220, 38, 38, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fecaca', fontSize: '0.85rem' }}>1) Start with Layout + Audio Checks</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Select layout first (Grid, Speaker, Single view).</li>
+                  <li>Confirm every guest is visible.</li>
+                  <li>Open mixer and verify mic levels move cleanly.</li>
+                  <li>Confirm screen share audio is audible when used.</li>
+                  <li>Mute unused microphones.</li>
+                </ul>
+                <div style={{ marginTop: '0.45rem', color: '#fca5a5', fontSize: '0.76rem', fontWeight: 600 }}>
+                  Most broadcast issues start with bad audio. Check this first.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(192, 132, 252, 0.28)', background: 'rgba(147, 51, 234, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#e9d5ff', fontSize: '0.85rem' }}>2) Confirm Cameras and Names</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Cameras ON for visible guests.</li>
+                  <li>Names are correct and not duplicated.</li>
+                  <li>Background distractions are minimized.</li>
+                  <li>Focused participant is correct for highlight layouts.</li>
+                </ul>
+                <div style={{ marginTop: '0.45rem', color: '#ddd6fe', fontSize: '0.76rem' }}>
+                  Frozen guest tip: ask them to toggle camera OFF then ON.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(96, 165, 250, 0.25)', background: 'rgba(59, 130, 246, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#bfdbfe', fontSize: '0.85rem' }}>3) Use Invite Links for Guests</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Send invite links from top bar.</li>
+                  <li>Wait for camera connected, audio detected, and stable video.</li>
+                  <li>Do not go live until guests are fully connected.</li>
+                </ul>
+              </div>
+
+              <div style={{ border: '1px solid rgba(74, 222, 128, 0.3)', background: 'rgba(34, 197, 94, 0.1)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#bbf7d0', fontSize: '0.82rem' }}>GO LIVE - Start the Broadcast</div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(74, 222, 128, 0.25)', background: 'rgba(34, 197, 94, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#bbf7d0', fontSize: '0.85rem' }}>4) Go Live After Preview Looks Right</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Destination status must show ready.</li>
+                  <li>Preview layout and audio levels must be stable.</li>
+                  <li>Screen share visible (if used).</li>
+                  <li>Then click Go Live.</li>
+                </ul>
+              </div>
+
+              <div style={{ border: '1px solid rgba(45, 212, 191, 0.25)', background: 'rgba(20, 184, 166, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#99f6e4', fontSize: '0.85rem' }}>5) Watch the Program Window</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  Treat the program window as source of truth. If it looks wrong there, viewers see it wrong.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(56, 189, 248, 0.28)', background: 'rgba(14, 165, 233, 0.09)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#bae6fd', fontSize: '0.82rem' }}>DURING BROADCAST - Live Management</div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(56, 189, 248, 0.25)', background: 'rgba(14, 165, 233, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#bae6fd', fontSize: '0.85rem' }}>6) Switching Layouts Mid-Show</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  Change layout when guests change, focus shifts, or screen share starts. Pause briefly before switching to keep viewers oriented.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(167, 139, 250, 0.25)', background: 'rgba(139, 92, 246, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#ddd6fe', fontSize: '0.85rem' }}>7) Managing Guests</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Mute noisy guests quickly.</li>
+                  <li>Remove disconnected users.</li>
+                  <li>Adjust layout as participants change.</li>
+                  <li>If a guest drops, send a new invite link.</li>
+                </ul>
+              </div>
+
+              <div style={{ border: '1px solid rgba(244, 114, 182, 0.25)', background: 'rgba(236, 72, 153, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fbcfe8', fontSize: '0.85rem' }}>8) Screen Sharing Tips</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Close unnecessary windows before sharing.</li>
+                  <li>Select the correct tab/window and audio source.</li>
+                  <li>After sharing, verify visibility in program window.</li>
+                </ul>
+              </div>
+
+              <div style={{ border: '1px solid rgba(251, 146, 60, 0.3)', background: 'rgba(234, 88, 12, 0.1)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fdba74', fontSize: '0.82rem' }}>ENDING - Closing the Session</div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(251, 146, 60, 0.25)', background: 'rgba(234, 88, 12, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fdba74', fontSize: '0.85rem' }}>9) Ending Your Broadcast</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  Click Stop Broadcast, confirm shutdown, then wait for recording finalization. Do not close browser immediately.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(251, 191, 36, 0.25)', background: 'rgba(234, 179, 8, 0.08)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fde68a', fontSize: '0.85rem' }}>10) Confirm Recording Saved</div>
+                <ul style={{ margin: '0.45rem 0 0 1rem', padding: 0, color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  <li>Recording entry exists.</li>
+                  <li>Playback opens and works.</li>
+                  <li>File is saved correctly.</li>
+                  <li>If save fails, report immediately.</li>
+                </ul>
+              </div>
+
+              <div style={{ border: '1px solid rgba(239, 68, 68, 0.3)', background: 'rgba(239, 68, 68, 0.1)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#fca5a5', fontSize: '0.82rem' }}>Quick Trouble Fixes</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  No Audio: mic device + browser permissions + mixer levels, then refresh/rejoin.<br />
+                  Camera Missing: permission + correct device, then restart camera/refresh.<br />
+                  Screen Share Missing: confirm correct window/tab and restart share.<br />
+                  Black Output: verify layout + active camera + program preview, then switch layout once.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(94, 234, 212, 0.3)', background: 'rgba(13, 148, 136, 0.1)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#99f6e4', fontSize: '0.82rem' }}>Producer Workflow</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  Before: start room, add host, confirm layout, test audio, prep destinations.<br />
+                  During: monitor program feed, adjust layout, manage guests.<br />
+                  After: stop stream, confirm recording.
+                </div>
+              </div>
+
+              <div style={{ border: '1px solid rgba(125, 211, 252, 0.28)', background: 'rgba(2, 132, 199, 0.1)', borderRadius: '0.65rem', padding: '0.75rem' }}>
+                <div style={{ fontWeight: 700, color: '#bae6fd', fontSize: '0.82rem' }}>Streaming Destinations Check</div>
+                <div style={{ marginTop: '0.35rem', color: '#e2e8f0', fontSize: '0.78rem', lineHeight: 1.45 }}>
+                  Before streaming, verify YouTube, Twitch, and Facebook connections are linked and status shows ready.
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setGuideOpen(false);
+                  startTour();
+                }}
+                style={{
+                  marginTop: '0.25rem',
+                  border: '1px solid rgba(220, 38, 38, 0.35)',
+                  background: 'rgba(220, 38, 38, 0.16)',
+                  color: '#fecaca',
+                  borderRadius: '0.6rem',
+                  padding: '0.65rem 0.75rem',
+                  cursor: 'pointer',
+                  fontWeight: 700,
+                  fontSize: '0.8rem',
+                  textAlign: 'left',
+                }}
+              >
+                Start the interactive studio tour
+              </button>
+            </div>
+          </aside>
+
+          <style>{`
+            @keyframes slideInGuide {
+              from { transform: translateX(100%); opacity: 0.5; }
+              to { transform: translateX(0); opacity: 1; }
+            }
+          `}</style>
+        </>
+      )}
+    </>
   );
 }

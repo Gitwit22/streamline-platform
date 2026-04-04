@@ -16,6 +16,7 @@ import { getMeCached, clearMeCache } from "../../lib/meCache";
 import { clearPlatformFlagsCache } from "../../lib/platformFlagsCache";
 import { isFeatureAvailable, isPlatformEnabled } from "../../lib/featureAvailability";
 import { getUsageGating, usageLabels, usageTooltips } from "../../lib/usageLabels";
+import { type CollaboratorsPayload } from "../../lib/producerDelegation";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 
@@ -282,6 +283,7 @@ export default function SettingsBilling() {
   const [platformRecordingEnabled, setPlatformRecordingEnabled] = useState<boolean>(true);
   const [platformMonetizationEnabled, setPlatformMonetizationEnabled] = useState<boolean>(false);
   const [platformPayPerViewEnabled, setPlatformPayPerViewEnabled] = useState<boolean>(false);
+  const [platformCollaboratorDelegationEnabled, setPlatformCollaboratorDelegationEnabled] = useState<boolean>(false);
 
   // Track which room is currently selected in the HLS tab so we can show per-room monetization toggles
   const [hlsSelectedRoomId, setHlsSelectedRoomId] = useState<string | null>(null);
@@ -378,13 +380,18 @@ export default function SettingsBilling() {
   const [closeDeleteConfirmed, setCloseDeleteConfirmed] = useState(false);
   const [closeDeleteText, setCloseDeleteText] = useState("");
 
-  const [activeTab, setActiveTab] = useState<"plan" | "usage" | "destinations" | "hls" | "defaults" | "roles" | "close">("plan");
+  const [activeTab, setActiveTab] = useState<"plan" | "usage" | "destinations" | "hls" | "defaults" | "roles" | "collaborators" | "close">("plan");
+  const [collaboratorsData, setCollaboratorsData] = useState<CollaboratorsPayload | null>(null);
+  const [collaboratorsLoading, setCollaboratorsLoading] = useState(false);
+  const [collaboratorsError, setCollaboratorsError] = useState<string | null>(null);
+  const [collaboratorInviteEmail, setCollaboratorInviteEmail] = useState("");
+  const [collaboratorActionLoading, setCollaboratorActionLoading] = useState<string | null>(null);
 
   // Allow other pages to deep-link into a specific settings tab.
   // Example: nav('/settings/billing', { state: { openTab: 'usage', usageRoomId: 'my-room' } })
   useEffect(() => {
     const openTab = (location.state as any)?.openTab;
-    const validTabs: Array<typeof activeTab> = ["plan", "usage", "destinations", "hls", "defaults", "roles", "close"];
+    const validTabs: Array<typeof activeTab> = ["plan", "usage", "destinations", "hls", "defaults", "roles", "collaborators", "close"];
     if (typeof openTab === "string" && validTabs.includes(openTab as any)) {
       setActiveTab(openTab as any);
     }
@@ -403,7 +410,69 @@ export default function SettingsBilling() {
     if (activeTab === "hls" && platformHlsSettingsTabEnabled === false) {
       setActiveTab("plan");
     }
-  }, [activeTab, platformTranscodeEnabled, platformHlsSettingsTabEnabled]);
+    if (activeTab === "collaborators" && platformCollaboratorDelegationEnabled === false) {
+      setActiveTab("plan");
+    }
+  }, [activeTab, platformTranscodeEnabled, platformHlsSettingsTabEnabled, platformCollaboratorDelegationEnabled]);
+
+  useEffect(() => {
+    if (activeTab !== "collaborators" || !platformCollaboratorDelegationEnabled) return;
+    let cancelled = false;
+
+    (async () => {
+      setCollaboratorsLoading(true);
+      setCollaboratorsError(null);
+      try {
+        const res = await apiFetchWithCookieFallback("/api/collaborators/me", { method: "GET" });
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(payload?.error || "Failed to load collaborators");
+        }
+        if (!cancelled) {
+          setCollaboratorsData((payload || null) as CollaboratorsPayload | null);
+        }
+      } catch (err: any) {
+        if (!cancelled) {
+          setCollaboratorsError(err?.message || "Failed to load collaborators");
+          setCollaboratorsData(null);
+        }
+      } finally {
+        if (!cancelled) setCollaboratorsLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, platformCollaboratorDelegationEnabled]);
+
+  const runCollaboratorAction = async (path: string, body?: Record<string, any>, onDone?: () => void) => {
+    setCollaboratorActionLoading(path);
+    setCollaboratorsError(null);
+    try {
+      const actionRes = await apiFetchWithCookieFallback(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body || {}),
+      });
+      const actionPayload = await actionRes.json().catch(() => null);
+      if (!actionRes.ok) {
+        throw new Error(actionPayload?.error || "Collaborator action failed");
+      }
+
+      const refreshed = await apiFetchWithCookieFallback("/api/collaborators/me", { method: "GET" });
+      const payload = await refreshed.json().catch(() => null);
+      if (!refreshed.ok) {
+        throw new Error(payload?.error || "Failed to refresh collaborators");
+      }
+      setCollaboratorsData((payload || null) as CollaboratorsPayload | null);
+      onDone?.();
+    } catch (err: any) {
+      setCollaboratorsError(err?.message || "Collaborator action failed");
+    } finally {
+      setCollaboratorActionLoading(null);
+    }
+  };
 
   const simpleMode = advancedPermissions.effectivePermissionsMode !== "advanced";
 
@@ -696,6 +765,7 @@ export default function SettingsBilling() {
           // Monetization/PPV flags default to disabled (opt-in).
           setPlatformMonetizationEnabled(pf.monetizationEnabled === true);
           setPlatformPayPerViewEnabled(pf.payPerViewEnabled === true);
+          setPlatformCollaboratorDelegationEnabled(pf.collaboratorDelegationEnabled === true);
           const hlsTabFlag =
             typeof pf.hlsSettingsTab === "boolean"
               ? pf.hlsSettingsTab
@@ -710,6 +780,7 @@ export default function SettingsBilling() {
           setPlatformHlsSettingsTabEnabled(true);
           setPlatformMonetizationEnabled(false);
           setPlatformPayPerViewEnabled(false);
+          setPlatformCollaboratorDelegationEnabled(false);
         }
 
         if (Array.isArray(data.plans) && data.plans.length) {
@@ -2004,13 +2075,24 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
             </button>
           )}
           {platformHlsSettingsTabEnabled !== false && (
-            <button
-              type="button"
-              style={activeTab === "hls" ? { ...S.tab, ...S.tabActive } : S.tab}
-              onClick={() => setActiveTab("hls")}
-            >
-              HLS
-            </button>
+            <>
+              <button
+                type="button"
+                style={activeTab === "hls" ? { ...S.tab, ...S.tabActive } : S.tab}
+                onClick={() => setActiveTab("hls")}
+              >
+                HLS
+              </button>
+              {platformCollaboratorDelegationEnabled && (
+                <button
+                  type="button"
+                  style={activeTab === "collaborators" ? { ...S.tab, ...S.tabActive } : S.tab}
+                  onClick={() => setActiveTab("collaborators")}
+                >
+                  Collaborators
+                </button>
+              )}
+            </>
           )}
           <button
             type="button"
@@ -2213,6 +2295,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                         </div>
                       </div>
                     ))}
+
                   </div>
                 );
               })}
@@ -2228,6 +2311,132 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 </li>
               </ul>
             </div>
+          </div>
+        )}
+
+        {activeTab === "collaborators" && platformCollaboratorDelegationEnabled && (
+          <div style={{ ...S.card, opacity: isBlocked ? 0.6 : 1 }}>
+            <div style={S.cardHeader}>
+              <h2 style={S.cardTitle}>🤝 Collaborators</h2>
+            </div>
+
+            <p style={{ color: "#94a3b8", marginBottom: 14 }}>
+              Invite a registered StreamLine user to produce on behalf of your account. Accepted collaborators can create and run rooms using your plan and billing context.
+            </p>
+
+            <div style={{ display: "grid", gap: 12, marginBottom: 18 }}>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <input
+                  type="email"
+                  value={collaboratorInviteEmail}
+                  onChange={(e) => setCollaboratorInviteEmail(e.target.value)}
+                  placeholder="producer@example.com"
+                  style={{
+                    flex: "1 1 320px",
+                    minWidth: 240,
+                    padding: "12px 14px",
+                    borderRadius: 10,
+                    border: "1px solid #1f2937",
+                    background: "rgba(15,23,42,0.85)",
+                    color: "#fff",
+                  }}
+                />
+                <button
+                  type="button"
+                  disabled={!collaboratorInviteEmail.trim() || collaboratorActionLoading === "/api/collaborators/invite"}
+                  onClick={() =>
+                    runCollaboratorAction("/api/collaborators/invite", { email: collaboratorInviteEmail.trim() }, () => {
+                      setCollaboratorInviteEmail("");
+                    })
+                  }
+                  style={{
+                    padding: "12px 16px",
+                    borderRadius: 10,
+                    border: "none",
+                    background: "#f97316",
+                    color: "#111827",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  Send Invite
+                </button>
+              </div>
+
+              {collaboratorsError && (
+                <div style={{ color: "#fca5a5", fontSize: 13 }}>{collaboratorsError}</div>
+              )}
+            </div>
+
+            {collaboratorsLoading && <div style={{ color: "#9ca3af" }}>Loading collaborators…</div>}
+
+            {!collaboratorsLoading && (
+              <div style={{ display: "grid", gap: 18 }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#e5e7eb", marginBottom: 10 }}>Invites you sent</div>
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {(collaboratorsData?.outgoing || []).length === 0 && (
+                      <div style={{ color: "#6b7280", fontSize: 13 }}>No outgoing collaborator invites yet.</div>
+                    )}
+                    {(collaboratorsData?.outgoing || []).map((item) => (
+                      <div key={item.id} style={{ border: "1px solid #1f2937", borderRadius: 12, padding: "12px 14px", background: "rgba(15,23,42,0.75)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                        <div>
+                          <div style={{ color: "#fff", fontWeight: 600 }}>{item.counterpartyLabel}</div>
+                          <div style={{ color: "#9ca3af", fontSize: 12 }}>Status: {item.status}</div>
+                        </div>
+                        {item.status !== "revoked" && (
+                          <button
+                            type="button"
+                            disabled={collaboratorActionLoading === `/api/collaborators/${item.id}/revoke`}
+                            onClick={() => runCollaboratorAction(`/api/collaborators/${item.id}/revoke`)}
+                            style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid rgba(248,113,113,0.4)", background: "rgba(127,29,29,0.18)", color: "#fca5a5", cursor: "pointer", fontWeight: 700 }}
+                          >
+                            Revoke
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "#e5e7eb", marginBottom: 10 }}>Invites you received</div>
+                  <div style={{ display: "grid", gap: 10 }}>
+                    {(collaboratorsData?.incoming || []).length === 0 && (
+                      <div style={{ color: "#6b7280", fontSize: 13 }}>No incoming invites.</div>
+                    )}
+                    {(collaboratorsData?.incoming || []).map((item) => (
+                      <div key={item.id} style={{ border: "1px solid #1f2937", borderRadius: 12, padding: "12px 14px", background: "rgba(15,23,42,0.75)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                        <div>
+                          <div style={{ color: "#fff", fontWeight: 600 }}>{item.counterpartyLabel}</div>
+                          <div style={{ color: "#9ca3af", fontSize: 12 }}>Status: {item.status}</div>
+                        </div>
+                        {item.status === "pending" && (
+                          <div style={{ display: "flex", gap: 8 }}>
+                            <button
+                              type="button"
+                              disabled={collaboratorActionLoading === `/api/collaborators/${item.id}/accept`}
+                              onClick={() => runCollaboratorAction(`/api/collaborators/${item.id}/accept`)}
+                              style={{ padding: "8px 12px", borderRadius: 10, border: "none", background: "#22c55e", color: "#052e16", cursor: "pointer", fontWeight: 700 }}
+                            >
+                              Accept
+                            </button>
+                            <button
+                              type="button"
+                              disabled={collaboratorActionLoading === `/api/collaborators/${item.id}/decline`}
+                              onClick={() => runCollaboratorAction(`/api/collaborators/${item.id}/decline`)}
+                              style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #374151", background: "transparent", color: "#fff", cursor: "pointer", fontWeight: 600 }}
+                            >
+                              Decline
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -3041,7 +3250,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                       }}
                       style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: "#0f172a", color: "#e2e8f0" }}
                     >
-                      {(["speaker", "grid", "carousel"] as const).map((m) => (
+                      {(["speaker", "grid", "carousel", "pip"] as const).map((m) => (
                         <option key={m} value={m}>
                           {m.charAt(0).toUpperCase() + m.slice(1)}
                         </option>

@@ -1291,11 +1291,31 @@ router.get("/list", async (req: Request, res: Response) => {
       .where("userId", "==", userId)
       .get();
 
+    // Convert Firestore Timestamp objects to ISO strings so the frontend
+    // receives serialisable date strings instead of raw { _seconds, _nanoseconds }
+    // objects, which cause "Invalid Date" when parsed by new Date().
+    const toISO = (v: any): string | null => {
+      if (!v) return null;
+      if (typeof v?.toDate === "function") return v.toDate().toISOString();
+      if (v instanceof Date) return v.toISOString();
+      if (typeof v === "string") return v;
+      return null;
+    };
+
     const recordings = recordingsSnap.docs
-      .map((doc: any) => ({
-        id: doc.id,
-        ...doc.data(),
-      }))
+      .map((doc: any) => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          ...data,
+          createdAt: toISO(data.createdAt),
+          updatedAt: toISO(data.updatedAt),
+          startedAt: toISO(data.startedAt),
+          readyAt: toISO(data.readyAt),
+          stoppedAt: toISO(data.stoppedAt),
+          deletedAt: toISO(data.deletedAt),
+        };
+      })
       .sort((a: any, b: any) => {
         // Sort by createdAt descending in memory
         const aTime = new Date(a.createdAt || 0).getTime();

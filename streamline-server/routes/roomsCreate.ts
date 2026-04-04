@@ -6,6 +6,7 @@ import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeRoomLayout, type RoomLayout } from "../lib/roomLayout";
 import { isValidPresenceMode, normalizePresenceMode, type PresenceMode } from "../lib/presenceMode";
+import { logDelegatedRoomAction, resolveOwnerActingContext } from "../lib/collaborators";
 
 const router = Router();
 
@@ -19,6 +20,15 @@ const router = Router();
 router.post("/create", requireAuth as any, async (req: any, res) => {
   const uid = req.user?.uid;
   if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+  const actingContext = await resolveOwnerActingContext(req);
+  if (!actingContext) {
+    return res.status(403).json({ error: "invalid_owner_context" });
+  }
+  if (actingContext.isDelegated && !actingContext.permissions?.createRooms) {
+    return res.status(403).json({ error: "delegation_create_rooms_denied" });
+  }
+  const ownerUid = actingContext.ownerUid || uid;
 
   const roomType = (req.body?.roomType || "rtc") as "rtc" | "hls";
 
@@ -53,7 +63,7 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
   // so new rooms inherit the user's preferred layout without requiring per-room setup.
   let initialRoomLayout: RoomLayout | undefined = undefined;
   try {
-    const userSnap = await db.collection("users").doc(uid).get();
+    const userSnap = await db.collection("users").doc(ownerUid).get();
     const userData = userSnap.exists ? (userSnap.data() as any) || {} : {};
     const mediaPrefs = (userData as any)?.mediaPrefs || {};
     initialRoomLayout =
@@ -67,7 +77,7 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
   try {
     const { data } = await ensureRoomDoc({
       roomId,
-      ownerId: uid,
+      ownerId: ownerUid,
       livekitRoomName,
       roomType,
       initialStatus: "idle",
@@ -83,10 +93,30 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
       livekitRoomName: data.livekitRoomName || livekitRoomName,
       roomType: data.roomType || roomType,
       presenceMode,
+      actingContext: {
+        ownerUid,
+        actedByUid: uid,
+        isDelegated: actingContext.isDelegated,
+        ownerDisplayName: actingContext.ownerDisplayName,
+        ownerEmail: actingContext.ownerEmail,
+      },
     });
   } catch (err) {
     console.error("/api/rooms/create ensureRoomDoc failed", err);
     return res.status(500).json({ error: "room_init_failed" });
+  } finally {
+    if (actingContext.isDelegated) {
+      await logDelegatedRoomAction({
+        actedByUid: uid,
+        ownerUid,
+        roomId,
+        action: "room_create",
+        metadata: {
+          livekitRoomName,
+          roomType,
+        },
+      }).catch(() => {});
+    }
   }
 });
 

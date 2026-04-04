@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import { API_BASE } from "../services/apiBase";
 import { apiFetchAuth } from "../lib/api";
+import { persistSessionUser } from "../lib/sessionUser";
 
 // Email validation function
 function validateEmail(email: string): boolean {
@@ -102,10 +103,8 @@ export const SignupPage = () => {
       }
 
       // Store user data and token in localStorage
-      localStorage.setItem("sl_user", JSON.stringify(data.user));
+      persistSessionUser(data.user);
       localStorage.setItem("authToken", data.token);
-      localStorage.setItem("sl_userId", data.user.id || data.user.uid);
-      localStorage.setItem("sl_displayName", data.user.displayName);
 
       // Notify hooks (useEffectiveEntitlements) that auth state changed
       try {

@@ -14,6 +14,7 @@ import { isValidPresenceMode, normalizePresenceMode, buildPresenceMetadata, type
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { isAdmin } from "../middleware/adminAuth";
 import { resolveHostName } from "../lib/resolveHostName";
+import { logDelegatedRoomAction, resolveOwnerActingContext } from "../lib/collaborators";
 
 export function extractInviteToken(req: any): string | null {
   const hdr = (req?.headers as any) || {};
@@ -885,6 +886,14 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     const ownerId = typeof room.ownerId === "string" ? room.ownerId.trim() : "";
     const livekitRoomName = String(room.livekitRoomName || roomId).trim();
     const roomStatus = room.status === "live" ? "live" : "idle";
+    const actingContext = user ? await resolveOwnerActingContext(req) : null;
+    const isOwner = !!user && !!ownerId && user.uid === ownerId;
+    const isDelegatedProducer = !!(
+      user &&
+      actingContext?.isDelegated &&
+      actingContext.ownerUid === ownerId
+    );
+    const isPrivilegedProducer = isOwner || isDelegatedProducer;
 
     // Room policy defaults (secure-by-default for older docs)
     const visibilityRaw = typeof room.visibility === "string" ? room.visibility.trim().toLowerCase() : "";
@@ -928,17 +937,16 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     }
 
     // Policy: visibility
-    const isOwner = !!user && !!ownerId && user.uid === ownerId;
     // Private rooms are owner-only UNLESS the caller presents a valid invite token.
     // This supports "invite someone on stage" while keeping strict access by default.
     const inviteForRoom = tryGetLegacyInviteGuest(req, roomId);
     const hasInviteAccess = !!inviteForRoom;
-    if (visibility === "private" && !isOwner && !hasInviteAccess) {
+    if (visibility === "private" && !isPrivilegedProducer && !hasInviteAccess) {
       return res.status(403).json({ error: "not_allowed" });
     }
 
     // Policy: payment
-    if (requiresPayment && !isOwner) {
+    if (requiresPayment && !isPrivilegedProducer) {
       return res.status(402).json({ error: "payment_required" });
     }
 
@@ -977,15 +985,19 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // non-normal presence modes.  Guests cannot.
     const rawPresenceMode = req.body?.presenceMode;
     let presenceMode: PresenceMode =
-      user && isOwner && isValidPresenceMode(rawPresenceMode)
+      user && isPrivilegedProducer && isValidPresenceMode(rawPresenceMode)
         ? normalizePresenceMode(rawPresenceMode)
         : "normal";
+
+    if (presenceMode === "invisible" && isDelegatedProducer && !actingContext?.permissions?.joinInvisibleProducer) {
+      presenceMode = "normal";
+    }
 
     // Server-side gate: invisible host requires the plan entitlement.
     // If the plan doesn't include it, silently downgrade to "normal".
     if (presenceMode === "invisible" && user) {
       try {
-        const ent = await getEffectiveEntitlements(user.uid);
+        const ent = await getEffectiveEntitlements(ownerId || user.uid);
         if (!ent.features.invisibleHost) {
           presenceMode = "normal";
         }
@@ -998,7 +1010,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // - Authenticated users: host (if owner) or participant
     // - Guest sessions: "guest" (RTC participant with mic/cam)
     const lkRole: "guest" | "participant" | "host" = user
-      ? (isOwner ? "host" : "participant")
+      ? (isPrivilegedProducer ? "host" : "participant")
       : guest?.role === "participant"
         ? "participant"
         : "guest";
@@ -1009,14 +1021,18 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       roomId,
       livekitRoomName,
       ownerId: ownerId || null,
-      bypass: !!(user && isOwner),
+      bypass: !!(user && isPrivilegedProducer),
       res,
     });
     if (!capacity.ok) return;
 
     const capLockOwner = capacity.lockOwner;
     try {
-    const identity = user ? user.uid : `invite:${guest!.inviteId}:${Math.random().toString(16).slice(2)}`;
+    const identity = user
+      ? isDelegatedProducer
+        ? `producer:${user.uid}:${ownerId}`
+        : user.uid
+      : `invite:${guest!.inviteId}:${Math.random().toString(16).slice(2)}`;
     if (!identity || !String(identity).trim()) {
       return res.status(500).json({ code: "internal_error", error: "invalid_identity" });
     }
@@ -1025,7 +1041,10 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     }
 
     // When host joins, flip room live.
-    if (user && isOwner && roomStatus !== "live") {
+    if (user && isPrivilegedProducer && roomStatus !== "live") {
+      if (isDelegatedProducer && !actingContext?.permissions?.startRooms) {
+        return res.status(403).json({ error: "delegation_start_rooms_denied" });
+      }
       await firestore.collection("rooms").doc(roomId).set(
         {
           status: "live",
@@ -1059,18 +1078,31 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     const effectiveRoleKey: "guest" | "participant" | "host" = lkRole;
     const basePerms =
       effectiveRoleKey === "host"
-        ? {
-            canStream: true,
-            canRecord: true,
-            canDestinations: true,
-            canModerate: true,
-            canLayout: true,
-            canScreenShare: true,
-            canInvite: true,
-            canAnalytics: true,
-            canMuteGuests: true,
-            canRemoveGuests: true,
-          }
+        ? isDelegatedProducer
+          ? {
+              canStream: !!actingContext?.permissions?.manageStreaming,
+              canRecord: !!actingContext?.permissions?.manageRecording,
+              canDestinations: !!actingContext?.permissions?.manageStreaming,
+              canModerate: !!actingContext?.permissions?.manageParticipants,
+              canLayout: !!actingContext?.permissions?.controlLayouts,
+              canScreenShare: true,
+              canInvite: !!actingContext?.permissions?.manageParticipants,
+              canAnalytics: true,
+              canMuteGuests: !!actingContext?.permissions?.manageParticipants,
+              canRemoveGuests: !!actingContext?.permissions?.manageParticipants,
+            }
+          : {
+              canStream: true,
+              canRecord: true,
+              canDestinations: true,
+              canModerate: true,
+              canLayout: true,
+              canScreenShare: true,
+              canInvite: true,
+              canAnalytics: true,
+              canMuteGuests: true,
+              canRemoveGuests: true,
+            }
         : effectiveRoleKey === "participant"
           ? {
               canStream: false,
@@ -1105,6 +1137,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       permissions: basePerms,
       identity,
       presenceMode,
+      actingOwnerUid: isDelegatedProducer ? ownerId : undefined,
     } as const;
 
     const roomAccessToken = jwt.sign(roomAccessPayload, getRoomAccessSecret(), { expiresIn: "12h" });
@@ -1118,6 +1151,20 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       });
     }
 
+    const ownerEntitlements = user ? await getEffectiveEntitlements(ownerId || user.uid) : null;
+    if (isDelegatedProducer && user) {
+      await logDelegatedRoomAction({
+        actedByUid: user.uid,
+        ownerUid: ownerId,
+        roomId,
+        action: "room_token_mint",
+        metadata: {
+          presenceMode,
+          identity,
+        },
+      }).catch(() => {});
+    }
+
     return res.json({
       token,
       serverUrl,
@@ -1129,6 +1176,16 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       role: lkRole,
       effectiveRoleKey,
       presenceMode,
+      effectiveEntitlements: ownerEntitlements,
+      actingContext: user
+        ? {
+            ownerUid: ownerId || user.uid,
+            actedByUid: user.uid,
+            isDelegated: isDelegatedProducer,
+            ownerDisplayName: actingContext?.ownerDisplayName || null,
+            ownerEmail: actingContext?.ownerEmail || null,
+          }
+        : null,
     });
     } finally {
       if (capLockOwner) {

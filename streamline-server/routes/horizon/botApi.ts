@@ -50,6 +50,8 @@ const MAX_CHAT_LIMIT = 100;
 const DEFAULT_CHAT_LIMIT = 50;
 const BOT_API_VERSION = "1.0.0";
 
+type SupportRoomStatus = "idle" | "live" | "ended";
+
 /* ── Rate Limiter ─────────────────────────────────────────────────────── */
 
 interface RateBucket {
@@ -103,7 +105,6 @@ router.use(horizonRateLimit);
 
 router.post(
   "/events",
-  horizonRateLimit,
   express.raw({ type: "application/json", limit: "256kb" }),
   requireBotAuth,
   async (req: Request, res: Response) => {
@@ -191,40 +192,23 @@ router.post(
  * GET /support/status — Health / connection test
  * ═══════════════════════════════════════════════════════════════════════ */
 
-router.get("/support/status", horizonRateLimit, requireBotAuth, (_req: Request, res: Response) => {
-  res.json({
+router.get("/support/status", requireBotAuth, (_req: Request, res: Response) => {
+  const responsePayload = {
     ok: true,
+    timestamp: new Date().toISOString(),
     service: "StreamLine Horizon Integration",
     version: BOT_API_VERSION,
-    timestamp: new Date().toISOString(),
-    capabilities: [
-      "chat.message",
-      "chat.session_start",
-      "chat.session_end",
-      "voice.participant_joined",
-      "voice.participant_left",
-      "voice.room_started",
-      "voice.room_ended",
-      "support.alert",
-    ],
-    endpoints: {
-      inbound: "POST /api/horizon/bot/events",
-      outboundChat: "POST /api/rooms/:roomId/chat-events",
-      outboundVoice: "POST /api/rooms/:roomId/voice-stream",
-      agentChat: "POST /api/rooms/:roomId/chat",
-      supportStatus: "GET /api/horizon/bot/support/status",
-      supportRooms: "GET /api/horizon/bot/support/rooms",
-      supportRoomDetail: "GET /api/horizon/bot/support/rooms/:roomId",
-      supportRoomChat: "GET /api/horizon/bot/support/rooms/:roomId/chat",
-    },
-  });
+  };
+
+  logSupportPayload("status", responsePayload);
+  res.json(responsePayload);
 });
 
 /* ═══════════════════════════════════════════════════════════════════════
  * GET /support/rooms — List active rooms
  * ═══════════════════════════════════════════════════════════════════════ */
 
-router.get("/support/rooms", horizonRateLimit, requireBotAuth, async (req: Request, res: Response) => {
+router.get("/support/rooms", requireBotAuth, async (req: Request, res: Response) => {
   const requestId = (req as any).id ?? "no-req-id";
 
   try {
@@ -239,22 +223,11 @@ router.get("/support/rooms", horizonRateLimit, requireBotAuth, async (req: Reque
     }
 
     const snap = await query.get();
-    const rooms = snap.docs.map((doc) => {
-      const d = doc.data();
-      return {
-        id: doc.id,
-        name: d.name || null,
-        status: d.status || "unknown",
-        hostUid: d.hostUid || null,
-        participantCount: d.participantCount ?? 0,
-        createdAt: tsIso(d.createdAt),
-        updatedAt: tsIso(d.updatedAt),
-        isLive: d.isLive ?? false,
-      };
-    });
+    const rooms = snap.docs.map((doc) => normalizeSupportRoom(doc.id, doc.data()));
 
     logger.info({ requestId, count: rooms.length, statusFilter: statusFilter || "all" }, "horizon support rooms listed");
-    res.json({ ok: true, rooms, count: rooms.length });
+    logSupportPayload("rooms", rooms, { requestId, count: rooms.length, statusFilter: statusFilter || "all" });
+    res.json(rooms);
   } catch (err: any) {
     logger.error({ requestId, err: err?.message }, "support rooms list error");
     res.status(500).json({ error: "internal_error" });
@@ -265,7 +238,7 @@ router.get("/support/rooms", horizonRateLimit, requireBotAuth, async (req: Reque
  * GET /support/rooms/:roomId — Room detail
  * ═══════════════════════════════════════════════════════════════════════ */
 
-router.get("/support/rooms/:roomId", horizonRateLimit, requireBotAuth, async (req: Request, res: Response) => {
+router.get("/support/rooms/:roomId", requireBotAuth, async (req: Request, res: Response) => {
   const requestId = (req as any).id ?? "no-req-id";
   const roomId = typeof req.params.roomId === "string" ? req.params.roomId.trim() : "";
 
@@ -281,26 +254,11 @@ router.get("/support/rooms/:roomId", horizonRateLimit, requireBotAuth, async (re
       return;
     }
 
-    const d = roomSnap.data() as any;
-    const room = {
-      id: roomSnap.id,
-      name: d.name || null,
-      status: d.status || "unknown",
-      hostUid: d.hostUid || null,
-      participantCount: d.participantCount ?? 0,
-      createdAt: tsIso(d.createdAt),
-      updatedAt: tsIso(d.updatedAt),
-      isLive: d.isLive ?? false,
-      chat: d.chat
-        ? {
-            enabled: d.chat.enabled ?? false,
-            activeSessionId: d.chat.activeSessionId || null,
-          }
-        : null,
-    };
+    const room = normalizeSupportRoomDetail(roomSnap.id, roomSnap.data());
 
     logger.info({ requestId, roomId }, "horizon support room detail fetched");
-    res.json({ ok: true, room });
+    logSupportPayload("room-detail", room, { requestId, roomId });
+    res.json(room);
   } catch (err: any) {
     logger.error({ requestId, roomId, err: err?.message }, "support room detail error");
     res.status(500).json({ error: "internal_error" });
@@ -311,7 +269,7 @@ router.get("/support/rooms/:roomId", horizonRateLimit, requireBotAuth, async (re
  * GET /support/rooms/:roomId/chat — Recent chat messages
  * ═══════════════════════════════════════════════════════════════════════ */
 
-router.get("/support/rooms/:roomId/chat", horizonRateLimit, requireBotAuth, async (req: Request, res: Response) => {
+router.get("/support/rooms/:roomId/chat", requireBotAuth, async (req: Request, res: Response) => {
   const requestId = (req as any).id ?? "no-req-id";
   const roomId = typeof req.params.roomId === "string" ? req.params.roomId.trim() : "";
 
@@ -338,7 +296,9 @@ router.get("/support/rooms/:roomId/chat", horizonRateLimit, requireBotAuth, asyn
     }
 
     if (!sessionId) {
-      res.json({ ok: true, roomId, messages: [], sessionId: null, count: 0 });
+      const messages: any[] = [];
+      logSupportPayload("room-chat", messages, { requestId, roomId, sessionId: null, count: 0 });
+      res.json(messages);
       return;
     }
 
@@ -352,24 +312,14 @@ router.get("/support/rooms/:roomId/chat", horizonRateLimit, requireBotAuth, asyn
       .limit(limit)
       .get();
 
-    const messages = msgSnap.docs.map((doc) => {
-      const m = doc.data();
-      return {
-        id: doc.id,
-        text: m.text || "",
-        senderIdentity: m.senderIdentity || null,
-        senderName: m.senderName || null,
-        senderRole: m.senderRole || null,
-        isAgent: m.isAgent ?? false,
-        createdAt: tsIso(m.createdAt),
-      };
-    });
+    const messages = msgSnap.docs.map((doc) => normalizeSupportChatMessage(doc.id, doc.data()));
 
     // Return in chronological order (oldest first)
     messages.reverse();
 
     logger.info({ requestId, roomId, sessionId, count: messages.length }, "horizon support room chat fetched");
-    res.json({ ok: true, roomId, sessionId, messages, count: messages.length });
+    logSupportPayload("room-chat", messages, { requestId, roomId, sessionId, count: messages.length });
+    res.json(messages);
   } catch (err: any) {
     logger.error({ requestId, roomId, err: err?.message }, "support room chat error");
     res.status(500).json({ error: "internal_error" });
@@ -388,6 +338,112 @@ function tsIso(ts: any): string | null {
   if (ts instanceof Date) return ts.toISOString();
   if (typeof ts === "number") return new Date(ts).toISOString();
   return null;
+}
+
+function normalizeSupportRoom(roomId: string, data: any) {
+  const status = normalizeSupportRoomStatus(data);
+
+  return {
+    id: roomId,
+    name: toRequiredString(data?.name),
+    status,
+    hostUid: toNullableString(data?.hostUid),
+    participantCount: toNumber(data?.participantCount),
+    createdAt: tsIso(data?.createdAt),
+    updatedAt: tsIso(data?.updatedAt),
+    isLive: status === "live",
+  };
+}
+
+function normalizeSupportRoomDetail(roomId: string, data: any) {
+  const status = normalizeSupportRoomStatus(data);
+
+  return {
+    id: roomId,
+    name: toRequiredString(data?.name),
+    status,
+    hostUid: toNullableString(data?.hostUid),
+    participantCount: toNumber(data?.participantCount),
+    createdAt: tsIso(data?.createdAt),
+    updatedAt: tsIso(data?.updatedAt),
+    isLive: status === "live",
+    chat: {
+      enabled: toBoolean(data?.chat?.enabled),
+      activeSessionId: toNullableString(data?.chat?.activeSessionId),
+    },
+  };
+}
+
+function normalizeSupportChatMessage(messageId: string, data: any) {
+  return {
+    id: messageId,
+    text: toRequiredString(data?.text),
+    senderIdentity: toRequiredString(data?.senderIdentity),
+    senderName: toRequiredString(data?.senderName),
+    senderRole: toRequiredString(data?.senderRole),
+    isAgent: toBoolean(data?.isAgent),
+    createdAt: tsIso(data?.createdAt) ?? "",
+  };
+}
+
+function normalizeSupportRoomStatus(data: any): SupportRoomStatus {
+  const raw = typeof data?.status === "string" ? data.status.trim().toLowerCase() : "";
+
+  if (raw === "live" || toBoolean(data?.isLive)) return "live";
+  if (raw === "ended" || raw === "closed" || raw === "archived") return "ended";
+  return "idle";
+}
+
+function toRequiredString(value: unknown): string {
+  return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+function toNullableString(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (value == null) return null;
+  return String(value);
+}
+
+function toNumber(value: unknown): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function toBoolean(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    return normalized === "true" || normalized === "1";
+  }
+  if (typeof value === "number") return value !== 0;
+  return false;
+}
+
+function summarizePayloadTypes(value: any): any {
+  if (Array.isArray(value)) {
+    return {
+      type: "array",
+      length: value.length,
+      itemShape: value.length > 0 ? summarizePayloadTypes(value[0]) : "empty",
+    };
+  }
+
+  if (value === null) return "null";
+
+  if (value instanceof Date) return "date";
+
+  if (typeof value === "object") {
+    return Object.fromEntries(Object.entries(value).map(([key, nestedValue]) => [key, summarizePayloadTypes(nestedValue)]));
+  }
+
+  return typeof value;
+}
+
+function logSupportPayload(endpoint: string, payload: unknown, context: Record<string, unknown> = {}): void {
+  const fieldTypes = summarizePayloadTypes(payload);
+  console.log(`[support-api:${endpoint}]`, JSON.stringify(payload, null, 2));
+  console.log(`[support-api:${endpoint}:types]`, JSON.stringify(fieldTypes, null, 2));
+  logger.info({ endpoint, ...context, payload, fieldTypes }, "support api response payload");
 }
 
 export default router;

@@ -22,6 +22,7 @@ import MonetizationSetup from "./pages/MonetizationSetup";
 import LearnMore from "./pages/LearnMore";
 import Checkout from "./pages/Checkout";
 import PricingExplainerPage from "./pages/PricingExplainerPage";
+import HelpGuidePage from "./pages/HelpGuidePage";
 import InviteLanding from "./pages/InviteLanding";
 import InviteRedeem from "./pages/InviteRedeem";
 import MyContentDisabled from "./pages/MyContentDisabled";
@@ -79,6 +80,7 @@ export function creatorRoutes(flags: CreatorRouteFlags) {
       <Route path="/learnmore" element={<LearnMore />} />
       <Route path="/checkout" element={<Checkout />} />
       <Route path="/pricing/explainer" element={<PricingExplainerPage />} />
+      <Route path="/help" element={<HelpGuidePage />} />
 
       {/* Invite landing */}
       <Route path="/i/:inviteToken" element={<InviteLanding />} />

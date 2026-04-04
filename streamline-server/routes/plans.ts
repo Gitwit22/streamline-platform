@@ -19,6 +19,7 @@ router.get("/", async (_req, res) => {
       myContentRecordingsSnap,
       monetizationSnap,
       payPerViewSnap,
+      collaboratorDelegationSnap,
     ] = await Promise.all([
       firestore.collection("featureFlags").doc("hlsSettingsTab").get(),
       firestore.collection("featureFlags").doc("recording").get(),
@@ -29,6 +30,7 @@ router.get("/", async (_req, res) => {
       firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
       firestore.collection("featureFlags").doc("monetizationEnabled").get(),
       firestore.collection("featureFlags").doc("payPerViewEnabled").get(),
+      firestore.collection("featureFlags").doc("collaboratorDelegationEnabled").get(),
     ]);
 
     const hlsUiData = hlsUiSnap.exists ? ((hlsUiSnap.data() as any) || {}) : {};
@@ -42,6 +44,9 @@ router.get("/", async (_req, res) => {
       : {};
     const monetizationData = monetizationSnap.exists ? ((monetizationSnap.data() as any) || {}) : {};
     const payPerViewData = payPerViewSnap.exists ? ((payPerViewSnap.data() as any) || {}) : {};
+    const collaboratorDelegationData = collaboratorDelegationSnap.exists
+      ? ((collaboratorDelegationSnap.data() as any) || {})
+      : {};
 
     const hlsEnabled = hlsUiData.enabled === undefined ? true : !!hlsUiData.enabled;
     const recordingEnabled = recordingUiData.enabled === undefined ? true : !!recordingUiData.enabled;
@@ -59,6 +64,7 @@ router.get("/", async (_req, res) => {
     // Monetization + PPV flags default to DISABLED (opt-in).
     const monetizationEnabled = monetizationData.enabled === true;
     const payPerViewEnabled = payPerViewData.enabled === true;
+    const collaboratorDelegationEnabled = collaboratorDelegationData.enabled === true;
 
     const snap = await firestore.collection("plans").get();
     const mapped = snap.docs.map((d) => {
@@ -171,6 +177,7 @@ router.get("/", async (_req, res) => {
           myContentRecordingsEnabled,
           monetizationEnabled,
           payPerViewEnabled,
+          collaboratorDelegationEnabled,
         },
       });
     }
@@ -191,6 +198,7 @@ router.get("/", async (_req, res) => {
         myContentRecordingsEnabled,
         monetizationEnabled,
         payPerViewEnabled,
+        collaboratorDelegationEnabled,
       },
     });
   } catch (err: any) {
@@ -209,6 +217,7 @@ router.get("/", async (_req, res) => {
         myContentRecordingsEnabled: false,
         monetizationEnabled: false,
         payPerViewEnabled: false,
+        collaboratorDelegationEnabled: false,
       },
     });
   }
