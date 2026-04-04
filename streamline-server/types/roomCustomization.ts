@@ -105,12 +105,18 @@ export type RoomLifecycleState =
  * Intro clip runtime object.
  *
  * Stored at: rooms/{roomId}.runtime.intro
+ *
+ * When serialized to JSON (API responses), Firestore Timestamps appear as
+ * `{ _seconds: number; _nanoseconds: number }`. Clients should use
+ * `startedAt._seconds * 1000` to convert to milliseconds.
  */
 export type RoomIntroRuntime = {
   status: "idle" | "queued" | "playing" | "skipped" | "completed" | "failed";
   assetId?: string;
-  startedAt?: FirebaseFirestore.Timestamp;
-  endedAt?: FirebaseFirestore.Timestamp;
+  /** Firestore Timestamp — stored as-is, serializes to { _seconds, _nanoseconds }. */
+  startedAt?: { _seconds: number; _nanoseconds: number } | Record<string, unknown>;
+  /** Firestore Timestamp — stored as-is, serializes to { _seconds, _nanoseconds }. */
+  endedAt?: { _seconds: number; _nanoseconds: number } | Record<string, unknown>;
 };
 
 /**

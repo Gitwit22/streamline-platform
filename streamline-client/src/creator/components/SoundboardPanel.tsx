@@ -54,7 +54,7 @@ export default function SoundboardPanel({
 
   const handleTrigger = useCallback(
     async (effect: SfxEffect) => {
-      if (!enabled || isTriggering || isCoolingDown) return;
+      if (!enabled || isTriggering || Date.now() < cooldownUntil) return;
 
       setIsTriggering(effect);
       setLastError(null);
@@ -95,7 +95,7 @@ export default function SoundboardPanel({
         setIsTriggering(null);
       }
     },
-    [enabled, isTriggering, isCoolingDown, roomId]
+    [enabled, isTriggering, cooldownUntil, roomId]
   );
 
   const effectiveAllowed = allowedEffects && allowedEffects.length > 0

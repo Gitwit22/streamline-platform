@@ -76,12 +76,24 @@ export default function RoomBrandingLayer({
 
   if (bg?.enabled && !bgFailed) {
     if (bg.type === "image" && bg.url) {
-      backgroundStyle = {
-        backgroundImage: `url(${CSS.escape ? CSS.escape(bg.url) : bg.url})`,
-        backgroundSize: "cover",
-        backgroundPosition: "center",
-        backgroundRepeat: "no-repeat",
-      };
+      // Sanitize: only accept http/https URLs to prevent CSS injection.
+      let safeBgUrl = "";
+      try {
+        const parsed = new URL(bg.url);
+        if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+          safeBgUrl = bg.url;
+        }
+      } catch {
+        // Malformed URL — fall through to default background.
+      }
+      if (safeBgUrl) {
+        backgroundStyle = {
+          backgroundImage: `url("${safeBgUrl.replace(/"/g, "%22")}")`,
+          backgroundSize: "cover",
+          backgroundPosition: "center",
+          backgroundRepeat: "no-repeat",
+        };
+      }
     } else if (bg.type === "gradient" && bg.value) {
       backgroundStyle = { background: bg.value };
     } else if (bg.type === "solid" && bg.value) {

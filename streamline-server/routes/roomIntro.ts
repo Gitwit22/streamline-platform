@@ -118,6 +118,9 @@ router.post("/:roomId/intro/play", requireAuth as any, async (req: any, res) => 
       { merge: true }
     );
 
+    // Record the start timestamp as a plain seconds value for safe comparison in the expire callback.
+    const nowMillis = now.toMillis();
+
     // Schedule server-side auto-expire so a hung intro never blocks room start.
     // We use a lightweight setTimeout — acceptable for V1; production can
     // use Cloud Tasks/Scheduler for durability.
@@ -130,8 +133,11 @@ router.post("/:roomId/intro/play", requireAuth as any, async (req: any, res) => 
         if (!check.exists) return;
         const d = (check.data() as any) || {};
         // Only expire if still in "playing" state and started from the same timestamp.
+        // Firestore Timestamps expose .toMillis() at runtime; we use a type-guard.
         const live: RoomIntroRuntime = d.runtime?.intro || {};
-        if (live.status === "playing" && (live.startedAt as any)?.toMillis?.() === (now as any).toMillis?.()) {
+        const storedTs = live.startedAt as any;
+        const storedMillis = typeof storedTs?.toMillis === "function" ? storedTs.toMillis() : null;
+        if (live.status === "playing" && storedMillis === nowMillis) {
           await db.collection("rooms").doc(ctx.roomId).set(
             { runtime: { intro: { status: "completed", endedAt: admin.firestore.Timestamp.now() } } },
             { merge: true }

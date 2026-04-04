@@ -76,7 +76,7 @@ export default function Greenroom() {
       if (!data || !roomId) return false;
 
       const rs = data.roomStatus || data.status || "";
-      const lc = data.lifecycleState || "";
+      const lifecycleState = data.lifecycleState || "";
 
       // Room went live — admit immediately.
       if (rs === "live" || data.guestJoinAllowed === true) {
@@ -91,7 +91,7 @@ export default function Greenroom() {
       }
 
       // Lifecycle has moved past "greenroom" — time to join.
-      if (lc && lc !== "greenroom" && lc !== "draft" && lc !== "setup") {
+      if (lifecycleState && lifecycleState !== "greenroom" && lifecycleState !== "draft" && lifecycleState !== "setup") {
         nav(`/room/${encodeURIComponent(roomId)}`, { replace: true });
         return true;
       }

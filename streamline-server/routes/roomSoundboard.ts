@@ -17,6 +17,15 @@ function normalizeRoomId(raw: string | undefined): string {
   return String(raw || "").trim();
 }
 
+/** Thrown inside the Firestore transaction when the cooldown is still active. */
+class SfxCooldownError extends Error {
+  readonly status = 429 as const;
+  constructor() {
+    super("sfx_cooldown_active");
+    this.name = "SfxCooldownError";
+  }
+}
+
 /**
  * POST /api/rooms/:roomId/sfx/trigger
  *
@@ -101,7 +110,7 @@ router.post("/:roomId/sfx/trigger", requireAuth as any, async (req: any, res) =>
       const freshLast: number = freshRoom.runtime?.sfx?.lastTriggeredMs ?? 0;
       const freshNow = Date.now();
       if (freshNow - freshLast < SFX_COOLDOWN_MS) {
-        throw Object.assign(new Error("sfx_cooldown_active"), { code: 429 });
+        throw new SfxCooldownError();
       }
 
       tx.set(
@@ -122,7 +131,7 @@ router.post("/:roomId/sfx/trigger", requireAuth as any, async (req: any, res) =>
     if (err instanceof RoomPermissionError) {
       return res.status(err.status).json({ error: err.code });
     }
-    if (err?.code === 429 || err?.message === "sfx_cooldown_active") {
+    if (err instanceof SfxCooldownError) {
       return res.status(429).json({ error: "sfx_cooldown_active" });
     }
     console.error("POST /api/rooms/:roomId/sfx/trigger error", err);
