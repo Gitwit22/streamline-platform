@@ -24,6 +24,8 @@ import roomsHlsConfigRoutes from "./routes/roomsHlsConfig";
 import roomsActiveEmbedRoutes from "./routes/roomsActiveEmbed";
 import roomCustomizationRoutes from "./routes/roomCustomization";
 import roomGreenroomPolicyRoutes from "./routes/roomGreenroomPolicy";
+import roomGreenroomRoutes from "./routes/roomGreenroom";
+import roomLifecycleRoutes from "./routes/roomLifecycle";
 import roomIntroRoutes from "./routes/roomIntro";
 import roomSoundboardRoutes from "./routes/roomSoundboard";
 import roomControlsRoutes from "./routes/roomControls";
@@ -316,6 +318,10 @@ app.use("/api/rooms", roomsHlsConfigRoutes);
 app.use("/api/rooms", roomCustomizationRoutes);
 // Room-level greenroom policy (admission mode, VIP/block lists)
 app.use("/api/rooms", roomGreenroomPolicyRoutes);
+// Room-level greenroom admission flow (request/approve/deny/status/pending)
+app.use("/api/rooms", roomGreenroomRoutes);
+// Room lifecycle state machine (advance, get current state)
+app.use("/api/rooms", roomLifecycleRoutes);
 // Room-level intro clip controls (host play/skip/status)
 app.use("/api/rooms", roomIntroRoutes);
 // Room-level soundboard (host-only sfx trigger + cooldown)

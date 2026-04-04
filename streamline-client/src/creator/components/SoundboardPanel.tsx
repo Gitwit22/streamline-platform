@@ -21,6 +21,112 @@ interface SoundboardPanelProps {
   allowedEffects?: SfxEffect[];
 }
 
+// ── Audio synthesis ──────────────────────────────────────────────────────────
+
+/**
+ * Synthesizes a built-in SFX using the Web Audio API.
+ * All synthesis is host-local (V1). Future: replace with LiveKit data channel broadcast.
+ * Errors are swallowed so a broken AudioContext never disrupts room audio.
+ */
+function playSynthesizedEffect(effect: SfxEffect): void {
+  try {
+    const ctx = new AudioContext();
+
+    const play = () => {
+      const now = ctx.currentTime;
+      switch (effect) {
+        case "applause": {
+          // Burst of filtered white noise fading out over 2s.
+          const bufferSize = ctx.sampleRate * 2;
+          const buf = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+          const data = buf.getChannelData(0);
+          for (let i = 0; i < bufferSize; i++) data[i] = Math.random() * 2 - 1;
+          const src = ctx.createBufferSource();
+          src.buffer = buf;
+          const filter = ctx.createBiquadFilter();
+          filter.type = "bandpass";
+          filter.frequency.value = 1800;
+          filter.Q.value = 0.5;
+          const gain = ctx.createGain();
+          gain.gain.setValueAtTime(0.5, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 2);
+          src.connect(filter);
+          filter.connect(gain);
+          gain.connect(ctx.destination);
+          src.start(now);
+          src.stop(now + 2);
+          setTimeout(() => ctx.close(), 2500);
+          break;
+        }
+        case "boo": {
+          // Descending tone with vibrato over 1.5s.
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "sawtooth";
+          osc.frequency.setValueAtTime(300, now);
+          osc.frequency.exponentialRampToValueAtTime(80, now + 1.5);
+          gain.gain.setValueAtTime(0.35, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(now);
+          osc.stop(now + 1.5);
+          setTimeout(() => ctx.close(), 2000);
+          break;
+        }
+        case "crickets": {
+          // Chirping oscillation: two tones alternating at 8 Hz for 2s.
+          const chirpCount = 16;
+          const chirpInterval = 0.125;
+          for (let i = 0; i < chirpCount; i++) {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = "sine";
+            osc.frequency.value = i % 2 === 0 ? 4200 : 3800;
+            const t = now + i * chirpInterval;
+            gain.gain.setValueAtTime(0, t);
+            gain.gain.linearRampToValueAtTime(0.2, t + 0.03);
+            gain.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(t);
+            osc.stop(t + 0.1);
+          }
+          setTimeout(() => ctx.close(), 2500);
+          break;
+        }
+        case "airhorn": {
+          // Loud ascending blast: 0.6s fast rise then sustain.
+          const osc = ctx.createOscillator();
+          const gain = ctx.createGain();
+          osc.type = "square";
+          osc.frequency.setValueAtTime(220, now);
+          osc.frequency.exponentialRampToValueAtTime(880, now + 0.15);
+          gain.gain.setValueAtTime(0.6, now);
+          gain.gain.setValueAtTime(0.5, now + 0.15);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.6);
+          osc.connect(gain);
+          gain.connect(ctx.destination);
+          osc.start(now);
+          osc.stop(now + 0.6);
+          setTimeout(() => ctx.close(), 1000);
+          break;
+        }
+        default:
+          ctx.close();
+      }
+    };
+
+    if (ctx.state === "suspended") {
+      ctx.resume().then(play).catch(() => ctx.close());
+    } else {
+      play();
+    }
+  } catch {
+    // Web Audio unavailable or blocked — fail silently.
+  }
+}
+
 /**
  * SoundboardPanel — host-only panel for triggering built-in room sound effects.
  *
@@ -80,7 +186,9 @@ export default function SoundboardPanel({
           const msg = data?.error || `HTTP ${res.status}`;
           setLastError(msg === "effect_not_allowed" ? "Effect not allowed" : "Could not play effect");
         } else {
-          // Success — start local cooldown.
+          // Success — play the effect locally (V1: host-only audio).
+          playSynthesizedEffect(effect);
+          // Start local cooldown.
           setLastTriggered(effect);
           setCooldownUntil(Date.now() + COOLDOWN_MS);
           if (cooldownRef.current) clearTimeout(cooldownRef.current);

@@ -12,12 +12,16 @@ import RoomBrandingLayer, { type PublicRoomCustomization } from "../components/R
  *   - The room has a greenroom policy with mode !== "off"
  *   - The room lifecycle state is "greenroom"
  *
- * This page polls /api/rooms/:roomId/info every 5 seconds.
- * When the lifecycle state exits "greenroom" (e.g., the host admits guests
- * or advances the lifecycle), guests are redirected to the room.
+ * This page has two operating modes:
  *
- * If the greenroom state cannot be confirmed, we fall back to /invite
- * or /join to preserve the existing prejoin behavior.
+ * 1. Request mode (requireApproval=true or autoAdmit):
+ *    Guest enters their display name → server puts them in pending queue or
+ *    auto-admits them → page polls /greenroom/status until approved/denied.
+ *
+ * 2. Passive mode (fallback when request endpoint is unavailable):
+ *    Polls /api/rooms/:roomId/info every 5 seconds and redirects when the
+ *    room goes live (guestJoinAllowed === true). This preserves the behavior
+ *    of rooms that don't use the approval flow.
  *
  * Admission control is enforced server-side — this page is UI only.
  */
@@ -33,6 +37,15 @@ interface RoomInfo {
   lifecycleState?: string;
 }
 
+type GuestStage =
+  | "loading"
+  | "name_form"
+  | "requesting"
+  | "pending"
+  | "approved"
+  | "denied"
+  | "waiting"; // passive fallback
+
 const POLL_INTERVAL_MS = 5_000;
 const STALE_THRESHOLD_MS = 15 * 60 * 1_000; // 15 minutes
 
@@ -41,13 +54,25 @@ export default function Greenroom() {
   const { roomId } = useParams<{ roomId: string }>();
 
   const [info, setInfo] = useState<RoomInfo | null>(null);
-  const [loading, setLoading] = useState(true);
   const [isStale, setIsStale] = useState(false);
-  const [fetchError, setFetchError] = useState<string | null>(null);
   const [customization, setCustomization] = useState<PublicRoomCustomization | null>(null);
+
+  // Approval-flow state
+  const [stage, setStage] = useState<GuestStage>("loading");
+  const [displayName, setDisplayName] = useState("");
+  const [nameError, setNameError] = useState<string | null>(null);
+  const [requestId, setRequestId] = useState<string | null>(null);
+  const [requestError, setRequestError] = useState<string | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const waitingStartRef = useRef<number | null>(null);
+
+  const stopPolling = () => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  };
 
   const fetchInfo = useCallback(async (): Promise<RoomInfo | null> => {
     const id = String(roomId || "").trim();
@@ -68,7 +93,6 @@ export default function Greenroom() {
 
   /**
    * Decide whether the guest should leave the greenroom.
-   * Redirects to /room/:roomId when the room is ready for guests.
    * Returns true if a redirect was triggered.
    */
   const maybeRedirect = useCallback(
@@ -80,24 +104,28 @@ export default function Greenroom() {
 
       // Room went live — admit immediately.
       if (rs === "live" || data.guestJoinAllowed === true) {
+        stopPolling();
         nav(`/room/${encodeURIComponent(roomId)}`, { replace: true });
         return true;
       }
 
       // Room ended — send home.
       if (rs === "ended" || rs === "not_found") {
+        stopPolling();
         nav("/join", { replace: true });
         return true;
       }
 
       // Lifecycle has moved past "greenroom" — time to join.
       if (lifecycleState && lifecycleState !== "greenroom" && lifecycleState !== "draft" && lifecycleState !== "setup") {
+        stopPolling();
         nav(`/room/${encodeURIComponent(roomId)}`, { replace: true });
         return true;
       }
 
-      // Greenroom was disabled — fall back to prejoin flow (the existing join page).
+      // Greenroom was disabled — fall back to prejoin flow.
       if (data.greenroomMode === "off" || data.greenroomMode === undefined) {
+        stopPolling();
         nav(`/join`, { replace: true });
         return true;
       }
@@ -107,7 +135,7 @@ export default function Greenroom() {
     [roomId, nav]
   );
 
-  // Initial fetch
+  // Initial fetch — determine room state, then choose stage.
   useEffect(() => {
     if (!roomId) {
       nav("/join", { replace: true });
@@ -120,16 +148,15 @@ export default function Greenroom() {
       if (cancelled) return;
 
       if (!data) {
-        // Couldn't reach server — fall back to join
         nav("/join", { replace: true });
         return;
       }
 
       setInfo(data);
-      setLoading(false);
-      maybeRedirect(data);
 
-      // Fetch public customization for branding (best-effort, non-blocking).
+      if (maybeRedirect(data)) return;
+
+      // Fetch public customization for branding (best-effort).
       apiFetch(
         `/api/rooms/${encodeURIComponent(data.roomId)}/customization/public`,
         {},
@@ -145,47 +172,137 @@ export default function Greenroom() {
           }
         })
         .catch(() => { /* branding failure is silent */ });
+
+      // Show the name form to initiate the request flow.
+      setStage("name_form");
     })();
 
     return () => {
       cancelled = true;
+      stopPolling();
     };
   }, [roomId, fetchInfo, maybeRedirect, nav]);
 
-  // Poll while in greenroom state
-  useEffect(() => {
-    if (loading || !info) return;
+  // ── Handlers ─────────────────────────────────────────────────────────────
 
-    // If we already redirected (or should redirect), don't start polling.
-    if (maybeRedirect(info)) return;
+  const handleRequestSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = displayName.trim();
+    if (!name) {
+      setNameError("Please enter your display name.");
+      return;
+    }
+    setNameError(null);
+    setRequestError(null);
+    setStage("requesting");
 
+    try {
+      const res = await apiFetch(
+        `/api/rooms/${encodeURIComponent(String(roomId))}/greenroom/request`,
+        { method: "POST", body: JSON.stringify({ displayName: name }) },
+        { allowNonOk: true }
+      );
+      const ct = res.headers.get("content-type") || "";
+      const data: any = ct.includes("application/json") ? await res.json() : {};
+
+      if (res.status === 403) {
+        setStage("denied");
+        return;
+      }
+
+      if (res.status === 409 && data?.error === "greenroom_not_active") {
+        // Greenroom not configured server-side — fall back to passive waiting.
+        setStage("waiting");
+        startPassivePolling();
+        return;
+      }
+
+      if (!res.ok) {
+        setRequestError(data?.details || data?.error || "Could not submit request. Please try again.");
+        setStage("name_form");
+        return;
+      }
+
+      if (data.approved) {
+        // Auto-admitted (autoAdmit or vipBypass). Redirect to room.
+        nav(`/room/${encodeURIComponent(String(roomId))}`, { replace: true });
+        return;
+      }
+
+      if (data.pending && data.requestId) {
+        setRequestId(data.requestId);
+        setStage("pending");
+        startApprovalPolling(data.requestId);
+        return;
+      }
+
+      // Unexpected response — fallback to passive.
+      setStage("waiting");
+      startPassivePolling();
+    } catch {
+      setRequestError("Could not reach the server. Please try again.");
+      setStage("name_form");
+    }
+  };
+
+  const startApprovalPolling = useCallback((rid: string) => {
+    stopPolling();
+    pollRef.current = setInterval(async () => {
+      try {
+        const res = await apiFetch(
+          `/api/rooms/${encodeURIComponent(String(roomId))}/greenroom/status?requestId=${encodeURIComponent(rid)}`,
+          {},
+          { allowNonOk: true }
+        );
+        if (!res.ok) return;
+        const ct = res.headers.get("content-type") || "";
+        if (!ct.includes("application/json")) return;
+        const data: any = await res.json();
+
+        if (data.approved) {
+          stopPolling();
+          setStage("approved");
+          setTimeout(() => {
+            nav(`/room/${encodeURIComponent(String(roomId))}`, { replace: true });
+          }, 1200);
+          return;
+        }
+
+        if (data.denied) {
+          stopPolling();
+          setStage("denied");
+        }
+      } catch {
+        // Transient error — keep polling.
+      }
+    }, POLL_INTERVAL_MS);
+  }, [roomId, nav]);
+
+  const startPassivePolling = useCallback(() => {
+    stopPolling();
     if (!waitingStartRef.current) waitingStartRef.current = Date.now();
 
     pollRef.current = setInterval(async () => {
       const fresh = await fetchInfo();
-      if (!fresh) return; // transient error — keep polling
-
+      if (!fresh) return;
       setInfo(fresh);
-      if (maybeRedirect(fresh)) {
-        if (pollRef.current) clearInterval(pollRef.current);
-        return;
-      }
+      if (maybeRedirect(fresh)) return;
 
       if (waitingStartRef.current && Date.now() - waitingStartRef.current >= STALE_THRESHOLD_MS) {
         setIsStale(true);
       }
     }, POLL_INTERVAL_MS);
+  }, [fetchInfo, maybeRedirect]);
 
-    return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
-      }
-    };
-  }, [loading, info, fetchInfo, maybeRedirect]);
+  // ── Render ────────────────────────────────────────────────────────────────
 
-  // ── Loading ──────────────────────────────────────────────────────────────
-  if (loading) {
+  const waitingMessage =
+    customization?.greenroom?.waitingRoomMessage ||
+    (isStale
+      ? "The host has not opened the room yet. They may be running late."
+      : "The host will admit you shortly. Please stand by.");
+
+  if (stage === "loading") {
     return (
       <div style={styles.page}>
         <div style={styles.card}>
@@ -199,26 +316,106 @@ export default function Greenroom() {
     );
   }
 
-  if (fetchError) {
+  if (stage === "denied") {
     return (
-      <div style={styles.page}>
-        <div style={styles.card}>
-          <p style={styles.errorText}>{fetchError}</p>
-          <button style={styles.btn} onClick={() => nav("/join")}>
-            Return home
-          </button>
+      <RoomBrandingLayer customization={customization}>
+        <div style={styles.page}>
+          <div style={styles.card}>
+            <h1 style={{ ...styles.title, color: "#f87171" }}>Access Denied</h1>
+            <p style={styles.subtitle}>Your request to join this room was not approved.</p>
+            <button style={{ ...styles.btn, marginTop: 20 }} onClick={() => nav("/join")}>
+              Return home
+            </button>
+          </div>
         </div>
-      </div>
+      </RoomBrandingLayer>
     );
   }
 
-  // ── Waiting room UI ──────────────────────────────────────────────────────
-  const waitingMessage =
-    customization?.greenroom?.waitingRoomMessage ||
-    (isStale
-      ? "The host has not opened the room yet. They may be running late."
-      : "The host will admit you shortly. Please stand by.");
+  if (stage === "approved") {
+    return (
+      <RoomBrandingLayer customization={customization}>
+        <div style={styles.page}>
+          <div style={styles.card}>
+            <div style={{ textAlign: "center" }}>
+              <div style={styles.spinner} />
+              <style>{spinnerKeyframes}</style>
+              <h1 style={{ ...styles.title, color: "#4ade80" }}>Approved!</h1>
+              <p style={styles.subtitle}>Entering the room…</p>
+            </div>
+          </div>
+        </div>
+      </RoomBrandingLayer>
+    );
+  }
 
+  if (stage === "name_form" || stage === "requesting") {
+    return (
+      <RoomBrandingLayer customization={customization}>
+        <div style={styles.page}>
+          <div style={styles.card}>
+            {info && (info.roomName || info.hostName) && (
+              <div style={{ ...styles.roomInfo, marginBottom: 20 }}>
+                {info.roomName && <div style={styles.roomName}>{info.roomName}</div>}
+                {info.hostName && <div style={styles.hostName}>Hosted by {info.hostName}</div>}
+              </div>
+            )}
+            <h1 style={styles.title}>Join the waiting room</h1>
+            <p style={styles.subtitle}>Enter your name to request access.</p>
+            <form onSubmit={handleRequestSubmit} style={{ marginTop: 20 }}>
+              <input
+                type="text"
+                placeholder="Your display name"
+                value={displayName}
+                maxLength={40}
+                disabled={stage === "requesting"}
+                onChange={(e) => setDisplayName(e.target.value)}
+                style={styles.nameInput}
+                autoFocus
+              />
+              {nameError && <p style={styles.errorText}>{nameError}</p>}
+              {requestError && <p style={styles.errorText}>{requestError}</p>}
+              <button
+                type="submit"
+                disabled={stage === "requesting"}
+                style={{ ...styles.btn, width: "100%", marginTop: 12 }}
+              >
+                {stage === "requesting" ? "Requesting…" : "Request to Join"}
+              </button>
+            </form>
+          </div>
+        </div>
+      </RoomBrandingLayer>
+    );
+  }
+
+  if (stage === "pending") {
+    return (
+      <RoomBrandingLayer customization={customization}>
+        <div style={styles.page}>
+          <div style={styles.card}>
+            <div style={{ textAlign: "center", marginBottom: 24 }}>
+              <div style={styles.spinner} />
+              <style>{spinnerKeyframes}</style>
+              <h1 style={styles.title}>Waiting for approval</h1>
+              <p style={styles.subtitle}>
+                The host will admit you shortly. Please stand by.
+              </p>
+            </div>
+            {info && (info.roomName || info.hostName) && (
+              <div style={styles.roomInfo}>
+                {info.roomName && <div style={styles.roomName}>{info.roomName}</div>}
+                {info.hostName && <div style={styles.hostName}>Hosted by {info.hostName}</div>}
+              </div>
+            )}
+            <div style={styles.hint}>Checking automatically…</div>
+          </div>
+        </div>
+      </RoomBrandingLayer>
+    );
+  }
+
+  // "waiting" — passive fallback mode.
   return (
     <RoomBrandingLayer customization={customization}>
       <div style={styles.page}>
@@ -230,15 +427,10 @@ export default function Greenroom() {
             <p style={styles.subtitle}>{waitingMessage}</p>
           </div>
 
-          {/* Room info */}
           {info && (info.roomName || info.hostName) && (
             <div style={styles.roomInfo}>
-              {info.roomName && (
-                <div style={styles.roomName}>{info.roomName}</div>
-              )}
-              {info.hostName && (
-                <div style={styles.hostName}>Hosted by {info.hostName}</div>
-              )}
+              {info.roomName && <div style={styles.roomName}>{info.roomName}</div>}
+              {info.hostName && <div style={styles.hostName}>Hosted by {info.hostName}</div>}
             </div>
           )}
 
@@ -248,7 +440,6 @@ export default function Greenroom() {
             <button
               style={{ ...styles.btn, flex: 1 }}
               onClick={async () => {
-                setFetchError(null);
                 const fresh = await fetchInfo();
                 if (fresh) {
                   setInfo(fresh);
@@ -352,5 +543,16 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#f87171",
     fontSize: 14,
     marginBottom: 16,
+  },
+  nameInput: {
+    width: "100%",
+    boxSizing: "border-box" as const,
+    padding: "10px 14px",
+    borderRadius: 10,
+    border: "1px solid rgba(255,255,255,0.15)",
+    background: "rgba(255,255,255,0.06)",
+    color: "#fff",
+    fontSize: 14,
+    outline: "none",
   },
 };

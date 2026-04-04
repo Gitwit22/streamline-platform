@@ -94,6 +94,15 @@ router.post("/:roomId/intro/play", requireAuth as any, async (req: any, res) => 
       return res.json({ ok: true, roomId: ctx.roomId, intro: fallbackState, skipped: true });
     }
 
+    // Validate that the assetId refers to an existing saved_video document.
+    const assetSnap = await db.collection("saved_videos").doc(introConfig.assetId).get();
+    if (!assetSnap.exists) {
+      return res.status(400).json({
+        error: "invalid_asset_id",
+        details: "The introClip.assetId does not reference a known asset. Update the room customization with a valid asset before playing.",
+      });
+    }
+
     // Cap duration at hard maximum.
     const rawDuration = typeof introConfig.durationSeconds === "number"
       ? introConfig.durationSeconds
