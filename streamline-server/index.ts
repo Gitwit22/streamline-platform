@@ -23,6 +23,7 @@ import roomsResolveRoutes from "./routes/roomsResolve";
 import roomsHlsConfigRoutes from "./routes/roomsHlsConfig";
 import roomsActiveEmbedRoutes from "./routes/roomsActiveEmbed";
 import roomCustomizationRoutes from "./routes/roomCustomization";
+import roomGreenroomPolicyRoutes from "./routes/roomGreenroomPolicy";
 import roomControlsRoutes from "./routes/roomControls";
 import roomChatRoutes from "./routes/roomChat";
 import roomsLayoutRoutes from "./routes/roomsLayout";
@@ -311,6 +312,8 @@ app.use("/api/rooms", roomsRecordingsRoutes);
 app.use("/api/rooms", roomsHlsConfigRoutes);
 // Room-level customization (banner, background, layout, intro, sfx)
 app.use("/api/rooms", roomCustomizationRoutes);
+// Room-level greenroom policy (admission mode, VIP/block lists)
+app.use("/api/rooms", roomGreenroomPolicyRoutes);
 // Room-level selection of which Saved Embed to use for HLS control
 app.use("/api/rooms", roomsActiveEmbedRoutes);
 // Destinations management (encrypted keys)
