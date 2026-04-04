@@ -10,7 +10,11 @@ const EFFECTS: { id: SfxEffect; label: string; emoji: string }[] = [
   { id: "airhorn", label: "Air Horn", emoji: "📯" },
 ];
 
-/** How long to show the "cooling down" indicator after a trigger (ms). */
+/**
+ * How long to show the "cooling down" indicator after a trigger (ms).
+ * Intentionally 500ms longer than the server-side SFX_COOLDOWN_MS (3000ms) to
+ * prevent the UI from unlocking before the server is ready to accept another trigger.
+ */
 const COOLDOWN_MS = 3_500;
 
 interface SoundboardPanelProps {

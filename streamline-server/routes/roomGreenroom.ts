@@ -26,8 +26,17 @@ function readGreenroomPolicy(room: any) {
     requireApproval: raw.requireApproval === true,
     autoAdmit: raw.autoAdmit === true,
     vipBypass: raw.vipBypass === true,
-    vipList: Array.isArray(raw.vipList) ? (raw.vipList as string[]).filter((v) => typeof v === "string") : [],
-    blockedList: Array.isArray(raw.blockedList) ? (raw.blockedList as string[]).filter((v) => typeof v === "string") : [],
+    // Pre-normalize to lowercase for O(1) Set lookups at request time.
+    vipList: new Set<string>(
+      Array.isArray(raw.vipList)
+        ? (raw.vipList as string[]).filter((v) => typeof v === "string").map((v) => v.toLowerCase())
+        : []
+    ),
+    blockedList: new Set<string>(
+      Array.isArray(raw.blockedList)
+        ? (raw.blockedList as string[]).filter((v) => typeof v === "string").map((v) => v.toLowerCase())
+        : []
+    ),
   };
 }
 
@@ -86,13 +95,13 @@ router.post("/:roomId/greenroom/request", async (req: any, res) => {
 
     // blockedList check (case-insensitive display name match).
     const lowerName = displayName.toLowerCase();
-    const isBlocked = policy.blockedList.some((b) => b.toLowerCase() === lowerName);
+    const isBlocked = policy.blockedList.has(lowerName);
     if (isBlocked) {
       return res.status(403).json({ error: "guest_blocked" });
     }
 
     // Auto-admit paths.
-    const isVip = policy.vipList.some((v) => v.toLowerCase() === lowerName);
+    const isVip = policy.vipList.has(lowerName);
     const shouldAutoAdmit = policy.autoAdmit || (policy.vipBypass && isVip);
 
     if (shouldAutoAdmit) {
@@ -105,7 +114,6 @@ router.post("/:roomId/greenroom/request", async (req: any, res) => {
 
     // requireApproval path: enqueue in runtime.guestStaging.guests.
     const stagingRef = db.collection("rooms").doc(roomId);
-    const requestId = stagingRef.collection("_requestIds").doc().id; // re-use to generate a random ID
 
     // Check pending count to avoid unbounded growth.
     const existing = room.runtime?.guestStaging?.guests || {};
@@ -113,6 +121,9 @@ router.post("/:roomId/greenroom/request", async (req: any, res) => {
     if (pendingCount >= MAX_PENDING_GUESTS) {
       return res.status(429).json({ error: "greenroom_full", details: "Too many pending guests" });
     }
+
+    // Generate a random ID by obtaining a new document reference without writing it.
+    const requestId = stagingRef.collection("_ids").doc().id;
 
     const guestEntry = {
       displayName,
