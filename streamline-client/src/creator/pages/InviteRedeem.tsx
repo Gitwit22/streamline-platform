@@ -21,6 +21,9 @@ interface InviteInfo {
   inviteValid: boolean;
   roomType?: string;
   debugReason?: string;
+  // Greenroom Phase 3 — only present when greenroomMode is not "off"
+  greenroomMode?: "prejoin" | "hls_waiting";
+  lifecycleState?: string;
 }
 
 type GateState =
@@ -115,6 +118,25 @@ export default function InviteRedeem() {
 
   // Auto-poll when room is idle (waiting for host) — every 5 seconds
   const gateState = deriveGateState(info, error, loading);
+
+  // Greenroom routing (Phase 3):
+  // When the room's greenroom mode is active and the lifecycle state is
+  // "greenroom", redirect guests to the dedicated waiting room page.
+  // This is checked after every info fetch (initial + poll).
+  // Fallback: if greenroom state cannot be read, the existing "waiting"
+  // state in this page acts as the /prejoin behavior — never removed.
+  useEffect(() => {
+    if (!info || loading) return;
+    const { greenroomMode, lifecycleState, roomId } = info;
+    if (
+      greenroomMode &&
+      greenroomMode !== "off" &&
+      lifecycleState === "greenroom" &&
+      roomId
+    ) {
+      nav(`/greenroom/${encodeURIComponent(roomId)}`, { replace: true });
+    }
+  }, [info, loading, nav]);
 
   useEffect(() => {
     if (gateState !== "waiting") {

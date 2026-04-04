@@ -175,6 +175,8 @@ export default function Join() {
   // Platform-level invisible host flag (opt-in, default disabled)
   const [platformInvisibleHostEnabled, setPlatformInvisibleHostEnabled] = useState<boolean>(false);
   const [platformCollaboratorDelegationEnabled, setPlatformCollaboratorDelegationEnabled] = useState<boolean>(false);
+  // Room customization setup page flag (opt-in, default disabled)
+  const [platformRoomCustomizationEnabled, setPlatformRoomCustomizationEnabled] = useState<boolean>(false);
 
   // Use /api/auth/me for admin/test-mode status
   const { user: authUser, loading: authLoading } = useAuthMe();
@@ -292,6 +294,9 @@ export default function Join() {
           setPlatformCollaboratorDelegationEnabled(platformFlags.collaboratorDelegationEnabled === true);
         } else {
           setPlatformCollaboratorDelegationEnabled(false);
+        }
+        if (platformFlags.roomCustomizationEnabled === true) {
+          setPlatformRoomCustomizationEnabled(true);
         }
       } catch {
         if (!cancelled) setPlatformHlsEnabled(true);
@@ -1523,6 +1528,29 @@ export default function Join() {
                     This will broadcast to: <span style={{ color: "#e5e7eb" }}>/live/{selectedSavedEmbedId}</span>
                   </div>
                 )}
+                {selectedSavedEmbedId && platformRoomCustomizationEnabled && (() => {
+                  const embedRoomId = savedEmbeds.find((e) => e.embedId === selectedSavedEmbedId)?.roomId;
+                  if (!embedRoomId) return null;
+                  return (
+                    <div style={{ marginTop: "8px" }}>
+                      <button
+                        type="button"
+                        onClick={() => nav(`/rooms/${encodeURIComponent(embedRoomId)}/setup`)}
+                        style={{
+                          background: "rgba(255,255,255,0.06)",
+                          border: "1px solid rgba(255,255,255,0.12)",
+                          borderRadius: "8px",
+                          color: "#9ca3af",
+                          cursor: "pointer",
+                          fontSize: "12px",
+                          padding: "6px 14px",
+                        }}
+                      >
+                        ⚙ Room Setup
+                      </button>
+                    </div>
+                  );
+                })()}
                 {savedEmbedsError && (
                   <div style={{ marginTop: "6px", fontSize: "12px", color: "#fecaca" }}>
                     {savedEmbedsError}

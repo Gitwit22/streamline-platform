@@ -1256,6 +1256,18 @@ router.get("/rooms/:roomId/info", async (req: any, res) => {
     const roomType = room.roomType === "hls" || room.hlsConfig?.enabled === true ? "hls" : "rtc";
     const debugReason = deriveDebugReason(roomStatus, room);
 
+    // Greenroom routing metadata (Phase 3).
+    // Only safe, presentation-layer fields are surfaced here.
+    // The raw blockedList / vipList are never exposed publicly.
+    const rawGreenroomMode = room.settings?.greenroom?.mode;
+    const greenroomMode: "off" | "prejoin" | "hls_waiting" =
+      rawGreenroomMode === "prejoin" || rawGreenroomMode === "hls_waiting"
+        ? rawGreenroomMode
+        : "off";
+    const rawLifecycle = room.runtime?.lifecycleState;
+    const lifecycleState: string | undefined =
+      typeof rawLifecycle === "string" ? rawLifecycle : undefined;
+
     // Only return safe, public info — never expose owner IDs, secrets, or internal fields
     return res.json({
       roomId,
@@ -1267,6 +1279,8 @@ router.get("/rooms/:roomId/info", async (req: any, res) => {
       hostName,
       roomType,
       debugReason,
+      // Greenroom fields — new, optional. Absent when greenroom is off.
+      ...(greenroomMode !== "off" ? { greenroomMode, lifecycleState } : {}),
     });
   } catch (err) {
     console.error("/api/rooms/:roomId/info error", err);
@@ -1325,6 +1339,16 @@ router.get("/invites/:inviteId/info", async (req: any, res) => {
     // Resolve host name from room owner
     const hostName = await resolveHostName(room?.ownerId);
 
+    // Greenroom routing metadata (Phase 3) — same safe fields as /rooms/:roomId/info.
+    const rawGreenroomMode = room?.settings?.greenroom?.mode;
+    const greenroomMode: "off" | "prejoin" | "hls_waiting" =
+      rawGreenroomMode === "prejoin" || rawGreenroomMode === "hls_waiting"
+        ? rawGreenroomMode
+        : "off";
+    const rawLifecycle = room?.runtime?.lifecycleState;
+    const lifecycleState: string | undefined =
+      typeof rawLifecycle === "string" ? rawLifecycle : undefined;
+
     return res.json({
       inviteId,
       roomId,
@@ -1338,6 +1362,8 @@ router.get("/invites/:inviteId/info", async (req: any, res) => {
       inviteValid,
       roomType,
       debugReason,
+      // Greenroom fields — new, optional. Absent when greenroom is off.
+      ...(greenroomMode !== "off" ? { greenroomMode, lifecycleState } : {}),
     });
   } catch (err) {
     console.error("/api/invites/:inviteId/info error", err);

@@ -30,6 +30,8 @@ import EditorDisabled from "./pages/EditorDisabled";
 import AdminUsage from "./pages/AdminUsage";
 import AdminDashboard from "./pages/AdminDashboard";
 import SupportDashboard from "./pages/SupportDashboard";
+import RoomSetup from "./pages/RoomSetup";
+import Greenroom from "./pages/Greenroom";
 
 // ── Editing sub-lane (creator-only) ──────────────────────────────────
 import AssetLibrary from "./features/editing/AssetLibrary";
@@ -93,6 +95,8 @@ export function creatorRoutes(flags: CreatorRouteFlags) {
 
       {/* Streaming flow */}
       <Route path="/join" element={<Join />} />
+      <Route path="/rooms/:roomId/setup" element={<RoomSetup />} />
+      <Route path="/greenroom/:roomId" element={<Greenroom />} />
       <Route
         path="/my-content"
         element={

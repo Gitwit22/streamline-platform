@@ -438,6 +438,108 @@ export async function apiUpdateRoomPolicy(
   return res.json() as Promise<{ ok: true; roomId: string; allowGuests: boolean }>;
 }
 
+// ---------------------------------------------------------------------------
+// Room Customization API
+// ---------------------------------------------------------------------------
+
+export type RoomCustomizationConfig = {
+  banner?: {
+    enabled: boolean;
+    url: string;
+    position: "top" | "bottom";
+    height: number;
+    opacity: number;
+  };
+  roomBackground?: {
+    enabled: boolean;
+    type: "image" | "gradient" | "solid";
+    url?: string;
+    value?: string;
+    overlayOpacity?: number;
+  };
+  placeholderMedia?: {
+    enabled: boolean;
+    imageUrl: string;
+    title?: string;
+    subtitle?: string;
+  };
+  layoutStyle?: "default" | "speaker" | "grid" | "host-focus";
+  introClip?: {
+    enabled: boolean;
+    assetId?: string;
+    durationSeconds?: number;
+    autoPlayBeforeLive?: boolean;
+    allowHostSkip?: boolean;
+    fadeInMs?: number;
+    fadeOutMs?: number;
+  };
+  roomSfx?: {
+    enabled: boolean;
+    volume: number;
+    cooldownMs: number;
+    allowedEffects: Array<"applause" | "boo" | "crickets" | "airhorn">;
+  };
+  greenroom?: {
+    waitingRoomMessage?: string;
+    waitingRoomBackground?: string;
+    waitingRoomMusic?: string;
+  };
+};
+
+export async function apiGetRoomCustomization(roomId: string) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/customization`, {
+    method: "GET",
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; customization: RoomCustomizationConfig }>;
+}
+
+export async function apiUpdateRoomCustomization(
+  roomId: string,
+  patch: Partial<RoomCustomizationConfig>
+) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/customization`, {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; customization: RoomCustomizationConfig }>;
+}
+
+// ── Intro Clip API helpers ──────────────────────────────────────────────────
+
+export type IntroClipRuntime = {
+  status: "idle" | "queued" | "playing" | "skipped" | "completed" | "failed";
+  assetId?: string;
+  startedAt?: { _seconds: number; _nanoseconds: number } | null;
+  endedAt?: { _seconds: number; _nanoseconds: number } | null;
+};
+
+export async function apiGetIntroStatus(roomId: string) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/intro/status`);
+  return res.json() as Promise<{ ok: true; roomId: string; intro: IntroClipRuntime; config: RoomCustomizationConfig["introClip"] }>;
+}
+
+export async function apiPlayIntro(roomId: string) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/intro/play`, { method: "POST" });
+  return res.json() as Promise<{ ok: true; roomId: string; intro: IntroClipRuntime; durationSeconds?: number; skipped?: boolean }>;
+}
+
+export async function apiSkipIntro(roomId: string) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/intro/skip`, { method: "POST" });
+  return res.json() as Promise<{ ok: true; roomId: string; intro: IntroClipRuntime }>;
+}
+
+// ── Soundboard API helpers ──────────────────────────────────────────────────
+
+export type SfxEffect = "applause" | "boo" | "crickets" | "airhorn";
+
+export async function apiTriggerSfx(roomId: string, effect: SfxEffect) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/sfx/trigger`, {
+    method: "POST",
+    body: JSON.stringify({ effect }),
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; effect: SfxEffect; triggeredAt: number }>;
+}
+
 export function clearAuthStorage() {
   if (typeof window === "undefined") return;
   try {

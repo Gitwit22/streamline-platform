@@ -40,6 +40,11 @@ export type CanonicalPlan = {
     payPerView: boolean;
     // invisibleHost: host can join rooms in invisible mode (no tile, observe-only)
     invisibleHost: boolean;
+    // Room customization plan entitlements (all opt-in, default false)
+    canCustomizeRooms: boolean;
+    canUseGreenroom: boolean;
+    canUseIntroClip: boolean;
+    canUseRoomSoundEffects: boolean;
   };
   caps: {
     // null/missing = unlimited
@@ -326,6 +331,24 @@ export function normalizePlan(id: string, doc: any | undefined | null): Canonica
         rawFeatures.invisibleHost ??
           rawData.invisibleHostEnabled ??
           rawData.invisibleHost
+      ),
+      // Room customization plan entitlements — all opt-in (default false).
+      // Set features.canCustomizeRooms = true on the plan document to enable.
+      canCustomizeRooms: toBool(
+        rawFeatures.canCustomizeRooms ??
+          rawData.canCustomizeRooms
+      ),
+      canUseGreenroom: toBool(
+        rawFeatures.canUseGreenroom ??
+          rawData.canUseGreenroom
+      ),
+      canUseIntroClip: toBool(
+        rawFeatures.canUseIntroClip ??
+          rawData.canUseIntroClip
+      ),
+      canUseRoomSoundEffects: toBool(
+        rawFeatures.canUseRoomSoundEffects ??
+          rawData.canUseRoomSoundEffects
       ),
     },
     caps: {

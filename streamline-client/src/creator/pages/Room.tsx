@@ -43,6 +43,7 @@ import {
 } from "../../lib/mediaRecovery";
 import { setPlatformFlagsValue } from "../../lib/platformFlagsStore";
 import { fetchDestinations, preflight, type DestinationItem } from "../../services/destinations";
+import SoundboardPanel from "../components/SoundboardPanel";
 import { normalizeUiRolePresetId } from "../../lib/roles";
 import { recordingEvents } from "../../lib/recordingEvents";
 import { detectInAppBrowser } from "../../lib/detectInAppBrowser";
@@ -1854,6 +1855,7 @@ function RoomPage() {
   const [entitlementsReady, setEntitlementsReady] = useState(false);
   const [dashboardGreenroomEnabled, setDashboardGreenroomEnabled] = useState<boolean>(false);
   const [dashboardOverlaysEnabled, setDashboardOverlaysEnabled] = useState<boolean>(false);
+  const [showSoundboard, setShowSoundboard] = useState<boolean>(false);
   const [dualRecordingAllowed, setDualRecordingAllowed] = useState<boolean>(false);
   const [watermarkEnabled, setWatermarkEnabled] = useState<boolean>(false);
   const [maxGuestsAllowed, setMaxGuestsAllowed] = useState<number | null>(null);
@@ -4384,6 +4386,30 @@ function RoomPage() {
             </button>
             )}
 
+            {isHost && (myEffectiveEntitlements as any)?.features?.canUseRoomSoundEffects && (
+            <button
+              onClick={() => setShowSoundboard(v => !v)}
+              style={{
+                fontSize: '0.75rem',
+                padding: '0.5rem 0.75rem',
+                border: showSoundboard
+                  ? '1px solid rgba(251, 191, 36, 0.7)'
+                  : '1px solid rgba(251, 191, 36, 0.3)',
+                borderRadius: '0.375rem',
+                background: showSoundboard
+                  ? 'rgba(251, 191, 36, 0.15)'
+                  : 'rgba(251, 191, 36, 0.05)',
+                color: '#fbbf24',
+                cursor: 'pointer',
+                transition: 'all 0.3s ease',
+                fontWeight: '500'
+              }}
+              title="Sound effects panel"
+            >
+              🎚 SFX
+            </button>
+            )}
+
             {isHost && featureAccess.advancedScreenShare.allowed && (
               <button
                 onClick={() => setShowScreenShareRouter(v => !v)}
@@ -4723,6 +4749,24 @@ function RoomPage() {
         onModeChange={setScreenShareMode}
         activeSharerName={activeSharerName}
       />
+      )}
+
+      {/* Soundboard panel — host-only, feature-gated, rendered as a floating overlay */}
+      {isHost && showSoundboard && (myEffectiveEntitlements as any)?.features?.canUseRoomSoundEffects && roomId && (
+        <div
+          style={{
+            position: "fixed",
+            bottom: 80,
+            right: 16,
+            zIndex: 900,
+            width: 280,
+          }}
+        >
+          <SoundboardPanel
+            roomId={roomId}
+            enabled={(myEffectiveEntitlements as any)?.features?.canUseRoomSoundEffects === true}
+          />
+        </div>
       )}
 
       {/* Recording cap toast (Free plan) */}
