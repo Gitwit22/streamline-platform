@@ -95,8 +95,8 @@ router.put("/:roomId/customization", requireAuth as any, async (req: any, res) =
   // Validate roomSfx.allowedEffects when provided.
   if (body.roomSfx?.allowedEffects !== undefined) {
     const validEffects = ["applause", "boo", "crickets", "airhorn"];
-    const effects: any[] = Array.isArray(body.roomSfx.allowedEffects) ? body.roomSfx.allowedEffects : [];
-    const invalidEffects = effects.filter((e) => !validEffects.includes(e));
+    const effects: string[] = Array.isArray(body.roomSfx.allowedEffects) ? body.roomSfx.allowedEffects : [];
+    const invalidEffects = effects.filter((e: string) => !validEffects.includes(e));
     if (invalidEffects.length > 0) {
       return res.status(400).json({
         error: "invalid_input",

@@ -30,6 +30,8 @@ const LAYOUT_OPTIONS: { value: LayoutStyle; label: string }[] = [
   { value: "host-focus", label: "Host Focus" },
 ];
 
+const BANNER_DEFAULTS = { url: "", position: "bottom" as const, height: 80, opacity: 1 };
+
 export default function RoomSetup() {
   const nav = useNavigate();
   const { roomId } = useParams<{ roomId: string }>();
@@ -198,7 +200,7 @@ export default function RoomSetup() {
                 onChange={(e) =>
                   setCustomization((prev) => ({
                     ...prev,
-                    banner: { url: "", position: "bottom", height: 80, opacity: 1, ...prev.banner, enabled: e.target.checked },
+                    banner: { ...BANNER_DEFAULTS, ...prev.banner, enabled: e.target.checked },
                   }))
                 }
               />
@@ -216,7 +218,7 @@ export default function RoomSetup() {
                 onChange={(e) =>
                   setCustomization((prev) => ({
                     ...prev,
-                    banner: { position: "bottom", height: 80, opacity: 1, ...prev.banner, enabled: true, url: e.target.value },
+                    banner: { ...BANNER_DEFAULTS, ...prev.banner, enabled: true, url: e.target.value },
                   }))
                 }
               />
@@ -227,7 +229,7 @@ export default function RoomSetup() {
                 onChange={(e) =>
                   setCustomization((prev) => ({
                     ...prev,
-                    banner: { url: "", height: 80, opacity: 1, ...prev.banner, enabled: true, position: e.target.value as "top" | "bottom" },
+                    banner: { ...BANNER_DEFAULTS, ...prev.banner, enabled: true, position: e.target.value as "top" | "bottom" },
                   }))
                 }
               >
@@ -354,7 +356,7 @@ export default function RoomSetup() {
                 onChange={(e) =>
                   setCustomization((prev) => ({
                     ...prev,
-                    placeholderMedia: { imageUrl: "", ...prev.placeholderMedia, enabled: true, title: e.target.value },
+                    placeholderMedia: { ...prev.placeholderMedia, imageUrl: prev.placeholderMedia?.imageUrl ?? "", enabled: true, title: e.target.value },
                   }))
                 }
               />
@@ -367,7 +369,7 @@ export default function RoomSetup() {
                 onChange={(e) =>
                   setCustomization((prev) => ({
                     ...prev,
-                    placeholderMedia: { imageUrl: "", ...prev.placeholderMedia, enabled: true, subtitle: e.target.value },
+                    placeholderMedia: { ...prev.placeholderMedia, imageUrl: prev.placeholderMedia?.imageUrl ?? "", enabled: true, subtitle: e.target.value },
                   }))
                 }
               />
