@@ -1196,63 +1196,114 @@ router.get("/usage", async (req, res) => {
 
     const monthKeys = buildMonthKeys(startMs, endMs);
 
+    console.log("[admin/usage] period", {
+      startMs,
+      endMs,
+      startIso: new Date(startMs).toISOString(),
+      endIso: new Date(endMs).toISOString(),
+      activeProgramId,
+      monthKeys: Array.from(monthKeys),
+    });
+
     // Period-scoped roomsCreated for Support Hub Usage card.
     const roomsSnapshot = await firestore.collection("rooms").get();
+    let roomsCreatedSkippedProgram = 0;
+    let roomsCreatedSkippedTime = 0;
     const roomsCreated = roomsSnapshot.docs.reduce((count, doc) => {
       const data = doc.data();
-      if (!matchesProgramContext(data, activeProgramId)) return count;
+      if (!matchesProgramContext(data, activeProgramId)) { roomsCreatedSkippedProgram++; return count; }
       const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
-      return isInRange(createdMs, startMs, endMs) ? count + 1 : count;
+      if (!isInRange(createdMs, startMs, endMs)) { roomsCreatedSkippedTime++; return count; }
+      return count + 1;
     }, 0);
+    console.log("[admin/usage] rooms", {
+      total: roomsSnapshot.size,
+      skippedProgram: roomsCreatedSkippedProgram,
+      skippedTime: roomsCreatedSkippedTime,
+      roomsCreated,
+    });
 
     const usersSnapshotAll = await firestore.collection("users").get();
     const activeUsers = usersSnapshotAll.docs.reduce((count, doc) => {
       const data = doc.data();
       if (!includeDeleted && isDeletedUserRecord(data)) return count;
       if (!matchesProgramContext(data, activeProgramId)) return count;
-      const lastActiveMs = getDocMillis(data, ["lastActive", "lastActiveAt", "updatedAt"]);
+      // Include createdAt as last-resort fallback for accounts that haven't yet
+      // received an explicit lastActive / lastActiveAt / updatedAt write.
+      const lastActiveMs = getDocMillis(data, ["lastActive", "lastActiveAt", "updatedAt", "createdAt"]);
       return isInRange(lastActiveMs, startMs, endMs) ? count + 1 : count;
     }, 0);
+    console.log("[admin/usage] activeUsers", { totalUsers: usersSnapshotAll.size, activeUsers });
 
     const recordingsSnapshot = await firestore.collection("recordings").get();
+    let recordingsSkippedProgram = 0;
+    let recordingsSkippedTime = 0;
+    // Include "startedAt" because recordings started via /api/recordings/start
+    // are written with startedAt but no createdAt field.
     const recordingsCreated = recordingsSnapshot.docs.reduce((count, doc) => {
       const data = doc.data();
-      if (!matchesProgramContext(data, activeProgramId)) return count;
-      const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
-      return isInRange(createdMs, startMs, endMs) ? count + 1 : count;
+      if (!matchesProgramContext(data, activeProgramId)) { recordingsSkippedProgram++; return count; }
+      const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at", "startedAt"]);
+      if (!isInRange(createdMs, startMs, endMs)) { recordingsSkippedTime++; return count; }
+      return count + 1;
     }, 0);
+    console.log("[admin/usage] recordings", {
+      total: recordingsSnapshot.size,
+      skippedProgram: recordingsSkippedProgram,
+      skippedTime: recordingsSkippedTime,
+      recordingsCreated,
+    });
 
     const usageMonthlySnap = await firestore.collection("usageMonthly").get();
     let streamMinutes = 0;
     let hlsMinutes = 0;
     let apiRequests = 0;
+    let usageMonthlyMatched = 0;
     usageMonthlySnap.docs.forEach((doc) => {
       const data = doc.data() as any;
       if (!matchesProgramContext(data, activeProgramId)) return;
       const monthKey = String(data.monthKey || doc.id.split("_").pop() || "");
       if (!monthKeys.has(monthKey)) return;
+      usageMonthlyMatched++;
       const usage = data.usage || data.totals || {};
       streamMinutes += Number(usage.participantMinutes ?? usage.streamMinutes ?? usage.minutes ?? 0);
       hlsMinutes += Number(usage.hlsMinutes ?? 0);
       apiRequests += Number(usage.apiRequests ?? usage.api_requests ?? 0);
     });
+    console.log("[admin/usage] usageMonthly", {
+      total: usageMonthlySnap.size,
+      matched: usageMonthlyMatched,
+      streamMinutes,
+      hlsMinutes,
+      apiRequests,
+    });
 
     let messagesSent = 0;
     try {
       const messageSnap = await firestore.collectionGroup("messages").get();
+      let messagesSkippedTime = 0;
+      let messagesSkippedProgram = 0;
       messagesSent = messageSnap.docs.reduce((count, doc) => {
         const data = doc.data() as any;
         const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
-        if (!isInRange(createdMs, startMs, endMs)) return count;
+        if (!isInRange(createdMs, startMs, endMs)) { messagesSkippedTime++; return count; }
         if (!activeProgramId) return count + 1;
 
         const path = doc.ref.path.split("/");
         const roomId = path.length >= 2 && path[0] === "rooms" ? path[1] : "";
-        if (!roomId) return count;
+        if (!roomId) { messagesSkippedProgram++; return count; }
         // When messages don't carry program fields, allow matching via roomId path token.
-        return roomId.includes(activeProgramId) ? count + 1 : count;
+        if (!roomId.includes(activeProgramId)) { messagesSkippedProgram++; return count; }
+        return count + 1;
       }, 0);
-    } catch {
+      console.log("[admin/usage] messages", {
+        total: messageSnap.size,
+        skippedTime: messagesSkippedTime,
+        skippedProgram: messagesSkippedProgram,
+        messagesSent,
+      });
+    } catch (msgErr: any) {
+      console.error("[admin/usage] collectionGroup('messages') failed:", msgErr?.message || msgErr);
       messagesSent = 0;
     }
 
@@ -1265,9 +1316,21 @@ router.get("/usage", async (req, res) => {
         const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
         return isInRange(createdMs, startMs, endMs) ? count + 1 : count;
       }, 0);
-    } catch {
+    } catch (tickErr: any) {
+      console.error("[admin/usage] supportTickets query failed:", tickErr?.message || tickErr);
       ticketsToday = 0;
     }
+
+    console.log("[admin/usage] final counts", {
+      ticketsToday,
+      activeUsers,
+      roomsCreated,
+      messagesSent,
+      streamMinutes,
+      apiRequests,
+      recordingsCreated,
+      hlsMinutes,
+    });
 
     res.json({
       ticketsToday: Number(ticketsToday || 0),

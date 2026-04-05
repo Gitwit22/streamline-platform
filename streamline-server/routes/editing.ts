@@ -1646,13 +1646,15 @@ router.post("/recordings/start", async (req: Request, res: Response) => {
 
     // Create recording document
     const recordingRef = db.collection("recordings").doc();
+    const recordingStartedAt = new Date();
     const recordingData = {
       id: recordingRef.id,
       userId,
       roomName,
       title,
       status: "recording",
-      startedAt: new Date(),
+      createdAt: recordingStartedAt,
+      startedAt: recordingStartedAt,
       stoppedAt: null,
       duration: 0,
       viewerCount: 0,
