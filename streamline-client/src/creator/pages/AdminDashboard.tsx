@@ -273,8 +273,14 @@ const FEATURE_META: Record<
   audiomixerenabled: { category: "Room Features", label: "Audio Mixer", description: "Enable the bus-based audio mixer panel (gain, ducking, program output) in rooms." },
   advancedscreenshareenabled: { category: "Room Features", label: "Advanced Screen Share", description: "Enable advanced screen share routing (pop-out window, main-stage modes) in rooms." },
   mixedaudiopublishenabled: { category: "Room Features", label: "Mixed Audio Publish", description: "Publish the mixer's program audio instead of the raw microphone track." },
+  roomcustomizationenabled: { category: "Room Features", label: "Room Customization", description: "Enable host room setup customization (branding, layout, room visuals)." },
+  greenroomhlsenabled: { category: "Room Features", label: "Greenroom HLS", description: "Enable greenroom waiting-room admission flow and related host controls." },
+  roomintromediav1: { category: "Room Features", label: "Room Intro Media V1", description: "Enable pre-live intro clip controls in room setup." },
+  roomsoundboardv1: { category: "Room Features", label: "Room Soundboard V1", description: "Enable host soundboard effects in room setup." },
   monetizationenabled: { category: "Billing", label: "Monetization", description: "Enable monetization features platform-wide (per-room toggles, event creation)." },
   payperviewenabled: { category: "Billing", label: "Pay-Per-View", description: "Enable pay-per-view gating for HLS events platform-wide." },
+  invisiblehostenabled: { category: "Collaboration", label: "Invisible Host", description: "Allow host to stay hidden from participants while moderating." },
+  collaboratordelegationenabled: { category: "Collaboration", label: "Collaborator Delegation", description: "Allow owner/collaborator delegated production controls." },
 };
 
 const titleize = (value: string) =>
@@ -299,7 +305,7 @@ function categorizeFeature(flag: FeatureFlag): { category: FeatureCategory; labe
   if (key.includes("ai")) return { category: "AI", label: titleize(flag.name) };
 
   // 2) Access programs: waitlist, greenroom, priority access
-  if (key.includes("waitlist") || key.includes("greenroom") || key.includes("priority")) {
+  if (key.includes("waitlist") || key.includes("priority")) {
     return { category: "Access", label: titleize(flag.name) };
   }
 

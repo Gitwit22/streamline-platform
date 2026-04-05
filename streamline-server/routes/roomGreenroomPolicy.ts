@@ -2,6 +2,7 @@ import { Router } from "express";
 import { requireAuth } from "../middleware/requireAuth";
 import { firestore as db } from "../firebaseAdmin";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
+import { isGreenroomHlsEnabled } from "../lib/platformFeatureFlags";
 import type { RoomSettingsPolicy } from "../types/roomCustomization";
 
 const router = Router();
@@ -46,6 +47,14 @@ router.get("/:roomId/greenroom-policy", requireAuth as any, async (req: any, res
   if (!roomId) return res.status(400).json({ error: "invalid_room_id" });
 
   try {
+    const platformEnabled = await isGreenroomHlsEnabled();
+    if (!platformEnabled) {
+      return res.status(409).json({
+        error: "feature_disabled",
+        feature: "greenroomHlsEnabled",
+      });
+    }
+
     const ctx = await assertRoomPerm(req as any, roomId, "canLayout");
     const policy = readGreenroomPolicy(ctx.room);
 
@@ -124,6 +133,14 @@ router.put("/:roomId/greenroom-policy", requireAuth as any, async (req: any, res
   }
 
   try {
+    const platformEnabled = await isGreenroomHlsEnabled();
+    if (!platformEnabled) {
+      return res.status(409).json({
+        error: "feature_disabled",
+        feature: "greenroomHlsEnabled",
+      });
+    }
+
     const ctx = await assertRoomPerm(req as any, roomId, "canLayout");
 
     // Merge incoming fields onto the existing policy.

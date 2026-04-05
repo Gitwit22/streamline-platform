@@ -5,6 +5,7 @@ import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { signGuestSession } from "../middleware/guestSession";
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { isGreenroomHlsEnabled } from "../lib/platformFeatureFlags";
 import admin from "firebase-admin";
 
 const router = Router();
@@ -82,6 +83,14 @@ router.post("/:roomId/greenroom/request", async (req: any, res) => {
   }
 
   try {
+    const platformEnabled = await isGreenroomHlsEnabled();
+    if (!platformEnabled) {
+      return res.status(409).json({
+        error: "feature_disabled",
+        feature: "greenroomHlsEnabled",
+      });
+    }
+
     const snap = await db.collection("rooms").doc(roomId).get();
     if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
@@ -164,6 +173,14 @@ router.get("/:roomId/greenroom/status", async (req: any, res) => {
   }
 
   try {
+    const platformEnabled = await isGreenroomHlsEnabled();
+    if (!platformEnabled) {
+      return res.status(409).json({
+        error: "feature_disabled",
+        feature: "greenroomHlsEnabled",
+      });
+    }
+
     const snap = await db.collection("rooms").doc(roomId).get();
     if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
@@ -208,6 +225,14 @@ router.get("/:roomId/greenroom/pending", requireAuth as any, async (req: any, re
   if (!roomId) return res.status(400).json({ error: "invalid_room_id" });
 
   try {
+    const platformEnabled = await isGreenroomHlsEnabled();
+    if (!platformEnabled) {
+      return res.status(409).json({
+        error: "feature_disabled",
+        feature: "greenroomHlsEnabled",
+      });
+    }
+
     const ctx = await assertRoomPerm(req as any, roomId, "canLayout");
 
     const snap = await db.collection("rooms").doc(ctx.roomId).get();
@@ -258,6 +283,14 @@ router.post("/:roomId/greenroom/approve", requireAuth as any, async (req: any, r
   }
 
   try {
+    const platformEnabled = await isGreenroomHlsEnabled();
+    if (!platformEnabled) {
+      return res.status(409).json({
+        error: "feature_disabled",
+        feature: "greenroomHlsEnabled",
+      });
+    }
+
     const ctx = await assertRoomPerm(req as any, roomId, "canLayout");
 
     await db.runTransaction(async (tx) => {
@@ -314,6 +347,14 @@ router.post("/:roomId/greenroom/deny", requireAuth as any, async (req: any, res)
   }
 
   try {
+    const platformEnabled = await isGreenroomHlsEnabled();
+    if (!platformEnabled) {
+      return res.status(409).json({
+        error: "feature_disabled",
+        feature: "greenroomHlsEnabled",
+      });
+    }
+
     const ctx = await assertRoomPerm(req as any, roomId, "canLayout");
 
     await db.runTransaction(async (tx) => {

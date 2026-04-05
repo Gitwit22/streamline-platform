@@ -1254,8 +1254,14 @@ router.get("/features", async (req, res) => {
       { name: "audioMixerEnabled", enabled: false },
       { name: "advancedScreenShareEnabled", enabled: false },
       { name: "mixedAudioPublishEnabled", enabled: false },
+      { name: "roomCustomizationEnabled", enabled: false },
+      { name: "greenroomHlsEnabled", enabled: false },
+      { name: "roomIntroMediaV1", enabled: false },
+      { name: "roomSoundboardV1", enabled: false },
       { name: "invisibleHostEnabled", enabled: false },
       { name: "collaboratorDelegationEnabled", enabled: false },
+      { name: "monetizationEnabled", enabled: false },
+      { name: "payPerViewEnabled", enabled: false },
     ];
 
     const byName = new Map<string, any>();

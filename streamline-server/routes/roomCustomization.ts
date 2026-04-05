@@ -3,6 +3,7 @@ import { requireAuth } from "../middleware/requireAuth";
 import { firestore as db } from "../firebaseAdmin";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { isRoomCustomizationEnabled } from "../lib/platformFeatureFlags";
 import type { RoomCustomizationConfig } from "../types/roomCustomization";
 
 const router = Router();
@@ -58,6 +59,14 @@ router.get("/:roomId/customization", requireAuth as any, async (req: any, res) =
   }
 
   try {
+    const platformEnabled = await isRoomCustomizationEnabled();
+    if (!platformEnabled) {
+      return res.status(409).json({
+        error: "feature_disabled",
+        feature: "roomCustomizationEnabled",
+      });
+    }
+
     const ctx = await assertRoomPerm(req as any, roomId, "canLayout");
     const settings = (ctx.room as any).settings || {};
     const customization: RoomCustomizationConfig = settings.customization || {};
@@ -139,6 +148,14 @@ router.put("/:roomId/customization", requireAuth as any, async (req: any, res) =
   }
 
   try {
+    const platformEnabled = await isRoomCustomizationEnabled();
+    if (!platformEnabled) {
+      return res.status(409).json({
+        error: "feature_disabled",
+        feature: "roomCustomizationEnabled",
+      });
+    }
+
     const ctx = await assertRoomPerm(req as any, roomId, "canLayout");
 
     // Merge the incoming fields onto the existing customization object.
@@ -193,6 +210,11 @@ router.get("/:roomId/customization/public", async (req: any, res) => {
   }
 
   try {
+    const platformEnabled = await isRoomCustomizationEnabled();
+    if (!platformEnabled) {
+      return res.status(404).json({ error: "feature_not_available" });
+    }
+
     const snap = await db.collection("rooms").doc(roomId).get();
     if (!snap.exists) {
       return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });

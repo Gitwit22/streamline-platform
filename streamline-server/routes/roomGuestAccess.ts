@@ -14,6 +14,7 @@ import { isValidPresenceMode, normalizePresenceMode, buildPresenceMetadata, type
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { isAdmin } from "../middleware/adminAuth";
 import { resolveHostName } from "../lib/resolveHostName";
+import { isGreenroomHlsEnabled } from "../lib/platformFeatureFlags";
 import { logDelegatedRoomAction, resolveOwnerActingContext } from "../lib/collaborators";
 
 export function extractInviteToken(req: any): string | null {
@@ -1259,7 +1260,8 @@ router.get("/rooms/:roomId/info", async (req: any, res) => {
     // Greenroom routing metadata (Phase 3).
     // Only safe, presentation-layer fields are surfaced here.
     // The raw blockedList / vipList are never exposed publicly.
-    const rawGreenroomMode = room.settings?.greenroom?.mode;
+    const greenroomFlagEnabled = await isGreenroomHlsEnabled();
+    const rawGreenroomMode = greenroomFlagEnabled ? room.settings?.greenroom?.mode : "off";
     const greenroomMode: "off" | "prejoin" | "hls_waiting" =
       rawGreenroomMode === "prejoin" || rawGreenroomMode === "hls_waiting"
         ? rawGreenroomMode
@@ -1340,7 +1342,8 @@ router.get("/invites/:inviteId/info", async (req: any, res) => {
     const hostName = await resolveHostName(room?.ownerId);
 
     // Greenroom routing metadata (Phase 3) — same safe fields as /rooms/:roomId/info.
-    const rawGreenroomMode = room?.settings?.greenroom?.mode;
+    const greenroomFlagEnabled = await isGreenroomHlsEnabled();
+    const rawGreenroomMode = greenroomFlagEnabled ? room?.settings?.greenroom?.mode : "off";
     const greenroomMode: "off" | "prejoin" | "hls_waiting" =
       rawGreenroomMode === "prejoin" || rawGreenroomMode === "hls_waiting"
         ? rawGreenroomMode
