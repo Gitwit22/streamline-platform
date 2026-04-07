@@ -443,6 +443,14 @@ export async function apiUpdateRoomPolicy(
 // ---------------------------------------------------------------------------
 
 export type RoomCustomizationConfig = {
+  enabled?: boolean;
+  logoUrl?: string | null;
+  bannerUrl?: string | null;
+  backgroundMode?: "banner" | "full" | "none";
+  tileScale?: number;
+  verticalOffset?: number;
+  logoAlignment?: "left" | "center" | "right";
+  bannerAlignment?: "top" | "center" | "bottom";
   banner?: {
     enabled: boolean;
     url: string;

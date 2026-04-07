@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { useAuthMe } from "../../hooks/useAuthMe";
 import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
 import {
@@ -7,8 +7,9 @@ import {
   apiUpdateRoomCustomization,
   type RoomCustomizationConfig,
   apiFetch,
+  apiFetchAuth,
 } from "../../lib/api";
-import { getPlatformFlagsValue } from "../../lib/platformFlagsStore";
+import { getPlatformFlagsValue, setPlatformFlagsValue } from "../../lib/platformFlagsStore";
 
 /**
  * RoomSetup — Pre-stream host customization page.
@@ -32,10 +33,39 @@ const LAYOUT_OPTIONS: { value: LayoutStyle; label: string; icon: string; desc: s
 ];
 
 const BANNER_DEFAULTS = { url: "", position: "bottom" as const, height: 80, opacity: 1 };
+const DEFAULT_TILE_SCALE = 0.8;
+const DEFAULT_VERTICAL_OFFSET = 84;
+
+function normalizeCustomization(input: RoomCustomizationConfig | null | undefined): RoomCustomizationConfig {
+  const src = input || {};
+  return {
+    ...src,
+    enabled: src.enabled === true,
+    logoUrl: typeof src.logoUrl === "string" ? src.logoUrl : null,
+    bannerUrl: typeof src.bannerUrl === "string" ? src.bannerUrl : null,
+    backgroundMode:
+      src.backgroundMode === "banner" || src.backgroundMode === "full" || src.backgroundMode === "none"
+        ? src.backgroundMode
+        : "none",
+    tileScale:
+      typeof src.tileScale === "number" && Number.isFinite(src.tileScale)
+        ? Math.max(0.5, Math.min(1, src.tileScale))
+        : DEFAULT_TILE_SCALE,
+    verticalOffset:
+      typeof src.verticalOffset === "number" && Number.isFinite(src.verticalOffset)
+        ? Math.max(0, Math.min(320, Math.round(src.verticalOffset)))
+        : DEFAULT_VERTICAL_OFFSET,
+    logoAlignment:
+      src.logoAlignment === "center" || src.logoAlignment === "right" ? src.logoAlignment : "left",
+    bannerAlignment:
+      src.bannerAlignment === "top" || src.bannerAlignment === "bottom" ? src.bannerAlignment : "center",
+  };
+}
 
 export default function RoomSetup() {
   const nav = useNavigate();
   const { roomId } = useParams<{ roomId: string }>();
+  const [searchParams] = useSearchParams();
   const { user: authUser, loading: authLoading } = useAuthMe();
   const { effectiveEntitlements } = useEffectiveEntitlements();
 
@@ -50,8 +80,9 @@ export default function RoomSetup() {
   const [introLoading, setIntroLoading] = useState(false);
 
   // Feature gate check
-  const platformFlags = getPlatformFlagsValue() || {};
-  const platformEnabled = platformFlags.roomCustomizationEnabled === true;
+  const [platformEnabled, setPlatformEnabled] = useState<boolean>(
+    getPlatformFlagsValue()?.roomCustomizationEnabled === true
+  );
   const planEnabled = !!(effectiveEntitlements as any)?.features?.canCustomizeRooms;
   const featureActive = platformEnabled && planEnabled;
   const introEnabled =
@@ -59,6 +90,28 @@ export default function RoomSetup() {
     !!(effectiveEntitlements as any)?.features?.canUseIntroClip;
 
   const isOwner = !!authUser && !authLoading;
+
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await apiFetchAuth("/api/account/me", {}, { allowNonOk: true });
+        if (!res.ok) return;
+        const me = await res.json().catch(() => null);
+        if (cancelled || !me || typeof me !== "object") return;
+        const platformFlags = (me as any).platformFlags || {};
+        setPlatformFlagsValue(platformFlags);
+        setPlatformEnabled(platformFlags.roomCustomizationEnabled === true);
+      } catch {
+        // Keep using whatever was in the shared store.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!roomId || !isOwner) return;
@@ -69,7 +122,7 @@ export default function RoomSetup() {
 
     apiGetRoomCustomization(roomId)
       .then((data) => {
-        setCustomization(data.customization || {});
+        setCustomization(normalizeCustomization(data.customization || {}));
       })
       .catch((err) => {
         console.error("[RoomSetup] Failed to load customization", err);
@@ -136,7 +189,7 @@ export default function RoomSetup() {
 
     try {
       const result = await apiUpdateRoomCustomization(roomId, customization);
-      setCustomization(result.customization || {});
+      setCustomization(normalizeCustomization(result.customization || {}));
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
     } catch (err: any) {
@@ -148,6 +201,11 @@ export default function RoomSetup() {
 
   const handleGoLive = () => {
     if (!roomId) return;
+    const next = (searchParams.get("next") || "").trim();
+    if (next.startsWith("/")) {
+      nav(next);
+      return;
+    }
     nav(`/room/${encodeURIComponent(roomId)}`);
   };
 
@@ -225,6 +283,141 @@ export default function RoomSetup() {
           <h1 style={styles.title}>Room Setup</h1>
           <p style={styles.subtitle}>Configure your room before going live.</p>
         </div>
+        
+        <section style={styles.section}>
+          <div style={styles.sectionHeader}>
+            <h2 style={styles.sectionTitle}>Room Customization</h2>
+            <label style={styles.toggleLabel}>
+              <input
+                type="checkbox"
+                checked={customization.enabled === true}
+                onChange={(e) =>
+                  setCustomization((prev) => ({
+                    ...prev,
+                    enabled: e.target.checked,
+                  }))
+                }
+              />
+              {" "}Enabled
+            </label>
+          </div>
+
+          <p style={styles.mutedText}>
+            Add room logo/banner and visual layout offsets. These values are reused for future joins.
+          </p>
+
+          <div style={styles.fieldGroup}>
+            <label style={styles.fieldLabel}>Room Logo URL</label>
+            <input
+              type="url"
+              style={styles.input}
+              placeholder="https://example.com/logo.png"
+              value={customization.logoUrl || ""}
+              onChange={(e) =>
+                setCustomization((prev) => ({
+                  ...prev,
+                  logoUrl: e.target.value || null,
+                }))
+              }
+            />
+
+            <label style={styles.fieldLabel}>Banner / Background URL</label>
+            <input
+              type="url"
+              style={styles.input}
+              placeholder="https://example.com/banner.jpg"
+              value={customization.bannerUrl || ""}
+              onChange={(e) =>
+                setCustomization((prev) => ({
+                  ...prev,
+                  bannerUrl: e.target.value || null,
+                }))
+              }
+            />
+
+            <label style={styles.fieldLabel}>Background Mode</label>
+            <select
+              style={styles.select}
+              value={customization.backgroundMode || "none"}
+              onChange={(e) =>
+                setCustomization((prev) => ({
+                  ...prev,
+                  backgroundMode: e.target.value as "banner" | "full" | "none",
+                }))
+              }
+            >
+              <option value="none">None</option>
+              <option value="banner">Banner strip</option>
+              <option value="full">Full background</option>
+            </select>
+
+            <label style={styles.fieldLabel}>
+              Tile Scale ({(customization.tileScale ?? DEFAULT_TILE_SCALE).toFixed(2)})
+            </label>
+            <input
+              type="range"
+              min={0.5}
+              max={1}
+              step={0.05}
+              value={customization.tileScale ?? DEFAULT_TILE_SCALE}
+              onChange={(e) =>
+                setCustomization((prev) => ({
+                  ...prev,
+                  tileScale: Number(e.target.value),
+                }))
+              }
+            />
+
+            <label style={styles.fieldLabel}>
+              Vertical Offset ({Math.round(customization.verticalOffset ?? DEFAULT_VERTICAL_OFFSET)}px)
+            </label>
+            <input
+              type="range"
+              min={0}
+              max={220}
+              step={4}
+              value={customization.verticalOffset ?? DEFAULT_VERTICAL_OFFSET}
+              onChange={(e) =>
+                setCustomization((prev) => ({
+                  ...prev,
+                  verticalOffset: Number(e.target.value),
+                }))
+              }
+            />
+
+            <label style={styles.fieldLabel}>Logo Alignment</label>
+            <select
+              style={styles.select}
+              value={customization.logoAlignment || "left"}
+              onChange={(e) =>
+                setCustomization((prev) => ({
+                  ...prev,
+                  logoAlignment: e.target.value as "left" | "center" | "right",
+                }))
+              }
+            >
+              <option value="left">Left</option>
+              <option value="center">Center</option>
+              <option value="right">Right</option>
+            </select>
+
+            <label style={styles.fieldLabel}>Banner Alignment</label>
+            <select
+              style={styles.select}
+              value={customization.bannerAlignment || "center"}
+              onChange={(e) =>
+                setCustomization((prev) => ({
+                  ...prev,
+                  bannerAlignment: e.target.value as "top" | "center" | "bottom",
+                }))
+              }
+            >
+              <option value="top">Top</option>
+              <option value="center">Center</option>
+              <option value="bottom">Bottom</option>
+            </select>
+          </div>
+        </section>
 
         {/* ── Layout Style ── */}
         <section style={styles.section}>

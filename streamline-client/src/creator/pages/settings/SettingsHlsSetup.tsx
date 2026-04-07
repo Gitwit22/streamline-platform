@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { API_BASE } from "../../../lib/apiBase";
 import { S } from "../SettingsBilling.styles";
-import { apiFetchAuth } from "../../../lib/api";
+import { apiFetchAuth, apiGetRoomCustomization, apiUpdateRoomCustomization, type RoomCustomizationConfig } from "../../../lib/api";
 
 type SavedEmbed = {
   embedId: string;
@@ -20,6 +20,24 @@ type HlsCreateDraft = {
   name?: string;
   description?: string;
   label?: string;
+};
+
+type RoomCustomizationPanel = {
+  enabled: boolean;
+  logoUrl: string;
+  bannerUrl: string;
+  backgroundMode: "banner" | "full" | "none";
+  tileScale: number;
+  verticalOffset: number;
+};
+
+const DEFAULT_ROOM_CUSTOMIZATION_PANEL: RoomCustomizationPanel = {
+  enabled: false,
+  logoUrl: "",
+  bannerUrl: "",
+  backgroundMode: "none",
+  tileScale: 0.8,
+  verticalOffset: 84,
 };
 
 const HLS_CREATE_DRAFT_KEY = "sl_hls_create_draft_v1";
@@ -120,11 +138,95 @@ export default function SettingsHlsSetup({
     }
   };
   const selectedEmbed = useMemo(() => embeds.find((e) => e.embedId === selectedEmbedId) || null, [embeds, selectedEmbedId]);
+  const [roomCustomizationPanel, setRoomCustomizationPanel] = useState<RoomCustomizationPanel>(
+    DEFAULT_ROOM_CUSTOMIZATION_PANEL
+  );
+  const [roomCustomizationLoading, setRoomCustomizationLoading] = useState(false);
+  const [roomCustomizationSaving, setRoomCustomizationSaving] = useState(false);
+  const [roomCustomizationError, setRoomCustomizationError] = useState<string | null>(null);
+  const [roomCustomizationSaved, setRoomCustomizationSaved] = useState(false);
 
   // Notify parent of room selection changes.
   useEffect(() => {
     _onSelectedRoomChange?.(selectedEmbed?.roomId || null, !!selectedEmbed?.roomId);
   }, [selectedEmbed?.roomId]);
+
+  useEffect(() => {
+    if (!selectedEmbed?.roomId) {
+      setRoomCustomizationPanel(DEFAULT_ROOM_CUSTOMIZATION_PANEL);
+      setRoomCustomizationError(null);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      setRoomCustomizationLoading(true);
+      setRoomCustomizationError(null);
+      try {
+        const data = await apiGetRoomCustomization(selectedEmbed.roomId);
+        if (cancelled) return;
+        const c = data.customization || {};
+        setRoomCustomizationPanel({
+          enabled: c.enabled === true,
+          logoUrl: typeof c.logoUrl === "string" ? c.logoUrl : "",
+          bannerUrl: typeof c.bannerUrl === "string" ? c.bannerUrl : "",
+          backgroundMode:
+            c.backgroundMode === "banner" || c.backgroundMode === "full" || c.backgroundMode === "none"
+              ? c.backgroundMode
+              : "none",
+          tileScale:
+            typeof c.tileScale === "number" && Number.isFinite(c.tileScale)
+              ? Math.max(0.5, Math.min(1, c.tileScale))
+              : 0.8,
+          verticalOffset:
+            typeof c.verticalOffset === "number" && Number.isFinite(c.verticalOffset)
+              ? Math.max(0, Math.min(320, Math.round(c.verticalOffset)))
+              : 84,
+        });
+      } catch (err: any) {
+        if (!cancelled) {
+          setRoomCustomizationError(err?.message || "Failed to load room customization");
+        }
+      } finally {
+        if (!cancelled) setRoomCustomizationLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedEmbed?.roomId]);
+
+  const saveSelectedRoomCustomization = async () => {
+    if (!selectedEmbed?.roomId || roomCustomizationSaving) return;
+    setRoomCustomizationSaving(true);
+    setRoomCustomizationError(null);
+    setRoomCustomizationSaved(false);
+    try {
+      const patch: Partial<RoomCustomizationConfig> = {
+        enabled: roomCustomizationPanel.enabled,
+        logoUrl: roomCustomizationPanel.logoUrl || null,
+        bannerUrl: roomCustomizationPanel.bannerUrl || null,
+        backgroundMode: roomCustomizationPanel.backgroundMode,
+        tileScale: roomCustomizationPanel.tileScale,
+        verticalOffset: roomCustomizationPanel.verticalOffset,
+      };
+      const data = await apiUpdateRoomCustomization(selectedEmbed.roomId, patch);
+      const c = data.customization || {};
+      setRoomCustomizationPanel((prev) => ({
+        ...prev,
+        enabled: c.enabled === true,
+        logoUrl: typeof c.logoUrl === "string" ? c.logoUrl : "",
+        bannerUrl: typeof c.bannerUrl === "string" ? c.bannerUrl : "",
+      }));
+      setRoomCustomizationSaved(true);
+      window.setTimeout(() => setRoomCustomizationSaved(false), 2200);
+    } catch (err: any) {
+      setRoomCustomizationError(err?.message || "Failed to save room customization");
+    } finally {
+      setRoomCustomizationSaving(false);
+    }
+  };
 
   // Create form
   const [createName, setCreateName] = useState(() => {
@@ -507,15 +609,15 @@ export default function SettingsHlsSetup({
           )}
         </div>
 
-        {/* C) Branding (coming soon) */}
+        {/* C) Room customization (shared with pre-join setup + live room) */}
         <div style={panelStyle}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <div style={{ fontWeight: 800, color: "#e5e7eb" }}>Branding (coming soon)</div>
+            <div style={{ fontWeight: 800, color: "#e5e7eb" }}>Room Customization</div>
           </div>
 
           {!selectedEmbed && (
             <div style={{ marginTop: 10, color: "#9ca3af", fontSize: 13 }}>
-              Select an embed from the list on the right to see its viewer link.
+              Select an embed from the list on the right to edit this room's logo/banner setup.
             </div>
           )}
 
@@ -529,19 +631,177 @@ export default function SettingsHlsSetup({
                 Embed page URL: <span style={{ color: "#e5e7eb" }}>{absoluteViewerUrlFromPath(selectedEmbed.viewerPath, selectedEmbed.embedId)}</span>
               </div>
 
-              <div
-                style={{
-                  marginTop: 4,
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  background: "rgba(30,64,175,0.25)",
-                  border: "1px solid rgba(59,130,246,0.6)",
-                  color: "#dbeafe",
-                  fontSize: 13,
-                }}
-              >
-                Branding controls (title, logo, colors, offline message) are coming soon.
-                For now, share the viewer link or embed code from the Saved Embeds list on the right.
+              {roomCustomizationLoading && (
+                <div style={{ fontSize: 12, color: "#9ca3af" }}>Loading room customization…</div>
+              )}
+
+              <label style={{ display: "flex", alignItems: "center", gap: 8, color: "#e5e7eb", fontSize: 13 }}>
+                <input
+                  type="checkbox"
+                  checked={roomCustomizationPanel.enabled}
+                  disabled={!canCustomize}
+                  onChange={(e) =>
+                    setRoomCustomizationPanel((prev) => ({
+                      ...prev,
+                      enabled: e.target.checked,
+                    }))
+                  }
+                />
+                Enable room customization
+              </label>
+
+              <div style={{ display: "grid", gap: 6 }}>
+                <label style={{ fontSize: 12, color: "#9ca3af", fontWeight: 700 }}>Logo URL</label>
+                <input
+                  type="url"
+                  value={roomCustomizationPanel.logoUrl}
+                  disabled={!canCustomize}
+                  onChange={(e) =>
+                    setRoomCustomizationPanel((prev) => ({ ...prev, logoUrl: e.target.value }))
+                  }
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(63,63,70,0.6)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "#e5e7eb",
+                    fontSize: 13,
+                  }}
+                />
+              </div>
+
+              <div style={{ display: "grid", gap: 6 }}>
+                <label style={{ fontSize: 12, color: "#9ca3af", fontWeight: 700 }}>Banner URL</label>
+                <input
+                  type="url"
+                  value={roomCustomizationPanel.bannerUrl}
+                  disabled={!canCustomize}
+                  onChange={(e) =>
+                    setRoomCustomizationPanel((prev) => ({ ...prev, bannerUrl: e.target.value }))
+                  }
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(63,63,70,0.6)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "#e5e7eb",
+                    fontSize: 13,
+                  }}
+                />
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                <div style={{ display: "grid", gap: 6 }}>
+                  <label style={{ fontSize: 12, color: "#9ca3af", fontWeight: 700 }}>Background mode</label>
+                  <select
+                    value={roomCustomizationPanel.backgroundMode}
+                    disabled={!canCustomize}
+                    onChange={(e) =>
+                      setRoomCustomizationPanel((prev) => ({
+                        ...prev,
+                        backgroundMode: e.target.value as "banner" | "full" | "none",
+                      }))
+                    }
+                    style={{
+                      width: "100%",
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(63,63,70,0.6)",
+                      background: "rgba(0,0,0,0.25)",
+                      color: "#e5e7eb",
+                      fontSize: 13,
+                    }}
+                  >
+                    <option value="none">None</option>
+                    <option value="banner">Banner</option>
+                    <option value="full">Full</option>
+                  </select>
+                </div>
+
+                <div style={{ display: "grid", gap: 6 }}>
+                  <label style={{ fontSize: 12, color: "#9ca3af", fontWeight: 700 }}>Tile scale</label>
+                  <input
+                    type="number"
+                    min={0.5}
+                    max={1}
+                    step={0.05}
+                    value={roomCustomizationPanel.tileScale}
+                    disabled={!canCustomize}
+                    onChange={(e) =>
+                      setRoomCustomizationPanel((prev) => ({
+                        ...prev,
+                        tileScale: Math.max(0.5, Math.min(1, Number(e.target.value) || 0.8)),
+                      }))
+                    }
+                    style={{
+                      width: "100%",
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      border: "1px solid rgba(63,63,70,0.6)",
+                      background: "rgba(0,0,0,0.25)",
+                      color: "#e5e7eb",
+                      fontSize: 13,
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ display: "grid", gap: 6 }}>
+                <label style={{ fontSize: 12, color: "#9ca3af", fontWeight: 700 }}>Vertical offset (px)</label>
+                <input
+                  type="number"
+                  min={0}
+                  max={320}
+                  step={4}
+                  value={roomCustomizationPanel.verticalOffset}
+                  disabled={!canCustomize}
+                  onChange={(e) =>
+                    setRoomCustomizationPanel((prev) => ({
+                      ...prev,
+                      verticalOffset: Math.max(0, Math.min(320, Math.round(Number(e.target.value) || 84))),
+                    }))
+                  }
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    border: "1px solid rgba(63,63,70,0.6)",
+                    background: "rgba(0,0,0,0.25)",
+                    color: "#e5e7eb",
+                    fontSize: 13,
+                  }}
+                />
+              </div>
+
+              {roomCustomizationError && (
+                <div style={{ marginTop: 4, color: "#fca5a5", fontSize: 12 }}>{roomCustomizationError}</div>
+              )}
+              {roomCustomizationSaved && (
+                <div style={{ marginTop: 4, color: "#86efac", fontSize: 12 }}>Customization saved</div>
+              )}
+
+              <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+                <button
+                  type="button"
+                  style={{ ...S.secondaryBtn, padding: "8px 12px", fontSize: 13 }}
+                  onClick={() => {
+                    const room = selectedEmbed.roomId;
+                    const next = `/room/${encodeURIComponent(room)}`;
+                    window.location.href = `/rooms/${encodeURIComponent(room)}/setup?next=${encodeURIComponent(next)}`;
+                  }}
+                >
+                  Open Full Editor
+                </button>
+                <button
+                  type="button"
+                  style={{ ...S.primaryBtn, padding: "8px 12px", fontSize: 13 }}
+                  disabled={!canCustomize || roomCustomizationSaving}
+                  onClick={saveSelectedRoomCustomization}
+                >
+                  {roomCustomizationSaving ? "Saving…" : "Save Customization"}
+                </button>
               </div>
             </div>
           )}

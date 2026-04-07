@@ -77,6 +77,17 @@ const ROOM_OPTIONS: RoomOptions = {
   },
 };
 
+type PublicRoomCustomization = {
+  enabled?: boolean;
+  logoUrl?: string | null;
+  bannerUrl?: string | null;
+  backgroundMode?: "banner" | "full" | "none";
+  tileScale?: number;
+  verticalOffset?: number;
+  logoAlignment?: "left" | "center" | "right";
+  bannerAlignment?: "top" | "center" | "bottom";
+};
+
 // Telemetry tracker for measuring guest invite flow performance
 function GuestTelemetryTracker({ roomId, isViewer }: { roomId: string | null; isViewer: boolean }) {
   const room = useRoomContext();
@@ -1201,6 +1212,8 @@ type LiveKitShellProps = {
   presenceMode: "normal" | "invisible";
   showLayoutPicker: boolean;
   onToggleLayoutPicker: () => void;
+  roomCustomization: PublicRoomCustomization | null;
+  roomCustomizationActive: boolean;
 };
 
 function LiveKitShell({
@@ -1234,6 +1247,8 @@ function LiveKitShell({
   presenceMode,
   showLayoutPicker,
   onToggleLayoutPicker,
+  roomCustomization,
+  roomCustomizationActive,
 }: LiveKitShellProps) {
   const [guestStatus, setGuestStatus] = useState<GuestStatus>(null);
   const [roomPreviewPreset, setRoomPreviewPreset] = useState<StudioLayoutPresetId | null>(null);
@@ -1245,6 +1260,34 @@ function LiveKitShell({
     type: 'denied' | 'notFound' | 'notReadable' | 'notSupported' | 'inAppBrowser' | null;
     message: string;
   } | null>(null);
+  const [roomBannerFailed, setRoomBannerFailed] = useState(false);
+  const [roomLogoFailed, setRoomLogoFailed] = useState(false);
+
+  const safeTileScale =
+    typeof roomCustomization?.tileScale === "number" && Number.isFinite(roomCustomization.tileScale)
+      ? Math.max(0.5, Math.min(1, roomCustomization.tileScale))
+      : 0.8;
+  const safeVerticalOffset =
+    typeof roomCustomization?.verticalOffset === "number" && Number.isFinite(roomCustomization.verticalOffset)
+      ? Math.max(0, Math.min(320, Math.round(roomCustomization.verticalOffset)))
+      : 84;
+  const backgroundMode = roomCustomization?.backgroundMode || "none";
+  const roomBannerUrl = (roomCustomization?.bannerUrl || "").trim();
+  const roomLogoUrl = (roomCustomization?.logoUrl || "").trim();
+  const showRoomBanner =
+    roomCustomizationActive &&
+    backgroundMode !== "none" &&
+    !!roomBannerUrl &&
+    !roomBannerFailed;
+  const showRoomLogo = roomCustomizationActive && !!roomLogoUrl && !roomLogoFailed;
+
+  useEffect(() => {
+    setRoomBannerFailed(false);
+  }, [roomBannerUrl]);
+
+  useEffect(() => {
+    setRoomLogoFailed(false);
+  }, [roomLogoUrl]);
 
   // Handle media device errors and show appropriate messaging
   const handleMediaDeviceError = (error: any) => {
@@ -1368,6 +1411,7 @@ function LiveKitShell({
         subjectToControls && !controlsAllowScreenShare ? " sl-controls-no-screen" : ""
       }${advancedScreenShareEnabled ? ` sl-screen-${screenShareMode}` : ""}${
         roomPreviewPreset ? ` sl-program-${roomPreviewPreset}` : ""
+      }${roomCustomizationActive ? " sl-room-customized" : ""}
       }`}
       token={token}
       serverUrl={serverUrl}
@@ -1398,9 +1442,78 @@ function LiveKitShell({
         width: "100%",
         height: "calc(100vh - 60px)",
         position: "relative",
+        ["--sl-room-tile-scale" as any]: safeTileScale,
+        ["--sl-room-vertical-offset" as any]: `${safeVerticalOffset}px`,
       }}
     >
       <div ref={mediaRootRef} style={{ width: "100%", height: "100%", position: "relative" }}>
+        {showRoomBanner && (
+          <img
+            src={roomBannerUrl}
+            alt=""
+            aria-hidden
+            style={{ display: "none" }}
+            onError={() => setRoomBannerFailed(true)}
+          />
+        )}
+        {showRoomLogo && (
+          <img
+            src={roomLogoUrl}
+            alt=""
+            aria-hidden
+            style={{ display: "none" }}
+            onError={() => setRoomLogoFailed(true)}
+          />
+        )}
+
+        {showRoomBanner && (
+          <div
+            aria-hidden
+            style={{
+              position: "absolute",
+              left: 0,
+              right: 0,
+              top: 0,
+              height: backgroundMode === "full" ? "100%" : `${safeVerticalOffset}px`,
+              backgroundImage: `url("${roomBannerUrl.replace(/"/g, "%22")}")`,
+              backgroundPosition:
+                roomCustomization?.bannerAlignment === "top"
+                  ? "center top"
+                  : roomCustomization?.bannerAlignment === "bottom"
+                  ? "center bottom"
+                  : "center center",
+              backgroundRepeat: "no-repeat",
+              backgroundSize: backgroundMode === "full" ? "cover" : "cover",
+              opacity: backgroundMode === "full" ? 0.7 : 0.92,
+              zIndex: 1,
+              pointerEvents: "none",
+            }}
+          />
+        )}
+
+        {showRoomLogo && (
+          <img
+            src={roomLogoUrl}
+            alt="Room logo"
+            onError={() => setRoomLogoFailed(true)}
+            style={{
+              position: "absolute",
+              top: 10,
+              left: roomCustomization?.logoAlignment === "left" ? 12 : "50%",
+              right: roomCustomization?.logoAlignment === "right" ? 12 : undefined,
+              transform: roomCustomization?.logoAlignment === "center" ? "translateX(-50%)" : undefined,
+              width: 82,
+              height: 82,
+              objectFit: "contain",
+              borderRadius: 8,
+              background: "rgba(2,6,23,0.35)",
+              padding: 4,
+              zIndex: 25,
+              pointerEvents: "none",
+            }}
+          />
+        )}
+
         <LiveKitDebugLogger />
         <VideoElementMonitor />
         {DEV_CONTROLS && <PermissionsDebugOverlay dashboardRole={dashboardRole === "host" ? "host" : "participant"} />}
@@ -1850,7 +1963,9 @@ function RoomPage() {
   const [planRecordingEnabled, setPlanRecordingEnabled] = useState<boolean>(false);
   const [planHlsEnabled, setPlanHlsEnabled] = useState<boolean>(false);
   const [planHlsCustomizationEnabled, setPlanHlsCustomizationEnabled] = useState<boolean>(false);
+  const [planRoomCustomizationEnabled, setPlanRoomCustomizationEnabled] = useState<boolean>(false);
   const [platformHlsEnabled, setPlatformHlsEnabled] = useState<boolean>(true);
+  const [platformRoomCustomizationEnabled, setPlatformRoomCustomizationEnabled] = useState<boolean>(false);
   const [platformRecordingEnabled, setPlatformRecordingEnabled] = useState<boolean>(true);
   const [entitlementsReady, setEntitlementsReady] = useState(false);
   const [dashboardGreenroomEnabled, setDashboardGreenroomEnabled] = useState<boolean>(false);
@@ -1876,6 +1991,7 @@ function RoomPage() {
   const [adminOverride, setAdminOverride] = useState<boolean>(false);
   const [, setAuthStatus] = useState<"unknown" | "authed" | "guest">("unknown");
     const [effectivePermissionsMode, setEffectivePermissionsMode] = useState<"simple" | "advanced">("simple");
+  const [roomCustomization, setRoomCustomization] = useState<PublicRoomCustomization | null>(null);
   const roomId = firestoreRoomId ?? routeRoomId ?? null;
 
   // ---------------------------------------------------------------------------
@@ -1930,6 +2046,39 @@ function RoomPage() {
   });
 
   useEffect(() => {
+    if (!roomId) {
+      setRoomCustomization(null);
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await apiFetch(
+          `/api/rooms/${encodeURIComponent(roomId)}/customization/public`,
+          { cache: "no-store" },
+          { allowNonOk: true }
+        );
+        if (!res.ok) {
+          if (!cancelled) setRoomCustomization(null);
+          return;
+        }
+        const payload = await res.json().catch(() => null);
+        if (!cancelled) {
+          setRoomCustomization((payload?.customization || null) as PublicRoomCustomization | null);
+        }
+      } catch {
+        if (!cancelled) setRoomCustomization(null);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [roomId]);
+
+  useEffect(() => {
     // New room => allow fresh host tools hydration
     hostToolsHydratedKeyRef.current = null;
   }, [roomId]);
@@ -1972,6 +2121,8 @@ function RoomPage() {
     setPlanHlsEnabled(false);
     setPlanRtmpDestinationsMax(null);
     setPlanHlsCustomizationEnabled(false);
+    setPlanRoomCustomizationEnabled(false);
+    setPlatformRoomCustomizationEnabled(false);
     setPlanMultistreamEnabled(false);
     setDualRecordingAllowed(false);
     setWatermarkEnabled(false);
@@ -2431,6 +2582,10 @@ function RoomPage() {
         );
       }
 
+      if (Object.prototype.hasOwnProperty.call(features as any, "canCustomizeRooms")) {
+        setPlanRoomCustomizationEnabled((features as any).canCustomizeRooms === true);
+      }
+
       if (Object.prototype.hasOwnProperty.call(limits, "maxGuests")) {
         if (typeof limits.maxGuests === "number") {
           setMaxGuestsAllowed(limits.maxGuests);
@@ -2453,6 +2608,10 @@ function RoomPage() {
 
     if (appliedEff) {
       setEntitlementsReady(true);
+    }
+
+    if (platform && Object.prototype.hasOwnProperty.call(platform, "roomCustomizationEnabled")) {
+      setPlatformRoomCustomizationEnabled((platform as any).roomCustomizationEnabled === true);
     }
   };
 
@@ -4051,6 +4210,16 @@ function RoomPage() {
   const canStartStopHls =
     !isViewer &&
     (isHost || can("canStream") || !!effectiveControls.canStartStopStream);
+  const canManageRoomCustomization =
+    !needsReauth &&
+    !isViewer &&
+    !!roomId &&
+    platformRoomCustomizationEnabled &&
+    planRoomCustomizationEnabled &&
+    (isHost || can("canLayout"));
+  const roomCustomizationActive =
+    roomCustomization?.enabled === true &&
+    (roomCustomization.backgroundMode === "banner" || roomCustomization.backgroundMode === "full");
 
   const handleUpgradeHls = () => {
     nav("/settings/billing");
@@ -4495,6 +4664,32 @@ function RoomPage() {
               </>
             )}
 
+            {canManageRoomCustomization && (
+              <button
+                type="button"
+                onClick={() =>
+                  nav(
+                    `/rooms/${encodeURIComponent(roomId || "")}/setup?next=${encodeURIComponent(
+                      `/room/${encodeURIComponent(roomId || "")}`
+                    )}`
+                  )
+                }
+                style={{
+                  padding: "0.375rem 0.75rem",
+                  fontSize: "0.75rem",
+                  borderRadius: "0.375rem",
+                  background: "rgba(255,255,255,0.06)",
+                  color: "#e5e7eb",
+                  border: "1px solid rgba(255,255,255,0.16)",
+                  cursor: "pointer",
+                  fontWeight: 500,
+                }}
+                title="Edit room branding and layout"
+              >
+                Customize Room
+              </button>
+            )}
+
             {!canManageStream && !isViewer && roomTokenMode === "guest" && (
               <button
                 disabled
@@ -4553,6 +4748,8 @@ function RoomPage() {
           presenceMode={presenceMode}
           showLayoutPicker={showLayoutPicker}
           onToggleLayoutPicker={() => setShowLayoutPicker(v => !v)}
+          roomCustomization={roomCustomization}
+          roomCustomizationActive={roomCustomizationActive}
         />
       )}
 
@@ -4706,6 +4903,7 @@ function RoomPage() {
           multistreamAllowed={canMultistream}
           hlsEnabled={hlsAvailable}
           hlsCustomizationEnabled={featureAccess.canUse.hlsSetup && (isHost || can("canLayout"))}
+          roomCustomizationEnabled={canManageRoomCustomization}
           showHlsSection={hlsAvailable}
           canStartStopHls={canStartStopHls}
           entitlementsReady={entitlementsReady}

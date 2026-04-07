@@ -4,6 +4,7 @@ import { firestore as db } from "../firebaseAdmin";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { isRoomCustomizationEnabled } from "../lib/platformFeatureFlags";
+import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import type { RoomCustomizationConfig } from "../types/roomCustomization";
 
 const router = Router();
@@ -14,6 +15,14 @@ const router = Router();
  * host-only configuration.
  */
 type PublicRoomCustomization = {
+  enabled?: boolean;
+  logoUrl?: string | null;
+  bannerUrl?: string | null;
+  backgroundMode?: "banner" | "full" | "none";
+  tileScale?: number;
+  verticalOffset?: number;
+  logoAlignment?: "left" | "center" | "right";
+  bannerAlignment?: "top" | "center" | "bottom";
   banner?: {
     enabled: boolean;
     url: string;
@@ -44,6 +53,68 @@ function normalizeRoomId(raw: string | undefined): string {
   return String(raw || "").trim();
 }
 
+const DEFAULT_TILE_SCALE = 0.8;
+const DEFAULT_VERTICAL_OFFSET = 84;
+
+function toTrimmedNullableString(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const next = input.trim();
+  return next ? next : null;
+}
+
+function clampTileScale(input: unknown): number {
+  const value = Number(input);
+  if (!Number.isFinite(value)) return DEFAULT_TILE_SCALE;
+  return Math.max(0.5, Math.min(1, value));
+}
+
+function clampVerticalOffset(input: unknown): number {
+  const value = Number(input);
+  if (!Number.isFinite(value)) return DEFAULT_VERTICAL_OFFSET;
+  return Math.max(0, Math.min(320, Math.round(value)));
+}
+
+function normalizeCustomization(input: RoomCustomizationConfig | undefined | null): RoomCustomizationConfig {
+  const src = input || {};
+
+  const logoUrl = toTrimmedNullableString((src as any).logoUrl);
+  const bannerUrl = toTrimmedNullableString((src as any).bannerUrl) ?? toTrimmedNullableString(src.banner?.url);
+  const backgroundMode =
+    src.backgroundMode === "banner" || src.backgroundMode === "full" || src.backgroundMode === "none"
+      ? src.backgroundMode
+      : src.roomBackground?.enabled
+      ? "full"
+      : bannerUrl
+      ? "banner"
+      : "none";
+
+  const next: RoomCustomizationConfig = {
+    ...src,
+    enabled: src.enabled === true,
+    logoUrl,
+    bannerUrl,
+    backgroundMode,
+    tileScale: clampTileScale(src.tileScale),
+    verticalOffset: clampVerticalOffset(src.verticalOffset),
+    logoAlignment:
+      src.logoAlignment === "center" || src.logoAlignment === "right" ? src.logoAlignment : "left",
+    bannerAlignment:
+      src.bannerAlignment === "top" || src.bannerAlignment === "bottom" ? src.bannerAlignment : "center",
+  };
+
+  return next;
+}
+
+async function assertCustomizationEntitlement(req: any, uid?: string): Promise<boolean> {
+  if (!uid) return true;
+  if (req?.account?.isAdmin || req?.account?.adminOverride || req?.account?.adminOverrideHls) {
+    return true;
+  }
+
+  const entitlements = await getEffectiveEntitlements(req.account || uid);
+  return entitlements?.features?.canCustomizeRooms === true;
+}
+
 /**
  * GET /api/rooms/:roomId/customization
  *
@@ -68,8 +139,13 @@ router.get("/:roomId/customization", requireAuth as any, async (req: any, res) =
     }
 
     const ctx = await assertRoomPerm(req as any, roomId, "canLayout");
+    const entitled = await assertCustomizationEntitlement(req, ctx.uid);
+    if (!entitled) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
     const settings = (ctx.room as any).settings || {};
-    const customization: RoomCustomizationConfig = settings.customization || {};
+    const customization: RoomCustomizationConfig = normalizeCustomization(settings.customization || {});
 
     return res.json({
       ok: true,
@@ -106,6 +182,14 @@ router.put("/:roomId/customization", requireAuth as any, async (req: any, res) =
 
   // Validate top-level shape — we accept only known keys.
   const allowedKeys: Array<keyof RoomCustomizationConfig> = [
+    "enabled",
+    "logoUrl",
+    "bannerUrl",
+    "backgroundMode",
+    "tileScale",
+    "verticalOffset",
+    "logoAlignment",
+    "bannerAlignment",
     "banner",
     "roomBackground",
     "placeholderMedia",
@@ -157,9 +241,13 @@ router.put("/:roomId/customization", requireAuth as any, async (req: any, res) =
     }
 
     const ctx = await assertRoomPerm(req as any, roomId, "canLayout");
+    const entitled = await assertCustomizationEntitlement(req, ctx.uid);
+    if (!entitled) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
 
     // Merge the incoming fields onto the existing customization object.
-    const existing: RoomCustomizationConfig = ((ctx.room as any).settings?.customization) || {};
+    const existing: RoomCustomizationConfig = normalizeCustomization(((ctx.room as any).settings?.customization) || {});
     const next: RoomCustomizationConfig = { ...existing };
 
     for (const key of allowedKeys) {
@@ -173,15 +261,17 @@ router.put("/:roomId/customization", requireAuth as any, async (req: any, res) =
       }
     }
 
+    const normalizedNext = normalizeCustomization(next);
+
     await db.collection("rooms").doc(ctx.roomId).set(
-      { settings: { customization: next } },
+      { settings: { customization: normalizedNext } },
       { merge: true }
     );
 
     return res.json({
       ok: true,
       roomId: ctx.roomId,
-      customization: next,
+      customization: normalizedNext,
     });
   } catch (err: any) {
     if (err instanceof RoomPermissionError) {
@@ -221,12 +311,26 @@ router.get("/:roomId/customization/public", async (req: any, res) => {
     }
 
     const room = (snap.data() as any) || {};
-    const raw: RoomCustomizationConfig = room.settings?.customization || {};
+    const raw: RoomCustomizationConfig = normalizeCustomization(room.settings?.customization || {});
 
     // Extract only safe, public presentation fields.
     // Intentionally omit introClip (runtime control), roomSfx (host-only),
     // and any field that could reveal operational state.
     const pub: PublicRoomCustomization = {};
+
+    pub.enabled = raw.enabled === true;
+    pub.logoUrl = toTrimmedNullableString((raw as any).logoUrl);
+    pub.bannerUrl = toTrimmedNullableString((raw as any).bannerUrl);
+    pub.backgroundMode =
+      raw.backgroundMode === "banner" || raw.backgroundMode === "full" || raw.backgroundMode === "none"
+        ? raw.backgroundMode
+        : "none";
+    pub.tileScale = clampTileScale(raw.tileScale);
+    pub.verticalOffset = clampVerticalOffset(raw.verticalOffset);
+    pub.logoAlignment =
+      raw.logoAlignment === "center" || raw.logoAlignment === "right" ? raw.logoAlignment : "left";
+    pub.bannerAlignment =
+      raw.bannerAlignment === "top" || raw.bannerAlignment === "bottom" ? raw.bannerAlignment : "center";
 
     if (raw.banner?.enabled) {
       pub.banner = {

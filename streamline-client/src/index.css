@@ -247,6 +247,13 @@ button:focus-visible {
   box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45) !important;
 }
 
+/* Room customization V1: keep default layouts unchanged, only apply when opted-in. */
+.sl-layout.sl-room-customized [data-lk-layout] {
+  transform: translateY(var(--sl-room-vertical-offset, 84px)) scale(var(--sl-room-tile-scale, 0.8));
+  transform-origin: top center;
+  transition: transform 180ms ease;
+}
+
 /* ======================================
    SCREEN SHARE PERMISSION & LAYOUT GATING
    ====================================== */

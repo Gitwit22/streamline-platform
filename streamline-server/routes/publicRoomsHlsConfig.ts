@@ -30,6 +30,7 @@ router.get("/:roomId/hls-config", async (req: any, res) => {
     return res.json({
       roomId,
       hlsConfig,
+      roomCustomization: (room as any)?.settings?.customization || null,
     });
   } catch (e: any) {
     if (e?.message === PERMISSION_ERRORS.ROOM_NOT_FOUND) {

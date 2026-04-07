@@ -177,6 +177,11 @@ export default function Join() {
   const [platformCollaboratorDelegationEnabled, setPlatformCollaboratorDelegationEnabled] = useState<boolean>(false);
   // Room customization setup page flag (opt-in, default disabled)
   const [platformRoomCustomizationEnabled, setPlatformRoomCustomizationEnabled] = useState<boolean>(false);
+  const planRoomCustomizationEnabled = !!(effectiveEntitlements as any)?.features?.canCustomizeRooms;
+  const canUseRoomCustomizationSetup =
+    !isParticipant &&
+    platformRoomCustomizationEnabled &&
+    planRoomCustomizationEnabled;
 
   // Use /api/auth/me for admin/test-mode status
   const { user: authUser, loading: authLoading } = useAuthMe();
@@ -570,6 +575,12 @@ export default function Join() {
           localStorage.setItem("sl_last_room_ts", String(Date.now()));
           localStorage.setItem("sl_current_role", "host");
 
+          if (canUseRoomCustomizationSetup) {
+            const next = `/room/${encodeURIComponent(savedRoomId)}`;
+            nav(`/rooms/${encodeURIComponent(savedRoomId)}/setup?next=${encodeURIComponent(next)}`);
+            return;
+          }
+
           nav(`/room/${encodeURIComponent(savedRoomId)}`);
           return;
         }
@@ -635,6 +646,12 @@ export default function Join() {
           });
         } else {
           clearSelectedOwnerContext();
+        }
+
+        if (canUseRoomCustomizationSetup) {
+          const next = `/room/${encodeURIComponent(roomId)}`;
+          nav(`/rooms/${encodeURIComponent(roomId)}/setup?next=${encodeURIComponent(next)}`);
+          return;
         }
 
         nav(`/room/${encodeURIComponent(roomId)}`, {
@@ -1528,14 +1545,14 @@ export default function Join() {
                     This will broadcast to: <span style={{ color: "#e5e7eb" }}>/live/{selectedSavedEmbedId}</span>
                   </div>
                 )}
-                {selectedSavedEmbedId && platformRoomCustomizationEnabled && (() => {
+                {selectedSavedEmbedId && canUseRoomCustomizationSetup && (() => {
                   const embedRoomId = savedEmbeds.find((e) => e.embedId === selectedSavedEmbedId)?.roomId;
                   if (!embedRoomId) return null;
                   return (
                     <div style={{ marginTop: "8px" }}>
                       <button
                         type="button"
-                        onClick={() => nav(`/rooms/${encodeURIComponent(embedRoomId)}/setup`)}
+                        onClick={() => nav(`/rooms/${encodeURIComponent(embedRoomId)}/setup?next=${encodeURIComponent(`/room/${encodeURIComponent(embedRoomId)}`)}`)}
                         style={{
                           background: "rgba(255,255,255,0.06)",
                           border: "1px solid rgba(255,255,255,0.12)",
@@ -1546,7 +1563,7 @@ export default function Join() {
                           padding: "6px 14px",
                         }}
                       >
-                        ⚙ Room Setup
+                        Customize Room
                       </button>
                     </div>
                   );
@@ -1589,6 +1606,33 @@ export default function Join() {
             >
               Enter Room
             </button>
+
+            {!isParticipant && joinMode === "new" && canUseRoomCustomizationSetup && (
+              <button
+                type="button"
+                onClick={async () => {
+                  if (!roomName.trim()) {
+                    alert("Create the room first with Enter Room to open customization.");
+                    return;
+                  }
+                  alert("Click Enter Room to create your room and open customization first.");
+                }}
+                style={{
+                  width: "100%",
+                  marginTop: "10px",
+                  padding: "10px 12px",
+                  background: "rgba(255,255,255,0.05)",
+                  color: "#d1d5db",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  borderRadius: "10px",
+                  fontSize: "13px",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                Customize Room (opens before join)
+              </button>
+            )}
           </form>
         </div>
 

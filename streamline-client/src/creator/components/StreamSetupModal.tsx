@@ -47,6 +47,14 @@ const buildDefaultPlatformState = (): Record<PlatformKey, PlatformState> => ({
 });
 
 type RoomUiSectionKey = "destinations" | "recording" | "layout" | "audio" | "hls";
+type RoomCustomizationPanelState = {
+  enabled: boolean;
+  logoUrl: string;
+  bannerUrl: string;
+  backgroundMode: "banner" | "full" | "none";
+  tileScale: number;
+  verticalOffset: number;
+};
 
 type RoomUiState = Record<RoomUiSectionKey, boolean>;
 
@@ -56,6 +64,15 @@ const DEFAULT_ROOM_UI_STATE: RoomUiState = {
   layout: false,
   audio: false,
   hls: false,
+};
+
+const DEFAULT_ROOM_CUSTOMIZATION_PANEL: RoomCustomizationPanelState = {
+  enabled: false,
+  logoUrl: "",
+  bannerUrl: "",
+  backgroundMode: "none",
+  tileScale: 0.8,
+  verticalOffset: 84,
 };
 
 const ROOM_UI_STORAGE_PREFIX = "sl_room_ui_v1";
@@ -125,6 +142,7 @@ interface Props {
   rtmpDestinationsMax?: number;
   hlsEnabled?: boolean;
   hlsCustomizationEnabled?: boolean;
+  roomCustomizationEnabled?: boolean;
   onUpgradeHls?: () => void;
   // Controls whether the HLS Setup (branding/config) section is rendered at all (platform-level flag).
   showHlsSection?: boolean;
@@ -165,6 +183,7 @@ export default function StreamSetupModalV2({
   rtmpDestinationsMax,
   hlsEnabled = true,
   hlsCustomizationEnabled = false,
+  roomCustomizationEnabled = false,
   onUpgradeHls,
   showHlsSection = true,
   canStartStopHls = true,
@@ -201,6 +220,13 @@ export default function StreamSetupModalV2({
   const [boundEmbedLoading, setBoundEmbedLoading] = useState(false);
   const [boundEmbedError, setBoundEmbedError] = useState<string | null>(null);
   const [hlsAdvancedOpen, setHlsAdvancedOpen] = useState(false);
+  const [roomCustomizationPanel, setRoomCustomizationPanel] = useState<RoomCustomizationPanelState>(
+    DEFAULT_ROOM_CUSTOMIZATION_PANEL
+  );
+  const [roomCustomizationLoading, setRoomCustomizationLoading] = useState(false);
+  const [roomCustomizationSaving, setRoomCustomizationSaving] = useState(false);
+  const [roomCustomizationError, setRoomCustomizationError] = useState<string | null>(null);
+  const [roomCustomizationSaved, setRoomCustomizationSaved] = useState(false);
 
   const platformOrder: PlatformKey[] = ["youtube", "facebook", "twitch", "instagram", "custom"];
 
@@ -256,6 +282,93 @@ export default function StreamSetupModalV2({
       setRoomUiState(DEFAULT_ROOM_UI_STATE);
     }
   }, [hlsRoomId]);
+
+  useEffect(() => {
+    if (!open || !hlsRoomReady || !roomCustomizationEnabled) return;
+
+    let cancelled = false;
+    (async () => {
+      setRoomCustomizationLoading(true);
+      setRoomCustomizationError(null);
+      try {
+        const res = await apiFetchAuth(
+          `${API_BASE}/api/rooms/${encodeURIComponent(hlsRoomId)}/customization`,
+          { cache: "no-store" },
+          { allowNonOk: true }
+        );
+        const payload = await res.json().catch(() => null);
+        if (!res.ok) {
+          throw new Error(payload?.error || "Failed to load room customization");
+        }
+
+        if (cancelled) return;
+        const c = payload?.customization || {};
+        setRoomCustomizationPanel({
+          enabled: c.enabled === true,
+          logoUrl: typeof c.logoUrl === "string" ? c.logoUrl : "",
+          bannerUrl: typeof c.bannerUrl === "string" ? c.bannerUrl : "",
+          backgroundMode:
+            c.backgroundMode === "banner" || c.backgroundMode === "full" || c.backgroundMode === "none"
+              ? c.backgroundMode
+              : "none",
+          tileScale:
+            typeof c.tileScale === "number" && Number.isFinite(c.tileScale)
+              ? Math.max(0.5, Math.min(1, c.tileScale))
+              : 0.8,
+          verticalOffset:
+            typeof c.verticalOffset === "number" && Number.isFinite(c.verticalOffset)
+              ? Math.max(0, Math.min(320, Math.round(c.verticalOffset)))
+              : 84,
+        });
+      } catch (err: any) {
+        if (!cancelled) {
+          setRoomCustomizationError(err?.message || "Failed to load room customization");
+        }
+      } finally {
+        if (!cancelled) setRoomCustomizationLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [open, hlsRoomReady, hlsRoomId, roomCustomizationEnabled]);
+
+  const saveRoomCustomizationFromModal = async () => {
+    if (!roomCustomizationEnabled || !hlsRoomReady || roomCustomizationSaving) return;
+
+    setRoomCustomizationSaving(true);
+    setRoomCustomizationError(null);
+    setRoomCustomizationSaved(false);
+    try {
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/rooms/${encodeURIComponent(hlsRoomId)}/customization`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            enabled: roomCustomizationPanel.enabled,
+            logoUrl: roomCustomizationPanel.logoUrl || null,
+            bannerUrl: roomCustomizationPanel.bannerUrl || null,
+            backgroundMode: roomCustomizationPanel.backgroundMode,
+            tileScale: roomCustomizationPanel.tileScale,
+            verticalOffset: roomCustomizationPanel.verticalOffset,
+          }),
+        },
+        { allowNonOk: true }
+      );
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        throw new Error(payload?.error || "Failed to save room customization");
+      }
+      setRoomCustomizationSaved(true);
+      window.setTimeout(() => setRoomCustomizationSaved(false), 2200);
+    } catch (err: any) {
+      setRoomCustomizationError(err?.message || "Failed to save room customization");
+    } finally {
+      setRoomCustomizationSaving(false);
+    }
+  };
 
   // Whenever the modal opens for a different room, clear any previous
   // bound embed state so we never show a "ghost" connection while
@@ -1732,8 +1845,203 @@ export default function StreamSetupModalV2({
             </CollapsibleSection>
           )}
 
-          {/* HLS Setup section (branding/config). Does NOT start HLS. */}
-          {/* HLS Setup (embed creation + branding) lives in Settings → HLS Setup. */}
+          {roomCustomizationEnabled && hlsRoomReady && (
+            <CollapsibleSection
+              title="Room Customization"
+              subtitle="Logo + banner for this room"
+              open={roomUiState.layout}
+              onToggle={(open) => updateRoomUiSection("layout", open)}
+            >
+              <div style={{ display: "grid", gap: "0.6rem" }}>
+                {roomCustomizationLoading && (
+                  <div style={{ fontSize: "0.75rem", color: "#9ca3af" }}>Loading room customization…</div>
+                )}
+
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "0.8rem", color: "#e5e7eb" }}>
+                  <input
+                    type="checkbox"
+                    checked={roomCustomizationPanel.enabled}
+                    onChange={(e) =>
+                      setRoomCustomizationPanel((prev) => ({
+                        ...prev,
+                        enabled: e.target.checked,
+                      }))
+                    }
+                  />
+                  Enable room customization
+                </label>
+
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontSize: "0.75rem", color: "#9ca3af" }}>Logo URL</div>
+                  <input
+                    type="url"
+                    value={roomCustomizationPanel.logoUrl}
+                    onChange={(e) =>
+                      setRoomCustomizationPanel((prev) => ({
+                        ...prev,
+                        logoUrl: e.target.value,
+                      }))
+                    }
+                    style={{
+                      width: "100%",
+                      padding: "0.45rem 0.55rem",
+                      borderRadius: "0.35rem",
+                      border: "1px solid rgba(75,85,99,0.7)",
+                      background: "rgba(15,23,42,0.9)",
+                      color: "#e5e7eb",
+                      fontSize: "0.8rem",
+                    }}
+                  />
+                </div>
+
+                <div style={{ display: "grid", gap: 6 }}>
+                  <div style={{ fontSize: "0.75rem", color: "#9ca3af" }}>Banner URL</div>
+                  <input
+                    type="url"
+                    value={roomCustomizationPanel.bannerUrl}
+                    onChange={(e) =>
+                      setRoomCustomizationPanel((prev) => ({
+                        ...prev,
+                        bannerUrl: e.target.value,
+                      }))
+                    }
+                    style={{
+                      width: "100%",
+                      padding: "0.45rem 0.55rem",
+                      borderRadius: "0.35rem",
+                      border: "1px solid rgba(75,85,99,0.7)",
+                      background: "rgba(15,23,42,0.9)",
+                      color: "#e5e7eb",
+                      fontSize: "0.8rem",
+                    }}
+                  />
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.5rem" }}>
+                  <label style={{ display: "grid", gap: 6 }}>
+                    <span style={{ fontSize: "0.75rem", color: "#9ca3af" }}>Background mode</span>
+                    <select
+                      value={roomCustomizationPanel.backgroundMode}
+                      onChange={(e) =>
+                        setRoomCustomizationPanel((prev) => ({
+                          ...prev,
+                          backgroundMode: e.target.value as "banner" | "full" | "none",
+                        }))
+                      }
+                      style={{
+                        padding: "0.45rem 0.55rem",
+                        borderRadius: "0.35rem",
+                        border: "1px solid rgba(75,85,99,0.7)",
+                        background: "rgba(15,23,42,0.9)",
+                        color: "#e5e7eb",
+                        fontSize: "0.8rem",
+                      }}
+                    >
+                      <option value="none">None</option>
+                      <option value="banner">Banner</option>
+                      <option value="full">Full</option>
+                    </select>
+                  </label>
+
+                  <label style={{ display: "grid", gap: 6 }}>
+                    <span style={{ fontSize: "0.75rem", color: "#9ca3af" }}>Tile scale</span>
+                    <input
+                      type="number"
+                      min={0.5}
+                      max={1}
+                      step={0.05}
+                      value={roomCustomizationPanel.tileScale}
+                      onChange={(e) =>
+                        setRoomCustomizationPanel((prev) => ({
+                          ...prev,
+                          tileScale: Math.max(0.5, Math.min(1, Number(e.target.value) || 0.8)),
+                        }))
+                      }
+                      style={{
+                        padding: "0.45rem 0.55rem",
+                        borderRadius: "0.35rem",
+                        border: "1px solid rgba(75,85,99,0.7)",
+                        background: "rgba(15,23,42,0.9)",
+                        color: "#e5e7eb",
+                        fontSize: "0.8rem",
+                      }}
+                    />
+                  </label>
+                </div>
+
+                <label style={{ display: "grid", gap: 6 }}>
+                  <span style={{ fontSize: "0.75rem", color: "#9ca3af" }}>Vertical offset (px)</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={320}
+                    step={4}
+                    value={roomCustomizationPanel.verticalOffset}
+                    onChange={(e) =>
+                      setRoomCustomizationPanel((prev) => ({
+                        ...prev,
+                        verticalOffset: Math.max(0, Math.min(320, Math.round(Number(e.target.value) || 84))),
+                      }))
+                    }
+                    style={{
+                      padding: "0.45rem 0.55rem",
+                      borderRadius: "0.35rem",
+                      border: "1px solid rgba(75,85,99,0.7)",
+                      background: "rgba(15,23,42,0.9)",
+                      color: "#e5e7eb",
+                      fontSize: "0.8rem",
+                    }}
+                  />
+                </label>
+
+                {roomCustomizationError && (
+                  <div style={{ fontSize: "0.75rem", color: "#fca5a5" }}>{roomCustomizationError}</div>
+                )}
+                {roomCustomizationSaved && (
+                  <div style={{ fontSize: "0.75rem", color: "#86efac" }}>Customization saved</div>
+                )}
+
+                <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem", flexWrap: "wrap" }}>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = `/room/${encodeURIComponent(hlsRoomId)}`;
+                      window.location.href = `/rooms/${encodeURIComponent(hlsRoomId)}/setup?next=${encodeURIComponent(next)}`;
+                    }}
+                    style={{
+                      padding: "0.45rem 0.7rem",
+                      borderRadius: "0.4rem",
+                      border: "1px solid rgba(148,163,184,0.4)",
+                      background: "rgba(15,23,42,0.6)",
+                      color: "#cbd5e1",
+                      fontSize: "0.78rem",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Open full editor
+                  </button>
+                  <button
+                    type="button"
+                    onClick={saveRoomCustomizationFromModal}
+                    disabled={roomCustomizationSaving}
+                    style={{
+                      padding: "0.5rem 0.8rem",
+                      borderRadius: "0.45rem",
+                      border: "1px solid rgba(148,163,184,0.4)",
+                      background: "rgba(15,23,42,0.95)",
+                      color: "#e5e7eb",
+                      fontSize: "0.8rem",
+                      fontWeight: 700,
+                      cursor: roomCustomizationSaving ? "not-allowed" : "pointer",
+                      opacity: roomCustomizationSaving ? 0.65 : 1,
+                    }}
+                  >
+                    {roomCustomizationSaving ? "Saving…" : "Save room customization"}
+                  </button>
+                </div>
+              </div>
+            </CollapsibleSection>
+          )}
 
           {/* Help Text */}
           <div style={{ 

@@ -26,6 +26,7 @@ router.get("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
     return res.json({
       roomId: ctx.roomId,
       hlsConfig,
+      roomCustomization: (ctx.room as any)?.settings?.customization || null,
       monetizationEnabled: (ctx.room as any).monetizationEnabled === true,
       payPerViewEnabled: (ctx.room as any).payPerViewEnabled === true,
     });
@@ -118,6 +119,7 @@ router.put("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
       success: true,
       roomId: ctx.roomId,
       hlsConfig: nextConfig,
+      roomCustomization: (ctx.room as any)?.settings?.customization || null,
       monetizationEnabled: mergePayload.monetizationEnabled ?? (ctx.room as any).monetizationEnabled ?? false,
       payPerViewEnabled: mergePayload.payPerViewEnabled ?? (ctx.room as any).payPerViewEnabled ?? false,
     });
