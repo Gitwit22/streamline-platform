@@ -368,14 +368,14 @@ router.post("/users/:userId/grant-minutes", async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
+    const previousBonusMinutes = userDoc.data()?.bonusMinutes ?? 0;
+    const newBonusMinutes = previousBonusMinutes + minutes;
+
     // Use atomic increment to avoid read-modify-write race conditions.
     await userRef.update({
       bonusMinutes: FieldValue.increment(minutes),
       updatedAt: new Date(),
     });
-
-    const updatedDoc = await userRef.get();
-    const newBonusMinutes = updatedDoc.data()?.bonusMinutes ?? 0;
 
     // Log the action
     await logAdminAction(req.adminUser!.uid, "grant_minutes", {

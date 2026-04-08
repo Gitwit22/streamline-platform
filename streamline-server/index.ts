@@ -178,6 +178,16 @@ const authRateLimiter = rateLimit({
 });
 app.use("/api/auth/login", authRateLimiter);
 app.use("/api/auth/signup", authRateLimiter);
+
+// Rate limiting for usage telemetry (one call per stream session)
+const usageEndedRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "too_many_requests" },
+});
+app.use("/api/usage/streamEnded", usageEndedRateLimiter);
 // Stripe/Billing webhooks MUST run before JSON body parsing so Stripe
 // webhook signature verification can use the raw request body.
 app.use("/api/webhooks", webhookRouter);

@@ -143,7 +143,7 @@ export async function requireAdmin(
 
     // Session revocation: reject tokens issued before authRevokedAtMs.
     const revokedAtMs = typeof userData.authRevokedAtMs === "number" ? userData.authRevokedAtMs : null;
-    if (revokedAtMs && revokedAtMs > 0 && jwtSource !== "body/query") {
+    if (revokedAtMs && revokedAtMs > 0) {
       const jwtPayload = req.cookies?.token
         ? (() => { try { return jwt.decode(req.cookies.token) as any; } catch { return null; } })()
         : (() => {
