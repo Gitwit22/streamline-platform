@@ -1,4 +1,5 @@
 import { Router } from "express";
+import crypto from "crypto";
 import { firestore } from "../firebaseAdmin";
 import { requireAdmin } from "../middleware/adminAuth";
 import { deleteFiles, deletePrefix } from "../lib/storageClient";
@@ -34,6 +35,17 @@ function toDate(value: any): Date | null {
   return null;
 }
 
+function timingSafeStringEqual(a: string, b: string): boolean {
+  try {
+    const ba = Buffer.from(a, "utf8");
+    const bb = Buffer.from(b, "utf8");
+    if (ba.length !== bb.length) return false;
+    return crypto.timingSafeEqual(ba, bb);
+  } catch {
+    return false;
+  }
+}
+
 // Admin-only maintenance endpoints (Render cron-friendly)
 //
 // Supports two auth mechanisms:
@@ -52,8 +64,8 @@ router.use((req, res, next) => {
       ? authHeader.slice("Bearer ".length).trim()
       : "";
 
-  if (headerKey && headerKey === key) return next();
-  if (bearer && bearer === key) {
+  if (headerKey && timingSafeStringEqual(headerKey, key)) return next();
+  if (bearer && timingSafeStringEqual(bearer, key)) {
     console.warn("[deprecation] maintenance key provided via Authorization header; send x-maintenance-key instead");
     return next();
   }

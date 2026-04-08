@@ -105,17 +105,11 @@ export async function requireAdmin(
       }
     }
 
-    // 3. Fallback: adminUserId in body or query
-    if (!userId) {
-      userId = (req.body && req.body.adminUserId) || (req.query && req.query.adminUserId) || null;
-      if (userId) jwtSource = 'body/query';
-    }
-
     // Minimal debug for tracing auth source without exposing user data
     console.log(`[requireAdmin] auth source: ${jwtSource || "none"}, path: ${req.path}`);
 
     if (!userId) {
-      res.status(401).json({ error: "Missing admin user ID or valid token" });
+      res.status(401).json({ error: "Missing admin credentials" });
       return;
     }
 
@@ -128,12 +122,43 @@ export async function requireAdmin(
       return;
     }
 
-    // Get admin user details
+    // Get admin user details and enforce lockout flags
     let userData: any = {};
     try {
       const userDoc = await firestore.collection("users").doc(userId).get();
       userData = userDoc.data() || {};
     } catch {}
+
+    // Enforce immediate lockout for deleted accounts.
+    const deletedAtMs =
+      typeof userData.deletedAtMs === "number"
+        ? userData.deletedAtMs
+        : typeof userData.deletedAt === "number"
+          ? userData.deletedAt
+          : null;
+    if (deletedAtMs && deletedAtMs > 0) {
+      res.status(403).json({ error: "account_deleted" });
+      return;
+    }
+
+    // Session revocation: reject tokens issued before authRevokedAtMs.
+    const revokedAtMs = typeof userData.authRevokedAtMs === "number" ? userData.authRevokedAtMs : null;
+    if (revokedAtMs && revokedAtMs > 0 && jwtSource !== "body/query") {
+      const jwtPayload = req.cookies?.token
+        ? (() => { try { return jwt.decode(req.cookies.token) as any; } catch { return null; } })()
+        : (() => {
+            const h = req.headers["authorization"] as string | undefined;
+            if (h?.startsWith("Bearer ")) {
+              try { return jwt.decode(h.slice(7)) as any; } catch { return null; }
+            }
+            return null;
+          })();
+      const iatSec = typeof jwtPayload?.iat === "number" ? jwtPayload.iat : null;
+      if (iatSec !== null && iatSec * 1000 < revokedAtMs) {
+        res.status(401).json({ error: "session_revoked" });
+        return;
+      }
+    }
 
     req.adminUser = {
       uid: userId,

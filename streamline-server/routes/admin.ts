@@ -6,7 +6,9 @@
 console.log("✅ admin.ts loaded");
 import express from "express";
 
+import admin from "firebase-admin";
 import { firestore } from "../firebaseAdmin";
+import { FieldValue } from "firebase-admin/firestore";
 import { requireAdmin, logAdminAction } from "../middleware/adminAuth";
 import { computeUsageSummaryResult } from "./usageRoutes";
 import { invalidatePlatformBillingCache } from "../lib/userAccount";
@@ -240,12 +242,27 @@ router.delete("/users/:userId", async (req, res) => {
     if (!userDoc.exists) {
       return res.status(404).json({ error: "User not found" });
     }
+
+    // Revoke active sessions before deleting the Firestore document
+    // so the user cannot continue authenticating with existing tokens.
+    try {
+      await admin.auth().revokeRefreshTokens(userId);
+    } catch (authErr: any) {
+      if (authErr?.code !== "auth/user-not-found") {
+        console.error("Failed to revoke refresh tokens for user:", userId, authErr);
+      }
+    }
+
+    // Delete the Firebase Auth account
+    try {
+      await admin.auth().deleteUser(userId);
+    } catch (authErr: any) {
+      if (authErr?.code !== "auth/user-not-found") {
+        console.error("Failed to delete Firebase Auth user:", userId, authErr);
+      }
+    }
+
     await userRef.delete();
-    // Optionally, delete related usage records
-    // const usageSnap = await firestore.collection("usage").where("userId", "==", userId).get();
-    // const batch = firestore.batch();
-    // usageSnap.forEach(doc => batch.delete(doc.ref));
-    // await batch.commit();
     await logAdminAction(req.adminUser!.uid, "delete_user", { userId });
     res.json({ success: true, userId });
   } catch (error) {
@@ -351,20 +368,20 @@ router.post("/users/:userId/grant-minutes", async (req, res) => {
       return res.status(404).json({ error: "User not found" });
     }
 
-    const currentBonusMinutes = userDoc.data()?.bonusMinutes || 0;
-    const newBonusMinutes = currentBonusMinutes + minutes;
-
+    // Use atomic increment to avoid read-modify-write race conditions.
     await userRef.update({
-      bonusMinutes: newBonusMinutes,
+      bonusMinutes: FieldValue.increment(minutes),
       updatedAt: new Date(),
     });
+
+    const updatedDoc = await userRef.get();
+    const newBonusMinutes = updatedDoc.data()?.bonusMinutes ?? 0;
 
     // Log the action
     await logAdminAction(req.adminUser!.uid, "grant_minutes", {
       userId,
       minutes,
       reason,
-      previousBonus: currentBonusMinutes,
       newBonus: newBonusMinutes,
     });
 

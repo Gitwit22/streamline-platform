@@ -293,6 +293,10 @@ router.post("/signup", async (req, res) => {
       return res.status(400).json({ error: "Email and password required" });
     }
 
+    if (String(password).length < 8) {
+      return res.status(400).json({ error: "password_too_short" });
+    }
+
     // Require explicit Terms of Service acceptance for new accounts.
     if (tosAccepted !== true) {
       return res.status(400).json({ error: "tos_required" });
