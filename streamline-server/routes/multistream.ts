@@ -581,6 +581,132 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
 });
 
 
+// ---------------------------------------------------------------------------
+// Layout name mapping: custom preset ID → LiveKit built-in layout string
+// Used only when no custom compositor template is configured.
+// ---------------------------------------------------------------------------
+const PRESET_TO_LIVEKIT_LAYOUT: Record<string, string> = {
+  solo: "speaker",
+  side_by_side: "grid",
+  host_large_guest_small: "speaker",
+  two_up_split: "grid",
+  three_grid: "grid",
+  four_grid: "grid",
+  screen_share_speaker: "screen-share",
+  floating_guest: "speaker",
+  floating_host: "speaker",
+};
+
+function presetToLivekitLayout(presetId: string): string {
+  return PRESET_TO_LIVEKIT_LAYOUT[presetId] ?? "grid";
+}
+
+// Per-user rate limiter: max 30 layout changes per minute.
+const updateLayoutWindowMs = 60_000;
+const updateLayoutMax = 30;
+const updateLayoutHits = new Map<string, { count: number; resetAt: number }>();
+
+function hitUpdateLayoutRateLimit(uid: string): boolean {
+  const now = Date.now();
+  const existing = updateLayoutHits.get(uid);
+  if (!existing || now >= existing.resetAt) {
+    updateLayoutHits.set(uid, { count: 1, resetAt: now + updateLayoutWindowMs });
+    return false;
+  }
+  existing.count += 1;
+  return existing.count > updateLayoutMax;
+}
+
+router.post("/:roomId/update-egress-layout", requireAuth, requireRoomAccessToken as any, async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    if (hitUpdateLayoutRateLimit(uid)) {
+      return res.status(429).json({ error: "rate_limited" });
+    }
+
+    const { roomId: canonicalRoomId } = getRoomAccess(req as any);
+    if (!canonicalRoomId) return res.status(400).json({ error: "Missing roomId" });
+
+    const requestedRoomId = String((req.params as any).roomId || "").trim();
+    if (requestedRoomId && requestedRoomId !== canonicalRoomId) {
+      return res.status(400).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
+    }
+
+    const roomId = canonicalRoomId;
+
+    try {
+      await assertRoomPerm(req as any, roomId, "canDestinations");
+    } catch (err) {
+      if (err instanceof RoomPermissionError) {
+        return res.status(err.status).json({ error: err.code as ApiErrorCode });
+      }
+      throw err;
+    }
+
+    const { presetId } = req.body as { presetId?: string };
+    if (!presetId || typeof presetId !== "string") {
+      return res.status(400).json({ error: "presetId is required" });
+    }
+
+    const livekitLayout = presetToLivekitLayout(presetId);
+
+    // Resolve egressIds from Firestore (mirrors stop-multistream lookup)
+    const roomSnap = await firestore.collection("rooms").doc(roomId).get();
+    const roomDoc = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+    const ownerUid = String(roomDoc.ownerId || uid).trim() || uid;
+
+    const streamDocId = `${ownerUid}_${roomId}`;
+    const ref = firestore.collection("activeStreams").doc(streamDocId);
+    const doc = await ref.get();
+
+    if (!doc.exists) {
+      return res.status(404).json({ error: "No active multistream found for this room" });
+    }
+
+    const data = doc.data() as any;
+    const egressIds: { normal?: string; instagram?: string } = (data?.egressIds as any) || {};
+    const primaryEgressId: string | null = egressIds.normal || data?.egressId || null;
+
+    if (!primaryEgressId) {
+      return res.status(404).json({ error: "No egressId found for active stream" });
+    }
+
+    // Only call egressClient.updateLayout when no custom compositor is in use.
+    // When EGRESS_TEMPLATE_BASE_URL is set the program-compositor.html reads
+    // programState from room metadata (already updated by the client), so a
+    // raw layout update would switch away from the custom renderer.
+    const egressTemplateBase = process.env.EGRESS_TEMPLATE_BASE_URL;
+    if (!egressTemplateBase) {
+      const { EgressClient } = await getLiveKitSdk();
+      const livekitUrl = process.env.LIVEKIT_URL;
+      const livekitApiKey = process.env.LIVEKIT_API_KEY;
+      const livekitApiSecret = process.env.LIVEKIT_API_SECRET;
+      const egressClient = new EgressClient(livekitUrl, livekitApiKey, livekitApiSecret);
+
+      try {
+        await egressClient.updateLayout(primaryEgressId, livekitLayout);
+      } catch (err: any) {
+        const message = err?.message || String(err);
+        // Treat "not running" / 412 as a soft failure so the client can still
+        // update local state without a hard error response.
+        const isNotRunning = err?.code === 412 || /412|not running/i.test(message);
+        if (!isNotRunning) {
+          console.error("[update-egress-layout] egressClient.updateLayout failed", err);
+          return res.status(500).json({ error: "Failed to update egress layout" });
+        }
+        console.warn("[update-egress-layout] egress not running; skipping layout update", { primaryEgressId, message });
+      }
+    }
+
+    return res.json({ ok: true, layout: livekitLayout, presetId });
+  } catch (err) {
+    console.error("update-egress-layout error:", err);
+    return res.status(500).json({ error: "Failed to update egress layout" });
+  }
+});
+
 router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as any, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;

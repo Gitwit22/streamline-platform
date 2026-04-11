@@ -405,6 +405,24 @@ export async function apiUpdateProgramState(
   return res.json() as Promise<{ ok: true; roomId: string; programState: ProgramState }>;
 }
 
+export async function apiUpdateEgressLayout(
+  roomId: string,
+  roomAccessToken: string,
+  presetId: string,
+) {
+  const res = await apiFetchAuth(
+    `/api/multistream/${encodeURIComponent(roomId)}/update-egress-layout`,
+    {
+      method: "POST",
+      body: JSON.stringify({ presetId }),
+      headers: {
+        "x-room-access-token": roomAccessToken,
+      },
+    },
+  );
+  return res.json() as Promise<{ ok: true; layout: string; presetId: string }>;
+}
+
 export type RoomPolicy = {
   visibility: "public" | "unlisted" | "private";
   requiresAuth: boolean;
