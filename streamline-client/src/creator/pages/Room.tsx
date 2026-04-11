@@ -1083,9 +1083,12 @@ function LayoutPickerPanel({
 
     try {
       await apiUpdateProgramState(roomId, roomAccessToken, patch);
-      // Also notify LiveKit of the layout change for the fallback (non-custom
-      // compositor) egress path.  This is a best-effort call; failures are
-      // logged but don't block the UI update.
+      // Also notify LiveKit of the layout change. The server endpoint calls
+      // egressClient.updateLayout() only when EGRESS_TEMPLATE_BASE_URL is not
+      // configured (i.e. no custom compositor is running). When the custom
+      // compositor IS active, layout already reaches the egress via the
+      // programState room-metadata update above, so this call is a safe no-op
+      // from the egress perspective. Failures are logged but don't block the UI.
       if (streamEgressId) {
         apiUpdateEgressLayout(roomId, roomAccessToken, presetId).catch((err) => {
           console.warn("[LayoutPicker] Failed to update egress layout", err);

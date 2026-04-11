@@ -601,10 +601,30 @@ function presetToLivekitLayout(presetId: string): string {
   return PRESET_TO_LIVEKIT_LAYOUT[presetId] ?? "grid";
 }
 
+// Per-user rate limiter: max 30 layout changes per minute.
+const updateLayoutWindowMs = 60_000;
+const updateLayoutMax = 30;
+const updateLayoutHits = new Map<string, { count: number; resetAt: number }>();
+
+function hitUpdateLayoutRateLimit(uid: string): boolean {
+  const now = Date.now();
+  const existing = updateLayoutHits.get(uid);
+  if (!existing || now >= existing.resetAt) {
+    updateLayoutHits.set(uid, { count: 1, resetAt: now + updateLayoutWindowMs });
+    return false;
+  }
+  existing.count += 1;
+  return existing.count > updateLayoutMax;
+}
+
 router.post("/:roomId/update-egress-layout", requireAuth, requireRoomAccessToken as any, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    if (hitUpdateLayoutRateLimit(uid)) {
+      return res.status(429).json({ error: "rate_limited" });
+    }
 
     const { roomId: canonicalRoomId } = getRoomAccess(req as any);
     if (!canonicalRoomId) return res.status(400).json({ error: "Missing roomId" });
@@ -669,12 +689,9 @@ router.post("/:roomId/update-egress-layout", requireAuth, requireRoomAccessToken
         await egressClient.updateLayout(primaryEgressId, livekitLayout);
       } catch (err: any) {
         const message = err?.message || String(err);
-        // Treat "not running" as a soft failure so the client can still update
-        // local state without a hard error response.
-        const isNotRunning =
-          (err?.code === 412) ||
-          /412/.test(message) ||
-          /not running/i.test(message);
+        // Treat "not running" / 412 as a soft failure so the client can still
+        // update local state without a hard error response.
+        const isNotRunning = err?.code === 412 || /412|not running/i.test(message);
         if (!isNotRunning) {
           console.error("[update-egress-layout] egressClient.updateLayout failed", err);
           return res.status(500).json({ error: "Failed to update egress layout" });
