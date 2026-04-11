@@ -1133,8 +1133,20 @@ router.get("/usage", async (req, res) => {
         const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
         const usageData = usageSnap.exists ? (usageSnap.data() as any) : {};
         const usage = usageData.usage || usageData.totals || {};
+        const currentPeriodMinutesData = usage.minutes || {};
+        const yearToDateData = usageData.ytd || {};
+        const yearToDateMinutesData = yearToDateData.minutes || {};
         const minutesUsed = Number(
           usage.participantMinutes ?? usage.streamMinutes ?? usage.minutes ?? 0
+        );
+        const allTimeMinutes = Number(
+          currentPeriodMinutesData.inRoom?.lifetime ??
+            currentPeriodMinutesData.live?.lifetime ??
+            yearToDateMinutesData.inRoom?.lifetime ??
+            yearToDateMinutesData.live?.lifetime ??
+            yearToDateData.participantMinutes ??
+            usage.participantMinutes ??
+            0
         );
 
         const overages = (usageData.overages || {}) as any;
@@ -1186,7 +1198,9 @@ router.get("/usage", async (req, res) => {
           effectiveLimit,
           percentUsed: effectiveLimit > 0 ? (minutesUsed / effectiveLimit) * 100 : 0,
           isBlocked: effectiveLimit > 0 ? minutesUsed >= effectiveLimit : false,
+          allTimeMinutes,
           lastActive: userData.lastActive,
+          lastLoginAtMs: getDocMillis(userData, ["lastActive", "lastActiveAt"]),
         };
       })
     );

@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { Fragment, useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetchAuth } from "../../lib/api";
 
@@ -34,7 +34,9 @@ interface UsageData {
   effectiveLimit: number;
   percentUsed: number;
   isBlocked: boolean;
-  lastActive?: Date;
+  allTimeMinutes?: number;
+  lastActive?: Date | string | number | null;
+  lastLoginAtMs?: number | null;
 }
 
 interface AdminStats {
@@ -70,6 +72,7 @@ export default function AdminUsage() {
   const [newPlan, setNewPlan] = useState<string>("free");
   const [planChangeReason, setPlanChangeReason] = useState("");
   const [resetLoadingUserId, setResetLoadingUserId] = useState<string | null>(null);
+  const [expandedUserIds, setExpandedUserIds] = useState<Set<string>>(new Set());
 
   // Get admin user ID (in production, extract from JWT)
   const adminUserId = localStorage.getItem("sl_userId") || "admin";
@@ -243,6 +246,18 @@ export default function AdminUsage() {
     }
   };
 
+  const toggleUserDetails = (userId: string) => {
+    setExpandedUserIds((current) => {
+      const next = new Set(current);
+      if (next.has(userId)) {
+        next.delete(userId);
+      } else {
+        next.add(userId);
+      }
+      return next;
+    });
+  };
+
   // Filter data by search query
   const filteredData = usageData.filter((user) => {
     const query = searchQuery.toLowerCase();
@@ -380,11 +395,20 @@ export default function AdminUsage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-800">
-                {filteredData.map((user) => (
-                  <tr key={user.userId} className="hover:bg-gray-800/50 transition">
+                {filteredData.map((user) => {
+                  const isExpanded = expandedUserIds.has(user.userId);
+                  return (
+                  <Fragment key={user.userId}>
+                  <tr className="hover:bg-gray-800/50 transition">
                     <td className="px-4 py-3">
                       <div className="font-medium">{user.displayName || "No name"}</div>
                       <div className="text-sm text-gray-400">{user.email}</div>
+                      <button
+                        onClick={() => toggleUserDetails(user.userId)}
+                        className="mt-2 text-xs text-red-300 hover:text-red-200 transition"
+                      >
+                        {isExpanded ? "▼ Hide usage details" : "▶ Show usage details"}
+                      </button>
                     </td>
                     <td className="px-4 py-3">
                       <span
@@ -512,7 +536,26 @@ export default function AdminUsage() {
                       </div>
                     </td>
                   </tr>
-                ))}
+                  {isExpanded && (
+                    <tr className="bg-gray-900/80">
+                      <td colSpan={9} className="px-4 py-3">
+                        <div className="rounded border border-gray-800 bg-gray-950/40 px-4 py-3">
+                          <div className="text-sm text-gray-300">
+                            <span className="text-gray-400">All-time usage:</span>{" "}
+                            <span className="font-mono text-white">
+                              {Number(user.allTimeMinutes ?? 0).toLocaleString()} min
+                            </span>
+                          </div>
+                          <div className="mt-1 text-sm text-gray-300">
+                            <span className="text-gray-400">Last logged on:</span>{" "}
+                            <span className="text-white">{formatLastLogin(user)}</span>
+                          </div>
+                        </div>
+                      </td>
+                    </tr>
+                  )}
+                  </Fragment>
+                )})}
               </tbody>
             </table>
           </div>
@@ -667,6 +710,23 @@ function getPlanColor(planId: string): string {
     internal_unlimited: "bg-emerald-500/20 text-emerald-300",
   };
   return colors[planId] || colors.free;
+}
+
+function formatLastLogin(user: UsageData): string {
+  let raw: number | null = user.lastLoginAtMs ?? null;
+  if (raw === null) {
+    if (user.lastActive instanceof Date) {
+      raw = user.lastActive.getTime();
+    } else if (typeof user.lastActive === "number") {
+      raw = user.lastActive;
+    } else if (typeof user.lastActive === "string") {
+      raw = Date.parse(user.lastActive);
+    }
+  }
+  if (!raw || Number.isNaN(raw)) {
+    return "Never";
+  }
+  return new Date(raw).toLocaleString();
 }
 
 function formatResetExpiry(expiresAt?: number | null) {
