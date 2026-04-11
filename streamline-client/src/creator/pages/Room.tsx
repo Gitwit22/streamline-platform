@@ -47,7 +47,7 @@ import SoundboardPanel from "../components/SoundboardPanel";
 import { normalizeUiRolePresetId } from "../../lib/roles";
 import { recordingEvents } from "../../lib/recordingEvents";
 import { detectInAppBrowser } from "../../lib/detectInAppBrowser";
-import { apiUpdateProgramState, apiGetProgramState } from "../../lib/api";
+import { apiUpdateProgramState, apiGetProgramState, apiUpdateEgressLayout } from "../../lib/api";
 import type { ProgramState } from "../../lib/programState";
 import { DEFAULT_PROGRAM_STATE } from "../../lib/programState";
 import {
@@ -971,12 +971,14 @@ function LayoutPickerPanel({
   open,
   onClose,
   onActivePresetChange,
+  streamEgressId,
 }: {
   roomId: string;
   roomAccessToken: string;
   open: boolean;
   onClose: () => void;
   onActivePresetChange?: (presetId: StudioLayoutPresetId | null) => void;
+  streamEgressId?: string | null;
 }) {
   const { localParticipant } = useLocalParticipant();
   const participants = useParticipants();
@@ -1081,6 +1083,14 @@ function LayoutPickerPanel({
 
     try {
       await apiUpdateProgramState(roomId, roomAccessToken, patch);
+      // Also notify LiveKit of the layout change for the fallback (non-custom
+      // compositor) egress path.  This is a best-effort call; failures are
+      // logged but don't block the UI update.
+      if (streamEgressId) {
+        apiUpdateEgressLayout(roomId, roomAccessToken, presetId).catch((err) => {
+          console.warn("[LayoutPicker] Failed to update egress layout", err);
+        });
+      }
     } catch (err) {
       console.error("[LayoutPicker] Failed to update program state", err);
     } finally {
@@ -1214,6 +1224,7 @@ type LiveKitShellProps = {
   onToggleLayoutPicker: () => void;
   roomCustomization: PublicRoomCustomization | null;
   roomCustomizationActive: boolean;
+  streamEgressId?: string | null;
 };
 
 function LiveKitShell({
@@ -1249,6 +1260,7 @@ function LiveKitShell({
   onToggleLayoutPicker,
   roomCustomization,
   roomCustomizationActive,
+  streamEgressId,
 }: LiveKitShellProps) {
   const [guestStatus, setGuestStatus] = useState<GuestStatus>(null);
   const [roomPreviewPreset, setRoomPreviewPreset] = useState<StudioLayoutPresetId | null>(null);
@@ -1534,6 +1546,7 @@ function LiveKitShell({
             open={showLayoutPicker}
             onClose={onToggleLayoutPicker}
             onActivePresetChange={setRoomPreviewPreset}
+            streamEgressId={streamEgressId}
           />
         )}
         {isHost && !isViewer && (
@@ -3878,6 +3891,7 @@ function RoomPage() {
         }
         const egressIdVal = data?.data?.egressId ?? data?.egressId ?? data?.data?.id ?? data?.id;
         streamEgressRef.current = egressIdVal || null;
+        setEgressId(egressIdVal || null);
         setStreamStatus("live");
         streamStartTimeRef.current = Date.now();
         setDidStreamThisSession(true);
@@ -4750,6 +4764,7 @@ function RoomPage() {
           onToggleLayoutPicker={() => setShowLayoutPicker(v => !v)}
           roomCustomization={roomCustomization}
           roomCustomizationActive={roomCustomizationActive}
+          streamEgressId={egressId}
         />
       )}
 
