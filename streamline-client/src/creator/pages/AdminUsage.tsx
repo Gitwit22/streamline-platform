@@ -543,7 +543,7 @@ export default function AdminUsage() {
                           <div className="text-sm text-gray-300">
                             <span className="text-gray-400">All-time usage:</span>{" "}
                             <span className="font-mono text-white">
-                              {Math.max(0, Number(user.allTimeMinutes ?? 0)).toLocaleString()} min
+                              {Number(user.allTimeMinutes ?? 0).toLocaleString()} min
                             </span>
                           </div>
                           <div className="mt-1 text-sm text-gray-300">
@@ -713,15 +713,16 @@ function getPlanColor(planId: string): string {
 }
 
 function formatLastLogin(user: UsageData): string {
-  const raw =
-    user.lastLoginAtMs ??
-    (user.lastActive instanceof Date
-      ? user.lastActive.getTime()
-      : typeof user.lastActive === "number"
-        ? user.lastActive
-      : typeof user.lastActive === "string"
-        ? Date.parse(user.lastActive)
-        : null);
+  let raw: number | null = user.lastLoginAtMs ?? null;
+  if (raw === null) {
+    if (user.lastActive instanceof Date) {
+      raw = user.lastActive.getTime();
+    } else if (typeof user.lastActive === "number") {
+      raw = user.lastActive;
+    } else if (typeof user.lastActive === "string") {
+      raw = Date.parse(user.lastActive);
+    }
+  }
   if (!raw || Number.isNaN(raw)) {
     return "Never";
   }
