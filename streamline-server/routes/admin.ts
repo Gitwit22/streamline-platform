@@ -1133,18 +1133,18 @@ router.get("/usage", async (req, res) => {
         const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
         const usageData = usageSnap.exists ? (usageSnap.data() as any) : {};
         const usage = usageData.usage || usageData.totals || {};
-        const usageMinutes = usage.minutes || {};
-        const usageYtd = usageData.ytd || {};
-        const usageYtdMinutes = usageYtd.minutes || {};
+        const currentPeriodMinutesData = usage.minutes || {};
+        const yearToDateData = usageData.ytd || {};
+        const yearToDateMinutesData = yearToDateData.minutes || {};
         const minutesUsed = Number(
           usage.participantMinutes ?? usage.streamMinutes ?? usage.minutes ?? 0
         );
         const allTimeMinutes = Number(
-          usageMinutes.inRoom?.lifetime ??
-            usageMinutes.live?.lifetime ??
-            usageYtdMinutes.inRoom?.lifetime ??
-            usageYtdMinutes.live?.lifetime ??
-            usageYtd.participantMinutes ??
+          currentPeriodMinutesData.inRoom?.lifetime ??
+            currentPeriodMinutesData.live?.lifetime ??
+            yearToDateMinutesData.inRoom?.lifetime ??
+            yearToDateMinutesData.live?.lifetime ??
+            yearToDateData.participantMinutes ??
             usage.participantMinutes ??
             0
         );
