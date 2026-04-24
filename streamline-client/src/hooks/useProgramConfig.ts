@@ -32,10 +32,13 @@ export function useCurrentProgramKey(): ProgramKey {
 
 /**
  * Returns the boolean value of a single feature flag for the active program.
+ * The dependency array is intentionally empty because program config and
+ * feature keys are resolved at build time and never change at runtime.
  *
  * @example
  *   const canUseWebinars = useFeatureFlag("canUseWebinars");
  */
 export function useFeatureFlag(featureKey: keyof ProgramFeatureFlags): boolean {
-  return useMemo(() => isFeatureEnabled(featureKey), [featureKey]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  return useMemo(() => isFeatureEnabled(featureKey), []);
 }

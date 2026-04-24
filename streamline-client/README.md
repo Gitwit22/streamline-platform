@@ -37,6 +37,8 @@ VITE_STREAMLINE_PROGRAM=corporate npm run build
 
 Copy the appropriate template to `.env` (or set vars via your hosting provider) before building.
 
+> **Note:** The API base URL variable is `VITE_API_BASE` (matches what `src/lib/apiBase.ts` reads).
+
 ### Deployment model
 
 ```
