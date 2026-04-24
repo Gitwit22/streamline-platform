@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useCorporateMe } from "./CorporateProtectedRoute";
+import { getProgramConfig } from "../../config/programs";
 
 type NavItem = { id: string; label: string; path: string };
 
@@ -15,6 +16,7 @@ export default function CorporateSidebar() {
   const role = String(me?.orgRole || me?.role || "employee");
   const orgName = String(me?.orgName || "Your Organization");
   const isAdmin = role === "owner" || role === "admin";
+  const programConfig = getProgramConfig();
 
   const items = useMemo<NavItem[]>(
     () => [
@@ -89,7 +91,7 @@ export default function CorporateSidebar() {
               className="font-mono text-xs tracking-[0.2em]"
               style={{ color: "hsl(197 89% 66%)" }}
             >
-              CORPORATE
+              {programConfig.shortName}
             </div>
           </div>
         </div>

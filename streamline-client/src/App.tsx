@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Routes, Route, Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { LoginPage } from "./pages/LoginPage";
 import { SignupPage } from "./pages/SignupPage";
@@ -10,7 +10,9 @@ import BillingSuccess from "./pages/BillingSuccess";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import LaneEnforcer from "./components/LaneEnforcer";
 import Demo from "./pages/Demo";
+import LaneNotAvailable from "./pages/LaneNotAvailable";
 import { DEMO_LANDING_ENABLED } from "./config/demoLanding";
+import { getCurrentProgramKey, isProgramExplicitlyConfigured } from "./config/programs";
 
 import EduLanding from "./edu/entry/EduLanding";
 import EduLogin from "./edu/entry/EduLogin";
@@ -69,6 +71,20 @@ import CorporateOrgChart from "./corporate/pages/OrgChart";
 import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
 import { clearPlatformFlagsCache } from "./lib/platformFlagsCache";
+
+/**
+ * ProgramGate — restricts a route subtree to a specific program/lane.
+ *
+ * Only active when VITE_STREAMLINE_PROGRAM is explicitly set to a valid value.
+ * When the env is unset (local dev or no restriction), all lanes remain accessible
+ * to preserve existing behaviour.
+ */
+function ProgramGate({ forProgram, children }: { forProgram: "edu" | "corporate"; children: ReactNode }) {
+  if (isProgramExplicitlyConfigured() && getCurrentProgramKey() !== forProgram) {
+    return <LaneNotAvailable blockedProgram={forProgram} />;
+  }
+  return <>{children}</>;
+}
 
 
 function App() {
@@ -249,7 +265,7 @@ function App() {
       <Route path="/demo" element={<Demo />} />
 
       {/* Corporate lane */}
-      <Route path="/streamline/corporate" element={<Outlet />}>
+      <Route path="/streamline/corporate" element={<ProgramGate forProgram="corporate"><Outlet /></ProgramGate>}>
         <Route index element={<CorporateLanding />} />
         <Route path="landing" element={<CorporateLanding />} />
         <Route path="login" element={<CorporateLogin />} />
@@ -282,7 +298,7 @@ function App() {
       </Route>
 
       {/* EDU lane */}
-      <Route path="/streamline/edu" element={<Outlet />}>
+      <Route path="/streamline/edu" element={<ProgramGate forProgram="edu"><Outlet /></ProgramGate>}>
         <Route index element={<EduLanding />} />
         <Route path="learn-more" element={<EduLearnMore />} />
         <Route path="get-started" element={<EduGetStarted />} />

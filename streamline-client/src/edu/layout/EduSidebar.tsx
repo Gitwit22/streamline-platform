@@ -5,6 +5,7 @@ import { apiFetch, clearAuthStorage } from "../../lib/api";
 import { logout } from "../../lib/logout";
 import { useSchoolBranding } from "../state/schoolBranding";
 import SchoolLogo from "../components/SchoolLogo";
+import { getProgramConfig } from "../../config/programs";
 
 type NavItem = { id: string; label: string; path: string };
 
@@ -20,6 +21,7 @@ export default function EduSidebar() {
   const { branding } = useSchoolBranding();
   const role = String(me?.orgRole || me?.role || "faculty_admin");
   const schoolName = branding.schoolName || String(me?.orgName || "Your School");
+  const programConfig = getProgramConfig();
   const isFacultyAdmin = role === "faculty_admin";
   const isFacultyTeacher = role === "faculty_teacher";
   const isStaff = isFacultyAdmin || isFacultyTeacher;
@@ -94,7 +96,7 @@ export default function EduSidebar() {
           <SchoolLogo size="lg" />
           <div className="min-w-0">
             <div className="truncate font-bold tracking-tight text-white">{schoolName}</div>
-            <div className="font-mono text-[10px] tracking-[0.2em] text-slate-500">Powered by <span className="text-orange-300">StreamLine EDU</span></div>
+            <div className="font-mono text-[10px] tracking-[0.2em] text-slate-500">Powered by <span className="text-orange-300">{programConfig.appName}</span></div>
           </div>
         </div>
       </div>

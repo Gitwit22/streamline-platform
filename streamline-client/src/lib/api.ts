@@ -1,6 +1,7 @@
 
 import { API_BASE } from "./apiBase";
 import { getFirebaseIdToken } from "./firebaseClient";
+import { getProgramConfig } from "../config/programs";
 
 /**
  * Read the auth token from localStorage for header-based auth fallback.
@@ -84,6 +85,13 @@ export async function apiFetch(path: string, init: RequestInit = {}, options?: {
   // Cookie-primary auth: always send credentials.
   // NOTE: Do not auto-attach Authorization from localStorage here; callers
   // that truly need header auth should set it explicitly.
+
+  // Include program/lane context for backend routing convenience.
+  // This is not a security boundary — the backend must still enforce auth/org
+  // rules independently. Callers can override by setting the header explicitly.
+  if (!headers.has("x-program-domain")) {
+    headers.set("x-program-domain", getProgramConfig().backendProgramHeader);
+  }
 
   const url = path.startsWith("http") ? path : `${API_BASE}${path}`;
 
