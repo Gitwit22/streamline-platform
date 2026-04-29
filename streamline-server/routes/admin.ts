@@ -24,6 +24,7 @@ import { logAuthSecurityEvent } from "../lib/authAudit";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
+import adminMonitoringRoutes from "./adminMonitoring";
 
 const router = express.Router();
 
@@ -1567,6 +1568,10 @@ router.get("/features", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch features" });
   }
 });
+
+// Mount admin monitoring & operational awareness sub-routes
+// (monitoring/overview, monitoring/services, monitoring/webhooks, alerts, rooms/active, support/tickets)
+router.use(adminMonitoringRoutes);
 
 
 

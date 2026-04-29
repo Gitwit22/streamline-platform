@@ -17,9 +17,11 @@ test("computeOverage returns positive delta when exceeded", () => {
   assert.equal(computeOverage(100, 125), 25);
 });
 
-test("normalizePlan defaults allowsOverages for pro only", () => {
+test("normalizePlan defaults allowsOverages for pro and internal_unlimited", () => {
   assert.equal(normalizePlan("starter", {}).features.allowsOverages, false);
+  assert.equal(normalizePlan("free", {}).features.allowsOverages, false);
   assert.equal(normalizePlan("pro", {}).features.allowsOverages, true);
+  assert.equal(normalizePlan("internal_unlimited", {}).features.allowsOverages, true);
 });
 
 test("normalizePlan honors explicit overage flags", () => {
@@ -58,4 +60,30 @@ test("evaluateUsageGate allows Pro at limit but only logs after exceeding", () =
   assert.equal(exceeded.allowed, true);
   assert.equal(exceeded.shouldLogOverages, true);
   assert.deepEqual(exceeded.overageTotals, { participantMinutes: 20, transcodeMinutes: 5 });
+});
+
+test("evaluateUsageGate treats zero limits as unlimited (never blocks)", () => {
+  const highUsageZeroLimit = evaluateUsageGate({
+    allowsOverages: false,
+    limits: { participantMinutes: 0, transcodeMinutes: 0 },
+    usage: { participantMinutes: 999999, transcodeMinutes: 999999 },
+  });
+  assert.equal(highUsageZeroLimit.allowed, true);
+});
+
+test("normalizePlan internal_unlimited allows overages even when over limit", () => {
+  const plan = normalizePlan("internal_unlimited", {
+    limits: { monthlyMinutes: 99999, transcodeMinutes: 99999 },
+  });
+  assert.equal(plan.features.allowsOverages, true);
+
+  const decision = evaluateUsageGate({
+    allowsOverages: plan.features.allowsOverages,
+    limits: {
+      participantMinutes: plan.limits.monthlyMinutes,
+      transcodeMinutes: Number(plan.limits.transcodeMinutes || 0),
+    },
+    usage: { participantMinutes: 100000, transcodeMinutes: 100000 },
+  });
+  assert.equal(decision.allowed, true);
 });

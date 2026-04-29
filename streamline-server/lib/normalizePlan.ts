@@ -218,7 +218,7 @@ export function normalizePlan(id: string, doc: any | undefined | null): Canonica
       rawData.allowsOverages ??
       rawData.overagesAllowed;
     if (explicit !== undefined) return toBool(explicit);
-    return idLower === "pro";
+    return idLower === "pro" || idLower === "internal_unlimited";
   })();
 
   // Derive canonical HLS feature flag with sensible defaults:

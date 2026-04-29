@@ -4,6 +4,8 @@ import { firestore } from "../firebaseAdmin";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { getRoomAccess, requireRoomAccessToken } from "../middleware/roomAccessToken";
+import { chatMessageEvent, chatSessionStartEvent, chatSessionEndEvent } from "../lib/horizonEvents";
+import { emitChatMessageCreated } from "../events/emitters/chatEmitter";
 
 const router = Router();
 
@@ -213,6 +215,9 @@ router.post("/:roomId/chat/session/end", requireRoomAccessToken as any, async (r
       .doc(activeSessionId)
       .set({ endedAt: serverTimestamp, updatedAt: serverTimestamp }, { merge: true });
 
+    // Fire-and-forget: notify Horizon bot of chat session end
+    chatSessionEndEvent({ roomId: canonicalRoomId, sessionId: activeSessionId });
+
     return res.json({ ok: true, ended: true, sessionId: activeSessionId });
   } catch (e: any) {
     const msg = String(e?.message || e);
@@ -344,6 +349,27 @@ router.post("/:roomId/chat/messages", requireRoomAccessToken as any, async (req:
       },
       { merge: false }
     );
+
+    // Fire-and-forget: notify Horizon bot of new chat message
+    chatMessageEvent({
+      roomId: canonicalRoomId,
+      sessionId: session.sessionId,
+      messageId: messageRef.id,
+      text,
+      sender: { identity: access.identity, uid: (req as any).user?.uid || null, role: access.role, name: senderName },
+    });
+
+    // Fire-and-forget: emit standardized platform event
+    emitChatMessageCreated({
+      roomId: canonicalRoomId,
+      entityId: messageRef.id,
+      actor: {
+        userId: (req as any).user?.uid || access.identity,
+        username: senderName || access.identity,
+        role: access.role,
+      },
+      data: { sessionId: session.sessionId, text },
+    });
 
     return res.json({
       ok: true,

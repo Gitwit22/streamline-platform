@@ -214,6 +214,33 @@ router.get("/me", requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * Verify a password against Firebase Auth via the Identity Toolkit REST API.
+ * Requires the FIREBASE_API_KEY env var (Firebase project Web API Key).
+ * Returns true if the password is valid, false otherwise.
+ */
+async function verifyPasswordViaFirebaseAuth(email: string, password: string): Promise<boolean> {
+  const apiKey = process.env.FIREBASE_API_KEY;
+  if (!apiKey) return false;
+
+  try {
+    const res = await fetch(
+      "https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Goog-Api-Key": apiKey,
+        },
+        body: JSON.stringify({ email, password, returnSecureToken: false }),
+      },
+    );
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
  //POST /api/auth/login
   //Body: { email, password }
  //Sets httpOnly cookie "token" so requireAuth works.
@@ -251,13 +278,31 @@ router.post("/login", async (req, res) => {
     // Verify password
     const storedHash = user.passwordHash;
     if (!storedHash) {
-      // user exists but has no password hash (maybe legacy or admin-created)
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
+      // Legacy accounts created via Firebase Auth may not have a passwordHash
+      // in Firestore. Attempt to verify via Firebase Auth and migrate the hash.
+      const firebaseOk = await verifyPasswordViaFirebaseAuth(emailNorm, password);
+      if (!firebaseOk) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
 
-    const ok = await bcrypt.compare(password, storedHash);
-    if (!ok) {
-      return res.status(401).json({ error: "Invalid credentials" });
+      // One-time migration: store bcrypt hash in Firestore so future logins
+      // are self-contained and don't depend on Firebase Auth / API key.
+      try {
+        const migratedHash = await bcrypt.hash(password, 10);
+        await db.collection("users").doc(doc.id).set(
+          { passwordHash: migratedHash },
+          { merge: true },
+        );
+        console.log(`[auth] Migrated passwordHash for legacy user ${doc.id}`);
+      } catch (migrationErr: any) {
+        // Non-fatal: login still succeeds; hash migration will happen on next login.
+        console.warn("[auth] passwordHash migration failed:", migrationErr?.message || migrationErr);
+      }
+    } else {
+      const ok = await bcrypt.compare(password, storedHash);
+      if (!ok) {
+        return res.status(401).json({ error: "Invalid credentials" });
+      }
     }
 
     const uid = doc.id;
@@ -275,10 +320,221 @@ router.post("/login", async (req, res) => {
     });
   } catch (err: any) {
     console.error("POST /api/auth/login failed:", err?.message || err);
-    return res.status(500).json({
-      error: "Login failed",
-      detail: err?.message || String(err),
-    });
+    return res.status(500).json({ error: "Login failed" });
+  }
+});
+
+/**
+ * POST /api/auth/legacy-login
+ * Body: { email, password }
+ *
+ * Lazy-migration bridge:
+ * - Verifies legacy passwordHash in Firestore
+ * - Ensures Firebase Auth user exists using INTERNAL UID as the primary key
+ * - Mints a Firebase custom token for client sign-in (signInWithCustomToken)
+ */
+router.post("/legacy-login", async (req, res) => {
+  try {
+    const { email, password } = (req.body || {}) as { email?: string; password?: string };
+    if (!email || !password) return res.status(400).json({ error: "Missing email or password" });
+
+    const emailNorm = String(email).trim().toLowerCase();
+
+    // 1) Find legacy user doc by email (legacy lookup). Canonical identity is doc.id (uid).
+    const snap = await db.collection("users").where("email", "==", emailNorm).limit(1).get();
+    if (snap.empty) return res.status(401).json({ error: "Invalid credentials" });
+
+    const doc = snap.docs[0];
+    const uid = doc.id;
+    const user = (doc.data() || {}) as any;
+
+    // Reject login to deleted accounts
+    if (user.accountStatus === "deleted") {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // 2) Verify legacy password
+    const storedHash = user.passwordHash;
+    if (!storedHash) return res.status(401).json({ error: "Invalid credentials" });
+    const ok = await bcrypt.compare(String(password), String(storedHash));
+    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+
+    // 3) Ensure Firebase Auth user exists BY UID (not by email)
+    let fbUser: any = null;
+    try {
+      fbUser = await firebaseAuth.getUser(uid);
+    } catch (err: any) {
+      const code = String(err?.code || "");
+      if (code !== "auth/user-not-found") throw err;
+    }
+
+    if (!fbUser) {
+      try {
+        await firebaseAuth.createUser({
+          uid,
+          email: emailNorm,
+          emailVerified: false,
+        });
+      } catch (err: any) {
+        // If a Firebase account already exists with this email but a different uid,
+        // we must NOT auto-bind; return a deterministic error so support can resolve.
+        const code = String(err?.code || "");
+        if (code === "auth/email-already-exists") {
+          if (process.env.AUTH_DEBUG === "1") {
+            try {
+              const existing = await firebaseAuth.getUserByEmail(emailNorm);
+              console.warn("[legacy-login] email conflict", {
+                internalUid: uid,
+                email: emailNorm,
+                firebaseUid: existing?.uid,
+              });
+            } catch {
+              console.warn("[legacy-login] email conflict (failed to lookup existing Firebase user)");
+            }
+          }
+          return res.status(409).json({ error: "email_conflict" });
+        }
+        throw err;
+      }
+    } else {
+      // Optional: keep Firebase email in sync (off by default)
+      const fbEmail = String(fbUser?.email || "").trim().toLowerCase();
+      if (fbEmail && fbEmail !== emailNorm && process.env.AUTH_SYNC_FIREBASE_EMAIL === "1") {
+        try {
+          await firebaseAuth.updateUser(uid, { email: emailNorm, emailVerified: false });
+        } catch (err: any) {
+          console.warn("[legacy-login] Failed to sync Firebase email for uid", uid, err?.code || err?.message || err);
+        }
+      }
+    }
+
+    // 4) Mint custom token for Firebase client sign-in
+    const customToken = await firebaseAuth.createCustomToken(uid);
+
+    // Optional: annotate user doc for audit/debugging.
+    try {
+      await db.collection("users").doc(uid).set(
+        {
+          firebaseAuthMigratedAtMs: Date.now(),
+          updatedAt: Date.now(),
+        },
+        { merge: true }
+      );
+    } catch {
+      // non-fatal
+    }
+
+    return res.json({ customToken });
+  } catch (err: any) {
+    console.error("POST /api/auth/legacy-login failed:", err?.message || err);
+    return res.status(500).json({ error: "legacy_login_failed" });
+  }
+});
+
+/**
+ * POST /api/auth/legacy-login
+ * Body: { email, password }
+ *
+ * Lazy-migration bridge:
+ * - Verifies legacy passwordHash in Firestore
+ * - Ensures Firebase Auth user exists using INTERNAL UID as the primary key
+ * - Mints a Firebase custom token for client sign-in (signInWithCustomToken)
+ */
+router.post("/legacy-login", async (req, res) => {
+  try {
+    const { email, password } = (req.body || {}) as { email?: string; password?: string };
+    if (!email || !password) return res.status(400).json({ error: "Missing email or password" });
+
+    const emailNorm = String(email).trim().toLowerCase();
+
+    // 1) Find legacy user doc by email (legacy lookup). Canonical identity is doc.id (uid).
+    const snap = await db.collection("users").where("email", "==", emailNorm).limit(1).get();
+    if (snap.empty) return res.status(401).json({ error: "Invalid credentials" });
+
+    const doc = snap.docs[0];
+    const uid = doc.id;
+    const user = (doc.data() || {}) as any;
+
+    // Reject login to deleted accounts
+    if (user.accountStatus === "deleted") {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // 2) Verify legacy password
+    const storedHash = user.passwordHash;
+    if (!storedHash) return res.status(401).json({ error: "Invalid credentials" });
+    const ok = await bcrypt.compare(String(password), String(storedHash));
+    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
+
+    // 3) Ensure Firebase Auth user exists BY UID (not by email)
+    let fbUser: any = null;
+    try {
+      fbUser = await firebaseAuth.getUser(uid);
+    } catch (err: any) {
+      const code = String(err?.code || "");
+      if (code !== "auth/user-not-found") throw err;
+    }
+
+    if (!fbUser) {
+      try {
+        await firebaseAuth.createUser({
+          uid,
+          email: emailNorm,
+          emailVerified: false,
+        });
+      } catch (err: any) {
+        // If a Firebase account already exists with this email but a different uid,
+        // we must NOT auto-bind; return a deterministic error so support can resolve.
+        const code = String(err?.code || "");
+        if (code === "auth/email-already-exists") {
+          if (process.env.AUTH_DEBUG === "1") {
+            try {
+              const existing = await firebaseAuth.getUserByEmail(emailNorm);
+              console.warn("[legacy-login] email conflict", {
+                internalUid: uid,
+                email: emailNorm,
+                firebaseUid: existing?.uid,
+              });
+            } catch {
+              console.warn("[legacy-login] email conflict (failed to lookup existing Firebase user)");
+            }
+          }
+          return res.status(409).json({ error: "email_conflict" });
+        }
+        throw err;
+      }
+    } else {
+      // Optional: keep Firebase email in sync (off by default)
+      const fbEmail = String(fbUser?.email || "").trim().toLowerCase();
+      if (fbEmail && fbEmail !== emailNorm && process.env.AUTH_SYNC_FIREBASE_EMAIL === "1") {
+        try {
+          await firebaseAuth.updateUser(uid, { email: emailNorm, emailVerified: false });
+        } catch (err: any) {
+          console.warn("[legacy-login] Failed to sync Firebase email for uid", uid, err?.code || err?.message || err);
+        }
+      }
+    }
+
+    // 4) Mint custom token for Firebase client sign-in
+    const customToken = await firebaseAuth.createCustomToken(uid);
+
+    // Optional: annotate user doc for audit/debugging.
+    try {
+      await db.collection("users").doc(uid).set(
+        {
+          firebaseAuthMigratedAtMs: Date.now(),
+          updatedAt: Date.now(),
+        },
+        { merge: true }
+      );
+    } catch {
+      // non-fatal
+    }
+
+    return res.json({ customToken });
+  } catch (err: any) {
+    console.error("POST /api/auth/legacy-login failed:", err?.message || err);
+    return res.status(500).json({ error: "legacy_login_failed" });
   }
 });
 
@@ -456,10 +712,7 @@ router.post("/signup", async (req, res) => {
     return res.json({ user: { id: uid, ...stripSensitiveUserFields(userData) }, token });
   } catch (err: any) {
     console.error("POST /api/auth/signup failed:", err?.message || err);
-    return res.status(500).json({
-      error: "Signup failed",
-      detail: err?.message || String(err),
-    });
+    return res.status(500).json({ error: "Signup failed" });
   }
 });
 
