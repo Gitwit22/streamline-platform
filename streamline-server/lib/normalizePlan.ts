@@ -34,6 +34,12 @@ export type CanonicalPlan = {
     canHls: boolean;
     // hls mirrors canHls so callers can use either name
     hls: boolean;
+    // monetization: general monetization tools visible to the user
+    monetization: boolean;
+    // payPerView: can create ticketed / PPV events (requires monetization + hls)
+    payPerView: boolean;
+    // invisibleHost: host can join rooms in invisible mode (no tile, observe-only)
+    invisibleHost: boolean;
   };
   caps: {
     // null/missing = unlimited
@@ -305,6 +311,22 @@ export function normalizePlan(id: string, doc: any | undefined | null): Canonica
       hlsCustomizationEnabled,
       canHls,
       hls: canHls,
+      monetization: toBool(
+        rawFeatures.monetization ??
+          rawData.monetizationEnabled ??
+          rawData.monetization
+      ),
+      payPerView: toBool(
+        rawFeatures.payPerView ??
+          rawFeatures.ppv ??
+          rawData.payPerViewEnabled ??
+          rawData.ppvEnabled
+      ),
+      invisibleHost: toBool(
+        rawFeatures.invisibleHost ??
+          rawData.invisibleHostEnabled ??
+          rawData.invisibleHost
+      ),
     },
     caps: {
       hlsMaxMinutesPerSession,

@@ -5,6 +5,7 @@ import { getEffectiveEntitlements } from "./effectiveEntitlements";
 import type { InviteClaims } from "../middleware/requireAuth";
 import type { RoomAccessClaims } from "../middleware/roomAccessToken";
 import { getRoom, type RoomDoc } from "../services/rooms";
+import { resolveOwnerActingContext } from "./collaborators";
 import {
   DEFAULT_ROLE_PROFILES_BY_ID,
   type RolePermissionMap,
@@ -151,6 +152,21 @@ function ensureBooleanPerms(perms: Partial<RolePermissions> | undefined): RolePe
   };
 }
 
+function collaboratorToRoomPermissions(raw: any): RolePermissions {
+  return ensureBooleanPerms({
+    canStream: !!raw?.manageStreaming,
+    canRecord: !!raw?.manageRecording,
+    canDestinations: !!raw?.manageStreaming,
+    canModerate: !!raw?.manageParticipants,
+    canLayout: !!raw?.controlLayouts,
+    canScreenShare: true,
+    canInvite: !!raw?.manageParticipants,
+    canAnalytics: true,
+    canMuteGuests: !!raw?.manageParticipants,
+    canRemoveGuests: !!raw?.manageParticipants,
+  });
+}
+
 export type RoomPermissionKey = keyof RolePermissions;
 
 export async function assertRoomPerm(
@@ -205,7 +221,8 @@ export async function assertRoomPerm(
   } else if (user) {
     uid = user.uid;
     actorType = "user";
-    const isOwner = roomData.ownerId && roomData.ownerId === uid;
+    const ownerId = String(roomData.ownerId || "").trim();
+    const isOwner = !!ownerId && ownerId === uid;
     const hasAdminOverride =
       !!account.isAdmin ||
       !!account.adminOverride ||
@@ -221,8 +238,20 @@ export async function assertRoomPerm(
       role = "admin";
       permissions = allTruePermissions();
     } else {
-      role = "participant";
-      permissions = ensureBooleanPerms({});
+      const actingContext = await resolveOwnerActingContext(req as any);
+      const isDelegatedForRoom = !!(
+        actingContext?.isDelegated &&
+        ownerId &&
+        actingContext.ownerUid === ownerId
+      );
+
+      if (isDelegatedForRoom) {
+        role = "cohost";
+        permissions = collaboratorToRoomPermissions(actingContext?.permissions);
+      } else {
+        role = "participant";
+        permissions = ensureBooleanPerms({});
+      }
     }
   } else {
     actorType = "invite";

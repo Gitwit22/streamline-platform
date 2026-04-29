@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1280, height=720" />
+<title>Streamline – Program Compositor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #0a0a0a;
+    font-family: system-ui, -apple-system, sans-serif;
+  }
+
+  #canvas {
+    position: relative;
+    width: 1280px;
+    height: 720px;
+    overflow: hidden;
+    background: #0a0a0a;
+    transform-origin: top left;
+    /* Scaled dynamically by JS to fill the actual encoding viewport */
+  }
+
+  .slot {
+    position: absolute;
+    overflow: hidden;
+    border-radius: 8px;
+    background: #111;
+    transition: left 0.35s ease, top 0.35s ease, width 0.35s ease, height 0.35s ease;
+  }
+
+  .slot video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+    display: block;
+  }
+
+  .slot-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #333;
+    font-size: 14px;
+    letter-spacing: 0.05em;
+  }
+
+  /* Placeholder when no program state is set */
+  #placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #444;
+    font-size: 28px;
+    letter-spacing: 0.05em;
+  }
+  #placeholder.hidden { display: none; }
+
+  /* Hidden audio container */
+  #audio-bin { position: absolute; width: 0; height: 0; overflow: hidden; }
+</style>
+</head>
+<body>
+  <div id="canvas"></div>
+  <div id="placeholder">STREAMLINE</div>
+  <div id="audio-bin"></div>
+
+  <script type="module">
+    import {
+      Room,
+      RoomEvent,
+      Track,
+      ConnectionState,
+    } from "https://cdn.jsdelivr.net/npm/livekit-client@2/+esm";
+
+    const params = new URLSearchParams(window.location.search);
+    const wsUrl  = params.get("url");
+    const token  = params.get("token");
+
+    if (!wsUrl || !token) {
+      document.getElementById("placeholder").textContent = "Missing url / token";
+      throw new Error("Missing LiveKit connection params");
+    }
+
+    const canvas      = document.getElementById("canvas");
+    const audioBin    = document.getElementById("audio-bin");
+    const placeholder = document.getElementById("placeholder");
+
+    // ─── State ───
+    let programState  = null;   // parsed from room metadata
+    let slotElements  = [];     // { el, videoEl, identity, slotIdx }
+    let audioElements = new Map(); // trackSid -> HTMLElement
+
+    const room = new Room({ adaptiveStream: false, dynacast: false });
+
+    // ─── Parse program state from room metadata ───
+    function parseProgramState() {
+      try {
+        const raw = room.metadata;
+        if (!raw) return null;
+        const meta = JSON.parse(raw);
+        return meta.programState || null;
+      } catch {
+        return null;
+      }
+    }
+
+    // ─── Get ordered remote participants ───
+    function getRemoteParticipants() {
+      const list = [];
+      for (const p of room.remoteParticipants.values()) {
+        list.push(p);
+      }
+      // Sort by join time for stable ordering
+      list.sort((a, b) => (a.joinedAt?.getTime() || 0) - (b.joinedAt?.getTime() || 0));
+      return list;
+    }
+
+    // ─── Find participant by identity ───
+    function findParticipant(identity) {
+      for (const p of room.remoteParticipants.values()) {
+        if (p.identity === identity) return p;
+      }
+      return null;
+    }
+
+    // ─── Get the best video track for a participant ───
+    function getVideoTrack(participant) {
+      if (!participant) return null;
+      // Prefer screen share, then camera
+      for (const pub of participant.trackPublications.values()) {
+        if (pub.source === Track.Source.ScreenShare && pub.track && !pub.isMuted) {
+          return pub.track;
+        }
+      }
+      const cam = participant.getTrackPublication(Track.Source.Camera);
+      if (cam?.track && !cam.isMuted) return cam.track;
+      return null;
+    }
+
+    // ─── Build the default layout when no program state is set ───
+    function buildAdaptiveGridSlots(participantCount) {
+      const count = Math.max(1, Math.floor(participantCount || 1));
+      if (count <= 4) {
+        return [
+          { id: "slot1", x: 20, y: 10, width: 610, height: 345, zIndex: 1 },
+          { id: "slot2", x: 650, y: 10, width: 610, height: 345, zIndex: 1 },
+          { id: "slot3", x: 20, y: 365, width: 610, height: 345, zIndex: 1 },
+          { id: "slot4", x: 650, y: 365, width: 610, height: 345, zIndex: 1 },
+        ].slice(0, count);
+      }
+
+      const outerX = 20;
+      const outerY = 10;
+      const gapX = 10;
+      const gapY = 10;
+      const cols = Math.max(2, Math.ceil(Math.sqrt(count * (1280 / 720))));
+      const rows = Math.ceil(count / cols);
+
+      const usableWidth = 1280 - outerX * 2;
+      const usableHeight = 720 - outerY * 2;
+      const tileWidth = Math.floor((usableWidth - gapX * (cols - 1)) / cols);
+      const tileHeight = Math.floor((usableHeight - gapY * (rows - 1)) / rows);
+
+      const slots = [];
+      for (let i = 0; i < count; i++) {
+        const row = Math.floor(i / cols);
+        const col = i % cols;
+        const isLastRow = row === rows - 1;
+        const itemsInLastRow = count - cols * (rows - 1);
+        const rowCols = isLastRow && itemsInLastRow > 0 ? itemsInLastRow : cols;
+        const rowWidth = rowCols * tileWidth + (rowCols - 1) * gapX;
+        const startX = Math.floor((1280 - rowWidth) / 2);
+
+        slots.push({
+          id: `slot${i + 1}`,
+          x: startX + col * (tileWidth + gapX),
+          y: outerY + row * (tileHeight + gapY),
+          width: tileWidth,
+          height: tileHeight,
+          zIndex: 1,
+        });
+      }
+
+      return slots;
+    }
+
+    function getDefaultSlots(participantCount) {
+      if (participantCount <= 1) {
+        return [{ id: "slot1", x: 0, y: 0, width: 1280, height: 720, zIndex: 1 }];
+      }
+      if (participantCount === 2) {
+        return [
+          { id: "slot1", x: 0, y: 0, width: 640, height: 720, zIndex: 1 },
+          { id: "slot2", x: 640, y: 0, width: 640, height: 720, zIndex: 1 },
+        ];
+      }
+      if (participantCount === 3) {
+        return [
+          { id: "slot1", x: 328, y: 10, width: 625, height: 345, zIndex: 1 },
+          { id: "slot2", x: 10, y: 365, width: 625, height: 345, zIndex: 1 },
+          { id: "slot3", x: 645, y: 365, width: 625, height: 345, zIndex: 1 },
+        ];
+      }
+      return buildAdaptiveGridSlots(participantCount);
+    }
+
+    // ─── Main render ───
+    function render() {
+      const ps = parseProgramState();
+      programState = ps;
+
+      const remotes = getRemoteParticipants();
+
+      // Determine slots and participant mapping
+      let slots;
+      let identities;
+
+      if (ps && ps.programSlots && ps.programSlots.length > 0) {
+        // Use program state, but fall back to the default layout when
+        // there are more program slots than actual participants.  This
+        // prevents large black empty areas on the composed output (e.g.
+        // a 2-person layout selected but only 1 person is streaming).
+        if (remotes.length > 0 && remotes.length < ps.programSlots.length) {
+          slots = getDefaultSlots(remotes.length);
+          identities = remotes.map((p) => p.identity);
+        } else {
+          slots = ps.programSlots;
+          if (ps.programParticipants && ps.programParticipants.length > 0) {
+            identities = ps.programParticipants;
+          } else {
+            identities = remotes.map((p) => p.identity);
+          }
+        }
+      } else {
+        // Fallback: auto-layout by participant count
+        slots = getDefaultSlots(remotes.length);
+        identities = remotes.map((p) => p.identity);
+      }
+
+      // Show/hide placeholder
+      if (remotes.length === 0) {
+        placeholder.classList.remove("hidden");
+      } else {
+        placeholder.classList.add("hidden");
+      }
+
+      // Reconcile DOM: create/update/remove slot elements
+      const needed = slots.length;
+
+      // Remove excess slot elements
+      while (slotElements.length > needed) {
+        const removed = slotElements.pop();
+        // Detach video track before removing element
+        if (removed.track) {
+          removed.track.detach(removed.videoEl);
+        }
+        removed.el.remove();
+      }
+
+      // Create missing slot elements
+      while (slotElements.length < needed) {
+        const el = document.createElement("div");
+        el.className = "slot";
+        const videoEl = document.createElement("video");
+        videoEl.autoplay = true;
+        videoEl.playsInline = true;
+        videoEl.muted = true; // video elements are muted; audio is separate
+        el.appendChild(videoEl);
+        canvas.appendChild(el);
+        slotElements.push({ el, videoEl, identity: null, track: null, slotIdx: slotElements.length });
+      }
+
+      // Update slot positions and video assignments
+      for (let i = 0; i < needed; i++) {
+        const slot = slots[i];
+        const entry = slotElements[i];
+        const identity = identities[i] || null;
+        const participant = identity ? findParticipant(identity) : null;
+        const track = participant ? getVideoTrack(participant) : null;
+
+        // Position the slot
+        entry.el.style.left   = slot.x + "px";
+        entry.el.style.top    = slot.y + "px";
+        entry.el.style.width  = slot.width + "px";
+        entry.el.style.height = slot.height + "px";
+        entry.el.style.zIndex = slot.zIndex || 1;
+
+        // Update video track if changed
+        if (track !== entry.track) {
+          if (entry.track) {
+            entry.track.detach(entry.videoEl);
+          }
+          if (track) {
+            track.attach(entry.videoEl);
+            entry.el.classList.remove("slot-empty");
+          } else {
+            entry.el.classList.add("slot-empty");
+          }
+          entry.track = track;
+        }
+
+        entry.identity = identity;
+      }
+    }
+
+    // ─── Audio handling ───
+    function attachAudio(track) {
+      if (audioElements.has(track.sid)) return;
+      const el = track.attach();
+      audioBin.appendChild(el);
+      audioElements.set(track.sid, el);
+    }
+
+    function detachAudio(track) {
+      const el = audioElements.get(track.sid);
+      if (el) {
+        el.remove();
+        audioElements.delete(track.sid);
+      }
+      track.detach();
+    }
+
+    // ─── Room events ───
+    room.on(RoomEvent.TrackSubscribed, (track, _pub, _participant) => {
+      if (track.kind === Track.Kind.Audio) attachAudio(track);
+      // Re-render on any track change (video may now be available)
+      render();
+    });
+
+    room.on(RoomEvent.TrackUnsubscribed, (track) => {
+      if (track.kind === Track.Kind.Audio) detachAudio(track);
+      // Clear from slot entries
+      for (const entry of slotElements) {
+        if (entry.track === track) {
+          entry.track = null;
+        }
+      }
+      render();
+    });
+
+    room.on(RoomEvent.TrackMuted, () => render());
+    room.on(RoomEvent.TrackUnmuted, () => render());
+
+    room.on(RoomEvent.ParticipantConnected, () => render());
+    room.on(RoomEvent.ParticipantDisconnected, () => render());
+
+    room.on(RoomEvent.ActiveSpeakersChanged, () => {
+      // Could be used for active speaker highlighting in the future
+    });
+
+    // ─── Room metadata change = program state update ───
+    room.on(RoomEvent.RoomMetadataChanged, (_metadata) => {
+      console.log("[compositor] metadata changed, re-rendering");
+      render();
+    });
+
+    // ─── Periodic metadata poll ───
+    // Safety net: if the RoomMetadataChanged event is missed (e.g. due to
+    // network blip), re-check metadata every 2 seconds and re-render when
+    // the programState has changed since the last render.
+    let lastRenderedPsJson = "";
+    setInterval(() => {
+      try {
+        const ps = parseProgramState();
+        const psJson = JSON.stringify(ps || {});
+        if (psJson !== lastRenderedPsJson) {
+          console.log("[compositor] poll detected change, re-rendering");
+          lastRenderedPsJson = psJson;
+          render();
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+    // Initialise the snapshot so the first poll doesn't cause a spurious re-render
+    try {
+      lastRenderedPsJson = JSON.stringify(parseProgramState() || {});
+    } catch { /* ignore */ }
+
+    // ─── Scale the 1 280×720 reference canvas to fill the actual viewport ───
+    // LiveKit sets the browser viewport to the encoding dimensions (e.g.
+    // 1 920×1 080 for HD).  We keep the slot coordinates on the 1 280×720
+    // reference grid and use a CSS transform to stretch the canvas to match.
+    function scaleCanvas() {
+      const sw = window.innerWidth / 1280;
+      const sh = window.innerHeight / 720;
+      canvas.style.transform = `scale(${sw}, ${sh})`;
+    }
+    window.addEventListener("resize", scaleCanvas);
+    scaleCanvas();
+
+    // ─── Connect and start ───
+    await room.connect(wsUrl, token);
+    render();
+
+    // LiveKit egress waits for this log line before starting the stream.
+    console.log("START_RECORDING");
+  </script>
+</body>
+</html>

@@ -28,6 +28,16 @@
   display: none !important;
 }
 
+/* Always show participant names on LiveKit tiles (useful for broadcast/recording context). */
+.lk-participant-tile .lk-participant-metadata {
+  opacity: 1 !important;
+}
+
+.lk-participant-tile .lk-participant-name {
+  display: block !important;
+  opacity: 1 !important;
+}
+
 .join-instructions {
   color: #ffffff !important;
 }
@@ -61,7 +71,7 @@ a:hover {
   color: #535bf2;
 }
 
-/* Buttons (global baseline – can be overridden per-component) */
+/* Buttons (global baseline) */
 button {
   border-radius: 8px;
   border: 1px solid transparent;
@@ -161,7 +171,7 @@ button:focus-visible {
   .sl-layout [data-lk-layout] > * video {
     width: 100% !important;
     height: 100% !important;
-    object-fit: cover;
+    object-fit: contain;
   }
 
   /* Screen share spans both columns */
@@ -186,4 +196,75 @@ button:focus-visible {
 
 /* Desktop: allow LiveKit to control screen-share tile visuals; no extra overlay */
 @media (min-width: 769px) {
+}
+
+/* Show the full shared screen instead of cropping edges. */
+.sl-layout [data-lk-layout] [data-lk-source="screen_share"] video {
+  object-fit: contain !important;
+  background: #000;
+}
+
+/* Optional in-room preview sync for key 2-person broadcast presets. */
+.sl-layout.sl-program-side_by_side [data-lk-layout] {
+  display: grid !important;
+  grid-template-columns: 1fr 1fr !important;
+  gap: 0 !important;
+}
+
+.sl-layout.sl-program-two_up_split [data-lk-layout] {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) !important;
+  gap: 20px !important;
+  padding: 20px !important;
+}
+
+.sl-layout.sl-program-floating_guest [data-lk-layout],
+.sl-layout.sl-program-floating_host [data-lk-layout] {
+  position: relative !important;
+  display: block !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.sl-layout.sl-program-floating_guest [data-lk-layout] > *:first-child,
+.sl-layout.sl-program-floating_host [data-lk-layout] > *:first-child {
+  position: absolute !important;
+  inset: 0 !important;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+.sl-layout.sl-program-floating_guest [data-lk-layout] > *:nth-child(2),
+.sl-layout.sl-program-floating_host [data-lk-layout] > *:nth-child(2) {
+  position: absolute !important;
+  right: 16px !important;
+  bottom: 16px !important;
+  width: min(22vw, 320px) !important;
+  height: min(16vw, 230px) !important;
+  z-index: 3 !important;
+  border-radius: 10px !important;
+  overflow: hidden !important;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45) !important;
+}
+
+/* ======================================
+   SCREEN SHARE PERMISSION & LAYOUT GATING
+   ====================================== */
+
+/* Hide the screen share toggle button for users without permission */
+.sl-controls-no-screen .lk-control-bar .lk-button-group:has(button[aria-label*="Screen"]),
+.sl-controls-no-screen .lk-control-bar button[aria-label*="Screen"],
+.sl-controls-no-screen .lk-control-bar button[aria-label*="screen"],
+.sl-controls-no-screen .lk-control-bar [data-lk-source="screen_share"] {
+  display: none !important;
+}
+
+/* Off mode: screen share tiles hidden everywhere */
+.sl-screen-off [data-lk-source="screen_share"] {
+  display: none !important;
+}
+
+/* Popout mode: screen share tiles hidden from main stage (shown in pop-out window) */
+.sl-screen-popout [data-lk-source="screen_share"] {
+  display: none !important;
 }

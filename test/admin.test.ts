@@ -126,16 +126,7 @@ async function adminRequest(
   const urlObj = new URL(url);
 
   if (body) {
-    options.body = JSON.stringify({
-      ...body,
-      // Fallback path used by requireAdmin when JWT is missing/invalid.
-      adminUserId: ADMIN_USER_ID,
-    });
-  }
-
-  if (method === 'GET') {
-    // Fallback path used by requireAdmin when JWT is missing/invalid.
-    urlObj.searchParams.set('adminUserId', ADMIN_USER_ID);
+    options.body = JSON.stringify(body);
   }
 
   return fetch(urlObj.toString(), options);
@@ -154,7 +145,6 @@ async function testNonAdminBlocked() {
     }
 
     const url = new URL(`${API_BASE}/api/admin/users`);
-    url.searchParams.set('adminUserId', 'non-admin-user-999');
     const response = await fetch(url.toString(), {
       headers: {
         ...authHeadersFromJwt(attackerJwt),
@@ -373,11 +363,11 @@ async function testToggleBilling() {
 
 // Test: Admin can list users usage
 async function testListUsersUsage() {
-  console.log('\n🧪 TEST 5: Admin can list users usage');
+  console.log('\n🧪 TEST 5: Admin usage contract includes roomsCreated');
   console.log('─'.repeat(60));
 
   try {
-    const response = await adminRequest('/api/admin/usage?limit=10');
+    const response = await adminRequest('/api/admin/usage?limit=10&period=30d');
     
     if (!response.ok) {
       console.log(`❌ FAIL: Could not fetch usage (${response.status})`);
@@ -385,7 +375,31 @@ async function testListUsersUsage() {
     }
 
     const data = await response.json();
-    console.log(`   Found ${data.usage.length} users`);
+
+    const requiredKeys = [
+      'ticketsToday',
+      'activeUsers',
+      'roomsCreated',
+      'messagesSent',
+      'streamMinutes',
+      'apiRequests',
+      'recordingsCreated',
+      'hlsMinutes',
+    ];
+
+    const missing = requiredKeys.filter((key) => !(key in data));
+    if (missing.length > 0) {
+      console.log(`❌ FAIL: Missing usage contract keys: ${missing.join(', ')}`);
+      return false;
+    }
+
+    if (typeof data.roomsCreated !== 'number' || Number.isNaN(data.roomsCreated)) {
+      console.log(`❌ FAIL: roomsCreated must be numeric, got: ${typeof data.roomsCreated}`);
+      return false;
+    }
+
+    console.log(`   roomsCreated: ${data.roomsCreated}`);
+    console.log(`   Found ${(data.usage || []).length} users in admin usage list`);
     
     if (data.usage.length > 0) {
       const sample = data.usage[0];
@@ -396,7 +410,7 @@ async function testListUsersUsage() {
       console.log(`   - Status: ${sample.isBlocked ? 'BLOCKED' : 'ACTIVE'}`);
     }
 
-    console.log('\n✅ PASS: Usage list retrieved successfully');
+    console.log('\n✅ PASS: Usage contract retrieved successfully');
     return true;
   } catch (error) {
     console.log('❌ ERROR:', error);

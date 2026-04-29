@@ -3,7 +3,7 @@
     "hooks:install": "git config core.hooksPath .githooks",
     "hooks:check": "node scripts/hooks-check.cjs",
     "check:no-raw-api-fetch": "tsx scripts/check-no-raw-api-fetch.ts",
-    "test": "node --test",
+    "test": "node --test test-usage.js test-r2-connection.js",
     "test:admin": "tsx test/admin.test.ts",
     "enforcement:drift-check": "tsx scripts/enforcement-drift-check.ts"
   },

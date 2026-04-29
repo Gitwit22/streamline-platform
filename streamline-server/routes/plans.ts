@@ -17,6 +17,9 @@ router.get("/", async (_req, res) => {
       editorSnap,
       myContentSnap,
       myContentRecordingsSnap,
+      monetizationSnap,
+      payPerViewSnap,
+      collaboratorDelegationSnap,
     ] = await Promise.all([
       firestore.collection("featureFlags").doc("hlsSettingsTab").get(),
       firestore.collection("featureFlags").doc("recording").get(),
@@ -25,6 +28,9 @@ router.get("/", async (_req, res) => {
       firestore.collection("featureFlags").doc("editorEnabled").get(),
       firestore.collection("featureFlags").doc("myContentEnabled").get(),
       firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
+      firestore.collection("featureFlags").doc("monetizationEnabled").get(),
+      firestore.collection("featureFlags").doc("payPerViewEnabled").get(),
+      firestore.collection("featureFlags").doc("collaboratorDelegationEnabled").get(),
     ]);
 
     const hlsUiData = hlsUiSnap.exists ? ((hlsUiSnap.data() as any) || {}) : {};
@@ -35,6 +41,11 @@ router.get("/", async (_req, res) => {
     const myContentData = myContentSnap.exists ? ((myContentSnap.data() as any) || {}) : {};
     const myContentRecordingsData = myContentRecordingsSnap.exists
       ? ((myContentRecordingsSnap.data() as any) || {})
+      : {};
+    const monetizationData = monetizationSnap.exists ? ((monetizationSnap.data() as any) || {}) : {};
+    const payPerViewData = payPerViewSnap.exists ? ((payPerViewSnap.data() as any) || {}) : {};
+    const collaboratorDelegationData = collaboratorDelegationSnap.exists
+      ? ((collaboratorDelegationSnap.data() as any) || {})
       : {};
 
     const hlsEnabled = hlsUiData.enabled === undefined ? true : !!hlsUiData.enabled;
@@ -49,6 +60,11 @@ router.get("/", async (_req, res) => {
     // My Content umbrella + sub-feature flags default to DISABLED when missing.
     const myContentEnabled = myContentData.enabled === true;
     const myContentRecordingsEnabled = myContentRecordingsData.enabled === true;
+
+    // Monetization + PPV flags default to DISABLED (opt-in).
+    const monetizationEnabled = monetizationData.enabled === true;
+    const payPerViewEnabled = payPerViewData.enabled === true;
+    const collaboratorDelegationEnabled = collaboratorDelegationData.enabled === true;
 
     const snap = await firestore.collection("plans").get();
     const mapped = snap.docs.map((d) => {
@@ -114,6 +130,10 @@ router.get("/", async (_req, res) => {
           hls: !!plan.features.hls,
           hlsEnabled: !!plan.features.hlsEnabled,
           hlsCustomizationEnabled: !!plan.features.hlsCustomizationEnabled,
+
+          // Monetization / PPV plan-level entitlements
+          monetization: !!plan.features.monetization,
+          payPerView: !!plan.features.payPerView,
         },
         caps: {
           hlsMaxMinutesPerSession: plan.caps?.hlsMaxMinutesPerSession ?? null,
@@ -155,6 +175,9 @@ router.get("/", async (_req, res) => {
           editorEnabled,
           myContentEnabled,
           myContentRecordingsEnabled,
+          monetizationEnabled,
+          payPerViewEnabled,
+          collaboratorDelegationEnabled,
         },
       });
     }
@@ -173,6 +196,9 @@ router.get("/", async (_req, res) => {
         editorEnabled,
         myContentEnabled,
         myContentRecordingsEnabled,
+        monetizationEnabled,
+        payPerViewEnabled,
+        collaboratorDelegationEnabled,
       },
     });
   } catch (err: any) {
@@ -189,6 +215,9 @@ router.get("/", async (_req, res) => {
         editorEnabled: false,
         myContentEnabled: false,
         myContentRecordingsEnabled: false,
+        monetizationEnabled: false,
+        payPerViewEnabled: false,
+        collaboratorDelegationEnabled: false,
       },
     });
   }

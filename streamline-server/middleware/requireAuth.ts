@@ -1,6 +1,7 @@
 // StreamLine uses custom auth UID (JWT) as canonical user identity.
 import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
+import { auth as firebaseAuth } from "../firebaseAdmin";
 import { getUserAccount } from "../lib/userAccount";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 
@@ -18,7 +19,12 @@ export type InviteClaims = {
 };
 
 function getJwtSecret() {
-  return process.env.JWT_SECRET || "dev-secret";
+  const raw = String(process.env.JWT_SECRET || "").trim();
+  const env = String(process.env.NODE_ENV || "development").toLowerCase();
+  if ((env === "production" || env === "staging") && (!raw || raw === "dev-secret")) {
+    throw new Error("Missing JWT_SECRET (no dev-secret in production)");
+  }
+  return raw || "dev-secret";
 }
 
 // Server-side auth debug gate.
@@ -36,6 +42,43 @@ function shouldLogAuthDebug(req: Request): boolean {
   return header === "1" || header === "true" || header === "yes";
 }
 
+async function tryVerifyFirebaseIdToken(rawToken: string): Promise<AuthUser | null> {
+  if (!rawToken) return null;
+  try {
+    const decoded = await firebaseAuth.verifyIdToken(rawToken);
+    const uid = typeof (decoded as any)?.uid === "string" ? String((decoded as any).uid) : "";
+    if (!uid) return null;
+    const iatSec = typeof (decoded as any)?.iat === "number" ? (decoded as any).iat : undefined;
+    return { uid, iatSec };
+  } catch {
+    return null;
+  }
+}
+
+export async function tryGetAuthUserAny(req: Request): Promise<AuthUser | null> {
+  const headerAuth = req.headers.authorization;
+  const headerToken =
+    typeof headerAuth === "string"
+      ? headerAuth.replace(/^Bearer\s+/i, "")
+      : "";
+
+  // Reset tracking for each request evaluation.
+  (req as any)._authUsed = undefined;
+  (req as any)._authHeaderInvalid = false;
+
+  // 1) Firebase ID token in Authorization header
+  if (headerToken) {
+    const fbUser = await tryVerifyFirebaseIdToken(headerToken);
+    if (fbUser) {
+      (req as any)._authUsed = "firebase";
+      return fbUser;
+    }
+  }
+
+  // 2) Legacy server JWT (header/cookie)
+  return tryGetAuthUser(req);
+}
+
 export function tryGetAuthUser(req: Request): AuthUser | null {
   const headerAuth = req.headers.authorization;
   const headerToken =
@@ -51,9 +94,12 @@ export function tryGetAuthUser(req: Request): AuthUser | null {
   (req as any)._authHeaderInvalid = false;
 
   // Prefer Authorization header, but only if it verifies.
+  // Phase 1: accept Firebase ID tokens (primary) + legacy server JWT (fallback).
   // If a client accidentally sends a stale/invalid header token,
   // fall back to the cookie token so valid sessions don't get rejected.
   if (headerToken) {
+    // Note: this is sync function; Firebase verification is async.
+    // We leave the sync legacy path here and handle Firebase verification in requireAuth.
     try {
       const decoded = jwt.verify(headerToken, getJwtSecret()) as any;
       const uid =
@@ -65,18 +111,18 @@ export function tryGetAuthUser(req: Request): AuthUser | null {
       if (uid) {
         const iatSec = typeof decoded?.iat === "number" ? decoded.iat : undefined;
         if (shouldLogAuthDebug(req)) {
-          console.log("[auth-debug] Verified header JWT for uid", uid);
+          console.log("[auth-debug] Verified header legacy JWT for uid", uid);
         }
         (req as any)._authUsed = "header";
         return { uid, iatSec };
       }
       if (shouldLogAuthDebug(req)) {
-        console.warn("[auth-debug] Header JWT verified but missing uid; falling back to cookie");
+        console.warn("[auth-debug] Header legacy JWT verified but missing uid; falling back to cookie");
       }
       (req as any)._authHeaderInvalid = true;
     } catch (err: any) {
       if (shouldLogAuthDebug(req)) {
-        console.warn("[auth-debug] Header JWT invalid, falling back to cookie:", err?.message || err);
+        console.warn("[auth-debug] Header legacy JWT invalid, falling back to cookie:", err?.message || err);
       }
       (req as any)._authHeaderInvalid = true;
     }
@@ -114,7 +160,8 @@ export function tryGetAuthUser(req: Request): AuthUser | null {
 
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   try {
-    const user = tryGetAuthUser(req);
+    const user = await tryGetAuthUserAny(req);
+
     if (!user) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
     // If the request included a bad/stale Authorization header but a valid
@@ -212,9 +259,9 @@ export function verifyInviteToken(rawInviteToken: string): InviteClaims {
   return decoded as InviteClaims;
 }
 
-export function requireAuthOrInvite(req: Request, res: Response, next: NextFunction) {
+export async function requireAuthOrInvite(req: Request, res: Response, next: NextFunction) {
   try {
-    const user = tryGetAuthUser(req);
+    const user = await tryGetAuthUserAny(req);
     if (user) {
       (req as any).user = user;
       // If caller also provided an invite token, validate it and attach claims.

@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=1080, height=1920" />
+<title>Streamline – IG Portrait Compositor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html, body {
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    background: #0a0a0a;
+  }
+
+  #wrapper {
+    width: 100vw;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #scene {
+    /* 87% of the viewport = safe padding on all sides */
+    width: 87%;
+    height: 87%;
+    border-radius: 16px;
+    overflow: hidden;
+    background: #111;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #scene video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: transparent;
+  }
+
+  /* Placeholder shown while waiting for the first video track */
+  #placeholder {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #444;
+    font-family: system-ui, sans-serif;
+    font-size: 28px;
+    letter-spacing: 0.05em;
+    pointer-events: none;
+  }
+  #placeholder.hidden { display: none; }
+
+  /* Invisible container – audio elements must be in the DOM for
+     LiveKit's headless Chromium to capture their output. */
+  #audio-bin { position: absolute; width: 0; height: 0; overflow: hidden; }
+</style>
+</head>
+<body>
+  <div id="wrapper">
+    <div id="scene">
+      <video id="video" autoplay playsinline></video>
+      <div id="placeholder">STREAMLINE</div>
+    </div>
+  </div>
+  <div id="audio-bin"></div>
+
+  <script type="module">
+    // LiveKit egress loads this page with ?url=<ws_url>&token=<jwt>
+    import {
+      Room,
+      RoomEvent,
+      Track,
+      ConnectionState,
+    } from "https://cdn.jsdelivr.net/npm/livekit-client@2/+esm";
+
+    const params   = new URLSearchParams(window.location.search);
+    const wsUrl    = params.get("url");
+    const token    = params.get("token");
+
+    if (!wsUrl || !token) {
+      document.getElementById("placeholder").textContent = "Missing url / token";
+      throw new Error("Missing LiveKit connection params");
+    }
+
+    const videoEl      = document.getElementById("video");
+    const audioBin     = document.getElementById("audio-bin");
+    const placeholder  = document.getElementById("placeholder");
+
+    const room = new Room({ adaptiveStream: false, dynacast: false });
+
+    /* ─── track selection helpers ─── */
+
+    let currentVideoTrack = null;
+    let activeSpeaker     = null;
+
+    /** Return the highest-priority video track across all remote participants.
+     *  Priority: screen-share  ▸  active-speaker camera  ▸  any camera */
+    function pickBestVideo() {
+      // 1. Screen-share from anyone
+      for (const p of room.remoteParticipants.values()) {
+        for (const pub of p.trackPublications.values()) {
+          if (
+            pub.source === Track.Source.ScreenShare &&
+            pub.track &&
+            !pub.isMuted
+          ) {
+            return pub.track;
+          }
+        }
+      }
+
+      // 2. Active speaker's camera
+      if (activeSpeaker) {
+        const cam = activeSpeaker.getTrackPublication(Track.Source.Camera);
+        if (cam?.track && !cam.isMuted) return cam.track;
+      }
+
+      // 3. First available camera
+      for (const p of room.remoteParticipants.values()) {
+        const cam = p.getTrackPublication(Track.Source.Camera);
+        if (cam?.track && !cam.isMuted) return cam.track;
+      }
+
+      return null;
+    }
+
+    function refreshVideo() {
+      const best = pickBestVideo();
+      if (best === currentVideoTrack) return;
+
+      // Detach old track from the element
+      if (currentVideoTrack) {
+        currentVideoTrack.detach(videoEl);
+      }
+
+      if (best) {
+        best.attach(videoEl);
+        placeholder.classList.add("hidden");
+      } else {
+        placeholder.classList.remove("hidden");
+      }
+
+      currentVideoTrack = best;
+    }
+
+    /* ─── audio ─── */
+
+    function attachAudio(track) {
+      const el = track.attach();
+      audioBin.appendChild(el);
+    }
+
+    /* ─── room events ─── */
+
+    room.on(RoomEvent.TrackSubscribed, (track, _pub, _participant) => {
+      if (track.kind === Track.Kind.Audio)  attachAudio(track);
+      if (track.kind === Track.Kind.Video)  refreshVideo();
+    });
+
+    room.on(RoomEvent.TrackUnsubscribed, (track) => {
+      track.detach().forEach((el) => el.remove());
+      if (track === currentVideoTrack) currentVideoTrack = null;
+      refreshVideo();
+    });
+
+    room.on(RoomEvent.TrackMuted, ()   => refreshVideo());
+    room.on(RoomEvent.TrackUnmuted, () => refreshVideo());
+
+    room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
+      const remote = speakers.find((s) => !s.isLocal);
+      if (remote) {
+        activeSpeaker = remote;
+        refreshVideo();
+      }
+    });
+
+    /* ─── connect & signal ready ─── */
+
+    await room.connect(wsUrl, token);
+    refreshVideo();
+
+    // LiveKit egress waits for this log line before starting the stream.
+    console.log("START_RECORDING");
+  </script>
+</body>
+</html>

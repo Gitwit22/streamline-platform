@@ -6,6 +6,7 @@ import { clampPresetForPlan, getPresetById, getUserPlanId, MEDIA_PRESETS, MediaP
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { buildPublicPasswordResetState, buildPublicRecoveryState, needsRecoverySetup } from "../lib/accountRecovery";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import crypto from "crypto";
 import { CURRENT_TOS_VERSION } from "../lib/tos";
@@ -36,9 +37,9 @@ const DEFAULT_MEDIA_PREFS = {
 
 const DEFAULT_COHOST_PROFILE = {
   label: "Co-Host",
-  canStream: true,
-  canRecord: true,
-  canDestinations: true,
+  canStream: false,
+  canRecord: false,
+  canDestinations: false,
   canModerate: false,
   canLayout: true,
   canScreenShare: true,
@@ -232,29 +233,59 @@ async function getSegmentedUiFlags() {
     editorSnap,
     myContentSnap,
     myContentRecordingsSnap,
+    audioMixerSnap,
+    advancedScreenShareSnap,
+    mixedAudioPublishSnap,
+    monetizationSnap,
+    payPerViewSnap,
+    invisibleHostSnap,
+    collaboratorDelegationSnap,
   ] = await Promise.all([
     firestore.collection("featureFlags").doc("contentLibraryEnabled").get(),
     firestore.collection("featureFlags").doc("projectsEnabled").get(),
     firestore.collection("featureFlags").doc("editorEnabled").get(),
     firestore.collection("featureFlags").doc("myContentEnabled").get(),
     firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
+    firestore.collection("featureFlags").doc("audioMixerEnabled").get(),
+    firestore.collection("featureFlags").doc("advancedScreenShareEnabled").get(),
+    firestore.collection("featureFlags").doc("mixedAudioPublishEnabled").get(),
+    firestore.collection("featureFlags").doc("monetizationEnabled").get(),
+    firestore.collection("featureFlags").doc("payPerViewEnabled").get(),
+    firestore.collection("featureFlags").doc("invisibleHostEnabled").get(),
+    firestore.collection("featureFlags").doc("collaboratorDelegationEnabled").get(),
   ]);
 
-  const contentLibraryData = contentLibrarySnap.exists ? ((contentLibrarySnap.data() as any) || {}) : {};
-  const projectsData = projectsSnap.exists ? ((projectsSnap.data() as any) || {}) : {};
-  const editorData = editorSnap.exists ? ((editorSnap.data() as any) || {}) : {};
-  const myContentData = myContentSnap.exists ? ((myContentSnap.data() as any) || {}) : {};
-  const myContentRecordingsData = myContentRecordingsSnap.exists
-    ? ((myContentRecordingsSnap.data() as any) || {})
-    : {};
+  // Default to ENABLED when the Firestore document doesn't exist.
+  // Plans already gate feature access; platform flags act only as
+  // kill-switches. Set `{ enabled: false }` in Firestore to disable.
+  const resolve = (snap: FirebaseFirestore.DocumentSnapshot) => {
+    if (!snap.exists) return true;               // missing → enabled
+    const d = (snap.data() as any) || {};
+    return d.enabled !== false;                   // explicit false → disabled
+  };
 
-  // New flags default to DISABLED when missing.
+  // Room feature flags default to DISABLED (opt-in) — set `{ enabled: true }` in
+  // Firestore to activate. This is the opposite of the UI flags above which
+  // default to enabled.
+  const resolveOptIn = (snap: FirebaseFirestore.DocumentSnapshot) => {
+    if (!snap.exists) return false;              // missing → disabled
+    const d = (snap.data() as any) || {};
+    return d.enabled === true;                   // only explicit true → enabled
+  };
+
   return {
-    contentLibraryEnabled: contentLibraryData.enabled === true,
-    projectsEnabled: projectsData.enabled === true,
-    editorEnabled: editorData.enabled === true,
-    myContentEnabled: myContentData.enabled === true,
-    myContentRecordingsEnabled: myContentRecordingsData.enabled === true,
+    contentLibraryEnabled: resolve(contentLibrarySnap),
+    projectsEnabled: resolve(projectsSnap),
+    editorEnabled: resolve(editorSnap),
+    myContentEnabled: resolve(myContentSnap),
+    myContentRecordingsEnabled: resolve(myContentRecordingsSnap),
+    audioMixerEnabled: resolveOptIn(audioMixerSnap),
+    advancedScreenShareEnabled: resolveOptIn(advancedScreenShareSnap),
+    mixedAudioPublishEnabled: resolveOptIn(mixedAudioPublishSnap),
+    monetizationEnabled: resolveOptIn(monetizationSnap),
+    payPerViewEnabled: resolveOptIn(payPerViewSnap),
+    invisibleHostEnabled: resolveOptIn(invisibleHostSnap),
+    collaboratorDelegationEnabled: resolveOptIn(collaboratorDelegationSnap),
   };
 }
 // Advanced permissions have been fully removed in favor of a single,
@@ -610,6 +641,10 @@ router.get("/me", async (req, res) => {
 
       const transcodeLimitRaw = (limits as any).transcodeMinutes;
 
+      // Editing access comes from the Firestore plan doc's `editing` object.
+      // This is intentionally separate from the legacy `features` map.
+      const planEditingAccess = Boolean((plan.raw as any)?.editing?.access === true);
+
       effectiveEntitlements = {
         planId: entitlements.planId,
         planName: plan.name || entitlements.planId,
@@ -629,6 +664,20 @@ router.get("/me", async (req, res) => {
 
           // Optional: surface for client gating (e.g. Overages toggle).
           overagesAllowed: !!(features as any).overagesAllowed,
+
+          // Monetization / PPV plan-level entitlements
+          monetization: !!(features as any).monetization,
+          payPerView: !!(features as any).payPerView,
+
+          // Invisible host mode (plan-level)
+          invisibleHost: !!(features as any).invisibleHost,
+
+          // Editing (plans are truth)
+          editing: planEditingAccess,
+          // Segmented editing surfaces (until a separate segmented plan matrix exists)
+          contentLibrary: planEditingAccess,
+          projects: planEditingAccess,
+          editor: planEditingAccess,
         },
         limits: {
           // Canonical numeric usage/feature caps
@@ -641,6 +690,10 @@ router.get("/me", async (req, res) => {
           // Client gating relies on presence (typeof === "number").
           transcodeMinutes: typeof transcodeLimitRaw === "number" ? Number(transcodeLimitRaw) : undefined,
           maxRecordingMinutesPerClip: Number(limits.maxRecordingMinutesPerClip || 0),
+
+          // Editing limits (optional client UX)
+          editingMaxProjects: Number((plan.raw as any)?.editing?.maxProjects ?? 0),
+          editingMaxTracks: Number((plan.raw as any)?.editing?.maxTracks ?? 0),
         },
         caps: entitlements.caps || {},
       };
@@ -668,10 +721,48 @@ router.get("/me", async (req, res) => {
           // non-fatal
         }
 
+    // Optional EDU/org context for client-side EDU lane routing + guards.
+    // This is intentionally best-effort and non-fatal if org collections
+    // aren't populated yet.
+    let orgId: string | null = null;
+    let orgType: string | null = null;
+    let orgName: string | null = null;
+    let orgRole: string | null = null;
+
+    try {
+      const rawOrgId = (data as any)?.orgId ?? (data as any)?.org?.id ?? (data as any)?.org?.orgId;
+      orgId = typeof rawOrgId === "string" && rawOrgId.trim() ? rawOrgId.trim() : null;
+
+      const rawOrgType = (data as any)?.orgType ?? (data as any)?.org?.orgType;
+      orgType = typeof rawOrgType === "string" && rawOrgType.trim() ? rawOrgType.trim() : null;
+
+      if (orgId) {
+        const orgSnap = await firestore.collection("orgs").doc(orgId).get().catch(() => null as any);
+        const org = orgSnap && orgSnap.exists ? (orgSnap.data() as any) : null;
+        if (org && typeof org.orgType === "string" && String(org.orgType).trim()) orgType = String(org.orgType).trim();
+        if (org && typeof org.name === "string" && String(org.name).trim()) orgName = String(org.name).trim();
+
+        const memberId = `${orgId}_${uid}`;
+        const memberSnap = await firestore.collection("orgMembers").doc(memberId).get().catch(() => null as any);
+        const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
+        if (member && typeof member.role === "string" && String(member.role).trim()) orgRole = String(member.role).trim();
+      }
+    } catch {
+      // non-fatal
+    }
+
     const payload = {
       id: uid,
       email: data.email || null,
       displayName: data.displayName || null,
+      passwordReset: buildPublicPasswordResetState((data as any).passwordReset),
+      recovery: buildPublicRecoveryState((data as any).recovery),
+      recoveryConfigured: !needsRecoverySetup(data),
+      recoveryRequired: needsRecoverySetup(data),
+      orgId,
+      orgType,
+      orgName,
+      orgRole,
       billingTruth,
       billingSettings: {
         overagesEnabled:
@@ -705,7 +796,7 @@ router.get("/me", async (req, res) => {
         hlsSettingsTab: hlsUi.enabled,
         transcodeEnabled: platformTranscodeEnabled,
         recordingEnabled: recordingUi.enabled,
-          ...await getSegmentedUiFlags(),
+        ...await getSegmentedUiFlags(),
       },
             planId: normalizedPlanId,
       effectiveEntitlements,

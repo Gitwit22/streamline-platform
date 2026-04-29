@@ -1,6 +1,8 @@
 import React, { FormEvent, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { apiFetchAuth, clearAuthStorage } from "../lib/api";
+import { apiFetch, clearAuthStorage } from "../lib/api";
+import { refreshAndPersistAccountMe } from "../lib/sessionUser";
+import { firebaseSignInWithCustomToken, firebaseSignInWithEmailAndPassword, isFirebaseWebConfigured } from "../lib/firebaseClient";
 
 // Email validation function – operates on an already-normalized (trimmed + lowercased) address.
 function validateEmail(email: string): boolean {
@@ -42,7 +44,6 @@ export const LoginPage: React.FC = () => {
   const [showPassword, setShowPassword] = useState<boolean>(false);
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
-  const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 
   const accountDeleted = useMemo(() => {
     try {
@@ -95,56 +96,132 @@ export const LoginPage: React.FC = () => {
     logAuthDev("Frontend validation PASSED – calling auth API");
 
     try {
-      const res = await fetch(`${API_BASE}/api/auth/login`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ email: normalizedEmail, password }),
-      });
+      // Prefer Firebase lazy-migration login when Firebase is configured.
+      // Keep legacy /api/auth/login as fallback so dev envs without Firebase config don't brick.
+      if (!isFirebaseWebConfigured()) {
+        const res = await apiFetch(
+          "/api/auth/login",
+          {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: normalizedEmail, password }),
+          },
+          { allowNonOk: true }
+        );
 
-      if (!res.ok) {
-        if (res.status === 401 || res.status === 403) {
-          clearAuthStorage();
+        if (!res.ok) {
+          if (res.status === 401 || res.status === 403) {
+            clearAuthStorage();
+          }
+          const ct = res.headers.get("content-type") || "";
+          const err = ct.includes("application/json")
+            ? await res.json().catch(() => ({}))
+            : { error: "Login failed: backend returned non-JSON (check API base / server)" };
+          setError((err as any)?.error || "Invalid credentials");
+          setLoading(false);
+          return;
         }
-        const ct = res.headers.get("content-type") || "";
-        const err = ct.includes("application/json")
-          ? await res.json().catch(() => ({}))
-          : { error: "Login failed: backend returned non-JSON (check API base / server)" };
-        setError((err as any)?.error || "Invalid credentials");
-        setLoading(false);
-        return;
-      }
 
-      // LOGIN SUCCEEDED — capture JWT from the response body so we
-      // can fall back to header-based auth when cookies are blocked.
-      let loginBody: any = null;
-      try {
-        const ctLogin = res.headers.get("content-type") || "";
-        loginBody = ctLogin.includes("application/json") ? await res.json() : null;
-      } catch {
-        loginBody = null;
-      }
+        let loginBody: any = null;
+        try {
+          const ctLogin = res.headers.get("content-type") || "";
+          loginBody = ctLogin.includes("application/json") ? await res.json() : null;
+        } catch {
+          loginBody = null;
+        }
 
-      const token = (loginBody as any)?.token as string | undefined;
-      if (!token) {
-        clearAuthStorage();
-        setError("Login failed: missing token from server");
-        setLoading(false);
-        return;
-      }
+        const token = (loginBody as any)?.token as string | undefined;
+        if (!token) {
+          clearAuthStorage();
+          setError("Login failed: missing token from server");
+          setLoading(false);
+          return;
+        }
 
-      try {
-        localStorage.setItem("authToken", token);
-      } catch {}
+        try {
+          localStorage.setItem("authToken", token);
+        } catch {}
+
+      } else {
+        // Firebase is configured. Try direct signInWithEmailAndPassword first —
+        // this handles users who have a Firebase Auth account (e.g. signed up
+        // via the original inline signup) but no passwordHash in Firestore.
+        let firebaseDirectOk = false;
+        try {
+          await firebaseSignInWithEmailAndPassword(normalizedEmail, password);
+          firebaseDirectOk = true;
+        } catch (fbErr: any) {
+          const fbCode = String(fbErr?.code || "");
+          // If the user simply doesn't exist in Firebase Auth, fall through
+          // to legacy-login which will create the Firebase account on the fly.
+          if (fbCode !== "auth/user-not-found" && fbCode !== "auth/invalid-credential") {
+            // Genuine auth failure (wrong password, disabled, etc.)
+            const friendlyMsg =
+              fbCode === "auth/wrong-password" || fbCode === "auth/invalid-credential"
+                ? "Invalid credentials"
+                : fbCode === "auth/too-many-requests"
+                  ? "Too many attempts. Please try again later."
+                  : fbCode === "auth/user-disabled"
+                    ? "This account has been disabled."
+                    : "Invalid credentials";
+            setError(friendlyMsg);
+            setLoading(false);
+            return;
+          }
+        }
+
+        if (!firebaseDirectOk) {
+          // User not in Firebase Auth yet — use legacy-login to lazy-migrate.
+          const res = await apiFetch(
+            "/api/auth/legacy-login",
+            {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email: normalizedEmail, password }),
+            },
+            { allowNonOk: true }
+          );
+
+          if (!res.ok) {
+            if (res.status === 401 || res.status === 403) {
+              clearAuthStorage();
+            }
+            const ct = res.headers.get("content-type") || "";
+            const errBody = ct.includes("application/json") ? await res.json().catch(() => ({})) : {};
+            const msg = (errBody as any)?.error || (res.status === 409 ? "Email conflict. Contact support." : "Invalid credentials");
+            setError(msg);
+            setLoading(false);
+            return;
+          }
+
+          const payload = await res.json().catch(() => null as any);
+          const customToken = String(payload?.customToken || "").trim();
+          if (!customToken) {
+            setError("Login failed: missing customToken");
+            setLoading(false);
+            return;
+          }
+
+          await firebaseSignInWithCustomToken(customToken);
+        }
+
+        // Clear legacy header token so we don't send stale Authorization values.
+        try {
+          localStorage.removeItem("authToken");
+        } catch {}
+      }
 
       // Hydrate user from canonical /api/account/me. If this fails,
       // treat it as a hard error instead of redirecting into a
       // half-authed state that causes room join "blink".
+      let me: any = null;
       try {
-        const meRes = await apiFetchAuth("/api/account/me");
-        const me = await meRes.json();
+        me = await refreshAndPersistAccountMe();
+
+        // Notify hooks (useEffectiveEntitlements) that auth state changed
+        // so they re-fetch entitlements with the new token.
         try {
-          localStorage.setItem("sl_user", JSON.stringify(me));
+          window.dispatchEvent(new CustomEvent("sl:auth-changed"));
         } catch {}
       } catch (err) {
         console.warn("[Login] /account/me after login failed", err);
@@ -155,7 +232,15 @@ export const LoginPage: React.FC = () => {
       }
 
       setLoading(false);
+
+      if (me?.recoveryRequired === true) {
+        const recoveryNext = nextUrl || "/join";
+        nav(`/account-recovery/setup?next=${encodeURIComponent(recoveryNext)}`, { replace: true });
+        return;
+      }
+
       nav(nextUrl || "/join");
+      return;
     } catch (err) {
       console.error(err);
       setError("Something went wrong. Try again.");
@@ -493,6 +578,12 @@ export const LoginPage: React.FC = () => {
                 color: "#9ca3af",
                 textDecoration: "none",
                 transition: "color 0.3s ease",
+              }}
+              onClick={(e) => {
+                e.preventDefault();
+                const emailNorm = String(email || "").trim().toLowerCase();
+                const next = emailNorm ? `?login=${encodeURIComponent(emailNorm)}` : "";
+                nav(`/forgot-password${next}`);
               }}
               onMouseEnter={(e) => {
                 e.currentTarget.style.color = "#ef4444";

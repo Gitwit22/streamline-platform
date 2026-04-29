@@ -2,17 +2,18 @@ import "dotenv/config";
 import express from "express";
 import cors, { type CorsOptions } from "cors";
 import cookieParser from "cookie-parser";
+import helmet from "helmet";
+import pinoHttp from "pino-http";
 import webhookRouter from "./routes/webhook";
 import authRoutes from "./routes/auth";
 import adminRoutes from './routes/admin';
 import accountRoutes from "./routes/account";
+import collaboratorsRoutes from "./routes/collaborators";
 import { requireAuth } from "./middleware/requireAuth";
-import authRouter from "./routes/auth";
 import billingRoutes from "./routes/billing";
 import recordingsRoutes from "./routes/recordings";
 import usageRoutes from "./routes/usageRoutes";
 import plansRoutes from "./routes/plans";
-import roomTokenRoute from "./routes/roomToken";
 import roomsCreateRoutes from "./routes/roomsCreate";
 import invitesRoutes from "./routes/invites";
 import roomInvitesRoutes from "./routes/roomInvites";
@@ -24,6 +25,8 @@ import roomsActiveEmbedRoutes from "./routes/roomsActiveEmbed";
 import roomControlsRoutes from "./routes/roomControls";
 import roomChatRoutes from "./routes/roomChat";
 import roomsLayoutRoutes from "./routes/roomsLayout";
+import roomsStudioLayoutRoutes from "./routes/roomsStudioLayout";
+import roomsProgramStateRoutes from "./routes/roomsProgramState";
 import roomsPolicyRoutes from "./routes/roomsPolicy";
 import roomsRecordingsRoutes from "./routes/roomsRecordings";
 import destinationsRoutes from "./routes/destinations";
@@ -32,7 +35,11 @@ import statsRoutes from "./routes/stats";
 import telemetryRoutes from "./routes/telemetry";
 import savedEmbedsRoutes from "./routes/savedEmbeds";
 import editingRoutes from "./routes/editing";
+import projectsRoutes from "./routes/projects";
+import myContentRoutes from "./routes/myContent";
 import maintenanceRoutes from "./routes/maintenance";
+import onboardingRoutes from "./routes/onboarding";
+import { startRecordingCleanup } from "./services/recordingCleanup";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
 import { getLiveKitSdk } from "./lib/livekit"; // adjust path
@@ -42,12 +49,10 @@ import { getEffectiveEntitlements } from "./lib/effectiveEntitlements";
 import { evaluateUsageGate } from "./lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "./lib/usageOveragesWriter";
 import admin from "firebase-admin";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
 import hlsRoutes from "./routes/hls";
 import publicHlsRoutes from "./routes/publicHls";
 import publicRoomsHlsConfigRoutes from "./routes/publicRoomsHlsConfig";
-import { sanitizeDisplayName } from "./lib/sanitizeDisplayName";
+import monetizationRoutes from "./routes/monetization";
 import { resolveRoomIdentity } from "./lib/roomIdentity";
 import { assertRoomPerm, RoomPermissionError } from "./lib/rolePermissions";
 import { PERMISSION_ERRORS } from "./lib/permissionErrors";
@@ -55,9 +60,23 @@ import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "./
 
 import { requireAdmin } from "./middleware/adminAuth";
 
+// Horizon / observability imports
+import { logger } from "./lib/logger";
+import { requestIdMiddleware } from "./middleware/requestId";
+import { globalErrorHandler } from "./middleware/errorHandler";
+import horizonApiRoutes from "./routes/horizonApi";
+import platformHealthRoutes from "./routes/platformHealth";
+import diagnosticsRoutes from "./routes/diagnostics";
+import alertRoutes from "./routes/alertRoutes";
+import skillsIntegrationRoutes from "./routes/skillsIntegration";
+import supportActionsRoutes from "./routes/supportActions";
+import supportTicketsRoutes from "./routes/supportTickets";
+import supportPublicRoutes from "./routes/supportPublic";
+import { attachHorizonWs } from "./routes/horizonWs";
+import horizonRoomHooks from "./routes/horizon/roomHooks";
+import horizonBotApi from "./routes/horizon/botApi";
 
 import { uploadVideo } from "./lib/storageClient";
-import horizonRoutes from "./routes/horizon";
 
 
 console.log("CLIENT_URL:", process.env.CLIENT_URL);
@@ -67,6 +86,20 @@ const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 
 
 const app = express();
+
+// Trust the first proxy (Render / reverse proxy) for accurate req.ip
+app.set("trust proxy", 1);
+
+// Security headers – compatibility-first configuration.
+// contentSecurityPolicy is disabled to avoid breaking embeds, HLS playback,
+// and cross-origin media; crossOriginEmbedderPolicy off for the same reason.
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: { policy: "cross-origin" },
+  })
+);
 
 function normalizeControlsDocId(raw: any): string {
   const id = String(raw || "").trim();
@@ -92,6 +125,7 @@ const allowedOrigins = new Set(
     // Production custom domains
     "https://streamline.nxtlvlts.com",
     "https://www.streamline.nxtlvlts.com",
+    "https://supporthub.nxtlvlts.com",
     // Local dev
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -122,15 +156,25 @@ const corsOptions: CorsOptions = {
     "Authorization",
     "X-Requested-With",
     "Cache-Control",
+    // Optional onboarding key for controlled self-serve onboarding
+    "x-onboarding-key",
+    "X-Onboarding-Key",
     // Room-level access token used by in-room APIs (HLS, multistream, controls, etc.).
     // Explicitly allow both typical header casings to satisfy browser preflight checks.
     "x-room-access-token",
     "X-Room-Access-Token",
+    "x-owner-context-uid",
+    "X-Owner-Context-Uid",
     // Legacy invite JWT (join links) used for guest RTC join/status without auth.
     "x-invite-token",
     "X-Invite-Token",
+    // Program-scoped context headers used by Support Hub and admin APIs.
+    "x-program-id",
+    "X-Program-Id",
+    "x-active-program-id",
+    "X-Active-Program-Id",
   ],
-  exposedHeaders: ["x-sl-auth-fallback", "x-sl-auth-header-invalid"],
+  exposedHeaders: ["x-sl-auth-fallback", "x-sl-auth-header-invalid", "X-Request-Id"],
   optionsSuccessStatus: 204,
 };
 
@@ -138,25 +182,45 @@ app.use(cors(corsOptions));
 // Preflight
 app.options(/.*/, cors(corsOptions));
 
+// ── Observability middleware (before all routes, including webhooks) ──
+// Request ID must be first so every log line / response includes it.
+app.use(requestIdMiddleware);
 
-
-
+// Structured request logging via pino-http.
+// Skip noisy health-check endpoints to keep logs clean.
+app.use(
+  pinoHttp({
+    logger,
+    genReqId: (req: any) => req.id, // reuse requestId middleware value
+    autoLogging: {
+      ignore: (req: any) => {
+        const url = req.url || "";
+        return url === "/api/health" || url === "/" || url === "/api";
+      },
+    },
+  })
+);
 
 // Stripe/Billing webhooks MUST run before JSON body parsing so Stripe
 // webhook signature verification can use the raw request body.
 app.use("/api/webhooks", webhookRouter);
 
-// Horizon bot integration – POST /events uses raw body for HMAC verification,
-// so it must also be mounted before the global JSON parser.
-// Support API endpoints (GET) use the global JSON parser below.
-app.use("/api/horizon", horizonRoutes);
-
 // Body parsers for the rest of the API
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
+
+// Egress compositor templates – served as static HTML so LiveKit's headless
+// Chromium can load them via the customBaseUrl parameter.
+app.use(
+  "/egress-templates",
+  express.static(path.join(process.cwd(), "public", "egress-templates"))
+);
+
 app.use("/api/auth", authRoutes);
 app.use("/api/account", accountRoutes);
+app.use("/api/collaborators", collaboratorsRoutes);
+app.use("/api/support/tickets", supportPublicRoutes);
 
 // Admin routes
 app.use("/api/admin", adminRoutes);
@@ -177,7 +241,6 @@ app.get("/api", (req, res) => {
       "/api/rooms",
       "/api/admin",
       "/api/hls",
-      "/api/horizon",
     ]
   });
 });
@@ -188,11 +251,23 @@ app.use("/api/hls", hlsRoutes);
 app.use("/api/public/hls", publicHlsRoutes);
 // Public viewer-safe HLS config (no auth)
 app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
+
+// Monetization v1 (PPV, PWYW, Donations for HLS rooms)
+app.use("/api/monetization", monetizationRoutes);
+
+// Onboarding/reset endpoints (guarded; demo-safe)
+app.use("/api/onboarding", onboardingRoutes);
 // Recordings API - This handles GET /:id and POST /start, /stop
 app.use("/api/recordings", recordingsRoutes);
 
 // Editing API (authenticated)
 app.use("/api/editing", editingRoutes);
+
+// Projects API (core media workspace — independent of editing)
+app.use("/api/projects", projectsRoutes);
+
+// My Content API (SavedVideo library — Layer 1)
+app.use("/api/my-content", myContentRoutes);
 
 // Health check
 app.get("/", (_req, res) => res.send("API up"));
@@ -226,8 +301,14 @@ app.use("/api/rooms", roomsPolicyRoutes);
 app.use("/api/rooms", roomControlsRoutes);
 // Per-session persistent chat (roomAccessToken scoped)
 app.use("/api/rooms", roomChatRoutes);
+// Horizon ↔ room hooks (chat-events, voice-stream, agent chat response)
+app.use("/api/rooms", horizonRoomHooks);
 // Persistent room layout config (controls viewer layout; recordings inherit)
 app.use("/api/rooms", roomsLayoutRoutes);
+// Studio layout config (preset-based canvas composition for the program output)
+app.use("/api/rooms", roomsStudioLayoutRoutes);
+// Program state (shared output/compositor state; synced to LiveKit room metadata)
+app.use("/api/rooms", roomsProgramStateRoutes);
 // Latest recording state + reconcile helpers
 app.use("/api/rooms", roomsRecordingsRoutes);
 // Room-level persistent HLS config (NOT runtime HLS state)
@@ -242,6 +323,10 @@ app.use("/api/live", liveRoutes);
 // Saved embeds (user-owned) -> stable Firestore rooms
 app.use("/api/saved-embeds", savedEmbedsRoutes);
 
+// Reject legacy EDU/Corporate lane requests
+app.use("/api/edu", (_req, res) => res.status(404).json({ error: "lane_removed" }));
+app.use("/api/corp", (_req, res) => res.status(404).json({ error: "lane_removed" }));
+
 // Billing routes
 app.use("/api/billing", billingRoutes);
 
@@ -251,6 +336,22 @@ app.use("/api/plans", plansRoutes);
 app.use("/api/stats", statsRoutes);
 // Lightweight telemetry events
 app.use("/api/telemetry", telemetryRoutes);
+
+// =============================================================================
+// HORIZON BOT API — bot-accessible via HORIZON_WEBHOOK_SECRET bearer token
+// =============================================================================
+app.use("/api/horizon/bot", horizonBotApi);
+
+// =============================================================================
+// HORIZON / ADMIN MONITORING ROUTES — all admin-only
+// =============================================================================
+app.use("/api/horizon", requireAdmin, horizonApiRoutes);
+app.use("/api/horizon/health", requireAdmin, platformHealthRoutes);
+app.use("/api/horizon/diagnostics", requireAdmin, diagnosticsRoutes);
+app.use("/api/horizon/alerts", requireAdmin, alertRoutes);
+app.use("/api/horizon/skills", requireAdmin, skillsIntegrationRoutes);
+app.use("/api/horizon/support/actions", requireAdmin, supportActionsRoutes);
+app.use("/api/horizon/support/tickets", requireAdmin, supportTicketsRoutes);
 
 // Protected config health (helps diagnose env drift across Render services)
 app.get("/api/health/config", requireAuth, (req, res) => {
@@ -678,6 +779,24 @@ app.post("/api/roomModeration/remove-all", requireAuth, requireRoomAccessToken a
     }
 
     const removedCount = results.filter((r) => r.removed).length;
+
+    // Mark the room as "ended" so guests see "session has ended" instead of
+    // "room has not started yet".  The host is the only caller of remove-all
+    // (requires canRemoveGuests), so this is always the right lifecycle transition.
+    try {
+      await db.collection("rooms").doc(roomId).set(
+        {
+          status: "ended",
+          endedAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    } catch (statusErr) {
+      // Best-effort — don't fail the kick operation if status update fails
+      console.warn("[remove-all] failed to set room status=ended", { roomId, err: (statusErr as any)?.message });
+    }
+
     return res.json({ ok: true, removedCount, results });
   } catch (e: any) {
     console.error("remove-all error", e);
@@ -690,233 +809,10 @@ app.post("/api/roomModeration/remove-all", requireAuth, requireRoomAccessToken a
 // AUTH ENDPOINTS
 // =============================================================================
 
-// Helper function to calculate next reset date based on signup date
-function calculateNextResetDate(createdAt: Date): Date {
-  const now = new Date();
-  const signupDay = createdAt.getDate();
-  
-  // Next reset is on the same day next month
-  const nextMonth = new Date(now.getFullYear(), now.getMonth() + 1, signupDay);
-  
-  // If we've already passed this month's reset day, use next month
-  if (now.getDate() >= signupDay) {
-    return new Date(now.getFullYear(), now.getMonth() + 2, signupDay);
-  }
-  
-  return nextMonth;
-}
-
-// Signup
-app.post("/api/auth/signup", async (req, res) => {
-  try {
-    const {
-      email,
-      password,
-      displayName,
-      timeZone,
-      skipOnboarding,
-      defaultResolution,
-      defaultDestinations,
-      defaultPrivacy,
-    } = req.body as {
-      email?: string;
-      password?: string;
-      displayName?: string;
-      timeZone?: string;
-      skipOnboarding?: boolean;
-      defaultResolution?: string;
-      defaultDestinations?: { youtube?: boolean; facebook?: boolean, twitch?: boolean };
-      defaultPrivacy?: string;
-    };
-
-    console.log("🔐 Signup request:", { email, displayName, timeZone });
-
-    if (!email || !password) {
-      return res.status(400).json({ error: "email and password are required" });
-    }
-
-    if (password.length < 6) {
-      return res.status(400).json({ error: "password must be at least 6 characters" });
-    }
-
-    const existingSnap = await db
-      .collection("users")
-      .where("email", "==", email.trim().toLowerCase())
-      .limit(1)
-      .get();
-
-    if (!existingSnap.empty) {
-      return res.status(409).json({ error: "email already in use" });
-    }
-
-    const passwordHash = await bcrypt.hash(password, 10);
-    const now = new Date();
-    const monthKey = getCurrentMonthKey();
-
-    // =============================================================================
-    // CREATE USER DOCUMENT WITH COMPLETE STRUCTURE
-    // =============================================================================
-
-    // Build userData – include passwordHash so the canonical auth.ts login
-    // route can verify credentials via Firestore (prevents login failures
-    // for accounts created through this legacy endpoint).
-const userData: any = {
-  email: email.trim().toLowerCase(),
-  passwordHash,
-  displayName: sanitizeDisplayName(displayName).trim(),
-  timeZone: timeZone || "America/Chicago",
-
-  // Plan assignment
-  planId: "free",
-  plan: "free", // optional legacy fallback
-  planUpdatedAt: now,
-
-  // Social connections
-  youtubeConnected: false,
-  facebookConnected: false,
-  twitchConnected: false,
-
-  // Timestamps
-  createdAt: now,
-  updatedAt: now,
-
-  // Onboarding
-  onboardingCompleted: !skipOnboarding,
-
-  // Billing configuration
-  billing: {
-    anniversaryDay: now.getDate(),
-    nextResetAt: calculateNextResetDate(now),
-
-    // ✅ overages defaults (keep here)
-    overagesEnabled: false,
-    billingEnabled: false,
-    overageRatePerMin: 0,
-  },
-
-  // Usage metadata
-  usageMeta: {
-    activeMonthKey: monthKey,
-    lastResetAt: now,
-    ytdMinutes: 0,
-  },
-
-  admin: { isAdmin: false },
-
-  preferences: skipOnboarding
-    ? {}
-    : {
-        defaultResolution: defaultResolution || "720p",
-        defaultDestinations: {
-          youtube: defaultDestinations?.youtube ?? false,
-          facebook: defaultDestinations?.facebook ?? false,
-          twitch: defaultDestinations?.twitch ?? false,
-        },
-        defaultPrivacy: defaultPrivacy || "public",
-      },
-};
-
-// Legacy fields (optional)
-if (!skipOnboarding) {
-  userData.defaultResolution = userData.preferences.defaultResolution;
-  userData.defaultDestinations = userData.preferences.defaultDestinations;
-  if (defaultPrivacy) userData.defaultPrivacy = defaultPrivacy;
-}
-
-// 1) Create Firebase Auth user (this generates UID)
-const userRecord = await admin.auth().createUser({
-  email: userData.email,
-  password, // must be in scope
-  displayName: userData.displayName,
-});
-
-const uid = userRecord.uid;
-
-// 2) Create Firestore user doc at users/{uid}
-const userRef = db.collection("users").doc(uid);
-
-await userRef.set({
-  ...userData,
-  id: uid,  // optional
-  uid: uid, // optional but helpful
-
-  // ✅ optional mirror for older code that checks root
-  overagesEnabled: userData.billing.overagesEnabled,
-});
-
-console.log("✅ User document created:", uid);
-
-
-    // =============================================================================
-    // INITIALIZE MONTHLY USAGE DOCUMENT
-    // =============================================================================
-
-    const usageData = {
-      uid: userRef.id,
-      monthKey,
-      periodStart: now,
-      periodEnd: null, // Will be set when month ends
-      
-      totals: {
-        streamMinutes: 0,
-        participantMinutes: 0,
-        transcodeMinutes: 0,
-        overageMinutes: 0,
-      },
-      
-      lastSession: null,
-      
-      source: "server", // Mark as server-written for security
-      updatedAt: now,
-    };
-
-    await db.collection("usageMonthly").doc(`${userRef.id}_${monthKey}`).set(usageData);
-    console.log("✅ Monthly usage document initialized");
-
-    // =============================================================================
-    // RETURN SUCCESS RESPONSE
-    // =============================================================================
-
-    const user = {
-      id: userRef.id,
-      uid: userRef.id, // Include both for compatibility
-      email: userData.email,
-      displayName: userData.displayName,
-      planId: userData.planId,
-      plan: userData.plan,
-      timeZone: userData.timeZone,
-      onboardingCompleted: userData.onboardingCompleted,
-      defaultResolution: userData.defaultResolution || null,
-      defaultDestinations: userData.defaultDestinations || null,
-      defaultPrivacy: userData.defaultPrivacy || null,
-      youtubeConnected: userData.youtubeConnected,
-      facebookConnected: userData.facebookConnected,
-      createdAt: userData.createdAt.toISOString ? userData.createdAt.toISOString() : userData.createdAt,
-    };
-
-    const token = jwt.sign(user, JWT_SECRET, { expiresIn: "7d" });
-
-    console.log("✅ Signup successful for:", email);
-
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
-    });
-    // Also return token in response for frontend fallback (non-httpOnly)
-    return res.json({ user, token });
-  } catch (err) {
-    console.error("❌ Signup error:", err);
-    return res.status(500).json({ error: "internal server error" });
-  }
-});
-
-// Login
-// NOTE: /api/auth/login and /api/auth/signup are now handled exclusively by
-// routes/auth.ts via app.use("/api/auth", authRoutes). The legacy inline
-// implementations that signed different JWT payloads have been removed to
-// ensure a single, consistent auth flow.
+// NOTE: /api/auth/login, /api/auth/signup, and /api/auth/legacy-login are
+// handled exclusively by routes/auth.ts via app.use("/api/auth", authRoutes).
+// The legacy inline signup that created Firebase Auth users without storing
+// passwordHash in Firestore has been removed to prevent auth drift.
 
 // =============================================================================
 // USAGE TRACKING
@@ -929,24 +825,20 @@ app.get("/api/health", (_req, res) => {
 // NOTE: /api/usage/summary is implemented in routes/usageRoutes.ts
 // and is requireAuth-protected with a stable payload.
 
-app.post("/api/usage/streamEnded", async (req, res) => {
+app.post("/api/usage/streamEnded", requireAuth, async (req, res) => {
   try {
-    const authedUid = (req as any).user?.uid as string | undefined;
-    const { uid: bodyUid, minutes, guestCount } = req.body as {
-      uid?: string;
+    const uid = (req as any).user?.uid as string | undefined;
+    const { minutes, guestCount } = req.body as {
       minutes?: number;
       guestCount?: number;
       transcodeMinutes?: number;
     };
 
-    const uid = bodyUid || authedUid;
     if (!uid) {
-      return res.status(400).json({ error: "uid required" });
+      return res.status(401).json({ error: "authentication required" });
     }
 
     console.log("[usage] streamEnded start", {
-      authedUid,
-      bodyUid,
       uid,
       minutes,
       guestCount,
@@ -1149,17 +1041,77 @@ app.use((req, res) => {
   res.status(404).json({ error: "Not found", path: req.originalUrl });
 });
 
+// =============================================================================
+// GLOBAL ERROR HANDLER — must be registered after all routes
+// =============================================================================
+app.use(globalErrorHandler);
 
+// =============================================================================
+// SERVER STARTUP + GRACEFUL SHUTDOWN
+// =============================================================================
 
-app.listen(PORT, () => {
-  console.log(`✅ Server listening on http://localhost:${PORT}`);
-  console.log("[config-health]", {
-    env: String(process.env.NODE_ENV || "development"),
-    tokenGrants: "v3-no-sources",
-    hasLivekitUrl: !!process.env.LIVEKIT_URL,
-    hasLivekitApiKey: !!process.env.LIVEKIT_API_KEY,
-    hasLivekitApiSecret: !!process.env.LIVEKIT_API_SECRET,
-    hasJwtSecret: !!process.env.JWT_SECRET,
-    hasRoomAccessTokenSecret: !!process.env.ROOM_ACCESS_TOKEN_SECRET,
-  });
+const server = app.listen(PORT, () => {
+  logger.info(
+    {
+      port: PORT,
+      env: String(process.env.NODE_ENV || "development"),
+      tokenGrants: "v3-no-sources",
+      hasLivekitUrl: !!process.env.LIVEKIT_URL,
+      hasLivekitApiKey: !!process.env.LIVEKIT_API_KEY,
+      hasLivekitApiSecret: !!process.env.LIVEKIT_API_SECRET,
+      hasJwtSecret: !!process.env.JWT_SECRET,
+      hasRoomAccessTokenSecret: !!process.env.ROOM_ACCESS_TOKEN_SECRET,
+    },
+    `Server listening on http://localhost:${PORT}`
+  );
+
+  // Start the export render worker (background Firestore poller).
+  // Set EXPORT_WORKER_ENABLED=0 to disable on instances that should not render.
+  const workerEnabled = String(process.env.EXPORT_WORKER_ENABLED ?? "1").trim();
+  if (workerEnabled !== "0" && workerEnabled.toLowerCase() !== "false") {
+    import("./lib/renderWorker.js").then(({ startExportWorker }) => {
+      startExportWorker();
+    }).catch((err) => {
+      logger.warn({ err: (err as any)?.message }, "Export worker failed to start (non-fatal)");
+    });
+  }
+
+  // Start the recording retention cleanup service (runs every hour).
+  // Deletes recordings older than 24 hours from R2 and Firestore.
+  // Set RECORDING_CLEANUP_DRY_RUN=1 to preview deletions without actually removing files.
+  startRecordingCleanup();
 });
+
+// Attach Horizon WebSocket (authenticated admin-only WS)
+attachHorizonWs(server);
+
+// =============================================================================
+// PROCESS-LEVEL HANDLERS
+// =============================================================================
+
+process.on("unhandledRejection", (reason: unknown) => {
+  logger.error({ err: reason }, "Unhandled promise rejection");
+});
+
+process.on("uncaughtException", (err: Error) => {
+  logger.fatal({ err }, "Uncaught exception — exiting");
+  // Flush logs then exit.  pino is sync-by-default to stdout, so a short
+  // timeout is sufficient to let any async transport finish.
+  setTimeout(() => process.exit(1), 500);
+});
+
+function gracefulShutdown(signal: string) {
+  logger.info({ signal }, "Received shutdown signal — closing server");
+  server.close(() => {
+    logger.info("HTTP server closed");
+    process.exit(0);
+  });
+  // Force exit if server hasn't closed in 10 s
+  setTimeout(() => {
+    logger.warn("Forcing exit after shutdown timeout");
+    process.exit(1);
+  }, 10_000).unref();
+}
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

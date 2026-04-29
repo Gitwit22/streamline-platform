@@ -1,10 +1,25 @@
 export type RoomLayoutMode = "grid" | "speaker" | "carousel" | "pip";
 
+export type OutputFormat = "landscape_16x9" | "vertical_9x16" | "square_1x1";
+
+export const VALID_OUTPUT_FORMATS: readonly OutputFormat[] = [
+  "landscape_16x9",
+  "vertical_9x16",
+  "square_1x1",
+] as const;
+
+export const OUTPUT_FORMAT_DIMENSIONS: Record<OutputFormat, { width: number; height: number }> = {
+  landscape_16x9: { width: 1920, height: 1080 },
+  vertical_9x16: { width: 1080, height: 1920 },
+  square_1x1: { width: 1080, height: 1080 },
+};
+
 export type RoomLayout = {
   mode: RoomLayoutMode;
   maxTiles?: number;
   followSpeaker?: boolean;
   pinnedIdentity?: string | null;
+  outputFormat?: OutputFormat;
 };
 
 export type CompositeLayoutMode = "grid" | "speaker";
@@ -28,6 +43,15 @@ function pickStringOrNull(v: any): string | null | undefined {
   return undefined;
 }
 
+export function normalizeOutputFormat(raw: any): OutputFormat | undefined {
+  if (typeof raw !== "string") return undefined;
+  const v = raw.trim().toLowerCase();
+  if (v === "landscape_16x9" || v === "vertical_9x16" || v === "square_1x1") {
+    return v as OutputFormat;
+  }
+  return undefined;
+}
+
 export function normalizeRoomLayout(input: any): RoomLayout | null {
   if (!input || typeof input !== "object") return null;
 
@@ -42,11 +66,13 @@ export function normalizeRoomLayout(input: any): RoomLayout | null {
   const maxTiles = pickNumber((input as any).maxTiles);
   const followSpeaker = pickBoolean((input as any).followSpeaker);
   const pinnedIdentity = pickStringOrNull((input as any).pinnedIdentity);
+  const outputFormat = normalizeOutputFormat((input as any).outputFormat);
 
   const out: RoomLayout = { mode };
   if (typeof maxTiles === "number") out.maxTiles = maxTiles;
   if (typeof followSpeaker === "boolean") out.followSpeaker = followSpeaker;
   if (pinnedIdentity !== undefined) out.pinnedIdentity = pinnedIdentity;
+  if (outputFormat) out.outputFormat = outputFormat;
 
   return out;
 }

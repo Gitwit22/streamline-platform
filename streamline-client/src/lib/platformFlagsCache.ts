@@ -1,6 +1,7 @@
 import { apiFetch } from "./api";
 import { getMeCached } from "./meCache";
 import { getPlatformFlagsValue, setPlatformFlagsValue, type PlatformFlags } from "./platformFlagsStore";
+export type { PlatformFlags };
 
 let inFlight: Promise<PlatformFlags> | null = null;
 

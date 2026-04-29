@@ -62,18 +62,30 @@ export async function startHlsEgress(params: {
   });
 
   // RoomComposite + Segments output => HLS manifest + segments uploaded continuously.
+  // Prefer the custom program-compositor template so the egress output reflects
+  // the host's real-time layout choices (programState via room metadata).
+  const egressTemplateBase = process.env.EGRESS_TEMPLATE_BASE_URL;
+  const customBaseUrl = egressTemplateBase
+    ? `${egressTemplateBase.replace(/\/+$/, "")}/egress-templates/program-compositor.html`
+    : undefined;
+
+  const layoutWithNames = `${params.layout}-dark`;
+
   if (process.env.AUTH_DEBUG === "1") {
     console.log("[livekit-debug] startRoomCompositeEgress (HLS)", {
       livekitRoomName: params.roomName,
       layout: params.layout,
       prefix: params.prefix,
+      customBaseUrl: customBaseUrl || "(fallback: built-in layout)",
     });
   }
 
   const info = await client.startRoomCompositeEgress(
     params.roomName,
     { segments: output },
-    { layout: params.layout }
+    {
+      ...(customBaseUrl ? { customBaseUrl } : { layout: layoutWithNames }),
+    }
   );
 
   // mapPreset(params.presetId) reserved for future encoding options usage

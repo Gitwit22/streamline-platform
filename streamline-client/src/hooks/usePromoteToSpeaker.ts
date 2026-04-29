@@ -69,7 +69,7 @@ export function usePromoteToSpeaker(roomId: string, roomAccessToken: string | nu
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
-              Authorization: `Bearer ${roomAccessToken}`,
+              'x-room-access-token': roomAccessToken,
             },
             credentials: 'include',
           }

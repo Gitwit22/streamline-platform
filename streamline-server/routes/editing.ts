@@ -2,13 +2,40 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { Router, Request, Response } from "express";
 import { firestore as db } from "../firebaseAdmin";
 import multer from "multer";
-import { uploadVideo, getSignedDownloadUrl } from "../lib/storageClient";
+import { uploadVideo, getSignedDownloadUrl, deleteFile } from "../lib/storageClient";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
-import { checkStorageLimit, updateStorageUsage } from "../usageHelper";
+import { reserveStorageIfAvailable, releaseReservedStorage, releaseStorageUsage, reserveStorageUsage, getCurrentStorageUsage } from "../usageHelper";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { canAccessFeature } from "./featureAccess";
+import { logger } from "../lib/logger";
+import {
+  normalizeExportSettings,
+  resolutionToDimensions,
+  formatToContainer,
+} from "../lib/exportTypes";
+import type {
+  ExportSettingsInput,
+  ExportTimeline,
+  ExportTimelineClip,
+  ExportTimelineTrack,
+} from "../lib/exportTypes";
+import {
+  createExportJob,
+  getExportJob,
+  cancelJob,
+} from "../lib/exportQueue";
+import {
+  resolveProjectForEditor,
+  listProjectsForEditor,
+  countUserProjects,
+} from "../lib/projectBridge";
+import {
+  getProcessingJob,
+  listProjectProcessingJobs,
+  enqueueStandardJobs,
+} from "../lib/processingQueue";
 
 const router = Router();
 
@@ -49,24 +76,27 @@ async function getSegmentedPlatformFlags(): Promise<SegmentedPlatformFlags> {
       ? ((myContentRecordingsSnap.data() as any) || {})
       : {};
 
+    // Platform flags act as kill-switches: missing → enabled.
+    // Set { enabled: false } in Firestore to disable.
+    const resolve = (d: any) => d.enabled !== false;
+
     cachedSegmentedFlags = {
-      // New segmented flags default to DISABLED when missing.
-      contentLibraryEnabled: contentLibraryData.enabled === true,
-      projectsEnabled: projectsData.enabled === true,
-      editorEnabled: editorData.enabled === true,
-      myContentEnabled: myContentData.enabled === true,
-      myContentRecordingsEnabled: myContentRecordingsData.enabled === true,
+      contentLibraryEnabled: resolve(contentLibraryData),
+      projectsEnabled: resolve(projectsData),
+      editorEnabled: resolve(editorData),
+      myContentEnabled: resolve(myContentData),
+      myContentRecordingsEnabled: resolve(myContentRecordingsData),
     };
     cachedSegmentedFlagsAt = now;
     return cachedSegmentedFlags;
   } catch (err) {
     console.error("[editing] failed to load segmented platform flags", err);
     cachedSegmentedFlags = {
-      contentLibraryEnabled: false,
-      projectsEnabled: false,
-      editorEnabled: false,
-      myContentEnabled: false,
-      myContentRecordingsEnabled: false,
+      contentLibraryEnabled: true,
+      projectsEnabled: true,
+      editorEnabled: true,
+      myContentEnabled: true,
+      myContentRecordingsEnabled: true,
     };
     cachedSegmentedFlagsAt = now;
     return cachedSegmentedFlags;
@@ -102,6 +132,78 @@ function getAuthedUid(req: Request): string | null {
   const user = (req as any).user;
   const uid = typeof user?.uid === "string" ? user.uid : null;
   return uid;
+}
+
+type EditingPlanInfo = {
+  planId: string;
+  access: boolean;
+  maxProjects: number; // 0 => unlimited when access=true
+  maxStorageGB: number;
+  maxTracks?: number;
+  maxResolution?: string | null;
+};
+
+async function getEditingPlanInfo(uid: string): Promise<EditingPlanInfo> {
+  const userSnap = await db.collection("users").doc(uid).get();
+  const userData = userSnap.exists ? ((userSnap.data() as any) || {}) : {};
+  const planId = String(userData.planId || userData.plan || "free");
+
+  const planSnap = await db.collection("plans").doc(planId).get();
+  const planData = planSnap.exists ? ((planSnap.data() as any) || {}) : {};
+
+  const editing = (planData.editing || {}) as any;
+
+  // If the plan doc is missing from Firestore, fall back based on planId.
+  // Internal/enterprise/pro plans get full access even without a plan doc.
+  const FULL_ACCESS_PLAN_IDS = ["internal_unlimited", "enterprise", "pro"];
+  const planDocMissing = !planSnap.exists;
+  const access = planDocMissing
+    ? FULL_ACCESS_PLAN_IDS.includes(planId)
+    : editing.access === true;
+  const maxProjects = planDocMissing && access ? 999 : Number(editing.maxProjects ?? 0);
+  const maxStorageGB = (() => {
+    if (planDocMissing && access) return 100;
+    const gb = editing.maxStorageGB;
+    const bytes = editing.maxStorageBytes;
+    if (gb !== undefined && gb !== null) {
+      const n = Number(gb);
+      return Number.isFinite(n) ? Math.max(0, n) : 0;
+    }
+    if (bytes !== undefined && bytes !== null) {
+      const n = Number(bytes);
+      return Number.isFinite(n) ? Math.max(0, Math.round(n / (1024 * 1024 * 1024))) : 0;
+    }
+    return 0;
+  })();
+
+  return {
+    planId,
+    access,
+    maxProjects: Number.isFinite(maxProjects) ? Math.max(0, Math.round(maxProjects)) : 0,
+    maxStorageGB,
+    maxTracks: typeof editing.maxTracks === "number" ? Math.max(0, Math.round(editing.maxTracks)) : undefined,
+    maxResolution: typeof editing.maxResolution === "string" ? editing.maxResolution : (editing.maxResolution ?? null),
+  };
+}
+
+async function assertEditingAccess(req: Request, res: Response): Promise<{ uid: string; plan: EditingPlanInfo } | null> {
+  const uid = getAuthedUid(req);
+  if (!uid) {
+    res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    return null;
+  }
+
+  const plan = await getEditingPlanInfo(uid);
+  if (!plan.access) {
+    res.status(403).json({
+      error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
+      reason: "Editing not available on your plan",
+      planId: plan.planId,
+    });
+    return null;
+  }
+
+  return { uid, plan };
 }
 
 // Configure multer for memory storage (files stored in RAM temporarily)
@@ -143,13 +245,14 @@ router.post(
       console.log(`📦 Size: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
       console.log(`👤 User: ${userId}`);
 
-      // Check storage limits
-      try {
-        await checkStorageLimit(userId, file.size);
-      } catch (err: any) {
+      // Transactional reservation: atomically check limit + increment counter.
+      const reservation = await reserveStorageIfAvailable(userId, file.size, {
+        caller: "editing.upload",
+      });
+      if (!reservation.reserved) {
         return res.status(409).json({
           error: LIMIT_ERRORS.LIMIT_EXCEEDED,
-          details: err?.message || "Storage limit exceeded",
+          details: reservation.reason || "Storage limit exceeded",
         });
       }
 
@@ -162,20 +265,30 @@ router.post(
       console.log(`☁️ Uploading to: ${path}`);
 
       // Upload to R2/S3
-      const publicUrl = await uploadVideo(
-        file.buffer,
-        path,
-        file.mimetype
-      );
+      let publicUrl: string;
+      try {
+        publicUrl = await uploadVideo(
+          file.buffer,
+          path,
+          file.mimetype
+        );
+      } catch (uploadErr: any) {
+        // Upload failed — release the reserved bytes so they aren't stranded.
+        try {
+          await releaseReservedStorage(userId, file.size, {
+            caller: "editing.upload.rollback",
+            storagePath: path,
+          });
+        } catch (releaseErr: any) {
+          console.error("[editing] CRITICAL: failed to release reservation after upload failure", {
+            userId, storagePath: path, fileSizeBytes: file.size,
+            uploadError: uploadErr?.message, releaseError: releaseErr?.message,
+          });
+        }
+        throw uploadErr;
+      }
 
       console.log(`✅ Upload complete: ${publicUrl}`);
-
-      // Update storage usage (best-effort)
-      try {
-        await updateStorageUsage(userId, file.size);
-      } catch (err) {
-        console.log("⚠️ Storage usage update failed (non-critical)");
-      }
 
       // Create asset in Firestore
       const assetData = {
@@ -329,32 +442,55 @@ router.get("/assets/:id", async (req: Request, res: Response) => {
       return;
     }
 
+    // 1) Recordings-backed assets
     const recordingSnap = await db.collection("recordings").doc(id).get();
+    if (recordingSnap.exists) {
+      const data = recordingSnap.data();
 
-    if (!recordingSnap.exists) {
+      // Verify ownership
+      if (data?.userId !== userId) {
+        return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+      }
+
+      const asset = {
+        id: data?.id || recordingSnap.id,
+        name: data?.title || "Untitled",
+        duration: data?.duration || 0,
+        source: "stream" as const,
+        thumbnail: data?.thumbnailUrl || "",
+        thumbnailUrl: data?.thumbnailUrl || null,
+        videoUrl: data?.videoUrl || data?.publicExportUrl,
+        fileSize: data?.fileSize,
+        createdAt: data?.createdAt?.toDate?.()?.toISOString?.() || new Date().toISOString(),
+        userId: data?.userId,
+      };
+
+      return res.json(asset);
+    }
+
+    // 2) Uploaded assets
+    const uploadSnap = await db.collection("editing_assets").doc(id).get();
+    if (!uploadSnap.exists) {
       return res.status(404).json({ error: "Asset not found" });
     }
 
-    const data = recordingSnap.data();
-
-    // Verify ownership
+    const data = uploadSnap.data() as any;
     if (data?.userId !== userId) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    const asset = {
-      id: data?.id || recordingSnap.id,
-      name: data?.title || "Untitled",
+    return res.json({
+      id: uploadSnap.id,
+      name: data?.name || "Untitled",
       duration: data?.duration || 0,
-      source: "stream" as const,
+      source: data?.source || "upload",
       thumbnail: data?.thumbnailUrl || "",
-      videoUrl: data?.videoUrl || data?.publicExportUrl,
-      fileSize: data?.fileSize,
+      thumbnailUrl: data?.thumbnailUrl || null,
+      videoUrl: data?.videoUrl || "",
+      fileSize: data?.fileSize || 0,
       createdAt: data?.createdAt?.toDate?.()?.toISOString?.() || new Date().toISOString(),
       userId: data?.userId,
-    };
-
-    res.json(asset);
+    });
   } catch (err: any) {
     console.error("get asset error:", err);
     res.status(500).json({ error: err.message || "Internal server error" });
@@ -375,25 +511,83 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
       return;
     }
 
+    // 1) Try recordings-backed assets
     const recordingSnap = await db.collection("recordings").doc(id).get();
+    if (recordingSnap.exists) {
+      const data = recordingSnap.data();
 
-    if (!recordingSnap.exists) {
+      // Verify ownership
+      if (data?.userId !== userId) {
+        return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+      }
+
+      // Capture file size before deletion
+      const fileSize = typeof data?.fileSize === "number" ? data.fileSize : 0;
+
+      const storage = await deleteRecordingStorage(data);
+
+      // Release storage quota after R2 bytes are removed
+      if (fileSize > 0) {
+        try {
+          await releaseStorageUsage(userId, fileSize, {
+            caller: "editing.DELETE.recording",
+            docId: id,
+          });
+        } catch (e: any) {
+          console.error("[editing] storage release failed for recording asset:", {
+            userId, docId: id, fileSize, error: e?.message || e,
+          });
+        }
+      }
+
+      // Delete from Firestore
+      await db.collection("recordings").doc(id).delete();
+
+      return res.json({ ok: true, message: "Asset deleted", storage });
+    }
+
+    // 2) Try uploaded editing_assets
+    const uploadSnap = await db.collection("editing_assets").doc(id).get();
+    if (!uploadSnap.exists) {
       return res.status(404).json({ error: "Asset not found" });
     }
 
-    const data = recordingSnap.data();
+    const uploadData = uploadSnap.data() as any;
 
     // Verify ownership
-    if (data?.userId !== userId) {
+    if (uploadData?.userId !== userId) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    const storage = await deleteRecordingStorage(data);
+    // Capture file size before deletion
+    const fileSize = typeof uploadData?.fileSize === "number" ? uploadData.fileSize : 0;
 
-    // Delete from Firestore
-    await db.collection("recordings").doc(id).delete();
+    const storagePath = typeof uploadData?.storagePath === "string" ? uploadData.storagePath : null;
+    if (storagePath) {
+      try {
+        await deleteFile(storagePath);
+      } catch (e: any) {
+        console.warn("[editing] failed to delete asset storage", e?.message || e);
+      }
 
-    res.json({ ok: true, message: "Asset deleted", storage });
+      // Release storage quota after R2 bytes are removed
+      if (fileSize > 0) {
+        try {
+          await releaseStorageUsage(userId, fileSize, {
+            caller: "editing.DELETE.upload",
+            docId: id,
+            storagePath,
+          });
+        } catch (e: any) {
+          console.error("[editing] storage release failed for uploaded asset:", {
+            userId, docId: id, fileSize, storagePath, error: e?.message || e,
+          });
+        }
+      }
+    }
+
+    await db.collection("editing_assets").doc(id).delete();
+    return res.json({ ok: true, message: "Asset deleted" });
   } catch (err: any) {
     console.error("delete asset error:", err);
     res.status(500).json({ error: err.message || "Internal server error" });
@@ -465,25 +659,13 @@ router.get("/projects", async (req: Request, res: Response) => {
     if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
       return;
     }
-    
-    const projectsSnap = await db
-      .collection("editing_projects")
-      .where("userId", "==", userId)
-      .get();
 
-    const projects = projectsSnap.docs.map((doc) => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        name: data.name,
-        assetId: data.assetId,
-        createdAt: data.createdAt?.toDate?.()?.toISOString(),
-        updatedAt: data.updatedAt?.toDate?.()?.toISOString(),
-        duration: data.duration || 0,
-        status: data.status || 'draft',
-        userId: data.userId
-      };
-    });
+    // Plan-based gating: projects are part of editing.
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    // Use the project bridge to merge both collections into one normalized list
+    const projects = await listProjectsForEditor(userId);
 
     res.json(projects);
   } catch (err: any) {
@@ -510,15 +692,37 @@ router.post("/projects", async (req: Request, res: Response) => {
       return;
     }
 
-    const newProject = {
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    // Enforce max projects (0 means unlimited when access=true)
+    if (access.plan.maxProjects > 0) {
+      const totalCount = await countUserProjects(userId);
+      if (totalCount >= access.plan.maxProjects) {
+        return res.status(409).json({
+          error: LIMIT_ERRORS.LIMIT_EXCEEDED,
+          reason: "Max projects limit reached",
+          limit: access.plan.maxProjects,
+        });
+      }
+    }
+
+    if (!name || typeof name !== "string" || !name.trim()) {
+      return res.status(400).json({ error: "name is required" });
+    }
+
+    const newProject: Record<string, any> = {
       userId,
-      name,
-      assetId,
+      name: String(name).trim(),
+      ...(assetId && typeof assetId === "string" && assetId.trim() ? { assetId: assetId.trim() } : {}),
       createdAt: new Date(),
       updatedAt: new Date(),
       duration: 0,
       status: 'draft',
-      timeline: []
+      timeline: {
+        clips: [],
+        tracks: 2,
+      }
     };
 
     const projectRef = await db.collection("editing_projects").add(newProject);
@@ -527,11 +731,490 @@ router.post("/projects", async (req: Request, res: Response) => {
       id: projectRef.id,
       ...newProject,
       createdAt: newProject.createdAt.toISOString(),
-      updatedAt: newProject.updatedAt.toISOString()
+      updatedAt: newProject.updatedAt.toISOString(),
+      lastModified: newProject.updatedAt.toISOString(),
     });
   } catch (err: any) {
     console.error("Create project error:", err);
     res.status(500).json({ error: "Failed to create project" });
+  }
+});
+
+// GET /api/editing/projects/:id - Get a single project
+router.get("/projects/:id", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    const { id } = req.params;
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
+      return;
+    }
+
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    // Use the bridge to resolve from either collection, auto-creating if needed
+    const project = await resolveProjectForEditor(id, userId);
+    if (!project) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    return res.json(project);
+  } catch (err: any) {
+    console.error("Get project error:", err);
+    res.status(500).json({ error: "Failed to fetch project" });
+  }
+});
+
+// PATCH /api/editing/projects/:id - Update project metadata
+router.patch("/projects/:id", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    const { id } = req.params;
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
+      return;
+    }
+
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    const ref = db.collection("editing_projects").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    const existing = snap.data() as any;
+    if (existing?.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    const patch: any = { updatedAt: new Date() };
+    if (typeof req.body?.name === "string" && req.body.name.trim()) {
+      patch.name = req.body.name.trim();
+    }
+    if (typeof req.body?.status === "string") {
+      patch.status = req.body.status;
+    }
+
+    await ref.set(patch, { merge: true });
+    const merged = { ...(existing || {}), ...patch };
+
+    return res.json({
+      id,
+      name: merged.name,
+      assetId: merged.assetId,
+      status: merged.status || "draft",
+      lastModified: patch.updatedAt.toISOString(),
+      duration: merged.duration || 0,
+      thumbnail: merged.thumbnail || merged.thumbnailUrl || null,
+      userId: merged.userId,
+      timeline: merged.timeline || null,
+    });
+  } catch (err: any) {
+    console.error("Update project error:", err);
+    res.status(500).json({ error: "Failed to update project" });
+  }
+});
+
+// DELETE /api/editing/projects/:id - Delete a project
+router.delete("/projects/:id", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    const { id } = req.params;
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
+      return;
+    }
+
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    const ref = db.collection("editing_projects").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+
+    const data = snap.data() as any;
+    if (data?.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    await ref.delete();
+    return res.json({ ok: true });
+  } catch (err: any) {
+    console.error("Delete project error:", err);
+    res.status(500).json({ error: "Failed to delete project" });
+  }
+});
+
+// POST /api/editing/projects/:id/duplicate - Duplicate a project
+router.post("/projects/:id/duplicate", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    const { id } = req.params;
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
+      return;
+    }
+    if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
+      return;
+    }
+
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    // Enforce max projects
+    if (access.plan.maxProjects > 0) {
+      const totalCount = await countUserProjects(userId);
+      if (totalCount >= access.plan.maxProjects) {
+        return res.status(409).json({
+          error: LIMIT_ERRORS.LIMIT_EXCEEDED,
+          reason: "Max projects limit reached",
+          limit: access.plan.maxProjects,
+        });
+      }
+    }
+
+    const ref = db.collection("editing_projects").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    const data = snap.data() as any;
+    if (data?.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    const now = new Date();
+    const duplicated = {
+      userId,
+      name: `${(data.name || "Untitled").trim()} (Copy)`,
+      assetId: data.assetId || "",
+      createdAt: now,
+      updatedAt: now,
+      duration: data.duration || 0,
+      status: "draft",
+      timeline: data.timeline || { clips: [], tracks: 2 },
+    };
+
+    const newRef = await db.collection("editing_projects").add(duplicated);
+
+    return res.json({
+      id: newRef.id,
+      ...duplicated,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      lastModified: now.toISOString(),
+    });
+  } catch (err: any) {
+    console.error("Duplicate project error:", err);
+    res.status(500).json({ error: "Failed to duplicate project" });
+  }
+});
+
+// PUT /api/editing/projects/:id/timeline - Persist timeline clips
+router.put("/projects/:id/timeline", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    const { id } = req.params;
+    const { clips, tracks: rawTracks } = req.body as any;
+
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+    if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
+      return;
+    }
+
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    const ref = db.collection("editing_projects").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    const data = snap.data() as any;
+    if (data?.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    if (!Array.isArray(clips)) {
+      return res.status(400).json({ error: "clips must be an array" });
+    }
+
+    const sanitized = clips
+      .map((c: any) => {
+        const startTime = Math.max(0, Number(c?.startTime ?? 0));
+        const duration = Math.max(0, Number(c?.duration ?? 0));
+        const inPoint = Math.max(0, Number(c?.inPoint ?? 0));
+        const outPoint = Math.max(inPoint, Number(c?.outPoint ?? 0));
+        return {
+          id: String(c?.id || ""),
+          assetId: String(c?.assetId || ""),
+          trackId: typeof c?.trackId === "string" ? c.trackId : "video_1",
+          startTime,
+          duration,
+          inPoint,
+          outPoint,
+          name: typeof c?.name === "string" ? c.name.slice(0, 200) : "Clip",
+          videoUrl: typeof c?.videoUrl === "string" ? c.videoUrl : "",
+        };
+      })
+      .filter((c: any) => c.id && c.assetId);
+
+    // Persist track state if provided, otherwise default to track count
+    let tracksData: any = 2;
+    if (Array.isArray(rawTracks) && rawTracks.length > 0) {
+      tracksData = rawTracks
+        .filter((t: any) => t && typeof t.id === "string" && typeof t.type === "string")
+        .map((t: any) => ({
+          id: String(t.id),
+          name: typeof t.name === "string" ? t.name.slice(0, 100) : "Track",
+          type: t.type === "audio" ? "audio" : "video",
+          muted: !!t.muted,
+          locked: !!t.locked,
+          solo: !!t.solo,
+          linkedTrackId: typeof t.linkedTrackId === "string" ? t.linkedTrackId : null,
+        }));
+    }
+
+    const timeline = {
+      clips: sanitized,
+      tracks: tracksData,
+    };
+
+    await ref.set(
+      {
+        timeline,
+        updatedAt: new Date(),
+      },
+      { merge: true }
+    );
+
+    return res.json({ saved: true });
+  } catch (err: any) {
+    console.error("Save timeline error:", err);
+    res.status(500).json({ error: "Failed to save timeline" });
+  }
+});
+
+// POST /api/editing/export - Create an export job for a project
+router.post("/export", async (req: Request, res: Response) => {
+  try {
+    if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
+      return;
+    }
+    if (!assertPlatformTranscodeEnabled(res)) {
+      return;
+    }
+
+    const userId = getAuthedUid(req);
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    const { projectId, settings: rawSettings } = (req.body || {}) as any;
+    if (!projectId || typeof projectId !== "string") {
+      return res.status(400).json({ error: "projectId is required" });
+    }
+
+    const projectSnap = await db.collection("editing_projects").doc(projectId).get();
+    if (!projectSnap.exists) {
+      return res.status(404).json({ error: "Project not found" });
+    }
+    const project = projectSnap.data() as any;
+    if (project?.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    // Normalise settings
+    const settings = normalizeExportSettings(rawSettings);
+    const { width, height } = resolutionToDimensions(settings.resolution);
+
+    // Build the render timeline from the saved project timeline
+    let exportTimeline: ExportTimeline | null = null;
+    const savedTimeline = project?.timeline;
+
+    if (savedTimeline && Array.isArray(savedTimeline.clips) && savedTimeline.clips.length > 0) {
+      // Resolve source URLs for each clip
+      const resolvedClips: ExportTimelineClip[] = [];
+      for (const c of savedTimeline.clips) {
+        const clip: ExportTimelineClip = {
+          id: String(c.id || ""),
+          assetId: String(c.assetId || ""),
+          trackId: String(c.trackId || "video_1"),
+          startMs: Math.round(Number(c.startTime || 0) * 1000),
+          endMs: Math.round((Number(c.startTime || 0) + Number(c.duration || 0)) * 1000),
+          sourceInMs: Math.round(Number(c.inPoint || 0) * 1000),
+          sourceOutMs: Math.round(Number(c.outPoint || 0) * 1000),
+          sourceUrl: typeof c.videoUrl === "string" ? c.videoUrl : "",
+          name: typeof c.name === "string" ? c.name : "Clip",
+        };
+
+        // If videoUrl is missing, try to resolve from asset collections
+        if (!clip.sourceUrl && clip.assetId) {
+          try {
+            const recSnap = await db.collection("recordings").doc(clip.assetId).get();
+            if (recSnap.exists) {
+              const d = recSnap.data() as any;
+              if (d?.userId === userId) clip.sourceUrl = d?.videoUrl || d?.publicExportUrl || "";
+            }
+            if (!clip.sourceUrl) {
+              const assetSnap = await db.collection("editing_assets").doc(clip.assetId).get();
+              if (assetSnap.exists) {
+                const d = assetSnap.data() as any;
+                if (d?.userId === userId) clip.sourceUrl = d?.videoUrl || "";
+              }
+            }
+          } catch {}
+        }
+
+        resolvedClips.push(clip);
+      }
+
+      // Build tracks
+      const savedTracks = Array.isArray(savedTimeline.tracks) ? savedTimeline.tracks : [];
+      const trackMap = new Map<string, ExportTimelineTrack>();
+
+      for (const clip of resolvedClips) {
+        if (!trackMap.has(clip.trackId)) {
+          const savedTrack = savedTracks.find((t: any) => t.id === clip.trackId);
+          trackMap.set(clip.trackId, {
+            id: clip.trackId,
+            kind: savedTrack?.type === "audio" ? "audio" : "video",
+            muted: savedTrack?.muted === true,
+            clips: [],
+          });
+        }
+        trackMap.get(clip.trackId)!.clips.push(clip);
+      }
+
+      const durationMs = resolvedClips.reduce(
+        (max, c) => Math.max(max, c.endMs), 0
+      );
+
+      exportTimeline = {
+        width,
+        height,
+        fps: 30,
+        durationMs,
+        tracks: Array.from(trackMap.values()),
+      };
+    }
+
+    // Create the durable export job
+    const job = await createExportJob({
+      userId,
+      projectId,
+      settings,
+      timeline: exportTimeline,
+    });
+
+    return res.json({
+      id: job.id,
+      status: job.status,
+      progressPercent: job.progressPercent,
+      currentStep: job.currentStep,
+      createdAt: job.createdAt instanceof Date ? job.createdAt.toISOString() : String(job.createdAt),
+    });
+  } catch (err: any) {
+    logger.error({ err: err?.message || String(err) }, "Export creation error");
+    res.status(500).json({ error: "Failed to start export" });
+  }
+});
+
+// GET /api/editing/exports/:exportId - Get export job status
+router.get("/exports/:exportId", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    const { exportId } = req.params;
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    const job = await getExportJob(exportId);
+    if (!job) {
+      return res.status(404).json({ error: "Export job not found" });
+    }
+    if (job.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    const toISO = (d: any) => {
+      if (!d) return undefined;
+      if (d instanceof Date) return d.toISOString();
+      if (typeof d?.toDate === "function") return d.toDate().toISOString();
+      return String(d);
+    };
+
+    const url = job.outputUrl || undefined;
+
+    return res.json({
+      id: job.id,
+      projectId: job.projectId,
+      status: job.status,
+      progressPercent: job.progressPercent,
+      progress: job.progressPercent,       // alias for backward compat
+      currentStep: job.currentStep,
+      outputUrl: url,
+      downloadUrl: url,                    // alias for backward compat
+      error: job.errorMessage || undefined,
+      attemptCount: job.attemptCount,
+      createdAt: toISO(job.createdAt),
+      startedAt: toISO(job.startedAt),
+      completedAt: toISO(job.completedAt),
+    });
+  } catch (err: any) {
+    logger.error({ err: err?.message || String(err) }, "Get export status error");
+    res.status(500).json({ error: "Failed to fetch export status" });
+  }
+});
+
+// POST /api/editing/exports/:exportId/cancel - Cancel a pending export
+router.post("/exports/:exportId/cancel", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    const { exportId } = req.params;
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    const job = await getExportJob(exportId);
+    if (!job) {
+      return res.status(404).json({ error: "Export job not found" });
+    }
+    if (job.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    const canceled = await cancelJob(exportId);
+    if (!canceled) {
+      return res.status(409).json({ error: "Job cannot be canceled (already terminal)" });
+    }
+
+    return res.json({ id: exportId, status: "canceled" });
+  } catch (err: any) {
+    logger.error({ err: err?.message || String(err) }, "Cancel export error");
+    res.status(500).json({ error: "Failed to cancel export" });
   }
 });
 
@@ -564,9 +1247,25 @@ router.get("/recordings/:id", async (req: Request, res: Response) => {
     if (data?.userId !== userId) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
+
+    // Generate a presigned playback URL from the R2 object key.
+    // The raw videoUrl in Firestore is either empty (stream recordings never
+    // set it) or a private bucket URL that 403s.  A short-lived signed URL
+    // lets the <video> element play the file directly.
+    let videoUrl = data?.videoUrl || "";
+    const storageKey = data?.objectKey || data?.downloadPath;
+    if (storageKey && data?.status === "ready") {
+      try {
+        videoUrl = await getSignedDownloadUrl(storageKey, 3600);
+      } catch (e) {
+        console.warn("[editing] signed-url generation failed for recording", id, e);
+      }
+    }
+
     res.json({
       id: recordingDoc.id,
       ...data,
+      videoUrl,
       createdAt: data?.createdAt?.toDate?.()?.toISOString()
     });
   } catch (err: any) {
@@ -592,17 +1291,52 @@ router.get("/list", async (req: Request, res: Response) => {
       .where("userId", "==", userId)
       .get();
 
+    // Convert Firestore Timestamp objects to ISO strings so the frontend
+    // receives serialisable date strings instead of raw { _seconds, _nanoseconds }
+    // objects, which cause "Invalid Date" when parsed by new Date().
+    const toISO = (v: any): string | null => {
+      if (!v) return null;
+      if (typeof v?.toDate === "function") return v.toDate().toISOString();
+      if (v instanceof Date) return v.toISOString();
+      if (typeof v === "string") return v;
+      return null;
+    };
+
     const recordings = recordingsSnap.docs
-      .map((doc: any) => ({
-        id: doc.id,
-        ...doc.data(),
-      }))
+      .map((doc: any) => {
+        const data = doc.data();
+        return {
+          id: doc.id,
+          ...data,
+          createdAt: toISO(data.createdAt),
+          updatedAt: toISO(data.updatedAt),
+          startedAt: toISO(data.startedAt),
+          readyAt: toISO(data.readyAt),
+          stoppedAt: toISO(data.stoppedAt),
+          deletedAt: toISO(data.deletedAt),
+        };
+      })
       .sort((a: any, b: any) => {
         // Sort by createdAt descending in memory
         const aTime = new Date(a.createdAt || 0).getTime();
         const bTime = new Date(b.createdAt || 0).getTime();
         return bTime - aTime;
       });
+
+    // Generate presigned playback URLs for ready recordings whose videoUrl
+    // is missing or points to a private R2 bucket path.
+    await Promise.all(
+      recordings.map(async (rec: any) => {
+        const storageKey = rec.objectKey || rec.downloadPath;
+        if (storageKey && rec.status === "ready") {
+          try {
+            rec.videoUrl = await getSignedDownloadUrl(storageKey, 3600);
+          } catch (e) {
+            console.warn("[editing] signed-url generation failed for", rec.id, e);
+          }
+        }
+      }),
+    );
 
     res.json(recordings);
   } catch (err) {
@@ -751,25 +1485,37 @@ router.post("/render", async (req: Request, res: Response) => {
       try {
         const buffer = Buffer.from(renderedBuffer);
         
-        // Check storage limit
-        try {
-          await checkStorageLimit(userId, buffer.byteLength);
-        } catch (err: any) {
+        // Transactional reservation: atomically check limit + increment counter.
+        const reservation = await reserveStorageIfAvailable(userId, buffer.byteLength, {
+          caller: "editing.render",
+          recordingId,
+        });
+        if (!reservation.reserved) {
           return res.status(409).json({
             error: LIMIT_ERRORS.LIMIT_EXCEEDED,
-            details: err?.message || "Storage limit exceeded",
+            details: reservation.reason || "Storage limit exceeded",
           });
         }
 
         // Upload to R2
         const exportPath = `exports/${userId}/${recordingId}/${Date.now()}.mp4`;
-        const publicUrl = await uploadVideo(buffer, exportPath, "video/mp4");
-
-        // Update storage usage (best-effort)
+        let publicUrl: string;
         try {
-          await updateStorageUsage(userId, buffer.byteLength);
-        } catch (err) {
-          console.log("⚠️ Storage usage update failed (non-critical)");
+          publicUrl = await uploadVideo(buffer, exportPath, "video/mp4");
+        } catch (uploadErr: any) {
+          // Upload failed — release the reserved bytes.
+          try {
+            await releaseReservedStorage(userId, buffer.byteLength, {
+              caller: "editing.render.rollback",
+              exportPath,
+            });
+          } catch (releaseErr: any) {
+            console.error("[editing] CRITICAL: failed to release reservation after render upload failure", {
+              userId, exportPath, fileSizeBytes: buffer.byteLength,
+              uploadError: uploadErr?.message, releaseError: releaseErr?.message,
+            });
+          }
+          throw uploadErr;
         }
 
         // Update recording with rendered path and URL
@@ -900,13 +1646,15 @@ router.post("/recordings/start", async (req: Request, res: Response) => {
 
     // Create recording document
     const recordingRef = db.collection("recordings").doc();
+    const recordingStartedAt = new Date();
     const recordingData = {
       id: recordingRef.id,
       userId,
       roomName,
       title,
       status: "recording",
-      startedAt: new Date(),
+      createdAt: recordingStartedAt,
+      startedAt: recordingStartedAt,
       stoppedAt: null,
       duration: 0,
       viewerCount: 0,
@@ -979,6 +1727,211 @@ router.post("/recordings/stop", async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error("❌ recording stop error:", err);
     res.status(500).json({ error: err.message || "Failed to stop recording" });
+  }
+});
+
+// ============================================================================
+// PLAN INFO ENDPOINT — expose editing plan limits to the client
+// ============================================================================
+
+router.get("/plan-info", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    const plan = await getEditingPlanInfo(userId);
+    const projectCount = await countUserProjects(userId);
+
+    // Include real current storage usage so the client can show actual state
+    const storageUsedBytes = await getCurrentStorageUsage(userId);
+    const GB = 1024 * 1024 * 1024;
+
+    return res.json({
+      planId: plan.planId,
+      access: plan.access,
+      maxProjects: plan.maxProjects,
+      currentProjects: projectCount,
+      maxStorageGB: plan.maxStorageGB,
+      maxTracks: plan.maxTracks ?? null,
+      maxResolution: plan.maxResolution ?? null,
+      storageUsedBytes,
+      storageUsedGB: Math.round((storageUsedBytes / GB) * 100) / 100,
+    });
+  } catch (err: any) {
+    console.error("Plan info error:", err);
+    res.status(500).json({ error: "Failed to fetch plan info" });
+  }
+});
+
+// ============================================================================
+// PROCESSING STATUS ENDPOINTS — background job status
+// ============================================================================
+
+router.get("/processing/:jobId", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    const job = await getProcessingJob(req.params.jobId);
+    if (!job || job.userId !== userId) {
+      return res.status(404).json({ error: "Processing job not found" });
+    }
+
+    return res.json(job);
+  } catch (err: any) {
+    console.error("Processing status error:", err);
+    res.status(500).json({ error: "Failed to fetch processing status" });
+  }
+});
+
+router.get("/projects/:id/processing", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+
+    const jobs = await listProjectProcessingJobs(req.params.id);
+    // Filter to only this user's jobs
+    const userJobs = jobs.filter((j) => j.userId === userId);
+
+    return res.json(userJobs);
+  } catch (err: any) {
+    console.error("Project processing status error:", err);
+    res.status(500).json({ error: "Failed to fetch processing status" });
+  }
+});
+
+// ============================================================================
+// CONTENT ITEMS — lightweight references to recordings in the user's library
+// ============================================================================
+
+// GET /api/editing/content-items — list user's content items
+router.get("/content-items", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    if (!userId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    if (!(await assertSegmentEnabled(res, "contentLibraryEnabled"))) return;
+
+    const snap = await db.collection("content_items")
+      .where("userId", "==", userId)
+      .get();
+
+    const items = snap.docs
+      .map((doc) => {
+        const d = doc.data();
+        return {
+          id: doc.id,
+          ...d,
+          createdAt: d.createdAt?.toDate?.()?.toISOString?.() ?? d.createdAt,
+        };
+      })
+      .sort((a: any, b: any) => {
+        const aTime = new Date(a.createdAt || 0).getTime();
+        const bTime = new Date(b.createdAt || 0).getTime();
+        return bTime - aTime;
+      });
+
+    return res.json({ items });
+  } catch (err: any) {
+    console.error("[content-items] list error:", err);
+    res.status(500).json({ error: "Failed to list content items" });
+  }
+});
+
+// POST /api/editing/content-items — add a recording to the user's content library
+router.post("/content-items", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    if (!userId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    if (!(await assertSegmentEnabled(res, "contentLibraryEnabled"))) return;
+
+    const { recordingId } = req.body;
+    if (!recordingId || typeof recordingId !== "string") {
+      return res.status(400).json({ error: "recordingId is required" });
+    }
+
+    // Verify the recording exists and belongs to this user
+    const recSnap = await db.collection("recordings").doc(recordingId).get();
+    if (!recSnap.exists) {
+      return res.status(404).json({ error: "Recording not found" });
+    }
+    const recData = recSnap.data() as any;
+    if (recData.userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    // Idempotency: don't duplicate
+    const dupCheck = await db.collection("content_items")
+      .where("userId", "==", userId)
+      .where("sourceId", "==", recordingId)
+      .where("sourceType", "==", "recording")
+      .limit(1)
+      .get();
+
+    if (!dupCheck.empty) {
+      const existing = dupCheck.docs[0];
+      return res.json({
+        item: {
+          id: existing.id,
+          ...existing.data(),
+          createdAt: existing.data().createdAt?.toDate?.()?.toISOString?.() ?? existing.data().createdAt,
+        },
+        duplicate: true,
+      });
+    }
+
+    const now = new Date();
+    const item = {
+      userId,
+      sourceType: "recording" as const,
+      sourceId: recordingId,
+      title: recData.title || recData.roomName || "Untitled Recording",
+      kind: "video" as const,
+      playbackUrl: recData.videoUrl || "",
+      thumbnailUrl: recData.thumbnailUrl || null,
+      durationMs: recData.duration ? Math.round(recData.duration * 1000) : null,
+      roomName: recData.roomName || null,
+      status: recData.status || "ready",
+      createdAt: now,
+    };
+
+    const ref = await db.collection("content_items").add(item);
+
+    return res.status(201).json({
+      item: { id: ref.id, ...item, createdAt: now.toISOString() },
+      duplicate: false,
+    });
+  } catch (err: any) {
+    console.error("[content-items] create error:", err);
+    res.status(500).json({ error: "Failed to add content item" });
+  }
+});
+
+// DELETE /api/editing/content-items/:id — remove a content item (reference only, not the recording)
+router.delete("/content-items/:id", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    if (!userId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    const docRef = db.collection("content_items").doc(req.params.id);
+    const snap = await docRef.get();
+    if (!snap.exists) return res.status(404).json({ error: "Content item not found" });
+    if ((snap.data() as any).userId !== userId) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    await docRef.delete();
+    return res.json({ ok: true });
+  } catch (err: any) {
+    console.error("[content-items] delete error:", err);
+    res.status(500).json({ error: "Failed to delete content item" });
   }
 });
 

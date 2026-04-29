@@ -55,7 +55,6 @@ export function HostAVControls({ guestStatus }: { guestStatus?: GuestStatus }) {
           fontWeight: 600,
           cursor: canCam ? "pointer" : "not-allowed",
           opacity: canCam ? 1 : 0.5,
-          border: "none",
           transition: "all 0.2s"
         }}
         disabled={!canCam}

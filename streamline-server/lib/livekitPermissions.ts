@@ -1,11 +1,25 @@
-import { TrackSource } from "livekit-server-sdk";
+// NOTE: LiveKit's JS client (`livekit-client`) represents Track.Source as
+// string literals like "camera" and "microphone".
+//
+// The server SDK exposes protobuf numeric enums (e.g. TrackSource.CAMERA === 1).
+// We intentionally emit *string* sources here so UI code (and LiveKit Components)
+// can reliably compare `canPublishSources` against `Track.Source.*`.
+
+import type { PresenceMode } from "./presenceMode";
+import { getPresencePolicy } from "./presenceMode";
+
+export type LiveKitTrackSource =
+  | "camera"
+  | "microphone"
+  | "screen_share"
+  | "screen_share_audio";
 
 // VideoGrant-compatible return type (used for LiveKit token grants)
 export type LiveKitGrant = {
   canSubscribe: boolean;
   canPublish: boolean;
   canPublishData: boolean;
-  canPublishSources: TrackSource[];
+  canPublishSources: LiveKitTrackSource[];
 };
 
 // Narrow type: just the realtime flags that matter for LiveKit permissions
@@ -21,12 +35,12 @@ export type RealtimePreset = {
 export function presetToLiveKitGrant(p: RealtimePreset): LiveKitGrant {
   const canPublish = !!p.canPublishAudio || !!p.canPublishVideo || !!p.canScreenShare;
 
-  const sources: TrackSource[] = [];
-  if (p.canPublishAudio) sources.push(TrackSource.MICROPHONE);
-  if (p.canPublishVideo) sources.push(TrackSource.CAMERA);
+  const sources: LiveKitTrackSource[] = [];
+  if (p.canPublishAudio) sources.push("microphone");
+  if (p.canPublishVideo) sources.push("camera");
   if (p.canScreenShare) {
-    sources.push(TrackSource.SCREEN_SHARE);
-    sources.push(TrackSource.SCREEN_SHARE_AUDIO);
+    sources.push("screen_share");
+    sources.push("screen_share_audio");
   }
 
   return {
@@ -44,7 +58,7 @@ export function roleToParticipantPermission(
   const canSubscribe = true;
   let canPublish = false;
   let canPublishData = false;
-  let canPublishSources: TrackSource[] = [];
+  let canPublishSources: LiveKitTrackSource[] = [];
 
   switch (role) {
     case "viewer": {
@@ -59,7 +73,7 @@ export function roleToParticipantPermission(
       // Invite-based guests and authenticated participants both get mic+cam
       canPublish = true;
       canPublishData = true;
-      canPublishSources = [TrackSource.MICROPHONE, TrackSource.CAMERA];
+      canPublishSources = ["microphone", "camera"];
       break;
     }
     case "cohost":
@@ -68,10 +82,10 @@ export function roleToParticipantPermission(
       canPublish = true;
       canPublishData = true;
       canPublishSources = [
-        TrackSource.MICROPHONE,
-        TrackSource.CAMERA,
-        TrackSource.SCREEN_SHARE,
-        TrackSource.SCREEN_SHARE_AUDIO,
+        "microphone",
+        "camera",
+        "screen_share",
+        "screen_share_audio",
       ];
       break;
     }
@@ -82,5 +96,26 @@ export function roleToParticipantPermission(
     canPublish,
     canPublishData,
     canPublishSources,
+  };
+}
+
+/**
+ * Apply presence-mode restrictions on top of the base role grant.
+ * Invisible mode disables publish, screen-share, and data (chat)
+ * capabilities while preserving subscribe so the participant can
+ * still monitor the room.
+ */
+export function applyPresenceModeToGrant(
+  base: LiveKitGrant,
+  mode: PresenceMode,
+): LiveKitGrant {
+  if (mode === "normal") return base;
+
+  const policy = getPresencePolicy(mode);
+  return {
+    canSubscribe: base.canSubscribe, // always keep subscribe for monitoring
+    canPublish: policy.canPublishAudio || policy.canPublishVideo || policy.canScreenShare,
+    canPublishData: policy.canSendChat,
+    canPublishSources: [],
   };
 }

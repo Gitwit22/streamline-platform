@@ -13,8 +13,9 @@ export type PlatformFlagsLike = {
   transcodeEnabled?: unknown;
   recordingEnabled?: unknown;
 
-  // Segmented, safety-first platform switches:
-  // - Missing/undefined => disabled (must be explicitly enabled)
+  // Segmented platform switches (kill-switches):
+  // - Server defaults to enabled when the Firestore doc is missing.
+  // - Set { enabled: false } in Firestore to disable.
   contentLibraryEnabled?: unknown;
   libraryEnabled?: unknown;
   projectsEnabled?: unknown;
@@ -25,6 +26,19 @@ export type PlatformFlagsLike = {
   // - Present but false => disabled (must be explicitly enabled)
   myContentEnabled?: unknown;
   myContentRecordingsEnabled?: unknown;
+
+  // Experimental: publish mixer's program audio instead of raw mic via LiveKit
+  mixedAudioPublishEnabled?: unknown;
+
+  // Advanced screen share routing (pop-out, main-stage modes)
+  advancedScreenShareEnabled?: unknown;
+
+  // Audio mixer panel (bus routing, ducking, program output)
+  audioMixerEnabled?: unknown;
+
+  // Monetization + PPV (opt-in, default disabled)
+  monetizationEnabled?: unknown;
+  payPerViewEnabled?: unknown;
 };
 
 function isNewPlatformFlagEnabled(value: unknown): boolean {
@@ -43,17 +57,7 @@ function resolveEntitlementBoolean(features: Record<string, unknown> | null | un
 
 function resolveEditingAccess(features: Record<string, unknown> | null | undefined): boolean {
   const f: any = features || {};
-  // Default: enabled unless explicitly disabled by plan.
-  // (Server does not currently send a dedicated editing entitlement, but this
-  // keeps the door open for future plan-based gating.)
-  const explicit = f.editing ?? f.editingEnabled ?? f.postProduction;
-  if (typeof explicit === "boolean") return explicit;
-  return true;
-}
-
-function resolveLegacyEditingPlatformEnabled(platformFlags: Record<string, unknown> | null | undefined): boolean {
-  const f: any = platformFlags || {};
-  // Safety-first: only opt-in when explicitly enabled.
+  // Safety-first: editing must be explicitly enabled by plan.
   const explicit = f.editing ?? f.editingEnabled ?? f.postProduction;
   if (typeof explicit === "boolean") return explicit;
   return false;
@@ -132,29 +136,43 @@ export function computeEffectiveFeatureAccess(input: {
   myContentRecordings: {
     allowed: boolean;
   };
+  advancedScreenShare: {
+    allowed: boolean;
+  };
+  audioMixer: {
+    allowed: boolean;
+  };
+  monetization: {
+    allowed: boolean;
+    platformEnabled: boolean;
+    planIncluded: boolean;
+  };
+  payPerView: {
+    allowed: boolean;
+    platformEnabled: boolean;
+    planIncluded: boolean;
+  };
 } {
   const eff = input.effectiveEntitlements || {};
   const pf = (input.platformFlags && typeof input.platformFlags === "object") ? input.platformFlags : {};
-
-  const platformLegacyEditingEnabled = resolveLegacyEditingPlatformEnabled(pf as any);
 
   // Prefer explicit platform kill-switches; default to enabled when missing.
   const platformHlsEnabled = isPlatformEnabled((pf as any).hlsEnabled ?? (pf as any).hlsSettingsTab);
   const platformTranscodeEnabled = isPlatformEnabled((pf as any).transcodeEnabled);
   const platformRecordingEnabled = isPlatformEnabled((pf as any).recordingEnabled);
 
-  // New segmented flags: missing => disabled.
+  // Segmented flags: missing => disabled.
   const platformContentLibraryEnabled = isNewPlatformFlagEnabled(
     (pf as any).contentLibraryEnabled ?? (pf as any).libraryEnabled
-  ) || platformLegacyEditingEnabled;
-  const platformProjectsEnabled = isNewPlatformFlagEnabled((pf as any).projectsEnabled) || platformLegacyEditingEnabled;
-  const platformEditorEnabled = isNewPlatformFlagEnabled((pf as any).editorEnabled) || platformLegacyEditingEnabled;
+  );
+  const platformProjectsEnabled = isNewPlatformFlagEnabled((pf as any).projectsEnabled);
+  const platformEditorEnabled = isNewPlatformFlagEnabled((pf as any).editorEnabled);
 
-  // My Content: prefer explicit flags when present; otherwise fall back to legacy behavior.
+  // My Content: prefer explicit flags when present; otherwise fall back to derived behavior.
   const hasMyContentEnabledFlag = Object.prototype.hasOwnProperty.call(pf, "myContentEnabled");
   const platformMyContentEnabled = hasMyContentEnabledFlag
     ? isNewPlatformFlagEnabled((pf as any).myContentEnabled)
-    : (platformContentLibraryEnabled || platformProjectsEnabled || platformEditorEnabled || platformLegacyEditingEnabled);
+    : (platformContentLibraryEnabled || platformProjectsEnabled || platformEditorEnabled);
 
   const hasMyContentRecordingsEnabledFlag = Object.prototype.hasOwnProperty.call(pf, "myContentRecordingsEnabled");
   const platformMyContentRecordingsEnabled = hasMyContentRecordingsEnabledFlag
@@ -237,5 +255,21 @@ export function computeEffectiveFeatureAccess(input: {
     myContentRecordings: {
       allowed: platformMyContentEnabled && platformMyContentRecordingsEnabled,
     },
+    advancedScreenShare: {
+      allowed: isNewPlatformFlagEnabled((pf as any).advancedScreenShareEnabled),
+    },
+    audioMixer: {
+      allowed: isNewPlatformFlagEnabled((pf as any).audioMixerEnabled),
+    },
+    monetization: (() => {
+      const platformEnabled = isNewPlatformFlagEnabled((pf as any).monetizationEnabled);
+      const planIncluded = resolveEntitlementBoolean(features, ["monetization"]);
+      return { allowed: platformEnabled && planIncluded, platformEnabled, planIncluded };
+    })(),
+    payPerView: (() => {
+      const platformEnabled = isNewPlatformFlagEnabled((pf as any).payPerViewEnabled);
+      const planIncluded = resolveEntitlementBoolean(features, ["payPerView"]);
+      return { allowed: platformEnabled && planIncluded, platformEnabled, planIncluded };
+    })(),
   };
 }

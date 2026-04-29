@@ -9,20 +9,22 @@ import {
   LiveKitRoom,
   useRoomContext,
   useLocalParticipant,
+  useLocalParticipantPermissions,
   useParticipants,
 } from "@livekit/components-react";
-import { RoomEvent, Track, ConnectionState } from "livekit-client";
+import { RoomEvent, Track, ConnectionState, type RoomOptions } from "livekit-client";
 import {
   apiStartRecording,
   apiStopRecording,
   apiFetch,
   apiFetchAuth,
   getAuthToken,
-  apiGetRoomPolicy,
-  apiUpdateRoomPolicy,
 } from "../lib/api";
 import { logTelemetry, markTiming, measureTiming } from "../lib/telemetry";
 import RoleOverlay from "../components/RoleOverlay";
+import StudioLayoutPanel from "../components/StudioLayoutPanel";
+import { apiUpdateProgramState } from "../lib/api";
+import type { LayoutSlot, StudioLayoutPresetId } from "../lib/studioLayout";
 import StreamSetupModalV2 from "../components/StreamSetupModal";
 import { ErrorBoundary } from "../components/ErrorBoundary";
 import { RoleChangeToast } from "../components/RoleChangeToast";
@@ -38,8 +40,27 @@ import {
 } from "../lib/mediaRecovery";
 import { setPlatformFlagsValue } from "../lib/platformFlagsStore";
 import { fetchDestinations, preflight, type DestinationItem } from "../services/destinations";
+import { detectInAppBrowser, getInAppBrowserName } from "../lib/detectInAppBrowser";
 
 const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
+
+// Optimised screen-share audio: disable browser processing that mangles
+// system/tab audio and prefer stereo capture so music & game audio sounds
+// clean rather than "shotty".
+const ROOM_OPTIONS: RoomOptions = {
+  screenShareCaptureDefaults: {
+    audio: {
+      autoGainControl: false,
+      echoCancellation: false,
+      noiseSuppression: false,
+      channelCount: 2,
+      sampleRate: 48000,
+    },
+    selfBrowserSurface: "include",
+    systemAudio: "include",
+    surfaceSwitching: "include",
+  },
+};
 
 // Telemetry tracker for measuring guest invite flow performance
 function GuestTelemetryTracker({ roomId, isViewer }: { roomId: string | null; isViewer: boolean }) {
@@ -583,16 +604,40 @@ function MediaDeviceErrorHandler({ onError }: { onError: (error: any) => void })
 
   useEffect(() => {
     if (!room) return;
+    let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 
     const handleError = (error: any) => {
       console.error('[MediaDeviceError]', error);
-      onError(error);
+
+      // Permission-denied is never transient — show immediately.
+      const name = error?.name || String(error);
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        onError(error);
+        return;
+      }
+
+      // For all other errors, delay briefly. LiveKit often auto-retries
+      // with fallback constraints and succeeds within ~2 s. If by then
+      // the local participant has an active audio or video track the
+      // error was transient — suppress it.
+      if (pendingTimer) clearTimeout(pendingTimer);
+      pendingTimer = setTimeout(() => {
+        pendingTimer = null;
+        const lp = room.localParticipant;
+        const hasAudio = lp?.audioTrackPublications?.size > 0;
+        const hasVideo = lp?.videoTrackPublications?.size > 0;
+        if (hasAudio || hasVideo) {
+          return;
+        }
+        onError(error);
+      }, 2500);
     };
 
     room.on(RoomEvent.MediaDevicesError, handleError);
 
     return () => {
       room.off(RoomEvent.MediaDevicesError, handleError);
+      if (pendingTimer) clearTimeout(pendingTimer);
     };
   }, [room, onError]);
 
@@ -838,10 +883,16 @@ function ThankYouScreen({ showHomeButton = false, onHome }: { showHomeButton?: b
 
 function PermissionsDebugOverlay({ dashboardRole }: { dashboardRole: "host" | "participant" }) {
   const { localParticipant } = useLocalParticipant();
-  const localPermissions: any =
-    (localParticipant as any)?.permissions || (localParticipant as any)?.participant?.permissions;
+  const perms = useLocalParticipantPermissions();
+  const localPermissions: any = perms || (localParticipant as any)?.permissions || (localParticipant as any)?.participant?.permissions;
   const rawRolePresetId = ((localParticipant as any)?.identityMetadata as any)?.rolePresetId;
   const normalizedRolePresetId = normalizeUiRolePresetId(rawRolePresetId);
+
+  useEffect(() => {
+    // Fastest “why are controls missing” signal.
+    // If canPublish is false, LiveKit Components will hide mic/cam controls.
+    console.log("[Room] LiveKit local permissions:", perms);
+  }, [perms]);
 
   return (
     <div
@@ -1148,6 +1199,8 @@ type LiveKitShellProps = {
   dashboardGreenroomEnabled: boolean;
   dashboardOverlaysEnabled: boolean;
   dashboardRole: "host" | "moderator" | "participant";
+  studioLayoutOpen: boolean;
+  onCloseStudioLayout: () => void;
   onLeaveRequested?: () => void;
   onDisconnected: () => void;
 };
@@ -1174,26 +1227,21 @@ function LiveKitShell({
   dashboardGreenroomEnabled,
   dashboardOverlaysEnabled,
   dashboardRole,
+  studioLayoutOpen,
+  onCloseStudioLayout,
   onLeaveRequested,
   onDisconnected,
 }: LiveKitShellProps) {
   const [guestStatus, setGuestStatus] = useState<GuestStatus>(null);
   const statusRef = useRef<GuestStatus>(null);
   const mediaRootRef = useRef<HTMLDivElement | null>(null);
+  const studioParticipants = useParticipants();
 
   // Media permission error state and handlers
   const [mediaPermissionError, setMediaPermissionError] = useState<{
     type: 'denied' | 'notFound' | 'notReadable' | 'notSupported' | 'inAppBrowser' | null;
     message: string;
   } | null>(null);
-
-  // Detect in-app browsers that may block camera/mic access
-  const detectInAppBrowser = (): boolean => {
-    const ua = navigator.userAgent || "";
-    // Facebook, Instagram, TikTok, Twitter, LinkedIn in-app browsers
-    const patterns = /FBAN|FBAV|Instagram|TikTok|Twitter|LinkedInApp/i;
-    return patterns.test(ua);
-  };
 
   // Handle media device errors and show appropriate messaging
   const handleMediaDeviceError = (error: any) => {
@@ -1321,6 +1369,7 @@ function LiveKitShell({
       connect={true}
       audio={true}
       video={true}
+      options={ROOM_OPTIONS}
       connectOptions={undefined}
       onConnected={() => {
         console.log('[Room] 🔗 LiveKit onConnected callback fired', { 
@@ -1349,6 +1398,7 @@ function LiveKitShell({
       <div ref={mediaRootRef} style={{ width: "100%", height: "100%", position: "relative" }}>
         <LiveKitDebugLogger />
         <VideoElementMonitor />
+        {DEV_CONTROLS && <PermissionsDebugOverlay dashboardRole={dashboardRole === "host" ? "host" : "participant"} />}
         <GuestTelemetryTracker roomId={roomId} isViewer={isViewer} />
         <MediaDeviceErrorHandler onError={handleMediaDeviceError} />
         <WaitingForHostBanner isViewer={isViewer} />
@@ -1501,6 +1551,29 @@ function LiveKitShell({
             overlaysEnabled={dashboardOverlaysEnabled}
           />
         )}
+        {studioLayoutOpen && !isViewer && roomId && roomAccessToken && (
+          <div style={{ position: "fixed", top: 80, right: 16, zIndex: 9998 }}>
+            <StudioLayoutPanel
+              roomId={roomId}
+              roomAccessToken={roomAccessToken}
+              participantCount={studioParticipants.length}
+              onClose={onCloseStudioLayout}
+              onProgramStateChange={(presetId: StudioLayoutPresetId | "custom" | null, slots: LayoutSlot[]) => {
+                if (!roomId || !roomAccessToken) return;
+                // Include programParticipants so the compositor knows which
+                // identities map to which slots in the composed output.
+                const identities = studioParticipants
+                  .slice(0, slots.length)
+                  .map((p: any) => p.identity);
+                apiUpdateProgramState(roomId, roomAccessToken, {
+                  programLayout: presetId,
+                  programSlots: slots,
+                  programParticipants: identities,
+                }).catch((err) => console.warn("[Room] program state update failed", err));
+              }}
+            />
+          </div>
+        )}
       </div>
     </LiveKitRoom>
   );
@@ -1527,37 +1600,34 @@ function RoomPage() {
       // ignore parse errors and fall back
     }
     const cachedName = localStorage.getItem("sl_displayName") ?? "";
-    
-    // Auto-generate name for guests to bypass name form and speed up join
-    if (!cachedName) {
-      // Check if this is a guest invite (has guest session token)
-      const roomId = new URLSearchParams(window.location.search).get('roomId') || 
-                     decodeURIComponent(window.location.pathname.split('/room/')[1] || '');
-      const guestToken = getGuestSessionToken(roomId);
-      
-      if (guestToken) {
-        const autoName = `Guest-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-        console.log('[Room] Auto-generated guest name:', autoName);
-        try {
-          localStorage.setItem("sl_displayName", autoName);
-        } catch {
-          // ignore localStorage errors
+    if (cachedName) return cachedName;
+
+    // If InviteRedeem pre-cached a LiveKit token, use its displayName so we
+    // don't flash the name-entry gate before the room loads.
+    try {
+      const candidateRoom = routeRoomId;
+      if (candidateRoom) {
+        const cached = sessionStorage.getItem(`sl_lk_token:${candidateRoom}`);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (typeof parsed?.displayName === "string" && parsed.displayName.trim()) {
+            const name = parsed.displayName.trim();
+            localStorage.setItem("sl_displayName", name);
+            return name;
+          }
         }
-        return autoName;
       }
-    }
-    
-    return cachedName;
+    } catch { /* ignore */ }
+
+    return "";
   });
   const [pendingName, setPendingName] = useState(displayName);
   const [token, setToken] = useState<string | null>(null);
   const [serverUrl, setServerUrl] = useState<string | null>(null);
   const [dashboardOpen, setDashboardOpen] = useState(false);
+  const [studioLayoutOpen, setStudioLayoutOpen] = useState(false);
   const [showStreamSetup, setShowStreamSetup] = useState(false);
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
-  const [allowGuests, setAllowGuests] = useState<boolean | null>(null);
-  const [allowGuestsLoading, setAllowGuestsLoading] = useState(false);
-  const [allowGuestsSaving, setAllowGuestsSaving] = useState(false);
   const [egressId, setEgressId] = useState<string | null>(null);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>("idle");
   const [showGoodbye, setShowGoodbye] = useState(false);
@@ -1587,6 +1657,30 @@ function RoomPage() {
   );
   const [roomTokenMode, setRoomTokenMode] = useState<"unknown" | "auth" | "guest">("unknown");
   const roomTokenMintInFlightRef = useRef(false);
+  // Guest direct-join state (no invite required)
+  const [guestJoinMode, setGuestJoinMode] = useState<"select" | "name-input">("select");
+  const [guestJoinLoading, setGuestJoinLoading] = useState(false);
+  const [guestJoinError, setGuestJoinError] = useState<string | null>(null);
+  const [publicRoomInfo, setPublicRoomInfo] = useState<{
+    roomName: string; status: string; allowGuests: boolean;
+    hostName?: string; roomType?: string;
+    roomStatus?: string; guestJoinAllowed?: boolean; debugReason?: string;
+  } | null>(null);
+  const [roomInfoNotFound, setRoomInfoNotFound] = useState(false);
+  const [isStaleWaiting, setIsStaleWaiting] = useState(false);
+  const staleWaitingStartRef = useRef<number | null>(null);
+  const STALE_WAIT_MS = 15 * 60 * 1000;
+
+  // Presence mode: passed from Join page via route state or localStorage
+  const [presenceMode, setPresenceMode] = useState<"normal" | "invisible">(() => {
+    const fromState = (location.state as any)?.presenceMode;
+    if (fromState === "silent" || fromState === "invisible") return "invisible";
+    try {
+      const stored = localStorage.getItem("sl_presence_mode");
+      if (stored === "silent" || stored === "invisible") return "invisible";
+    } catch { /* ignore */ }
+    return "normal";
+  });
   const [roomGateStatus, setRoomGateStatus] = useState<"unknown" | "idle" | "live" | "blocked">("unknown");
   const roomGatePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const hostToolsHydratedKeyRef = useRef<string | null>(null);
@@ -1614,11 +1708,13 @@ function RoomPage() {
 
   const currentRole = userRole;
   const isGuestRole = currentRole === "guest";
+  const isCohost = effectiveControls.rolePresetId === "cohost";
   const can = (key: keyof RoomPermissions) => !needsReauth && (isHost || !!roomPermissions?.[key]);
-  const canInviteLinks = !needsReauth && !isViewer && (isHost || !!effectiveControls.canInviteLinks || can("canInvite"));
+  const canInviteLinks = !needsReauth && !isViewer && (isHost || isCohost) && (isHost || !!effectiveControls.canInviteLinks || can("canInvite"));
   const canManageStream =
     !needsReauth &&
     !isViewer &&
+    (isHost || isCohost) &&
     (isHost ||
       !!effectiveControls.canStartStopStream ||
       !!effectiveControls.canStartStopRecording ||
@@ -1804,50 +1900,6 @@ function RoomPage() {
   });
 
   useEffect(() => {
-    if (!inviteModalOpen) return;
-    if (!roomId || !roomAccessToken) return;
-    if (!isHost) return;
-
-    let cancelled = false;
-    (async () => {
-      setAllowGuestsLoading(true);
-      try {
-        const data = await apiGetRoomPolicy(roomId, roomAccessToken);
-        if (cancelled) return;
-        setAllowGuests(typeof (data as any)?.allowGuests === "boolean" ? (data as any).allowGuests : null);
-      } catch {
-        if (!cancelled) setAllowGuests(null);
-      } finally {
-        if (!cancelled) setAllowGuestsLoading(false);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [inviteModalOpen, roomId, roomAccessToken, isHost]);
-
-  const setAllowGuestsPolicy = async (next: boolean) => {
-    if (!roomId || !roomAccessToken) return;
-    if (needsReauth) {
-      setNeedsReauth(true);
-      return;
-    }
-
-    setAllowGuestsSaving(true);
-    try {
-      const resp = await apiUpdateRoomPolicy(roomId, roomAccessToken, { allowGuests: next });
-      setAllowGuests(resp.allowGuests);
-    } catch (err: any) {
-      if (err?.status === 401 || err?.status === 403 || err?.name === "ApiUnauthorizedError") {
-        setNeedsReauth(true);
-      }
-    } finally {
-      setAllowGuestsSaving(false);
-    }
-  };
-
-  useEffect(() => {
     // New room => allow fresh host tools hydration
     hostToolsHydratedKeyRef.current = null;
   }, [roomId]);
@@ -1897,6 +1949,59 @@ function RoomPage() {
     setMaxRecordingMinutesPerClip(null);
   }, [roomId]);
 
+  // Fetch public room info for the join page (no auth required).
+  // Auto-polls every 5s when room is idle and user is on the join gate.
+  useEffect(() => {
+    if (!roomId) return;
+    let cancelled = false;
+
+    const fetchRoomInfo = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/info`);
+        if (cancelled) return;
+        if (res.status === 404) {
+          if (!cancelled) {
+            setRoomInfoNotFound(true);
+            setPublicRoomInfo(null);
+          }
+          return;
+        }
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) {
+          setPublicRoomInfo(data);
+          setRoomInfoNotFound(false);
+
+          // Use roomStatus when available (new backend), fall back to status
+          const rs = data.roomStatus || data.status;
+          // If room transitioned to ended during polling, stop polling
+          if (rs === "ended" || rs === "not_found") {
+            setRoomInfoNotFound(rs === "not_found");
+          }
+        }
+      } catch {
+        // non-critical — join page still works without this
+      }
+    };
+
+    fetchRoomInfo();
+
+    // Poll while on the join gate (no displayName) and room isn't live/ended yet
+    const pollId = setInterval(() => {
+      const rs = publicRoomInfo?.roomStatus || publicRoomInfo?.status;
+      if (!displayName && rs !== "live" && rs !== "ended") {
+        fetchRoomInfo();
+        // Stale-link guard: track how long we've been waiting
+        if (!staleWaitingStartRef.current) staleWaitingStartRef.current = Date.now();
+        if (Date.now() - staleWaitingStartRef.current >= STALE_WAIT_MS) {
+          setIsStaleWaiting(true);
+        }
+      }
+    }, 5000);
+
+    return () => { cancelled = true; clearInterval(pollId); };
+  }, [roomId, displayName, publicRoomInfo?.roomStatus, publicRoomInfo?.status]);
+
   useEffect(() => {
     setHostCheckReady(true);
     const candidateKey = roomId;
@@ -1915,17 +2020,10 @@ function RoomPage() {
 
     const willBeHost = createdRooms.includes(candidateKey) || localIsAdmin;
     setIsHost(willBeHost);
-    const storedRole = (() => {
-      try {
-        return localStorage.getItem("sl_current_role") || "guest";
-      } catch {
-        return "guest";
-      }
-    })();
-    const nextRole = willBeHost ? "host" : storedRole;
+    const nextRole = willBeHost ? "host" : "guest";
     setUserRole(nextRole);
     try {
-      if (willBeHost) localStorage.setItem("sl_current_role", "host");
+      localStorage.setItem("sl_current_role", nextRole);
       setInviteToken(localStorage.getItem("sl_invite_token") || null);
     } catch {
       // ignore
@@ -2080,7 +2178,7 @@ function RoomPage() {
 
   // Token-only routing support: /room?t=<token>
   // Prefer treating `t` as a room access/share token and resolving it via
-  // /api/rooms/resolve using Authorization headers. If resolution fails,
+  // /api/rooms/resolve using x-room-access-token. If resolution fails,
   // fall back to treating it as an invite token for older links.
   useEffect(() => {
     const t = String(searchParams.get("t") || "").trim();
@@ -2093,7 +2191,7 @@ function RoomPage() {
         const res = await fetch(`${API_BASE}/api/rooms/resolve`, {
           method: "GET",
           headers: {
-            Authorization: `Bearer ${t}`,
+            "x-room-access-token": t,
           },
           credentials: "include",
         });
@@ -2405,13 +2503,23 @@ function RoomPage() {
           if (cachedTokenData) {
             const parsed = JSON.parse(cachedTokenData);
             const age = Date.now() - (parsed.fetchedAt || 0);
-            // Use cached token if less than 5 minutes old
-            if (age < 5 * 60 * 1000 && parsed.serverUrl && parsed.token) {
-              console.log('[Room] Using pre-fetched LiveKit token (age:', Math.round(age / 1000), 'seconds)');
+            const cachedName = typeof parsed.displayName === "string" ? parsed.displayName.trim() : "";
+            const chosenName = String(displayName || "").trim();
+            const canUseCached =
+              age < 5 * 60 * 1000 &&
+              !!parsed.serverUrl &&
+              !!parsed.token &&
+              !!cachedName &&
+              !!chosenName &&
+              cachedName.toLowerCase() === chosenName.toLowerCase();
+
+            // Use cached token only if it's fresh AND matches the name the user entered.
+            // This ensures prefetch never overrides the display name selection flow.
+            if (canUseCached) {
+              console.log('[Room] Using pre-fetched LiveKit token (name matched; age:', Math.round(age / 1000), 'seconds)');
               setToken(parsed.token);
               setServerUrl(parsed.serverUrl);
               if (parsed.identity) setParticipantIdentity(parsed.identity);
-              if (parsed.displayName) setDisplayName(parsed.displayName);
               
               // Guests are RTC participants with mic+cam (not view-only)
               // isViewer stays false (invite guests can publish)
@@ -2420,7 +2528,7 @@ function RoomPage() {
               sessionStorage.removeItem(`sl_lk_token:${roomId}`);
               return;
             } else {
-              console.log('[Room] Pre-fetched token expired or incomplete, fetching fresh token');
+              console.log('[Room] Pre-fetched token expired, incomplete, or name mismatch; fetching fresh token');
               sessionStorage.removeItem(`sl_lk_token:${roomId}`);
             }
           }
@@ -2447,7 +2555,7 @@ function RoomPage() {
         const buildRoomTokenRequest = () => {
           const canonicalRoomId = roomId || "";
           const endpoint = `${API_BASE}/api/rooms/${encodeURIComponent(canonicalRoomId)}/token`;
-          const payload: any = { identity: displayName };
+          const payload: any = { identity: getOrCreateUid() };
 
           // New API uses the URL roomId; keep displayName in the body so
           // participant name is set in LiveKit.
@@ -2460,6 +2568,10 @@ function RoomPage() {
 
           payload.uid = getOrCreateUid();
           payload.displayName = displayName;
+          // Include presence mode so the backend can restrict grants accordingly.
+          if (presenceMode !== "normal") {
+            payload.presenceMode = presenceMode;
+          }
           // Always forward invite tokens when present.
           // This allows authenticated participants to join invite-scoped/private rooms
           // (server will clamp roles and validate invite-room match).
@@ -2497,8 +2609,6 @@ function RoomPage() {
                   "Content-Type": "application/json",
                   ...(inviteTokenForJoin ? { "x-invite-token": inviteTokenForJoin } : {}),
                   ...(guestSessionToken ? { "x-guest-session": guestSessionToken } : {}),
-                  // Also send as Authorization Bearer for maximum compatibility
-                  ...(guestSessionToken ? { "Authorization": `Bearer ${guestSessionToken}` } : {}),
                 },
                 body: JSON.stringify(payload),
               },
@@ -2550,6 +2660,41 @@ function RoomPage() {
           }
 
           if (res.status === 401) {
+            // Guest session retry: if we have a guest session token and this was
+            // a cookie-only attempt, retry once with the explicit header.
+            const gst = getGuestSessionToken(roomId);
+            if (gst && !payload.guestSessionToken) {
+              console.log('[Room] 401 on token fetch — retrying with explicit guest session header');
+              const retryRes = await apiFetch(
+                endpoint,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "x-guest-session": gst,
+                    ...(inviteTokenForJoin ? { "x-invite-token": inviteTokenForJoin } : {}),
+                  },
+                  body: JSON.stringify({ ...payload, guestSessionToken: gst }),
+                },
+                { allowNonOk: true },
+              );
+              if (retryRes.ok) {
+                const retryData = await retryRes.json().catch(() => null);
+                if (retryData?.token && retryData?.serverUrl) {
+                  console.log('[Room] Guest session retry succeeded');
+                  setToken(retryData.token);
+                  setServerUrl(retryData.serverUrl);
+                  if (retryData.identity) setParticipantIdentity(retryData.identity);
+                  if (retryData.roomAccessToken) setRoomAccessToken(retryData.roomAccessToken);
+                  if (retryData.roomName) setRoomName(retryData.roomName);
+                  if (retryData.roomId) setFirestoreRoomId(retryData.roomId);
+                  if (retryData.isViewer) setIsViewer(true);
+                  setNeedsReauth(false);
+                  return;
+                }
+              }
+            }
+
             setNeedsReauth(true);
             setAuthStatus("guest");
             setReauthBannerText(
@@ -2558,6 +2703,15 @@ function RoomPage() {
                   ? "Invite invalid or expired."
                   : "This room requires an account to join. Please sign in.")
             );
+            // Only force login redirect when we truly have no invite or guest session to attempt guest join.
+            if (!inviteToken && !gst) {
+              try {
+                const next = `${location.pathname}${location.search}`;
+                nav(`/login?next=${encodeURIComponent(next)}`, { replace: true });
+              } catch {
+                // ignore
+              }
+            }
             return;
           }
 
@@ -2712,8 +2866,6 @@ function RoomPage() {
             headers: {
               ...(!guestSessionToken && inviteToken ? { "x-invite-token": inviteToken } : {}),
               ...(guestSessionToken ? { "x-guest-session": guestSessionToken } : {}),
-              // Also send as Authorization Bearer for maximum compatibility
-              ...(guestSessionToken ? { "Authorization": `Bearer ${guestSessionToken}` } : {}),
             },
           },
           { allowNonOk: true }
@@ -2829,9 +2981,15 @@ function RoomPage() {
           const platformFlags = (me as any)?.platformFlags || {};
           applyEntitlementsAndPlatform(eff, platformFlags);
         }
-      } catch (err) {
+      } catch (err: any) {
         if (!cancelled) {
           console.error("[Room] failed to load media prefs/entitlements", err);
+          // If the error is a 401 (token expired / missing), enter the
+          // in-room re-auth flow instead of silently degrading.
+          if (err?.status === 401 || err?.name === "ApiUnauthorizedError") {
+            setAuthStatus("guest");
+            setNeedsReauth(true);
+          }
           setMediaPresets((prev) =>
             prev.length
               ? prev
@@ -2988,7 +3146,7 @@ function RoomPage() {
       if (typeof window !== "undefined" && "Notification" in window) {
         if (window.Notification.permission === "granted") {
           const n = new window.Notification("Recording is ready to download", {
-            body: "Click Download in the room banner (or open Settings → Usage → Latest video).",
+            body: "Your recording is now in Projects. You can download it there.",
           });
           n.onclick = () => {
             try {
@@ -2996,12 +3154,7 @@ function RoomPage() {
             } catch {}
 
             try {
-              nav("/settings/billing", {
-                state: {
-                  openTab: "usage",
-                  usageRoomId: effectiveRoomName || undefined,
-                },
-              });
+              nav("/projects");
             } catch {}
           };
         }
@@ -3094,8 +3247,13 @@ function RoomPage() {
         setDestinations(items);
         const connectedEnabled = items.filter((d) => d.enabled && d.status === "connected");
         setDestinationsReady(connectedEnabled.length > 0);
-      } catch (e) {
+      } catch (e: any) {
         console.error("destinations load failed", e);
+        // Enter in-room re-auth flow on 401 so the user sees the
+        // re-authenticate prompt instead of a broken host panel.
+        if (e?.status === 401 || e?.name === "ApiUnauthorizedError") {
+          setNeedsReauth(true);
+        }
         setDestinationsReady(false);
       } finally {
         setDestinationsLoading(false);
@@ -3118,8 +3276,11 @@ function RoomPage() {
       setDestinations(items);
       const connectedEnabled = items.filter((d) => d.enabled && d.status === "connected");
       setDestinationsReady(connectedEnabled.length > 0);
-    } catch (e) {
-      // no-op
+    } catch (e: any) {
+      // no-op — but enter re-auth on 401
+      if (e?.status === 401 || e?.name === "ApiUnauthorizedError") {
+        setNeedsReauth(true);
+      }
     }
   }
 
@@ -3135,8 +3296,11 @@ function RoomPage() {
         setPreflightResult(res);
         const connected = (res.destinations || []).filter((d: any) => d.status === "connected");
         setCanGoLive(connected.length > 0);
-      } catch (e) {
+      } catch (e: any) {
         console.error("preflight failed", e);
+        if (e?.status === 401 || e?.name === "ApiUnauthorizedError") {
+          setNeedsReauth(true);
+        }
         setCanGoLive(false);
       } finally {
         setPreflightLoading(false);
@@ -3428,6 +3592,39 @@ function RoomPage() {
     }
   };
 
+  const bestEffortStopHls = async (reason: string) => {
+    if (!roomId) return;
+    if (!canManageStream) return;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => {
+      console.warn(`bestEffortStopHls(${reason}) timed out; aborting`);
+      controller.abort();
+    }, 8000);
+    try {
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/hls/stop/${encodeURIComponent(roomId)}`,
+        {
+          method: "POST",
+          headers: roomAccessToken ? { "x-room-access-token": roomAccessToken } : undefined,
+          signal: controller.signal,
+        },
+        { allowNonOk: true }
+      );
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        console.warn(`bestEffortStopHls(${reason}) non-ok`, res.status, text);
+      }
+    } catch (err) {
+      if ((err as any)?.name === "AbortError") {
+        console.warn(`bestEffortStopHls(${reason}) aborted due to timeout`, err);
+      } else {
+        console.warn(`bestEffortStopHls(${reason}) failed`, err);
+      }
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  };
+
   const handleEndStream = async () => {
     if (canManageStream && streamStatus === "live") {
       alert("⏹️ Stream is still live. Stop the stream first.");
@@ -3437,6 +3634,8 @@ function RoomPage() {
       alert("⏹️ Recording is still active. Stop the stream first.");
       return;
     }
+    // Best-effort cleanup: prevent lingering HLS egress from a prior session.
+    await bestEffortStopHls("end-stream");
     // At this point stream/recording are stopped. Exit to Join.
     handleLeftRoom();
   };
@@ -3687,6 +3886,7 @@ function RoomPage() {
       setEgressId(null);
       setStreamStatus("idle");
       streamEgressRef.current = null;
+      void bestEffortStopHls("stop-multistream");
       if (recordingStatus === "recording") {
         console.log("ℹ️ Stream stopped but recording still active");
       }
@@ -3756,7 +3956,84 @@ function RoomPage() {
 
   // ==================== RENDER ====================
 
+  // Determine join context for the name entry page
+  const hasAuth = !!getAuthToken();
+  const hasGuestSession = !!getGuestSessionToken(roomId);
+  const hasInviteContext = hasGuestSession || !!inviteToken || !!searchParams.get("t");
+  const isDirectGuest = !hasAuth && !hasInviteContext;
+
   if (!displayName) {
+    const joinRoomName = publicRoomInfo?.roomName || roomName || routeRoomId || "this room";
+    // Use roomStatus (new backend) with fallback to status (backward compat)
+    const roomStatus = publicRoomInfo?.roomStatus || publicRoomInfo?.status || "";
+    const roomIsLive = roomStatus === "live";
+    const roomIsEnded = roomStatus === "ended";
+    const guestsAllowed = publicRoomInfo?.allowGuests !== false;
+
+    const handleGuestDirectJoin = async (name: string) => {
+      if (!roomId || !name.trim()) return;
+      setGuestJoinLoading(true);
+      setGuestJoinError(null);
+      try {
+        const res = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/join-guest`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({ displayName: name.trim() }),
+        });
+        const ct = res.headers.get("content-type") || "";
+        const data = ct.includes("application/json") ? await res.json() : null;
+
+        if (!res.ok) {
+          const errCode = data?.error || `HTTP ${res.status}`;
+          if (errCode === "room_not_live") {
+            setGuestJoinError("This room isn't live yet. Please wait for the host to start.");
+          } else if (errCode === "guests_not_allowed") {
+            setGuestJoinError("This room requires an account to join.");
+          } else if (errCode === "room_full") {
+            setGuestJoinError("This room is full. Please try again later.");
+          } else if (errCode === "rate_limited") {
+            setGuestJoinError("Too many attempts. Please wait a moment.");
+          } else {
+            setGuestJoinError(errCode);
+          }
+          return;
+        }
+
+        if (!data?.roomToken || !data?.serverUrl) {
+          setGuestJoinError("Failed to get connection details.");
+          return;
+        }
+
+        // Store guest session for subsequent token refreshes
+        if (data.guestSessionToken) {
+          try {
+            sessionStorage.setItem(`sl_guest_session:${roomId}`, data.guestSessionToken);
+          } catch { /* ignore */ }
+          try {
+            localStorage.setItem("sl_guestSessionToken", data.guestSessionToken);
+            localStorage.setItem("sl_guestSessionRoomId", roomId);
+          } catch { /* ignore */ }
+        }
+
+        // Pre-populate token + serverUrl so the existing useEffect doesn't re-fetch
+        setToken(data.roomToken);
+        setServerUrl(data.serverUrl);
+        if (data.identity) setParticipantIdentity(data.identity);
+        if (data.roomAccessToken) setRoomAccessToken(data.roomAccessToken);
+        if (data.roomName) setRoomName(data.roomName);
+        if (data.roomId) setFirestoreRoomId(data.roomId);
+
+        // Now set displayName to exit this early return and enter the room
+        localStorage.setItem("sl_displayName", name.trim());
+        setDisplayName(name.trim());
+      } catch (err: any) {
+        setGuestJoinError("Unable to connect. Please try again.");
+      } finally {
+        setGuestJoinLoading(false);
+      }
+    };
+
     return (
       <div style={{
         minHeight: '100vh',
@@ -3802,84 +4079,486 @@ function RoomPage() {
           }
         `}</style>
 
-        <form
-          style={{
-            background: 'rgba(39, 39, 42, 0.5)',
-            borderRadius: '1rem',
-            padding: '2rem',
-            width: '100%',
+        {/* Room header info */}
+        <div style={{
+          textAlign: 'center',
+          marginBottom: '1.5rem',
+          position: 'relative',
+          zIndex: 1,
+        }}>
+          <h2 style={{
+            fontSize: '1.25rem',
+            fontWeight: '600',
+            color: 'rgba(255, 255, 255, 0.9)',
+            marginBottom: '0.25rem',
+          }}>
+            {joinRoomName}
+          </h2>
+          {roomIsLive && (
+            <span style={{
+              display: 'inline-block',
+              background: '#e53e3e',
+              color: 'white',
+              fontSize: '0.7rem',
+              fontWeight: 700,
+              padding: '3px 10px',
+              borderRadius: '20px',
+              letterSpacing: '0.5px',
+            }}>
+              ● LIVE
+            </span>
+          )}
+          {publicRoomInfo?.hostName && (
+            <p style={{ fontSize: '0.9rem', color: 'rgba(255,255,255,0.55)', marginTop: '0.25rem' }}>
+              Hosted by {publicRoomInfo.hostName}
+            </p>
+          )}
+        </div>
+
+        {/* === Room not found / ended / closed === */}
+        {isDirectGuest && (roomInfoNotFound || roomIsEnded) && (
+          <div
+            style={{
+              background: 'rgba(39, 39, 42, 0.5)',
+              borderRadius: '1rem',
+              padding: '2rem',
+              width: '100%',
+              maxWidth: '400px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '1rem',
+              border: '1px solid rgba(63, 63, 70, 0.8)',
+              backdropFilter: 'blur(20px)',
+              position: 'relative',
+              zIndex: 1,
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+              textAlign: 'center',
+            }}
+          >
+            <h1 style={{
+              fontSize: '1.25rem',
+              fontWeight: '600',
+              color: '#ffffff',
+              margin: 0,
+            }}>
+              Room is not open
+            </h1>
+            <p style={{
+              fontSize: '0.9rem',
+              color: 'rgba(255,255,255,0.6)',
+              lineHeight: 1.5,
+              margin: 0,
+            }}>
+              This room is currently closed or has already ended.
+            </p>
+            <button
+              type="button"
+              onClick={() => nav('/')}
+              style={{
+                padding: '0.75rem',
+                borderRadius: '0.75rem',
+                background: 'rgba(255, 255, 255, 0.08)',
+                color: '#ffffff',
+                fontWeight: '600',
+                border: '1px solid rgba(255, 255, 255, 0.2)',
+                cursor: 'pointer',
+                fontSize: '0.875rem',
+              }}
+            >
+              Return home
+            </button>
+          </div>
+        )}
+
+        {/* In-app browser warning */}
+        {detectInAppBrowser() && (
+          <div style={{
             maxWidth: '400px',
-            display: 'flex',
-            flexDirection: 'column',
-            gap: '1.5rem',
-            border: '1px solid rgba(63, 63, 70, 0.8)',
-            backdropFilter: 'blur(20px)',
+            width: '100%',
+            padding: '10px 14px',
+            borderRadius: '0.75rem',
+            background: 'rgba(250,204,21,0.1)',
+            border: '1px solid rgba(250,204,21,0.25)',
+            fontSize: '0.85rem',
+            lineHeight: 1.45,
+            color: 'rgba(255,255,255,0.85)',
+            marginBottom: '1rem',
             position: 'relative',
             zIndex: 1,
-            boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'
-          }}
-          onSubmit={(e) => {
-            e.preventDefault();
-            const name = pendingName.trim();
-            if (!name) return;
-            localStorage.setItem("sl_displayName", name);
-            setDisplayName(name);
-          }}
-        >
-          <h1
+          }}>
+            <strong>Heads up:</strong> You're in {getInAppBrowserName() ? `the ${getInAppBrowserName()} browser` : 'an in-app browser'} which may block camera &amp; mic access.
+            Tap <strong>⋯</strong> → <strong>Open in browser</strong> for the best experience.
+          </div>
+        )}
+
+        {/* === Authenticated or invite-based user: simple name entry ===
+             InviteRedeem already validated the invite and room state.
+             Room.tsx trusts that path — no re-validation needed here. */}
+        {!isDirectGuest && (
+          <form
             style={{
+              background: 'rgba(39, 39, 42, 0.5)',
+              borderRadius: '1rem',
+              padding: '2rem',
+              width: '100%',
+              maxWidth: '400px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '1.5rem',
+              border: '1px solid rgba(63, 63, 70, 0.8)',
+              backdropFilter: 'blur(20px)',
+              position: 'relative',
+              zIndex: 1,
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'
+            }}
+            onSubmit={(e) => {
+              e.preventDefault();
+              const name = pendingName.trim();
+              if (!name) return;
+              localStorage.setItem("sl_displayName", name);
+              setDisplayName(name);
+            }}
+          >
+            <h1 style={{
               fontSize: '1.5rem',
               fontWeight: '600',
               textAlign: 'center',
               marginBottom: '0.5rem',
               color: '#ffffff'
+            }}>
+              Enter your name to join
+            </h1>
+
+            <input
+              type="text"
+              style={{
+                width: '100%',
+                padding: '0.875rem',
+                borderRadius: '0.75rem',
+                background: 'rgba(31, 41, 55, 0.8)',
+                color: '#ffffff',
+                border: '1px solid rgba(75, 85, 99, 0.5)',
+                outline: 'none',
+                transition: 'all 0.3s ease',
+                backdropFilter: 'blur(10px)'
+              }}
+              onFocus={(e) => (e.target as HTMLInputElement).style.borderColor = '#dc2626'}
+              onBlur={(e) => (e.target as HTMLInputElement).style.borderColor = 'rgba(75, 85, 99, 0.5)'}
+              placeholder={`Enter your name to join "${joinRoomName}"`}
+              value={pendingName}
+              onChange={(e) => setPendingName(e.target.value)}
+              autoFocus
+            />
+
+            <button
+              type="submit"
+              disabled={!pendingName.trim()}
+              style={{
+                width: '100%',
+                padding: '0.875rem',
+                borderRadius: '0.75rem',
+                background: !pendingName.trim()
+                  ? 'rgba(75, 85, 99, 0.5)'
+                  : 'linear-gradient(135deg, #dc2626, #ef4444)',
+                color: '#ffffff',
+                fontWeight: '600',
+                border: 'none',
+                cursor: !pendingName.trim() ? 'not-allowed' : 'pointer',
+                transition: 'all 0.3s ease',
+                opacity: !pendingName.trim() ? 0.6 : 1,
+              }}
+            >
+              Join Room
+            </button>
+          </form>
+        )}
+
+        {/* === Direct guest: Room idle — waiting for host === */}
+        {isDirectGuest && !roomIsLive && !roomIsEnded && !roomInfoNotFound && publicRoomInfo && (
+          <div
+            style={{
+              background: 'rgba(39, 39, 42, 0.5)',
+              borderRadius: '1rem',
+              padding: '2rem',
+              width: '100%',
+              maxWidth: '400px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '1rem',
+              border: '1px solid rgba(63, 63, 70, 0.8)',
+              backdropFilter: 'blur(20px)',
+              position: 'relative',
+              zIndex: 1,
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
+              textAlign: 'center',
             }}
           >
-            Enter your name to join
-          </h1>
+            <div style={{
+              width: 40, height: 40, margin: '0 auto',
+              borderRadius: '50%',
+              border: '3px solid rgba(99,102,241,0.3)',
+              borderTopColor: '#6366f1',
+              animation: 'sl-spin 1s linear infinite',
+            }} />
+            <style>{`@keyframes sl-spin { to { transform: rotate(360deg); } }`}</style>
 
-          <input
-            type="text"
-            style={{
-              width: '100%',
-              padding: '0.875rem',
-              borderRadius: '0.75rem',
-              background: 'rgba(31, 41, 55, 0.8)',
-              color: '#ffffff',
-              border: '1px solid rgba(75, 85, 99, 0.5)',
-              outline: 'none',
-              transition: 'all 0.3s ease',
-              backdropFilter: 'blur(10px)'
-            }}
-            onFocus={(e) => (e.target as HTMLInputElement).style.borderColor = '#dc2626'}
-            onBlur={(e) => (e.target as HTMLInputElement).style.borderColor = 'rgba(75, 85, 99, 0.5)'}
-            placeholder={`Enter your name to join "${roomName}"`}
-            value={pendingName}
-            onChange={(e) => setPendingName(e.target.value)}
-            autoFocus
-          />
-
-          <button
-            type="submit"
-            disabled={!pendingName.trim()}
-            style={{
-              width: '100%',
-              padding: '0.875rem',
-              borderRadius: '0.75rem',
-              background: !pendingName.trim()
-                ? 'rgba(75, 85, 99, 0.5)'
-                : 'linear-gradient(135deg, #dc2626, #ef4444)',
-              color: '#ffffff',
+            <h1 style={{
+              fontSize: '1.25rem',
               fontWeight: '600',
-              border: 'none',
-              cursor: !pendingName.trim() ? 'not-allowed' : 'pointer',
-              transition: 'all 0.3s ease',
-              opacity: !pendingName.trim() ? 0.6 : 1,
+              color: '#ffffff',
+              margin: 0,
+            }}>
+              Room has not started yet
+            </h1>
+            <p style={{
+              fontSize: '0.9rem',
+              color: 'rgba(255,255,255,0.6)',
+              lineHeight: 1.5,
+              margin: 0,
+            }}>
+              {isStaleWaiting
+                ? "This room has still not started. The host may not be live yet."
+                : "The host has not opened this room yet. Please wait for the session to begin."}
+            </p>
+            <p style={{ fontSize: '0.75rem', opacity: 0.4, margin: 0 }}>
+              Checking automatically…
+            </p>
+
+            <div style={{ display: 'flex', gap: 10 }}>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                style={{
+                  flex: 1,
+                  padding: '0.75rem',
+                  borderRadius: '0.75rem',
+                  background: 'rgba(255, 255, 255, 0.08)',
+                  color: '#ffffff',
+                  fontWeight: '600',
+                  border: '1px solid rgba(255, 255, 255, 0.2)',
+                  cursor: 'pointer',
+                  fontSize: '0.875rem',
+                }}
+              >
+                Refresh
+              </button>
+              <button
+                type="button"
+                onClick={() => nav('/')}
+                style={{
+                  flex: 1,
+                  padding: '0.75rem',
+                  borderRadius: '0.75rem',
+                  background: 'rgba(255, 255, 255, 0.08)',
+                  color: '#ffffff',
+                  fontWeight: '600',
+                  border: '1px solid rgba(255, 255, 255, 0.2)',
+                  cursor: 'pointer',
+                  fontSize: '0.875rem',
+                }}
+              >
+                Return home
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* === Direct guest: room is live — show join form directly === */}
+        {isDirectGuest && !roomIsEnded && !roomInfoNotFound && (roomIsLive || !publicRoomInfo) && guestJoinMode === "select" && (
+          <div
+            style={{
+              background: 'rgba(39, 39, 42, 0.5)',
+              borderRadius: '1rem',
+              padding: '2rem',
+              width: '100%',
+              maxWidth: '400px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '1rem',
+              border: '1px solid rgba(63, 63, 70, 0.8)',
+              backdropFilter: 'blur(20px)',
+              position: 'relative',
+              zIndex: 1,
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'
             }}
           >
-            Join Room
-          </button>
-        </form>
+            <h1 style={{
+              fontSize: '1.5rem',
+              fontWeight: '600',
+              textAlign: 'center',
+              color: '#ffffff'
+            }}>
+              Join Room
+            </h1>
+
+            {guestsAllowed && (
+              <button
+                type="button"
+                onClick={() => setGuestJoinMode("name-input")}
+                style={{
+                  width: '100%',
+                  padding: '0.875rem',
+                  borderRadius: '0.75rem',
+                  background: 'linear-gradient(135deg, #dc2626, #ef4444)',
+                  color: '#ffffff',
+                  fontWeight: '600',
+                  border: 'none',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease',
+                  fontSize: '1rem',
+                }}
+              >
+                Join as Guest
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => {
+                const next = `${location.pathname}${location.search}`;
+                nav(`/login?next=${encodeURIComponent(next)}`);
+              }}
+              style={{
+                width: '100%',
+                padding: '0.875rem',
+                borderRadius: '0.75rem',
+                background: 'rgba(255, 255, 255, 0.08)',
+                color: '#ffffff',
+                fontWeight: '600',
+                border: '1px solid rgba(255, 255, 255, 0.2)',
+                cursor: 'pointer',
+                transition: 'all 0.3s ease',
+                fontSize: '1rem',
+              }}
+            >
+              Login to Join
+            </button>
+
+            {!guestsAllowed && (
+              <p style={{
+                fontSize: '0.85rem',
+                color: 'rgba(255, 255, 255, 0.5)',
+                textAlign: 'center',
+              }}>
+                This room requires an account to join.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* === Direct guest: name input step === */}
+        {isDirectGuest && !roomIsEnded && !roomInfoNotFound && (roomIsLive || !publicRoomInfo) && guestJoinMode === "name-input" && (
+          <form
+            style={{
+              background: 'rgba(39, 39, 42, 0.5)',
+              borderRadius: '1rem',
+              padding: '2rem',
+              width: '100%',
+              maxWidth: '400px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '1.5rem',
+              border: '1px solid rgba(63, 63, 70, 0.8)',
+              backdropFilter: 'blur(20px)',
+              position: 'relative',
+              zIndex: 1,
+              boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)'
+            }}
+            onSubmit={(e) => {
+              e.preventDefault();
+              const name = pendingName.trim();
+              if (!name || guestJoinLoading) return;
+              handleGuestDirectJoin(name);
+            }}
+          >
+            <h1 style={{
+              fontSize: '1.5rem',
+              fontWeight: '600',
+              textAlign: 'center',
+              marginBottom: '0.5rem',
+              color: '#ffffff'
+            }}>
+              Enter your name
+            </h1>
+
+            {guestJoinError && (
+              <div style={{
+                background: 'rgba(229, 62, 62, 0.15)',
+                border: '1px solid rgba(229, 62, 62, 0.3)',
+                color: '#fc8181',
+                padding: '10px 14px',
+                borderRadius: '0.5rem',
+                fontSize: '0.875rem',
+              }}>
+                {guestJoinError}
+              </div>
+            )}
+
+            <input
+              type="text"
+              style={{
+                width: '100%',
+                padding: '0.875rem',
+                borderRadius: '0.75rem',
+                background: 'rgba(31, 41, 55, 0.8)',
+                color: '#ffffff',
+                border: '1px solid rgba(75, 85, 99, 0.5)',
+                outline: 'none',
+                transition: 'all 0.3s ease',
+                backdropFilter: 'blur(10px)',
+                boxSizing: 'border-box',
+              }}
+              onFocus={(e) => (e.target as HTMLInputElement).style.borderColor = '#dc2626'}
+              onBlur={(e) => (e.target as HTMLInputElement).style.borderColor = 'rgba(75, 85, 99, 0.5)'}
+              placeholder="Your display name"
+              value={pendingName}
+              onChange={(e) => setPendingName(e.target.value)}
+              maxLength={50}
+              autoFocus
+              disabled={guestJoinLoading}
+            />
+
+            <button
+              type="submit"
+              disabled={!pendingName.trim() || guestJoinLoading}
+              style={{
+                width: '100%',
+                padding: '0.875rem',
+                borderRadius: '0.75rem',
+                background: !pendingName.trim() || guestJoinLoading
+                  ? 'rgba(75, 85, 99, 0.5)'
+                  : 'linear-gradient(135deg, #dc2626, #ef4444)',
+                color: '#ffffff',
+                fontWeight: '600',
+                border: 'none',
+                cursor: !pendingName.trim() || guestJoinLoading ? 'not-allowed' : 'pointer',
+                transition: 'all 0.3s ease',
+                opacity: !pendingName.trim() || guestJoinLoading ? 0.6 : 1,
+              }}
+            >
+              {guestJoinLoading ? "Connecting..." : "Join Room"}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                setGuestJoinMode("select");
+                setGuestJoinError(null);
+              }}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'rgba(255, 255, 255, 0.5)',
+                padding: '4px',
+                fontSize: '0.875rem',
+                cursor: 'pointer',
+                textAlign: 'center',
+              }}
+            >
+              ← Back
+            </button>
+          </form>
+        )}
 
         <p style={{
           fontSize: '0.875rem',
@@ -4202,21 +4881,41 @@ function RoomPage() {
                 </div>
               </>
             )}
-            <button
-              onClick={() => setDashboardOpen(v => !v)}
-              style={{
-                fontSize: '0.75rem',
-                padding: '0.5rem 0.75rem',
-                border: '1px solid rgba(255, 255, 255, 0.4)',
-                borderRadius: '0.375rem',
-                background: 'rgba(255, 255, 255, 0.05)',
-                color: '#ffffff',
-                cursor: 'pointer',
-                transition: 'all 0.3s ease'
-              }}
-            >
-              Dashboard
-            </button>
+            {(isHost || isCohost) && (
+              <button
+                onClick={() => setDashboardOpen(v => !v)}
+                style={{
+                  fontSize: '0.75rem',
+                  padding: '0.5rem 0.75rem',
+                  border: '1px solid rgba(255, 255, 255, 0.4)',
+                  borderRadius: '0.375rem',
+                  background: 'rgba(255, 255, 255, 0.05)',
+                  color: '#ffffff',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease'
+                }}
+              >
+                Dashboard
+              </button>
+            )}
+
+            {(isHost || canManageStream) && (
+              <button
+                onClick={() => setStudioLayoutOpen(prev => !prev)}
+                style={{
+                  fontSize: '0.75rem',
+                  padding: '0.5rem 0.75rem',
+                  border: studioLayoutOpen ? '1px solid rgba(220, 38, 38, 0.7)' : '1px solid rgba(255, 255, 255, 0.4)',
+                  borderRadius: '0.375rem',
+                  background: studioLayoutOpen ? 'rgba(220, 38, 38, 0.15)' : 'rgba(255, 255, 255, 0.05)',
+                  color: '#ffffff',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease'
+                }}
+              >
+                Layouts
+              </button>
+            )}
 
             {canManageStream && (
               <>
@@ -4297,6 +4996,8 @@ function RoomPage() {
           dashboardGreenroomEnabled={dashboardGreenroomEnabled}
           dashboardOverlaysEnabled={dashboardOverlaysEnabled}
           dashboardRole={isHost ? "host" : "participant"}
+          studioLayoutOpen={studioLayoutOpen}
+          onCloseStudioLayout={() => setStudioLayoutOpen(false)}
           onLeaveRequested={() => {
             void handleEndStream();
           }}
@@ -4347,43 +5048,8 @@ function RoomPage() {
             </div>
 
             <p style={{ marginTop: 0, marginBottom: 14, color: "#94a3b8", fontSize: 13 }}>
-              Copy a participant link to invite someone on stage.
+              Room invites are participant-only. Copy the link to invite someone on stage.
             </p>
-
-            {isHost && roomId && roomAccessToken && (
-              <div
-                style={{
-                  marginBottom: 14,
-                  padding: "10px 12px",
-                  borderRadius: 10,
-                  border: "1px solid #1f2937",
-                  background: "rgba(255,255,255,0.02)",
-                }}
-              >
-                <div style={{ fontWeight: 700, fontSize: 13, marginBottom: 6 }}>Guest access</div>
-                <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, cursor: allowGuestsSaving ? "not-allowed" : "pointer" }}>
-                  <input
-                    type="checkbox"
-                    disabled={allowGuestsLoading || allowGuestsSaving}
-                    checked={allowGuests !== false}
-                    onChange={(e) => {
-                      const next = !!(e.target as HTMLInputElement).checked;
-                      void setAllowGuestsPolicy(next);
-                    }}
-                  />
-                  <span>Allow guests to join without signing in</span>
-                </label>
-                <div style={{ marginTop: 6, fontSize: 12, color: "#9ca3af", lineHeight: 1.4 }}>
-                  {allowGuestsLoading
-                    ? "Loading guest access policy…"
-                    : allowGuests === false
-                      ? "Guests are currently disabled for this room."
-                      : allowGuests === true
-                        ? "Guests are enabled for this room (still subject to server settings and room live status)."
-                        : "Not configured yet — currently treated as enabled for compatibility."}
-                </div>
-              </div>
-            )}
 
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div
@@ -4600,14 +5266,14 @@ function RoomPage() {
           <div style={{ marginTop: 6, fontSize: 12, color: "#cbd5e1", lineHeight: 1.35 }}>
             {recordingBackgroundNotice.kind === "processing" ? (
               <>
-                Recording is processing in the background. Download it from{" "}
-                <span style={{ color: "#e5e7eb", fontWeight: 600 }}>Settings → Usage → Latest video</span>{" "}
-                when it turns green.
+                Recording is processing in the background. It will appear in your{" "}
+                <span style={{ color: "#e5e7eb", fontWeight: 600 }}>Projects</span>{" "}
+                when ready.
               </>
             ) : (
               <>
-                Recording is ready. Click <span style={{ color: "#e5e7eb", fontWeight: 700 }}>Download</span> (opens a new tab).{" "}
-                <span style={{ color: "#94a3b8" }}>Link lasts 1 hour.</span>
+                Your recording is now in <span style={{ color: "#e5e7eb", fontWeight: 700 }}>Projects</span>.{" "}
+                Download it there, or click <span style={{ color: "#e5e7eb", fontWeight: 700 }}>Download</span> below.
               </>
             )}
           </div>
@@ -4718,42 +5384,11 @@ function RoomPage() {
           100% { opacity: 0; transform: scale(0.94); }
         }
 
-        /* Ensure LiveKit prefab fills the available room height */
-        .sl-layout .lk-video-conference,
-        .sl-layout .lk-video-conference-inner,
-        .sl-layout .lk-grid-layout-wrapper,
-        .sl-layout .lk-focus-layout-wrapper {
-          height: 100% !important;
-          min-height: 0 !important;
-        }
+        
 
         ${/* Removed sl-viewer CSS - invite guests are now RTC participants with mic+cam */ ""}
 
-        /* Realtime room controls: disable screen share for roles
-           whose effective controls do not allow it. */
-        .sl-layout.sl-controls-no-screen .lk-control-bar .lk-button-screen-share,
-        .sl-layout.sl-controls-no-screen .lk-control-bar [data-lk-button="toggle_screen_share"],
-        .sl-layout.sl-controls-no-screen .lk-control-bar button[aria-label*="Screen"] {
-          opacity: 0.6 !important;
-          filter: grayscale(1);
-        }
-
-        /* Realtime room controls (Phase 1): disable guest mic UI */
-        .sl-layout.sl-controls-no-audio .lk-control-bar .lk-button-microphone,
-        .sl-layout.sl-controls-no-audio .lk-control-bar [data-lk-button="toggle_mic"],
-        .sl-layout.sl-controls-no-audio .lk-control-bar button[aria-label*="Microphone"] {
-          pointer-events: none !important;
-          opacity: 0.35 !important;
-          filter: grayscale(1);
-        }
-
-        /* Best-effort self-tile fade (LiveKit DOM varies by version) */
-        .sl-layout.sl-controls-hide-self [data-lk-local-participant="true"],
-        .sl-layout.sl-controls-hide-self [data-lk-participant-tile][data-lk-local-participant="true"],
-        .sl-layout.sl-controls-hide-self .lk-participant-tile[data-lk-local-participant="true"] {
-          opacity: 0.08 !important;
-          pointer-events: none !important;
-        }
+       
       `}</style>
     </>
   );

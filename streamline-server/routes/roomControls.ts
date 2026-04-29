@@ -28,6 +28,10 @@ type RoomControls = {
   forcedMute?: boolean;
   forcedVideoOff?: boolean;
   role?: string;
+  // Screen-share routing (persisted + broadcast via SSE).
+  screenShareLayout?: string;
+  // Output format for platform-aware layout (e.g. Instagram vertical).
+  outputFormat?: string;
 };
 
 const DEFAULT_CONTROLS: Required<Pick<RoomControls, "canPublishAudio" | "tileVisible">> = {
@@ -96,9 +100,9 @@ const SYSTEM_ROLE_PRESETS: Record<
     canMuteGuests: true,
     canRemoveGuests: true,
     canInviteLinks: true,
-    canManageDestinations: true,
-    canStartStopStream: true,
-    canStartStopRecording: true,
+    canManageDestinations: false,
+    canStartStopStream: false,
+    canStartStopRecording: false,
     canViewAnalytics: false,
     canChangeLayoutScene: true,
   },
@@ -204,6 +208,20 @@ function pickBoolean(v: any): boolean | undefined {
   return undefined;
 }
 
+const VALID_SCREEN_SHARE_LAYOUTS = new Set(["off", "main", "popout"]);
+
+function pickScreenShareLayout(v: any): string | undefined {
+  if (typeof v === "string" && VALID_SCREEN_SHARE_LAYOUTS.has(v)) return v;
+  return undefined;
+}
+
+const VALID_OUTPUT_FORMATS = new Set(["landscape_16x9", "vertical_9x16", "square_1x1"]);
+
+function pickOutputFormat(v: any): string | undefined {
+  if (typeof v === "string" && VALID_OUTPUT_FORMATS.has(v)) return v;
+  return undefined;
+}
+
 function isHostOrCohost(role?: string): boolean {
   const r = String(role || "").toLowerCase();
   // Updated policy: only hosts can modify room controls or presets.
@@ -252,13 +270,17 @@ router.patch("/:roomId/controls", requireAuth as any, requireRoomAccessToken as 
     canStartStopRecording: pickBoolean(body.canStartStopRecording),
     forcedMute: pickBoolean(body.forcedMute),
     forcedVideoOff: pickBoolean(body.forcedVideoOff),
+    screenShareLayout: pickScreenShareLayout(body.screenShareLayout),
+    outputFormat: pickOutputFormat(body.outputFormat),
   };
 
   // Only accept known keys.
   const cleaned: RoomControls = {};
+  const STRING_CONTROL_KEYS = new Set<keyof RoomControls>(["screenShareLayout", "outputFormat"]);
   (Object.keys(patch) as Array<keyof RoomControls>).forEach((k) => {
     const val = patch[k];
     if (typeof val === "boolean") (cleaned as any)[k] = val;
+    else if (typeof val === "string" && STRING_CONTROL_KEYS.has(k)) (cleaned as any)[k] = val;
   });
 
   if (Object.keys(cleaned).length === 0) {
@@ -422,12 +444,16 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
     canStartStopRecording: pickBoolean(body.canStartStopRecording),
     forcedMute: pickBoolean(body.forcedMute),
     forcedVideoOff: pickBoolean(body.forcedVideoOff),
+    screenShareLayout: pickScreenShareLayout(body.screenShareLayout),
+    outputFormat: pickOutputFormat(body.outputFormat),
   };
 
   const cleaned: RoomControls = {};
+  const STRING_CTRL_KEYS = new Set<keyof RoomControls>(["screenShareLayout", "outputFormat"]);
   (Object.keys(patch) as Array<keyof RoomControls>).forEach((k) => {
     const val = patch[k];
     if (typeof val === "boolean") (cleaned as any)[k] = val;
+    else if (typeof val === "string" && STRING_CTRL_KEYS.has(k)) (cleaned as any)[k] = val;
   });
 
   if (Object.keys(cleaned).length === 0) {
@@ -640,8 +666,13 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
         livekitApplied = false;
         livekitReason = "not_found";
       } else {
-        console.error("[roomControls] livekit apply-permissions failed", err);
-        return res.status(500).json({ error: "livekit_role_update_failed" });
+        // Firestore controls were already persisted — the participant will
+        // receive the update via the SSE controls stream regardless.  Don't
+        // return 500 for a LiveKit-only failure; instead surface a warning
+        // in the response so the host UI can still show "Role updated."
+        console.error("[roomControls] livekit apply-permissions failed (Firestore persisted, SSE will deliver)", err);
+        livekitApplied = false;
+        livekitReason = "livekit_push_failed";
       }
     }
 

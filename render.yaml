@@ -11,7 +11,7 @@ services:
     repo: https://github.com/Gitwit22/streamline-platform
     branch: test
     rootDir: streamline-server
-    buildCommand: npm install && npm run build
+    buildCommand: npm ci && npm run build
     startCommand: npm run start
     autoDeploy: true
     envVars:
@@ -65,7 +65,7 @@ services:
     repo: https://github.com/Gitwit22/streamline-platform
     branch: test
     rootDir: streamline-client
-    buildCommand: npm install && npm run build
+    buildCommand: npm ci && npm run build
     staticPublishPath: dist
     autoDeploy: true
     envVars:
@@ -92,7 +92,7 @@ services:
     repo: https://github.com/Gitwit22/streamline-platform
     branch: test
     rootDir: streamline-server
-    buildCommand: npm install && npm run build
+    buildCommand: npm ci && npm run build
     schedule: "*/10 * * * *"
     command: npm run cron:expire-emergency
     envVars:

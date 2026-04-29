@@ -5,14 +5,15 @@ import { ensureRoomDoc } from "../services/rooms";
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeRoomLayout, type RoomLayout } from "../lib/roomLayout";
-import { emitRoomCreated } from "../events/emitters/roomEmitter";
+import { isValidPresenceMode, normalizePresenceMode, type PresenceMode } from "../lib/presenceMode";
+import { logDelegatedRoomAction, resolveOwnerActingContext } from "../lib/collaborators";
 
 const router = Router();
 
 /**
  * POST /api/rooms/create
  * Creates a new Firestore room document and returns its id.
- * Body: { livekitRoomName?: string, roomType?: "rtc" | "hls" }
+ * Body: { livekitRoomName?: string, roomType?: "rtc" | "hls", presenceMode?: PresenceMode }
  *
  * roomId is generated from Firestore (roomsRef.doc().id).
  */
@@ -20,7 +21,22 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
   const uid = req.user?.uid;
   if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
+  const actingContext = await resolveOwnerActingContext(req);
+  if (!actingContext) {
+    return res.status(403).json({ error: "invalid_owner_context" });
+  }
+  if (actingContext.isDelegated && !actingContext.permissions?.createRooms) {
+    return res.status(403).json({ error: "delegation_create_rooms_denied" });
+  }
+  const ownerUid = actingContext.ownerUid || uid;
+
   const roomType = (req.body?.roomType || "rtc") as "rtc" | "hls";
+
+  // Presence mode for the room creator (normal/invisible; "silent" → "invisible")
+  const rawPresenceMode = req.body?.presenceMode;
+  const presenceMode: PresenceMode = isValidPresenceMode(rawPresenceMode)
+    ? normalizePresenceMode(rawPresenceMode)
+    : "normal";
 
   // Optional room access policy (secure defaults are applied in ensureRoomDoc).
   const visibilityRaw = String(req.body?.visibility || "").trim().toLowerCase();
@@ -47,7 +63,7 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
   // so new rooms inherit the user's preferred layout without requiring per-room setup.
   let initialRoomLayout: RoomLayout | undefined = undefined;
   try {
-    const userSnap = await db.collection("users").doc(uid).get();
+    const userSnap = await db.collection("users").doc(ownerUid).get();
     const userData = userSnap.exists ? (userSnap.data() as any) || {} : {};
     const mediaPrefs = (userData as any)?.mediaPrefs || {};
     initialRoomLayout =
@@ -61,7 +77,7 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
   try {
     const { data } = await ensureRoomDoc({
       roomId,
-      ownerId: uid,
+      ownerId: ownerUid,
       livekitRoomName,
       roomType,
       initialStatus: "idle",
@@ -72,21 +88,35 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
       requiresPayment,
     });
 
-    // Fire-and-forget: emit room.created platform event
-    emitRoomCreated({
-      roomId,
-      actor: { userId: uid, username: uid, role: "owner" },
-      data: { livekitRoomName, roomType },
-    });
-
     return res.status(201).json({
       roomId,
       livekitRoomName: data.livekitRoomName || livekitRoomName,
       roomType: data.roomType || roomType,
+      presenceMode,
+      actingContext: {
+        ownerUid,
+        actedByUid: uid,
+        isDelegated: actingContext.isDelegated,
+        ownerDisplayName: actingContext.ownerDisplayName,
+        ownerEmail: actingContext.ownerEmail,
+      },
     });
   } catch (err) {
     console.error("/api/rooms/create ensureRoomDoc failed", err);
     return res.status(500).json({ error: "room_init_failed" });
+  } finally {
+    if (actingContext.isDelegated) {
+      await logDelegatedRoomAction({
+        actedByUid: uid,
+        ownerUid,
+        roomId,
+        action: "room_create",
+        metadata: {
+          livekitRoomName,
+          roomType,
+        },
+      }).catch(() => {});
+    }
   }
 });
 

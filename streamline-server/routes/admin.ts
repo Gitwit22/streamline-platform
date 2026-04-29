@@ -14,12 +14,157 @@ import { invalidatePlatformBillingCache } from "../lib/userAccount";
 import type { UserUsageSummary } from "../types/admin.types";
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { PLAN_IDS, PlanId, isPlanId, getAllPlanIds } from "../types/plan";
+import {
+  buildAdminPasswordResetState,
+  buildPublicPasswordResetState,
+  buildPublicRecoveryState,
+  canAdminManagePasswordReset,
+} from "../lib/accountRecovery";
+import { logAuthSecurityEvent } from "../lib/authAudit";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import adminMonitoringRoutes from "./adminMonitoring";
 
 const router = express.Router();
+
+function toMillis(value: any): number | null {
+  if (!value) return null;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 1e12 ? value : value * 1000;
+  }
+  if (value instanceof Date) {
+    const ms = value.getTime();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (typeof value?.toMillis === "function") {
+    const ms = value.toMillis();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  if (typeof value?.toDate === "function") {
+    const d = value.toDate();
+    const ms = d?.getTime?.();
+    return Number.isFinite(ms) ? ms : null;
+  }
+  const parsed = new Date(value);
+  const ms = parsed.getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function parsePeriodRange(query: any): { startMs: number; endMs: number } {
+  const now = Date.now();
+  const period = String(query.period || "30d").trim().toLowerCase();
+  const startRaw = typeof query.start === "string" ? query.start : query.startDate;
+  const endRaw = typeof query.end === "string" ? query.end : query.endDate;
+
+  const explicitStart = toMillis(startRaw);
+  const explicitEnd = toMillis(endRaw);
+  if (explicitStart !== null || explicitEnd !== null) {
+    const startMs = explicitStart ?? now - 30 * 24 * 60 * 60 * 1000;
+    const endMs = explicitEnd ?? now;
+    return { startMs: Math.min(startMs, endMs), endMs: Math.max(startMs, endMs) };
+  }
+
+  const dayMs = 24 * 60 * 60 * 1000;
+  if (period === "today") {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return { startMs: d.getTime(), endMs: now };
+  }
+  if (period === "week" || period === "7d") {
+    return { startMs: now - 7 * dayMs, endMs: now };
+  }
+  if (period === "month") {
+    const d = new Date();
+    d.setDate(1);
+    d.setHours(0, 0, 0, 0);
+    return { startMs: d.getTime(), endMs: now };
+  }
+  if (period === "90d") {
+    return { startMs: now - 90 * dayMs, endMs: now };
+  }
+  if (period === "all") {
+    return { startMs: 0, endMs: now };
+  }
+
+  // Default and "30d"
+  return { startMs: now - 30 * dayMs, endMs: now };
+}
+
+function readPath(obj: any, path: string): any {
+  return path.split(".").reduce((acc, key) => (acc && typeof acc === "object" ? acc[key] : undefined), obj);
+}
+
+function resolveProgramContext(req: any): string | null {
+  const q = req.query || {};
+  const programRaw =
+    q.programId ||
+    q.activeProgramId ||
+    q.program ||
+    req.header?.("x-program-id") ||
+    req.header?.("x-active-program-id") ||
+    "";
+  const value = String(programRaw || "").trim();
+  return value || null;
+}
+
+function matchesProgramContext(data: any, activeProgramId: string | null): boolean {
+  if (!activeProgramId) return true;
+  const candidates = [
+    readPath(data, "programId"),
+    readPath(data, "activeProgramId"),
+    readPath(data, "program.id"),
+    readPath(data, "programContext.programId"),
+    readPath(data, "meta.programId"),
+  ]
+    .map((v) => (typeof v === "string" ? v.trim() : ""))
+    .filter(Boolean);
+  return candidates.includes(activeProgramId);
+}
+
+function isInRange(ms: number | null, startMs: number, endMs: number): boolean {
+  if (ms === null) return false;
+  return ms >= startMs && ms <= endMs;
+}
+
+function getDocMillis(data: any, fields: string[]): number | null {
+  for (const field of fields) {
+    const raw = readPath(data, field);
+    const ms = toMillis(raw);
+    if (ms !== null) return ms;
+  }
+  return null;
+}
+
+function buildMonthKeys(startMs: number, endMs: number): Set<string> {
+  const start = new Date(startMs);
+  const end = new Date(endMs);
+  const cursor = new Date(start.getFullYear(), start.getMonth(), 1);
+  const endMonth = new Date(end.getFullYear(), end.getMonth(), 1);
+  const keys = new Set<string>();
+  while (cursor <= endMonth) {
+    const key = `${cursor.getFullYear()}-${String(cursor.getMonth() + 1).padStart(2, "0")}`;
+    keys.add(key);
+    cursor.setMonth(cursor.getMonth() + 1);
+  }
+  return keys;
+}
+
+function getDeletedAtMs(raw: any): number | null {
+  if (!raw) return null;
+  const deletedAtMs =
+    typeof raw.deletedAtMs === "number"
+      ? raw.deletedAtMs
+      : typeof raw.deletedAt === "number"
+        ? raw.deletedAt
+        : null;
+  return deletedAtMs && deletedAtMs > 0 ? deletedAtMs : null;
+}
+
+function isDeletedUserRecord(raw: any): boolean {
+  const status = typeof raw?.accountStatus === "string" ? String(raw.accountStatus).toLowerCase() : "";
+  return status === "deleted" || Boolean(getDeletedAtMs(raw));
+}
 
 // All routes require admin authentication
 router.use(requireAdmin);
@@ -31,6 +176,62 @@ router.use((req, res, next) => {
 
 router.get('/me', (req, res) => {
   res.json({ isAdmin: true, user: req.adminUser });
+});
+
+router.post("/users/:userId/enable-password-reset", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const targetRef = firestore.collection("users").doc(userId);
+    const targetSnap = await targetRef.get();
+
+    if (!targetSnap.exists) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const targetUser = targetSnap.data() || {};
+    if (isDeletedUserRecord(targetUser)) {
+      return res.status(400).json({ error: "Cannot enable password reset for a deleted user" });
+    }
+
+    const adminUid = req.adminUser?.uid || "";
+    if (!canAdminManagePasswordReset(adminUid, userId, targetUser)) {
+      return res.status(403).json({ error: "Not allowed to enable password reset for this user" });
+    }
+
+    const now = Date.now();
+    const passwordReset = buildAdminPasswordResetState(adminUid, now);
+
+    await targetRef.set(
+      {
+        passwordReset,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    await logAdminAction(adminUid, "enable_password_reset", {
+      userId,
+      expiresAt: passwordReset.expiresAt,
+    });
+    await logAuthSecurityEvent({
+      event: "admin_password_reset_enabled",
+      actorUserId: adminUid,
+      targetUserId: userId,
+      ip: req.ip || null,
+      details: {
+        expiresAt: passwordReset.expiresAt,
+      },
+    });
+
+    return res.json({
+      success: true,
+      passwordReset: buildPublicPasswordResetState(passwordReset),
+      canEnablePasswordReset: false,
+    });
+  } catch (error: any) {
+    console.error("Failed to enable password reset:", error);
+    return res.status(500).json({ error: "Failed to enable password reset" });
+  }
 });
 
 // Lightweight environment sanity endpoint for admins.
@@ -102,7 +303,6 @@ router.get("/env-sanity", async (req, res) => {
     console.error("/api/admin/env-sanity failed:", err);
     return res.status(500).json({
       error: "env_sanity_failed",
-      message: err?.message || String(err),
     });
   }
 });
@@ -123,13 +323,19 @@ router.get("/plans", async (req, res) => {
     return res.json({ plans });
   } catch (err: any) {
     console.error("🎯 ERROR in plans route:", err);
-    return res.status(500).json({ error: "Failed to load plans", details: err.message });
+    return res.status(500).json({ error: "Failed to load plans" });
   }
 });
 
 router.put("/plans/:planId", async (req, res) => {
   try {
     const { planId } = req.params;
+
+    // Validate planId: only allow known plan identifiers
+    if (!planId || !/^[a-zA-Z][a-zA-Z0-9_-]{0,39}$/.test(planId)) {
+      return res.status(400).json({ error: "Invalid plan ID format" });
+    }
+
     const updateData = { ...req.body };
     // Prevent changing the id field
     if ("id" in updateData) {
@@ -138,14 +344,156 @@ router.put("/plans/:planId", async (req, res) => {
     const planRef = firestore.collection("plans").doc(planId);
     const planSnap = await planRef.get();
     if (!planSnap.exists) {
-      return res.status(404).json({ error: "Plan not found" });
+      // Create the plan doc if it doesn't exist yet (e.g. first-time setup)
+      await planRef.set({ id: planId, ...updateData, createdAt: new Date().toISOString() });
+    } else {
+      await planRef.set(updateData, { merge: true });
     }
-    await planRef.update(updateData);
     await logAdminAction(req.adminUser!.uid, "update_plan", { planId, updateData });
     res.json({ success: true, planId, updated: updateData });
   } catch (error: any) {
     console.error("Failed to update plan:", error);
-    res.status(500).json({ error: "Failed to update plan", details: error.message });
+    res.status(500).json({ error: "Failed to update plan" });
+  }
+});
+
+// ── Seed / ensure all canonical plan documents exist with full features+limits ──
+router.post("/plans/seed", async (req, res) => {
+  try {
+    const PLANS: Record<string, any> = {
+      free: {
+        name: "Free",
+        description: "Get started – basic in-room experience",
+        priceMonthly: 0,
+        visibility: "public",
+        features: {
+          recording: false, rtmp: false, multistream: false, dualRecording: false,
+          advancedPermissions: false, allowsOverages: false,
+          canHls: false, hls: false, hlsEnabled: false, hlsCustomizationEnabled: false,
+          invisibleHost: false,
+        },
+        limits: {
+          monthlyMinutesIncluded: 180, transcodeMinutes: 0, maxGuests: 2,
+          rtmpDestinationsMax: 0, maxSessionMinutes: 60, maxRecordingMinutesPerClip: 0, maxHoursPerMonth: 3,
+        },
+        caps: { hlsMaxMinutesPerSession: null },
+        editing: { access: false, maxProjects: 0, maxStorageGB: 0, maxStorageBytes: 0 },
+      },
+      basic: {
+        name: "Basic",
+        description: "For hobbyists – recording & basic editing",
+        priceMonthly: 15,
+        visibility: "public",
+        features: {
+          recording: true, rtmp: false, multistream: false, dualRecording: false,
+          advancedPermissions: false, allowsOverages: false,
+          canHls: false, hls: false, hlsEnabled: false, hlsCustomizationEnabled: false,
+          invisibleHost: false,
+        },
+        limits: {
+          monthlyMinutesIncluded: 360, transcodeMinutes: 0, maxGuests: 4,
+          rtmpDestinationsMax: 0, maxSessionMinutes: 120, maxRecordingMinutesPerClip: 30, maxHoursPerMonth: 6,
+        },
+        caps: { hlsMaxMinutesPerSession: null },
+        editing: { access: true, maxProjects: 2, maxStorageGB: 3, maxStorageBytes: 3 * 1024 * 1024 * 1024 },
+      },
+      starter: {
+        name: "Starter",
+        description: "For growing creators – streaming, recording & editing",
+        priceMonthly: 29,
+        visibility: "public",
+        features: {
+          recording: true, rtmp: true, multistream: true, dualRecording: false,
+          advancedPermissions: false, allowsOverages: false,
+          canHls: false, hls: false, hlsEnabled: false, hlsCustomizationEnabled: false,
+          invisibleHost: false,
+        },
+        limits: {
+          monthlyMinutesIncluded: 600, transcodeMinutes: 60, maxGuests: 5,
+          rtmpDestinationsMax: 3, maxSessionMinutes: 240, maxRecordingMinutesPerClip: 15, maxHoursPerMonth: 10,
+        },
+        caps: { hlsMaxMinutesPerSession: null },
+        editing: { access: true, maxProjects: 5, maxStorageGB: 15, maxStorageBytes: 15 * 1024 * 1024 * 1024 },
+      },
+      pro: {
+        name: "Pro",
+        description: "For professionals – full suite with HLS & overages",
+        priceMonthly: 79,
+        visibility: "public",
+        features: {
+          recording: true, rtmp: true, multistream: true, dualRecording: true,
+          advancedPermissions: false, allowsOverages: true,
+          canHls: true, hls: true, hlsEnabled: true, hlsCustomizationEnabled: true,
+          invisibleHost: true,
+        },
+        limits: {
+          monthlyMinutesIncluded: 2400, transcodeMinutes: 300, maxGuests: 10,
+          rtmpDestinationsMax: 3, maxSessionMinutes: 480, maxRecordingMinutesPerClip: 60, maxHoursPerMonth: 40,
+        },
+        caps: { hlsMaxMinutesPerSession: null },
+        editing: { access: true, maxProjects: 10, maxStorageGB: 25, maxStorageBytes: 25 * 1024 * 1024 * 1024 },
+      },
+      enterprise: {
+        name: "Enterprise",
+        description: "Custom enterprise solution – configured per account",
+        priceMonthly: 0,
+        visibility: "admin",
+        features: {
+          recording: true, rtmp: true, multistream: true, dualRecording: true,
+          advancedPermissions: false, allowsOverages: true,
+          canHls: true, hls: true, hlsEnabled: true, hlsCustomizationEnabled: true,
+          invisibleHost: true,
+        },
+        limits: {
+          monthlyMinutesIncluded: 6000, transcodeMinutes: 1000, maxGuests: 50,
+          rtmpDestinationsMax: 10, maxSessionMinutes: 720, maxRecordingMinutesPerClip: 120, maxHoursPerMonth: 100,
+        },
+        caps: { hlsMaxMinutesPerSession: null },
+        editing: { access: true, maxProjects: 0, maxStorageGB: 0, maxStorageBytes: 0 },
+        customizable: true, contactSales: true,
+      },
+      internal_unlimited: {
+        name: "Internal Unlimited",
+        description: "Internal testing – all features unlocked",
+        priceMonthly: 0,
+        visibility: "admin",
+        features: {
+          recording: true, rtmp: true, multistream: true, dualRecording: true,
+          advancedPermissions: false, allowsOverages: true,
+          canHls: true, hls: true, hlsEnabled: true, hlsCustomizationEnabled: true,
+          invisibleHost: true,
+        },
+        limits: {
+          monthlyMinutesIncluded: 99999, transcodeMinutes: 99999, maxGuests: 100,
+          rtmpDestinationsMax: 10, maxSessionMinutes: 1440, maxRecordingMinutesPerClip: 999, maxHoursPerMonth: 9999,
+        },
+        caps: { hlsMaxMinutesPerSession: null },
+        editing: { access: true, maxProjects: 999, maxStorageGB: 100, maxStorageBytes: 100 * 1024 * 1024 * 1024 },
+      },
+    };
+
+    const results: { created: string[]; updated: string[]; errors: Array<{ planId: string; error: string }> } = {
+      created: [], updated: [], errors: [],
+    };
+
+    for (const [planId, planData] of Object.entries(PLANS)) {
+      try {
+        const docRef = firestore.collection("plans").doc(planId);
+        const existingDoc = await docRef.get();
+        const payload: any = { ...planData, id: planId, updatedAt: new Date().toISOString() };
+        if (!existingDoc.exists) payload.createdAt = new Date().toISOString();
+        await docRef.set(payload, { merge: true });
+        (existingDoc.exists ? results.updated : results.created).push(planId);
+      } catch (err: any) {
+        results.errors.push({ planId, error: err?.message || String(err) });
+      }
+    }
+
+    await logAdminAction(req.adminUser!.uid, "seed_plans", { created: results.created, updated: results.updated, errors: results.errors.length });
+    res.json({ success: true, ...results });
+  } catch (error: any) {
+    console.error("Failed to seed plans:", error);
+    res.status(500).json({ error: "Failed to seed plans", details: error.message });
   }
 });
 /**
@@ -199,11 +547,7 @@ router.get("/users", async (req, res) => {
           }
           return u;
         })
-      : users.filter((u: any) => {
-          const status = typeof u?.accountStatus === "string" ? String(u.accountStatus).toLowerCase() : "";
-          const deletedAtMs = typeof u?.deletedAtMs === "number" ? u.deletedAtMs : null;
-          return status !== "deleted" && !(deletedAtMs && deletedAtMs > 0);
-        });
+      : users.filter((u: any) => !isDeletedUserRecord(u));
 
     res.json({
       users: filteredUsers,
@@ -213,7 +557,7 @@ router.get("/users", async (req, res) => {
     });
   } catch (error: any) {
     console.error("Failed to fetch users:", error);
-    res.status(500).json({ error: "Failed to fetch users", details: error.message });
+    res.status(500).json({ error: "Failed to fetch users" });
   }
 });
 //delete user
@@ -239,7 +583,7 @@ router.delete("/users/:userId", async (req, res) => {
     res.json({ success: true, userId });
   } catch (error) {
     console.error("Failed to delete user:", error);
-    res.status(500).json({ error: "Failed to delete user", details: error.message });
+    res.status(500).json({ error: "Failed to delete user" });
   }
 });
 /**
@@ -316,7 +660,7 @@ router.get("/users/:userId", async (req, res) => {
     res.json(userSummary);
   } catch (error: any) {
     console.error("Failed to fetch user details:", error);
-    res.status(500).json({ error: "Failed to fetch user details", details: error.message });
+    res.status(500).json({ error: "Failed to fetch user details" });
   }
 });
 
@@ -370,7 +714,7 @@ router.post("/users/:userId/grant-minutes", async (req, res) => {
     });
   } catch (error: any) {
     console.error("Failed to grant minutes:", error);
-    res.status(500).json({ error: "Failed to grant minutes", details: error.message });
+    res.status(500).json({ error: "Failed to grant minutes" });
   }
 });
 
@@ -430,7 +774,7 @@ const validPlans: string[] = plansSnap.docs.map((d) => d.id);
     });
   } catch (error: any) {
     console.error("Failed to change plan:", error);
-    res.status(500).json({ error: "Failed to change plan", details: error.message });
+    res.status(500).json({ error: "Failed to change plan" });
   }
 });
 
@@ -482,7 +826,43 @@ router.post("/users/:userId/toggle-billing", async (req, res) => {
     });
   } catch (error: any) {
     console.error("Failed to toggle billing:", error);
-    res.status(500).json({ error: "Failed to toggle billing", details: error.message });
+    res.status(500).json({ error: "Failed to toggle billing" });
+  }
+});
+
+/**
+ * POST /api/admin/users/:userId/reset-plan-guards
+ * Reset billing guards, plan-change locks, and cooldowns so the user can change plans again.
+ */
+router.post("/users/:userId/reset-plan-guards", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const userRef = firestore.collection("users").doc(userId);
+    const userDoc = await userRef.get();
+
+    if (!userDoc.exists) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    await userRef.update({
+      billingGuards: null,
+      planChangeLock: null,
+      planChangeCooldownUntil: null,
+      planChangeRequestId: null,
+      planChangeRequestResult: null,
+      updatedAt: new Date(),
+    });
+
+    await logAdminAction(req.adminUser!.uid, "reset_plan_guards", { userId });
+
+    console.log(
+      `Admin ${req.adminUser!.email} reset plan-change guards for user ${userId}`
+    );
+
+    res.json({ success: true, userId });
+  } catch (error: any) {
+    console.error("Failed to reset plan guards:", error);
+    res.status(500).json({ error: "Failed to reset plan guards" });
   }
 });
 
@@ -628,7 +1008,7 @@ router.post("/plans/migrate-schema", async (req, res) => {
     });
   } catch (error: any) {
     console.error("plans/migrate-schema failed", error);
-    res.status(500).json({ error: "plans_migrate_schema_failed", details: error.message });
+    res.status(500).json({ error: "plans_migrate_schema_failed" });
   }
 });
 
@@ -696,7 +1076,6 @@ router.post("/feature-flags/billing", async (req, res) => {
     console.error("Failed to toggle platform billing:", error);
     return res.status(500).json({
       error: "Failed to toggle platform billing",
-      details: error.message,
     });
   }
 });
@@ -709,6 +1088,12 @@ router.get("/usage", async (req, res) => {
   try {
     const limit = parseInt(req.query.limit as string) || 100;
     const planFilter = req.query.plan as PlanId | undefined;
+    const { startMs, endMs } = parsePeriodRange(req.query || {});
+    const activeProgramId = resolveProgramContext(req);
+    const includeDeleted = (() => {
+      const raw = String(req.query.includeDeleted || "").trim().toLowerCase();
+      return raw === "1" || raw === "true" || raw === "yes";
+    })();
     const monthKey = getCurrentMonthKey();
 
     // Load platform billing flag once so the admin UI can accurately show
@@ -732,12 +1117,16 @@ router.get("/usage", async (req, res) => {
 
     const usersSnapshot = await usersQuery.limit(limit).get();
 
+    const userDocs = includeDeleted
+      ? usersSnapshot.docs
+      : usersSnapshot.docs.filter((doc) => !isDeletedUserRecord(doc.data()));
+
     // Fetch all plans once for efficiency
     const plansSnap = await firestore.collection("plans").get();
     const plansMap = Object.fromEntries(plansSnap.docs.map(d => [d.id, d.data()]));
 
     const usageData = await Promise.all(
-      usersSnapshot.docs.map(async (doc) => {
+      userDocs.map(async (doc) => {
         const userData = doc.data();
         const userId = doc.id;
         // usageMonthly doc id shape: `${uid}_${YYYY-MM}`
@@ -771,15 +1160,21 @@ router.get("/usage", async (req, res) => {
         const effectiveBillingEnabled = platformBillingEnabled && billingEnabled;
 
         const billingTruth = normalizeBillingTruthFromUser(userData, Date.now());
+        const canEnablePasswordReset = canAdminManagePasswordReset(req.adminUser!.uid, userId, userData);
 
         return {
           userId,
           email: userData.email,
           displayName: userData.displayName,
+          isAdmin: Boolean(userData.admin?.isAdmin ?? userData.isAdmin),
           planId,
           billingTruthStatus: billingTruth.status,
           stripeConnected: Boolean(billingTruth.stripeCustomerId),
           stripeCustomerId: billingTruth.stripeCustomerId,
+          passwordReset: buildPublicPasswordResetState(userData.passwordReset),
+          recovery: buildPublicRecoveryState(userData.recovery),
+          recoveryConfigured: buildPublicRecoveryState(userData.recovery).configured,
+          canEnablePasswordReset,
           billingEnabled,
           platformBillingEnabled,
           effectiveBillingEnabled,
@@ -800,14 +1195,165 @@ router.get("/usage", async (req, res) => {
     // Sort by percent used (most blocked users first)
     usageData.sort((a, b) => b.percentUsed - a.percentUsed);
 
+    const monthKeys = buildMonthKeys(startMs, endMs);
+
+    console.log("[admin/usage] period", {
+      startMs,
+      endMs,
+      startIso: new Date(startMs).toISOString(),
+      endIso: new Date(endMs).toISOString(),
+      activeProgramId,
+      monthKeys: Array.from(monthKeys),
+    });
+
+    // Period-scoped roomsCreated for Support Hub Usage card.
+    const roomsSnapshot = await firestore.collection("rooms").get();
+    let roomsCreatedSkippedProgram = 0;
+    let roomsCreatedSkippedTime = 0;
+    const roomsCreated = roomsSnapshot.docs.reduce((count, doc) => {
+      const data = doc.data();
+      if (!matchesProgramContext(data, activeProgramId)) { roomsCreatedSkippedProgram++; return count; }
+      const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
+      if (!isInRange(createdMs, startMs, endMs)) { roomsCreatedSkippedTime++; return count; }
+      return count + 1;
+    }, 0);
+    console.log("[admin/usage] rooms", {
+      total: roomsSnapshot.size,
+      skippedProgram: roomsCreatedSkippedProgram,
+      skippedTime: roomsCreatedSkippedTime,
+      roomsCreated,
+    });
+
+    const usersSnapshotAll = await firestore.collection("users").get();
+    const activeUsers = usersSnapshotAll.docs.reduce((count, doc) => {
+      const data = doc.data();
+      if (!includeDeleted && isDeletedUserRecord(data)) return count;
+      if (!matchesProgramContext(data, activeProgramId)) return count;
+      // Include createdAt as last-resort fallback for accounts that haven't yet
+      // received an explicit lastActive / lastActiveAt / updatedAt write.
+      const lastActiveMs = getDocMillis(data, ["lastActive", "lastActiveAt", "updatedAt", "createdAt"]);
+      return isInRange(lastActiveMs, startMs, endMs) ? count + 1 : count;
+    }, 0);
+    console.log("[admin/usage] activeUsers", { totalUsers: usersSnapshotAll.size, activeUsers });
+
+    const recordingsSnapshot = await firestore.collection("recordings").get();
+    let recordingsSkippedProgram = 0;
+    let recordingsSkippedTime = 0;
+    // Include "startedAt" because recordings started via /api/recordings/start
+    // are written with startedAt but no createdAt field.
+    const recordingsCreated = recordingsSnapshot.docs.reduce((count, doc) => {
+      const data = doc.data();
+      if (!matchesProgramContext(data, activeProgramId)) { recordingsSkippedProgram++; return count; }
+      const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at", "startedAt"]);
+      if (!isInRange(createdMs, startMs, endMs)) { recordingsSkippedTime++; return count; }
+      return count + 1;
+    }, 0);
+    console.log("[admin/usage] recordings", {
+      total: recordingsSnapshot.size,
+      skippedProgram: recordingsSkippedProgram,
+      skippedTime: recordingsSkippedTime,
+      recordingsCreated,
+    });
+
+    const usageMonthlySnap = await firestore.collection("usageMonthly").get();
+    let streamMinutes = 0;
+    let hlsMinutes = 0;
+    let apiRequests = 0;
+    let usageMonthlyMatched = 0;
+    usageMonthlySnap.docs.forEach((doc) => {
+      const data = doc.data() as any;
+      if (!matchesProgramContext(data, activeProgramId)) return;
+      const monthKey = String(data.monthKey || doc.id.split("_").pop() || "");
+      if (!monthKeys.has(monthKey)) return;
+      usageMonthlyMatched++;
+      const usage = data.usage || data.totals || {};
+      streamMinutes += Number(usage.participantMinutes ?? usage.streamMinutes ?? usage.minutes ?? 0);
+      hlsMinutes += Number(usage.hlsMinutes ?? 0);
+      apiRequests += Number(usage.apiRequests ?? usage.api_requests ?? 0);
+    });
+    console.log("[admin/usage] usageMonthly", {
+      total: usageMonthlySnap.size,
+      matched: usageMonthlyMatched,
+      streamMinutes,
+      hlsMinutes,
+      apiRequests,
+    });
+
+    let messagesSent = 0;
+    try {
+      const messageSnap = await firestore.collectionGroup("messages").get();
+      let messagesSkippedTime = 0;
+      let messagesSkippedProgram = 0;
+      messagesSent = messageSnap.docs.reduce((count, doc) => {
+        const data = doc.data() as any;
+        const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
+        if (!isInRange(createdMs, startMs, endMs)) { messagesSkippedTime++; return count; }
+        if (!activeProgramId) return count + 1;
+
+        const path = doc.ref.path.split("/");
+        const roomId = path.length >= 2 && path[0] === "rooms" ? path[1] : "";
+        if (!roomId) { messagesSkippedProgram++; return count; }
+        // When messages don't carry program fields, allow matching via roomId path token.
+        if (!roomId.includes(activeProgramId)) { messagesSkippedProgram++; return count; }
+        return count + 1;
+      }, 0);
+      console.log("[admin/usage] messages", {
+        total: messageSnap.size,
+        skippedTime: messagesSkippedTime,
+        skippedProgram: messagesSkippedProgram,
+        messagesSent,
+      });
+    } catch (msgErr: any) {
+      console.error("[admin/usage] collectionGroup('messages') failed:", msgErr?.message || msgErr);
+      messagesSent = 0;
+    }
+
+    let ticketsToday = 0;
+    try {
+      const ticketsSnapshot = await firestore.collection("supportTickets").get();
+      ticketsToday = ticketsSnapshot.docs.reduce((count, doc) => {
+        const data = doc.data();
+        if (!matchesProgramContext(data, activeProgramId)) return count;
+        const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
+        return isInRange(createdMs, startMs, endMs) ? count + 1 : count;
+      }, 0);
+    } catch (tickErr: any) {
+      console.error("[admin/usage] supportTickets query failed:", tickErr?.message || tickErr);
+      ticketsToday = 0;
+    }
+
+    console.log("[admin/usage] final counts", {
+      ticketsToday,
+      activeUsers,
+      roomsCreated,
+      messagesSent,
+      streamMinutes,
+      apiRequests,
+      recordingsCreated,
+      hlsMinutes,
+    });
+
     res.json({
+      ticketsToday: Number(ticketsToday || 0),
+      activeUsers: Number(activeUsers || 0),
+      roomsCreated: Number(roomsCreated || 0),
+      messagesSent: Number(messagesSent || 0),
+      streamMinutes: Number(streamMinutes || 0),
+      apiRequests: Number(apiRequests || 0),
+      recordingsCreated: Number(recordingsCreated || 0),
+      hlsMinutes: Number(hlsMinutes || 0),
       usage: usageData,
       total: usageData.length,
       limit,
+      period: {
+        startMs,
+        endMs,
+      },
+      activeProgramId,
     });
   } catch (error: any) {
     console.error("Failed to fetch usage stats:", error);
-    res.status(500).json({ error: "Failed to fetch usage stats", details: error.message });
+    res.status(500).json({ error: "Failed to fetch usage stats" });
   }
 });
 
@@ -830,7 +1376,6 @@ router.get("/usage/summary", async (req, res) => {
     return res.status(500).json({
       success: false,
       error: "Failed to fetch usage summary",
-      details: error?.message,
     });
   }
 });
@@ -842,6 +1387,10 @@ router.get("/usage/summary", async (req, res) => {
 router.get("/stats", async (req, res) => {
   try {
     const usersSnapshot = await firestore.collection("users").get();
+    const includeDeleted = (() => {
+      const raw = String(req.query.includeDeleted || "").trim().toLowerCase();
+      return raw === "1" || raw === "true" || raw === "yes";
+    })();
     
     const now = new Date();
     const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
@@ -859,6 +1408,11 @@ router.get("/stats", async (req, res) => {
 
     usersSnapshot.docs.forEach((doc) => {
       const data = doc.data();
+
+      if (!includeDeleted && isDeletedUserRecord(data)) {
+        return;
+      }
+
       totalUsers++;
       
       const plan = (data.planId || "free");
@@ -897,7 +1451,7 @@ router.get("/stats", async (req, res) => {
     res.json(stats);
   } catch (error: any) {
     console.error("Failed to fetch stats:", error);
-    res.status(500).json({ error: "Failed to fetch stats", details: error.message });
+    res.status(500).json({ error: "Failed to fetch stats" });
   }
 });
 
@@ -909,8 +1463,13 @@ router.post("/features/toggle", async (req, res) => {
   try {
     const { featureName, enabled, reason } = req.body;
 
-    if (!featureName) {
+    if (!featureName || typeof featureName !== "string") {
       return res.status(400).json({ error: "featureName is required" });
+    }
+
+    // Validate featureName: only allow alphanumeric, underscores, hyphens (1-80 chars)
+    if (!/^[a-zA-Z][a-zA-Z0-9_-]{0,79}$/.test(featureName)) {
+      return res.status(400).json({ error: "featureName must start with a letter and contain only letters, digits, underscores, or hyphens (max 80 chars)" });
     }
 
     if (typeof enabled !== "boolean") {
@@ -947,7 +1506,7 @@ router.post("/features/toggle", async (req, res) => {
     });
   } catch (error: any) {
     console.error("Failed to toggle feature:", error);
-    res.status(500).json({ error: "Failed to toggle feature", details: error.message });
+    res.status(500).json({ error: "Failed to toggle feature" });
   }
 });
 
@@ -963,6 +1522,16 @@ router.get("/features", async (req, res) => {
     // been explicitly created in Firestore.
     const seededDefaults: Array<{ name: string; enabled: boolean }> = [
       { name: "hlsSettingsTab", enabled: true },
+      { name: "editorEnabled", enabled: true },
+      { name: "contentLibraryEnabled", enabled: true },
+      { name: "projectsEnabled", enabled: true },
+      { name: "myContentEnabled", enabled: true },
+      { name: "myContentRecordingsEnabled", enabled: true },
+      { name: "audioMixerEnabled", enabled: false },
+      { name: "advancedScreenShareEnabled", enabled: false },
+      { name: "mixedAudioPublishEnabled", enabled: false },
+      { name: "invisibleHostEnabled", enabled: false },
+      { name: "collaboratorDelegationEnabled", enabled: false },
     ];
 
     const byName = new Map<string, any>();
@@ -975,9 +1544,15 @@ router.get("/features", async (req, res) => {
         name: doc.id,
         ...doc.data(),
       }))
-      // Advanced permissions is now a legacy flag and should not
-      // be exposed as a toggle in the Admin UI.
-      .filter((f) => f.name !== "advancedPermissions");
+      // Legacy / orphaned flags that should not appear in the Admin UI.
+      .filter((f) => ![
+        "advancedPermissions",
+        "editing_access",
+        "Editing",
+        "editing",
+        "editingEnabled",
+        "postProduction",
+      ].includes(f.name));
 
     for (const seed of seededDefaults) {
       if (!byName.has(seed.name)) {
@@ -990,7 +1565,7 @@ router.get("/features", async (req, res) => {
     res.json({ features });
   } catch (error: any) {
     console.error("Failed to fetch features:", error);
-    res.status(500).json({ error: "Failed to fetch features", details: error.message });
+    res.status(500).json({ error: "Failed to fetch features" });
   }
 });
 

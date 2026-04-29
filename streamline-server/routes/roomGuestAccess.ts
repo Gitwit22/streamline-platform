@@ -1,14 +1,20 @@
 import { Router } from "express";
 import admin from "firebase-admin";
+import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { firestore } from "../firebaseAdmin";
-import { tryGetAuthUser, verifyInviteToken } from "../middleware/requireAuth";
+import { tryGetAuthUserAny, verifyInviteToken } from "../middleware/requireAuth";
 import { tryGetGuestSession } from "../middleware/guestSession";
 import { verifyRoomAccessToken } from "../middleware/roomAccessToken";
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { signGuestSession } from "../middleware/guestSession";
-import { roleToParticipantPermission } from "../lib/livekitPermissions";
+import { roleToParticipantPermission, applyPresenceModeToGrant } from "../lib/livekitPermissions";
+import { isValidPresenceMode, normalizePresenceMode, buildPresenceMetadata, type PresenceMode } from "../lib/presenceMode";
+import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { isAdmin } from "../middleware/adminAuth";
+import { resolveHostName } from "../lib/resolveHostName";
+import { logDelegatedRoomAction, resolveOwnerActingContext } from "../lib/collaborators";
 
 export function extractInviteToken(req: any): string | null {
   const hdr = (req?.headers as any) || {};
@@ -44,13 +50,17 @@ export function tryGetLegacyInviteGuest(req: any, roomId: string): { inviteId: s
     if (!claimRoomId || claimRoomId !== roomId) return null;
 
     const inviteId = `legacy:${Buffer.from(raw).toString("base64url").slice(0, 24)}`;
-    // Backward compatibility: treat old "viewer" role as "guest" for /room flows
-    // Security: Explicitly validate known roles, reject unknown/corrupted values
+    // Backward compatibility:
+    // - legacy role "guest" historically behaved like an on-stage "participant"
+    // - legacy role "viewer" behaved like a view-only "guest"
+    // Security: explicitly validate known roles, reject unknown/corrupted values.
     let role: "guest" | "participant";
     if (rawRole === "participant") {
       role = "participant";
-    } else if (rawRole === "guest" || rawRole === "viewer") {
-      role = "guest"; // Map legacy "viewer" to "guest"
+    } else if (rawRole === "guest") {
+      role = "participant";
+    } else if (rawRole === "viewer") {
+      role = "guest";
     } else {
       // Unknown/corrupted role - reject for security
       return null;
@@ -64,6 +74,149 @@ export function tryGetLegacyInviteGuest(req: any, roomId: string): { inviteId: s
 async function getAccessTokenCtor() {
   const mod = await import("livekit-server-sdk");
   return mod.AccessToken;
+}
+
+async function getRoomServiceClient() {
+  const mod = await import("livekit-server-sdk");
+  return mod.RoomServiceClient;
+}
+
+function deriveServiceUrl(): string | null {
+  const raw = process.env.LIVEKIT_URL || "";
+  if (!raw) return null;
+  // Convert wss://host to https://host for RoomServiceClient
+  return raw.replace(/^wss?:\/\//i, (m) => (m.toLowerCase() === "ws://" ? "http://" : "https://"));
+}
+
+async function getParticipantCount(livekitRoomName: string): Promise<number | null> {
+  const serviceUrl = deriveServiceUrl();
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+  if (!serviceUrl || !apiKey || !apiSecret) return null;
+  try {
+    const RoomServiceClient = await getRoomServiceClient();
+    const client = new RoomServiceClient(serviceUrl, apiKey, apiSecret);
+    const participants = await client.listParticipants(livekitRoomName);
+    return participants?.length ?? 0;
+  } catch (err) {
+    console.warn("[roomGuestAccess] participant count failed", (err as any)?.message || err);
+    return null;
+  }
+}
+
+async function getPlanLimit(uid: string, field: string): Promise<number | undefined> {
+  const userSnap = await firestore.collection("users").doc(uid).get();
+  const planId = String((userSnap.data() || {}).planId || "free");
+  const planSnap = await firestore.collection("plans").doc(planId).get();
+  if (!planSnap.exists) return undefined;
+  const limits = (planSnap.data() || {}).limits || {};
+  const raw = (limits as any)[field];
+  if (raw === undefined || raw === null) return undefined;
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : undefined;
+}
+
+function normalizePositiveCap(raw: number | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return undefined;
+  return Math.floor(n);
+}
+
+async function resolveMaxGuestsCap(ownerId: string | null): Promise<number | undefined> {
+  const planCapRaw = ownerId ? await getPlanLimit(ownerId, "maxGuests") : undefined;
+  const planCap = normalizePositiveCap(planCapRaw);
+
+  const envRaw = Number(process.env.MAX_GUESTS_PER_ROOM || "0");
+  const envCap = Number.isFinite(envRaw) && envRaw > 0 ? Math.floor(envRaw) : undefined;
+
+  return planCap !== undefined ? planCap : envCap;
+}
+
+const CAPACITY_LOCK_TTL_MS = 10_000;
+
+async function acquireCapacityLock(roomId: string): Promise<string | null> {
+  const owner = crypto.randomUUID();
+  const ref = firestore.collection("roomCapacityLocks").doc(roomId);
+  const now = Date.now();
+  try {
+    await firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const data = snap.exists ? ((snap.data() as any) || {}) : {};
+      const existingOwner = typeof data.owner === "string" ? data.owner : "";
+      const expiresAtMs = typeof data.expiresAtMs === "number" ? data.expiresAtMs : 0;
+      if (expiresAtMs > now && existingOwner && existingOwner !== owner) {
+        throw new Error("capacity_lock_busy");
+      }
+      tx.set(
+        ref,
+        {
+          owner,
+          expiresAtMs: now + CAPACITY_LOCK_TTL_MS,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+    });
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
+async function releaseCapacityLock(roomId: string, owner: string): Promise<void> {
+  const ref = firestore.collection("roomCapacityLocks").doc(roomId);
+  try {
+    await firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const data = snap.exists ? ((snap.data() as any) || {}) : {};
+      const existingOwner = typeof data.owner === "string" ? data.owner : "";
+      if (existingOwner && existingOwner === owner) {
+        tx.set(
+          ref,
+          {
+            expiresAtMs: 0,
+            updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+      }
+    });
+  } catch {
+    // best-effort
+  }
+}
+
+async function enforceCapacityOrRespond(params: {
+  roomId: string;
+  livekitRoomName: string;
+  ownerId: string | null;
+  bypass: boolean;
+  res: any;
+}): Promise<{ ok: true; lockOwner: string | null } | { ok: false }> {
+  const { roomId, livekitRoomName, ownerId, bypass, res } = params;
+  if (bypass) return { ok: true, lockOwner: null };
+
+  const cap = await resolveMaxGuestsCap(ownerId);
+  if (cap === undefined) return { ok: true, lockOwner: null };
+
+  const lockOwner = await acquireCapacityLock(roomId);
+  if (!lockOwner) {
+    res.status(503).json({ error: "capacity_check_busy" });
+    return { ok: false };
+  }
+
+  const participantCount = await getParticipantCount(livekitRoomName);
+  // If LiveKit returns null (room not created yet / idle), treat as 0 participants.
+  // An idle room that hasn't been started in LiveKit has no participants.
+  const effectiveCount = participantCount ?? 0;
+  if (effectiveCount >= cap) {
+    await releaseCapacityLock(roomId, lockOwner);
+    res.status(429).json({ error: "room_full" });
+    return { ok: false };
+  }
+
+  return { ok: true, lockOwner };
 }
 
 function getLiveKitServerUrlForClient(): string | null {
@@ -97,17 +250,26 @@ function getRoomAccessSecret() {
   return raw || "dev-secret";
 }
 
-function roleGrant(role: "guest" | "participant" | "host") {
+function roleGrant(role: "guest" | "participant" | "host", presenceMode?: PresenceMode) {
   // Use canonical roleToParticipantPermission() for consistency
   const participantPerm = roleToParticipantPermission(role);
   const isHost = role === "host";
 
+  // Apply presence-mode restrictions when joining as invisible.
+  const effectivePerm = presenceMode
+    ? applyPresenceModeToGrant(participantPerm, presenceMode)
+    : participantPerm;
+
+  // NOTE: canPublishSources is intentionally omitted from the LiveKit grant.
+  // livekit-server-sdk v2.x expects TrackSource enum (protobuf int) values, not
+  // the string literals our permission layer uses. Omitting it is safe because
+  // canPublish: true already allows all sources at the LiveKit level; fine-grained
+  // source control is enforced at the application layer via our own permissions.
   return {
     roomJoin: true,
-    canSubscribe: participantPerm.canSubscribe,
-    canPublish: participantPerm.canPublish,
-    canPublishData: participantPerm.canPublishData,
-    canPublishSources: participantPerm.canPublishSources,
+    canSubscribe: effectivePerm.canSubscribe,
+    canPublish: effectivePerm.canPublish,
+    canPublishData: effectivePerm.canPublishData,
     roomAdmin: isHost,
   } as const;
 }
@@ -378,20 +540,29 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
         lastRedeemedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      // Backward compatibility: treat old "viewer" role as "guest" for /room flows
-      // Security: Explicitly validate known roles, reject unknown/corrupted values
-      // Normalize role: defensive parse, trim whitespace, lowercase
+      // Security: Explicitly validate known roles, reject unknown/corrupted values.
+      // Active product flows (roomInvites.ts, invites.ts) never mint host invites.
+      // A host role in an invite doc is treated as invalid state (likely DB tampering),
+      // not a recoverable case — reject explicitly rather than silently downgrading.
       const inviteRole = String(data.role ?? "").trim().toLowerCase();
-      let role: "guest" | "host";
+      let role: "guest";
       if (inviteRole === "host") {
-        role = "host";
+        // Host invites are impossible through active flows; treat as invalid/suspicious.
+        logPayload.reason = "host_role_in_invite";
+        logPayload.invalidRole = data.role;
+        console.error("[join-now] SECURITY: invite doc has role=host — rejecting as invalid state", {
+          inviteId,
+          roomId,
+          rawRole: data.role,
+        });
+        return { ok: false as const, status: 403 as const, error: "INVALID_INVITE_ROLE" };
       } else if (inviteRole === "guest" || inviteRole === "participant" || inviteRole === "viewer") {
         role = "guest"; // Map participant/viewer to guest for RTC join
       } else {
         // Unknown/corrupted role - reject for security
         logPayload.reason = "invalid_role";
         logPayload.invalidRole = data.role;
-        return { ok: false as const, status: 401 as const, error: "INVALID_ROLE" };
+        return { ok: false as const, status: 403 as const, error: "INVALID_ROLE" };
       }
 
       return { ok: true as const, roomId, role, maxUses, useCount: useCount + 1 };
@@ -426,6 +597,7 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     const livekitRoomName = String(room.livekitRoomName || roomId).trim();
     const roomName = String(room.roomName || room.name || livekitRoomName || roomId);
     const allowGuestsPolicy = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
+    const ownerId = typeof room.ownerId === "string" && room.ownerId.trim() ? room.ownerId.trim() : null;
 
     // Optional per-room guest policy
     if (allowGuestsPolicy === false) {
@@ -435,6 +607,26 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       console.log("[join-now]", logPayload);
       return res.status(401).json({ error: "login_required" });
     }
+
+    // Enforce room capacity (plan maxGuests) for unauthenticated guest join.
+    // Fail-closed if we cannot determine occupancy.
+    const capDecision = await enforceCapacityOrRespond({
+      roomId,
+      livekitRoomName,
+      ownerId,
+      bypass: false,
+      res,
+    });
+    if (!capDecision.ok) {
+      logPayload.event = "join_now_fail";
+      logPayload.reason = "room_full_or_capacity_unavailable";
+      logPayload.latencyMs = Date.now() - startTime;
+      console.log("[join-now]", logPayload);
+      return;
+    }
+
+    const capLockOwner = capDecision.lockOwner;
+    try {
 
     // Step 3: Mint LiveKit token
     const apiKey = process.env.LIVEKIT_API_KEY;
@@ -473,7 +665,10 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       ttl: livekitTtl,
     });
 
-    const grant = roleGrant(inviteRole);
+    // SECURITY: join-now is unauthenticated; inviteRole is always "guest"
+    // (host role is rejected in the redeem step above).
+    const mintedRole: "guest" = "guest";
+    const grant = roleGrant(mintedRole);
     at.addGrant({ room: livekitRoomName, ...grant } as any);
 
     const livekitToken = await at.toJwt();
@@ -483,10 +678,7 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     // Guest session TTL: 2 hours (longer than LiveKit token, allows token refresh)
     // CRITICAL: Guest session must expire AFTER LiveKit token so re-minting works
     const guestSessionTtl = "2h";
-    // Guest sessions only support "guest" | "participant" roles
-    // If invite has role="host", treat as "guest" for the unauthenticated join-now flow
-    const guestSessionRole: "guest" | "participant" = inviteRole === "host" ? "guest" : inviteRole;
-    const guestSessionToken = signGuestSession({ inviteId, roomId, role: guestSessionRole }, guestSessionTtl);
+    const guestSessionToken = signGuestSession({ inviteId, roomId, role: "guest", displayName }, guestSessionTtl);
     logPayload.guestSessionTtl = guestSessionTtl;
 
     // Step 5: Create room access token
@@ -521,7 +713,7 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       roomId,
       roomName,
       livekitRoomName,
-      role: inviteRole,
+      role: mintedRole,
       permissions: basePerms,
       identity,
     } as const;
@@ -572,9 +764,14 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       guestSessionToken,
       roomAccessToken,
       isViewer: false, // All invite-based guests are RTC participants with mic+cam (guest role)
-      role: inviteRole,
+      role: mintedRole,
       roomName,
     });
+    } finally {
+      if (capLockOwner) {
+        await releaseCapacityLock(roomId, capLockOwner);
+      }
+    }
   } catch (err: any) {
     logPayload.event = "join_now_fail";
     logPayload.reason = "exception";
@@ -602,7 +799,7 @@ router.get("/rooms/:roomId/status", async (req: any, res) => {
     const status = room.status === "live" ? "live" : "idle";
     const allowGuestsPolicy = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
 
-    const user = tryGetAuthUser(req);
+    const user = await tryGetAuthUserAny(req);
     let guest = tryGetGuestSession(req);
 
     // Optional per-room guest policy: only enforced when explicitly set.
@@ -652,8 +849,14 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     const roomId = String(req.params.roomId || "").trim();
     if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
-    const user = tryGetAuthUser(req);
+    const user = await tryGetAuthUserAny(req);
     let guest = tryGetGuestSession(req);
+    // Track whether the guest had a pre-existing session (e.g. sl_guest cookie
+    // from a prior join-now call) vs being newly promoted from a legacy invite
+    // token below.  Pre-existing sessions prove prior authorization and allow
+    // the guest to refresh tokens without the ALLOW_GUEST_RTC_JOIN env-var gate
+    // and without requiring the room to be "live".
+    const hadPreExistingSession = !!guest;
 
     if (!user && !guest) {
       const legacyGuest = tryGetLegacyInviteGuest(req, roomId);
@@ -683,6 +886,14 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     const ownerId = typeof room.ownerId === "string" ? room.ownerId.trim() : "";
     const livekitRoomName = String(room.livekitRoomName || roomId).trim();
     const roomStatus = room.status === "live" ? "live" : "idle";
+    const actingContext = user ? await resolveOwnerActingContext(req) : null;
+    const isOwner = !!user && !!ownerId && user.uid === ownerId;
+    const isDelegatedProducer = !!(
+      user &&
+      actingContext?.isDelegated &&
+      actingContext.ownerUid === ownerId
+    );
+    const isPrivilegedProducer = isOwner || isDelegatedProducer;
 
     // Room policy defaults (secure-by-default for older docs)
     const visibilityRaw = typeof room.visibility === "string" ? room.visibility.trim().toLowerCase() : "";
@@ -690,7 +901,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       visibilityRaw === "public" || visibilityRaw === "unlisted" || visibilityRaw === "private"
         ? (visibilityRaw as any)
         : "unlisted";
-    const requiresAuth = typeof room.requiresAuth === "boolean" ? !!room.requiresAuth : false;
+    const requiresAuth = typeof room.requiresAuth === "boolean" ? !!room.requiresAuth : true;
     const requiresPayment = typeof room.requiresPayment === "boolean" ? !!room.requiresPayment : false;
     const roomType = typeof room.roomType === "string" ? String(room.roomType).trim() : "";
     const allowGuestsPolicy = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
@@ -711,35 +922,38 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       return res.status(401).json({ error: "login_required" });
     }
 
-    // If not authed and the room requires auth, guest access must be explicitly
-    // enabled (ALLOW_GUEST_RTC_JOIN=1) and backed by a verified guest session.
-    // When requiresAuth is false (the default) any visitor may join without credentials.
-    if (!user && requiresAuth) {
-      if (!allowGuestJoin) {
+    // If not authed, must have a verified guest session scoped to this room.
+    // Guests with a pre-existing session (issued by join-now after invite
+    // validation) can refresh tokens without the ALLOW_GUEST_RTC_JOIN env-var
+    // gate — the session IS the proof of prior authorization.
+    // Only newly-promoted legacy-invite guests are gated by the env var.
+    if (!user) {
+      if (!guest || guest.roomId !== roomId) {
         return res.status(401).json({ error: "login_required" });
       }
-      if (!guest || guest.roomId !== roomId) {
+      if (!hadPreExistingSession && !allowGuestJoin) {
         return res.status(401).json({ error: "login_required" });
       }
     }
 
     // Policy: visibility
-    const isOwner = !!user && !!ownerId && user.uid === ownerId;
     // Private rooms are owner-only UNLESS the caller presents a valid invite token.
     // This supports "invite someone on stage" while keeping strict access by default.
     const inviteForRoom = tryGetLegacyInviteGuest(req, roomId);
     const hasInviteAccess = !!inviteForRoom;
-    if (visibility === "private" && !isOwner && !hasInviteAccess) {
+    if (visibility === "private" && !isPrivilegedProducer && !hasInviteAccess) {
       return res.status(403).json({ error: "not_allowed" });
     }
 
     // Policy: payment
-    if (requiresPayment && !isOwner) {
+    if (requiresPayment && !isPrivilegedProducer) {
       return res.status(402).json({ error: "payment_required" });
     }
 
-    // Guests can only join once room is live.
-    if (!user && roomStatus !== "live") {
+    // First-time guests (no pre-existing session) can only join once room is live.
+    // Guests with pre-existing sessions (already in the room via join-now) can
+    // refresh tokens during brief room status changes to avoid disconnections.
+    if (!user && roomStatus !== "live" && !hadPreExistingSession) {
       return res.status(409).json({ error: "room_not_live" });
     }
 
@@ -752,17 +966,73 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       return res.status(500).json({ code: "misconfigured", error: "LiveKit keys missing", missing });
     }
 
-    const displayName = sanitizeDisplayName(String(req.body?.displayName || req.body?.identity || "Guest")).trim() || "Guest";
+    // Display name resolution priority:
+    // 1. Explicit request body displayName (client re-sends on refresh)
+    // 2. Guest session JWT displayName (survives localStorage loss)
+    // 3. Request body identity (legacy fallback)
+    // 4. Auto-generated Guest-XXXXXX as last resort
+    const rawDisplayName = String(req.body?.displayName || "").trim();
+    const sessionDisplayName = guest?.displayName || "";
+    const identityFallback = String(req.body?.identity || "").trim();
+    const resolvedName = rawDisplayName
+      || sessionDisplayName
+      || identityFallback
+      || `Guest-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    const displayName = sanitizeDisplayName(resolvedName).trim() || `Guest-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+
+    // Validate and normalize presence mode (default to "normal", "silent" → "invisible")
+    // Authenticated room owners (and future moderator/cohost roles) may use
+    // non-normal presence modes.  Guests cannot.
+    const rawPresenceMode = req.body?.presenceMode;
+    let presenceMode: PresenceMode =
+      user && isPrivilegedProducer && isValidPresenceMode(rawPresenceMode)
+        ? normalizePresenceMode(rawPresenceMode)
+        : "normal";
+
+    if (presenceMode === "invisible" && isDelegatedProducer && !actingContext?.permissions?.joinInvisibleProducer) {
+      presenceMode = "normal";
+    }
+
+    // Server-side gate: invisible host requires the plan entitlement.
+    // If the plan doesn't include it, silently downgrade to "normal".
+    if (presenceMode === "invisible" && user) {
+      try {
+        const ent = await getEffectiveEntitlements(ownerId || user.uid);
+        if (!ent.features.invisibleHost) {
+          presenceMode = "normal";
+        }
+      } catch {
+        presenceMode = "normal";
+      }
+    }
 
     // Determine LiveKit role based on authentication
     // - Authenticated users: host (if owner) or participant
     // - Guest sessions: "guest" (RTC participant with mic/cam)
     const lkRole: "guest" | "participant" | "host" = user
-      ? (isOwner ? "host" : "participant")
+      ? (isPrivilegedProducer ? "host" : "participant")
       : guest?.role === "participant"
         ? "participant"
         : "guest";
-    const identity = user ? user.uid : `invite:${guest!.inviteId}:${Math.random().toString(16).slice(2)}`;
+
+    // Enforce room capacity (plan maxGuests) for non-owner joins.
+    // Fail-closed if we cannot determine occupancy.
+    const capacity = await enforceCapacityOrRespond({
+      roomId,
+      livekitRoomName,
+      ownerId: ownerId || null,
+      bypass: !!(user && isPrivilegedProducer),
+      res,
+    });
+    if (!capacity.ok) return;
+
+    const capLockOwner = capacity.lockOwner;
+    try {
+    const identity = user
+      ? isDelegatedProducer
+        ? `producer:${user.uid}:${ownerId}`
+        : user.uid
+      : `invite:${guest!.inviteId}:${Math.random().toString(16).slice(2)}`;
     if (!identity || !String(identity).trim()) {
       return res.status(500).json({ code: "internal_error", error: "invalid_identity" });
     }
@@ -771,7 +1041,10 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     }
 
     // When host joins, flip room live.
-    if (user && isOwner && roomStatus !== "live") {
+    if (user && isPrivilegedProducer && roomStatus !== "live") {
+      if (isDelegatedProducer && !actingContext?.permissions?.startRooms) {
+        return res.status(403).json({ error: "delegation_start_rooms_denied" });
+      }
       await firestore.collection("rooms").doc(roomId).set(
         {
           status: "live",
@@ -787,26 +1060,49 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       name: displayName,
     });
 
-    const grant = roleGrant(lkRole);
+    const grant = roleGrant(lkRole, presenceMode);
     at.addGrant({ room: livekitRoomName, ...grant } as any);
+
+    // Attach presence metadata so the frontend can filter the roster
+    if (presenceMode !== "normal") {
+      at.metadata = JSON.stringify(
+        buildPresenceMetadata({
+          role: lkRole,
+          presenceMode,
+        }),
+      );
+    }
 
     const token = await at.toJwt();
 
     const effectiveRoleKey: "guest" | "participant" | "host" = lkRole;
     const basePerms =
       effectiveRoleKey === "host"
-        ? {
-            canStream: true,
-            canRecord: true,
-            canDestinations: true,
-            canModerate: true,
-            canLayout: true,
-            canScreenShare: true,
-            canInvite: true,
-            canAnalytics: true,
-            canMuteGuests: true,
-            canRemoveGuests: true,
-          }
+        ? isDelegatedProducer
+          ? {
+              canStream: !!actingContext?.permissions?.manageStreaming,
+              canRecord: !!actingContext?.permissions?.manageRecording,
+              canDestinations: !!actingContext?.permissions?.manageStreaming,
+              canModerate: !!actingContext?.permissions?.manageParticipants,
+              canLayout: !!actingContext?.permissions?.controlLayouts,
+              canScreenShare: true,
+              canInvite: !!actingContext?.permissions?.manageParticipants,
+              canAnalytics: true,
+              canMuteGuests: !!actingContext?.permissions?.manageParticipants,
+              canRemoveGuests: !!actingContext?.permissions?.manageParticipants,
+            }
+          : {
+              canStream: true,
+              canRecord: true,
+              canDestinations: true,
+              canModerate: true,
+              canLayout: true,
+              canScreenShare: true,
+              canInvite: true,
+              canAnalytics: true,
+              canMuteGuests: true,
+              canRemoveGuests: true,
+            }
         : effectiveRoleKey === "participant"
           ? {
               canStream: false,
@@ -840,6 +1136,8 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       role: effectiveRoleKey,
       permissions: basePerms,
       identity,
+      presenceMode,
+      actingOwnerUid: isDelegatedProducer ? ownerId : undefined,
     } as const;
 
     const roomAccessToken = jwt.sign(roomAccessPayload, getRoomAccessSecret(), { expiresIn: "12h" });
@@ -853,6 +1151,20 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       });
     }
 
+    const ownerEntitlements = user ? await getEffectiveEntitlements(ownerId || user.uid) : null;
+    if (isDelegatedProducer && user) {
+      await logDelegatedRoomAction({
+        actedByUid: user.uid,
+        ownerUid: ownerId,
+        roomId,
+        action: "room_token_mint",
+        metadata: {
+          presenceMode,
+          identity,
+        },
+      }).catch(() => {});
+    }
+
     return res.json({
       token,
       serverUrl,
@@ -863,7 +1175,23 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       isViewer: false, // guest/participant/host all use /room route (not HLS viewer)
       role: lkRole,
       effectiveRoleKey,
+      presenceMode,
+      effectiveEntitlements: ownerEntitlements,
+      actingContext: user
+        ? {
+            ownerUid: ownerId || user.uid,
+            actedByUid: user.uid,
+            isDelegated: isDelegatedProducer,
+            ownerDisplayName: actingContext?.ownerDisplayName || null,
+            ownerEmail: actingContext?.ownerEmail || null,
+          }
+        : null,
     });
+    } finally {
+      if (capLockOwner) {
+        await releaseCapacityLock(roomId, capLockOwner);
+      }
+    }
   } catch (err: any) {
     console.error("/api/rooms/:roomId/token error", err?.message || err);
     res.setHeader("x-sl-token-grants", "v4-with-sources");
@@ -872,6 +1200,370 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       error: "Failed to create room token",
       message: process.env.AUTH_DEBUG === "1" ? String(err?.message || err) : undefined,
     });
+  }
+});
+
+/**
+ * Derive a normalized room lifecycle status from the raw Firestore room document.
+ *   - "live"  → room.status === "live"
+ *   - "ended" → room.status === "ended" (host explicitly ended the session)
+ *   - "idle"  → everything else (created but not yet started, or paused)
+ *
+ * When the room document is missing entirely, callers should use "not_found".
+ */
+function deriveRoomStatus(room: Record<string, any> | null): "idle" | "live" | "ended" | "not_found" {
+  if (!room) return "not_found";
+  const raw = typeof room.status === "string" ? room.status.trim().toLowerCase() : "";
+  if (raw === "live") return "live";
+  if (raw === "ended" || raw === "closed" || raw === "archived") return "ended";
+  return "idle";
+}
+
+function deriveDebugReason(roomStatus: string, room: Record<string, any> | null, extra?: string): string | undefined {
+  if (roomStatus === "not_found") return "room_not_found";
+  if (roomStatus === "ended") return `room_marked_${room?.status ?? "ended"}`;
+  if (roomStatus === "idle") return "room_idle_not_started";
+  return extra || undefined;
+}
+
+/**
+ * GET /api/rooms/:roomId/info
+ * Auth: NONE — fully public
+ * Returns basic room metadata so the join page can render room name,
+ * host info, and guest-allowed status before any authentication.
+ */
+router.get("/rooms/:roomId/info", async (req: any, res) => {
+  try {
+    const roomId = String(req.params.roomId || "").trim();
+    if (!roomId) return res.status(400).json({ error: "roomId_required" });
+
+    const snap = await firestore.collection("rooms").doc(roomId).get();
+    if (!snap.exists) {
+      return res.status(404).json({
+        error: PERMISSION_ERRORS.ROOM_NOT_FOUND,
+        roomStatus: "not_found" as const,
+        guestJoinAllowed: false,
+        debugReason: "room_not_found",
+      });
+    }
+
+    const room = (snap.data() as any) || {};
+    const roomStatus = deriveRoomStatus(room);
+    const allowGuests = typeof room.allowGuests === "boolean" ? room.allowGuests : true;
+    const guestJoinAllowed = roomStatus === "live" && allowGuests;
+    const roomName = String(room.roomName || room.name || roomId);
+    const hostName = await resolveHostName(room.ownerId);
+    const roomType = room.roomType === "hls" || room.hlsConfig?.enabled === true ? "hls" : "rtc";
+    const debugReason = deriveDebugReason(roomStatus, room);
+
+    // Only return safe, public info — never expose owner IDs, secrets, or internal fields
+    return res.json({
+      roomId,
+      roomName,
+      status: roomStatus === "live" ? "live" : "idle", // backward compat
+      roomStatus,
+      allowGuests,
+      guestJoinAllowed,
+      hostName,
+      roomType,
+      debugReason,
+    });
+  } catch (err) {
+    console.error("/api/rooms/:roomId/info error", err);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+/**
+ * GET /api/invites/:inviteId/info
+ * Auth: NONE — fully public, read-only
+ * Returns invite + room metadata so the landing page can render context
+ * before the user clicks "Join". Does NOT increment useCount.
+ */
+router.get("/invites/:inviteId/info", async (req: any, res) => {
+  try {
+    const inviteId = String(req.params.inviteId || "").trim();
+    if (!inviteId) return res.status(400).json({ error: "inviteId_required" });
+
+    const inviteSnap = await firestore.collection("roomInvites").doc(inviteId).get();
+    if (!inviteSnap.exists) return res.status(404).json({ error: "invite_not_found" });
+
+    const invite = (inviteSnap.data() as any) || {};
+
+    // Check validity: not revoked and not expired
+    const now = Date.now();
+    const revoked = !!invite.revokedAt;
+    const expiresAtRaw = invite.expiresAt;
+    const expiresAtMillis = expiresAtRaw?.toMillis?.() ?? null;
+    const expired = expiresAtRaw
+      ? (typeof expiresAtMillis === "number" ? expiresAtMillis < now : false)
+      : false;
+    const maxUsesReached = typeof invite.maxUses === "number" && invite.maxUses > 0
+      ? (invite.useCount || 0) >= invite.maxUses
+      : false;
+    const inviteValid = !revoked && !expired && !maxUsesReached;
+
+    // Resolve room info
+    const roomId = String(invite.roomId || "");
+    const roomSnap = roomId ? await firestore.collection("rooms").doc(roomId).get() : null;
+    const roomExists = !!roomSnap?.exists;
+    const room = roomExists ? (roomSnap!.data() as any) || {} : null;
+    const roomName = String(room?.roomName || room?.name || roomId || "Room");
+    const allowGuests = typeof room?.allowGuests === "boolean" ? room.allowGuests : true;
+    const roomStatus = roomExists ? deriveRoomStatus(room) : "not_found";
+    const roomType = room?.roomType === "hls" || room?.hlsConfig?.enabled === true ? "hls" : "rtc";
+    const guestJoinAllowed = inviteValid && roomStatus === "live" && allowGuests;
+
+    // Debug reason for non-live states
+    let debugReason: string | undefined;
+    if (!inviteValid) {
+      debugReason = revoked ? "invite_revoked" : expired ? "invite_expired" : maxUsesReached ? "invite_max_uses_reached" : "invite_invalid";
+    } else {
+      debugReason = deriveDebugReason(roomStatus, room);
+    }
+
+    // Resolve host name from room owner
+    const hostName = await resolveHostName(room?.ownerId);
+
+    return res.json({
+      inviteId,
+      roomId,
+      roomName,
+      hostName,
+      role: invite.role || "guest",
+      status: roomStatus === "live" ? "live" : "idle", // backward compat
+      roomStatus,
+      allowGuests,
+      guestJoinAllowed,
+      inviteValid,
+      roomType,
+      debugReason,
+    });
+  } catch (err) {
+    console.error("/api/invites/:inviteId/info error", err);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+/**
+ * POST /api/rooms/:roomId/join-guest
+ * Auth: NONE — direct guest join without invite link
+ * Body: { displayName: string }
+ * Returns: { serverUrl, roomToken, roomId, identity, displayName, guestSessionToken, roomAccessToken, role }
+ *
+ * This enables "click link → enter name → join" without creating an invite.
+ * The room must have allowGuests !== false and be live (or the env flag
+ * ALLOW_GUEST_DIRECT_JOIN=1 must be set to allow joining idle rooms).
+ */
+router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
+  try {
+    const roomId = String(req.params.roomId || "").trim();
+    if (!roomId) return res.status(400).json({ error: "roomId_required" });
+
+    const rawName = String(req.body?.displayName || "").trim();
+    const displayName = sanitizeDisplayName(rawName).trim();
+    if (!displayName || displayName.length < 1) {
+      return res.status(400).json({ error: "displayName_required" });
+    }
+
+    // IP rate limiting (reuse existing limiter)
+    const ip = String(req.ip || "");
+    if (hitRedeemRateLimit(ip)) {
+      return res.status(429).json({ error: "rate_limited" });
+    }
+
+    // Validate room exists
+    const snap = await firestore.collection("rooms").doc(roomId).get();
+    if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
+
+    const room = (snap.data() as any) || {};
+    const livekitRoomName = String(room.livekitRoomName || roomId).trim();
+    const roomName = String(room.roomName || room.name || livekitRoomName || roomId);
+    const roomStatus = room.status === "live" ? "live" : "idle";
+    const allowGuests = typeof room.allowGuests === "boolean" ? room.allowGuests : true;
+    const ownerId = typeof room.ownerId === "string" && room.ownerId.trim() ? room.ownerId.trim() : null;
+
+    // Policy: room must allow guests
+    if (!allowGuests) {
+      return res.status(403).json({ error: "guests_not_allowed" });
+    }
+
+    // Policy: room must be live for direct guest join (unless env override)
+    const allowIdleJoin = String(process.env.ALLOW_GUEST_DIRECT_JOIN_IDLE || "").trim() === "1";
+    if (roomStatus !== "live" && !allowIdleJoin) {
+      return res.status(409).json({ error: "room_not_live" });
+    }
+
+    // Enforce capacity
+    const capDecision = await enforceCapacityOrRespond({
+      roomId,
+      livekitRoomName,
+      ownerId,
+      bypass: false,
+      res,
+    });
+    if (!capDecision.ok) return;
+
+    const capLockOwner = capDecision.lockOwner;
+    try {
+      // Mint LiveKit token
+      const apiKey = process.env.LIVEKIT_API_KEY;
+      const apiSecret = process.env.LIVEKIT_API_SECRET;
+      if (!apiKey || !apiSecret) {
+        return res.status(500).json({ code: "misconfigured", error: "LiveKit keys missing" });
+      }
+
+      const identity = `guest_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+      const AccessToken = await getAccessTokenCtor();
+      const at = new AccessToken(apiKey, apiSecret, {
+        identity,
+        name: displayName,
+        ttl: "30m",
+      });
+
+      const grant = roleGrant("guest");
+      at.addGrant({ room: livekitRoomName, ...grant } as any);
+      const livekitToken = await at.toJwt();
+
+      // Create a synthetic guest session (no invite ID — direct join)
+      const guestSessionToken = signGuestSession(
+        { inviteId: `direct:${roomId}:${identity}`, roomId, role: "guest", displayName },
+        "2h",
+      );
+
+      // Room access token
+      const roomAccessPayload = {
+        roomId,
+        roomName,
+        livekitRoomName,
+        role: "guest" as const,
+        permissions: {
+          canStream: false,
+          canRecord: false,
+          canDestinations: false,
+          canModerate: false,
+          canLayout: false,
+          canScreenShare: false,
+          canInvite: false,
+          canAnalytics: false,
+          canMuteGuests: false,
+          canRemoveGuests: false,
+        },
+        identity,
+      };
+      const roomAccessToken = jwt.sign(roomAccessPayload, getRoomAccessSecret(), { expiresIn: "12h" });
+
+      // Set HttpOnly cookie
+      const isProduction = String(process.env.NODE_ENV || "development").toLowerCase() === "production";
+      res.cookie("sl_guest", guestSessionToken, {
+        httpOnly: true,
+        sameSite: isProduction ? "none" : "lax",
+        secure: isProduction,
+        path: "/",
+        maxAge: 2 * 60 * 60 * 1000,
+      });
+
+      const serverUrl = getLiveKitServerUrlForClient();
+      if (!serverUrl) {
+        return res.status(500).json({ code: "misconfigured", error: "LIVEKIT_URL missing" });
+      }
+
+      return res.json({
+        serverUrl,
+        roomToken: livekitToken,
+        roomId,
+        identity,
+        displayName,
+        guestSessionToken,
+        roomAccessToken,
+        role: "guest",
+        roomName,
+      });
+    } finally {
+      if (capLockOwner) {
+        await releaseCapacityLock(roomId, capLockOwner);
+      }
+    }
+  } catch (err: any) {
+    console.error("/api/rooms/:roomId/join-guest error", err?.message || err);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+/**
+ * POST /api/rooms/:roomId/token/invisible
+ * Auth: REQUIRED + must have admin or moderator role
+ * Body: { displayName?: string }
+ * Returns: { serverUrl, roomToken, roomId, identity, mode: "invisible" }
+ *
+ * Creates a participant that:
+ *   - can subscribe (watch/listen)
+ *   - cannot publish audio/video/data
+ *   - is marked hidden in metadata
+ * Ideal for note-taking bots, invisible moderators, observing admins.
+ */
+router.post("/rooms/:roomId/token/invisible", async (req: any, res) => {
+  try {
+    const roomId = String(req.params.roomId || "").trim();
+    if (!roomId) return res.status(400).json({ error: "roomId_required" });
+
+    const user = await tryGetAuthUserAny(req);
+    if (!user) return res.status(401).json({ error: "auth_required" });
+
+    // Check admin status
+    const callerIsAdmin = await isAdmin(user.uid);
+    if (!callerIsAdmin) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    // Validate room
+    const snap = await firestore.collection("rooms").doc(roomId).get();
+    if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
+
+    const room = (snap.data() as any) || {};
+    const livekitRoomName = String(room.livekitRoomName || roomId).trim();
+
+    const apiKey = process.env.LIVEKIT_API_KEY;
+    const apiSecret = process.env.LIVEKIT_API_SECRET;
+    if (!apiKey || !apiSecret) {
+      return res.status(500).json({ code: "misconfigured", error: "LiveKit keys missing" });
+    }
+
+    const displayName = sanitizeDisplayName(String(req.body?.displayName || "")).trim() || "Observer";
+    const identity = `invisible_${user.uid}_${Date.now()}`;
+
+    const AccessToken = await getAccessTokenCtor();
+    const at = new AccessToken(apiKey, apiSecret, {
+      identity,
+      name: displayName,
+      metadata: JSON.stringify({ hidden: true, role: "invisible_mod" }),
+    });
+
+    at.addGrant({
+      room: livekitRoomName,
+      roomJoin: true,
+      canSubscribe: true,
+      canPublish: false,
+      canPublishData: false,
+    } as any);
+
+    const token = await at.toJwt();
+
+    const serverUrl = getLiveKitServerUrlForClient();
+    if (!serverUrl) {
+      return res.status(500).json({ code: "misconfigured", error: "LIVEKIT_URL missing" });
+    }
+
+    return res.json({
+      serverUrl,
+      roomToken: token,
+      roomId,
+      identity,
+      mode: "invisible",
+    });
+  } catch (err: any) {
+    console.error("/api/rooms/:roomId/token/invisible error", err?.message || err);
+    return res.status(500).json({ error: "internal_error" });
   }
 });
 

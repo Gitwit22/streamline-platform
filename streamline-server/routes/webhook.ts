@@ -19,6 +19,8 @@ import { firestore as db } from "../firebaseAdmin";
 import { stripe } from "../lib/stripe";
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { FieldValue } from "firebase-admin/firestore";
+import { createSavedVideoFromRecording } from "./myContent";
+import { reserveStorageUsage } from "../usageHelper";
 import {
   S3Client,
   HeadObjectCommand,
@@ -549,11 +551,130 @@ router.post(
             },
             { merge: true }
           );
+
+          // ── Reset usage counters on invoice.paid (new billing period) ──
+          if (event.type === "invoice.paid" && isActive) {
+            const monthKey = getCurrentMonthKey();
+            const usageDocId = `${uid}_${monthKey}`;
+            const usageRef = db.collection("usageMonthly").doc(usageDocId);
+            const usageSnap = await usageRef.get();
+
+            if (usageSnap.exists) {
+              const existing = usageSnap.data() as any;
+              const prevUsage = existing?.usage || {};
+              const prevYtd = existing?.ytd || {};
+              const prevMinutes = prevUsage.minutes || {};
+
+              // Zero out currentPeriod counters; preserve lifetime/ytd totals
+              await usageRef.set(
+                {
+                  usage: {
+                    participantMinutes: 0,
+                    transcodeMinutes: 0,
+                    hlsMinutes: 0,
+                    minutes: {
+                      live: {
+                        currentPeriod: 0,
+                        lifetime: Number(prevMinutes.live?.lifetime || prevYtd.minutes?.live?.lifetime || 0),
+                      },
+                      transcode: {
+                        currentPeriod: 0,
+                        lifetime: Number(prevMinutes.transcode?.lifetime || prevYtd.minutes?.transcode?.lifetime || 0),
+                      },
+                      recording: {
+                        currentPeriod: 0,
+                        lifetime: Number(prevMinutes.recording?.lifetime || prevYtd.minutes?.recording?.lifetime || 0),
+                      },
+                    },
+                  },
+                  lastBillingReset: Date.now(),
+                  updatedAt: Date.now(),
+                },
+                { merge: true }
+              );
+            }
+
+            // Also reset legacy usage field so it doesn't seed stale data
+            await getUserRef(uid).update({
+              "usage.hoursStreamedThisMonth": 0,
+              "usage.hoursStreamedToday": 0,
+            });
+
+            console.log(
+              `[stripe-webhook] Reset usage counters for uid=${uid}, monthKey=${monthKey}`
+            );
+          }
           break;
         }
 
         case "checkout.session.completed": {
           const session = event.data.object as Stripe.Checkout.Session;
+
+          // ── Monetization one-time payments ──────────────────────────
+          if (session.metadata?.source === "streamline_monetization") {
+            try {
+              const {
+                createPurchase,
+                generateAccessCode,
+                hashAccessCode,
+                createAccessCode,
+                storeRawCode,
+              } = await import("../lib/monetization.js");
+
+              const mEventId = session.metadata.eventId;
+              const mType = session.metadata.type as "access" | "donation";
+              const amountTotal = session.amount_total ?? 0;
+              const currency = session.currency || "usd";
+              const paymentIntentId =
+                typeof session.payment_intent === "string"
+                  ? session.payment_intent
+                  : null;
+              const payerEmail =
+                typeof session.customer_details?.email === "string"
+                  ? session.customer_details.email
+                  : null;
+
+              const purchase = await createPurchase({
+                eventId: mEventId,
+                type: mType,
+                amountCents: amountTotal,
+                currency,
+                stripeCheckoutSessionId: session.id,
+                stripePaymentIntentId: paymentIntentId,
+                payerEmail,
+              });
+
+              if (mType === "access") {
+                const rawCode = generateAccessCode();
+                const codeHash = hashAccessCode(rawCode);
+                await createAccessCode({
+                  eventId: mEventId,
+                  purchaseId: purchase.id,
+                  codeHash,
+                });
+                storeRawCode(session.id, rawCode);
+                console.log("[stripe-webhook] Monetization access code issued", {
+                  eventId: mEventId,
+                  purchaseId: purchase.id,
+                  sessionId: session.id,
+                });
+              } else {
+                console.log("[stripe-webhook] Monetization donation recorded", {
+                  eventId: mEventId,
+                  purchaseId: purchase.id,
+                  amountCents: amountTotal,
+                });
+              }
+            } catch (mErr: any) {
+              console.error(
+                "[stripe-webhook] Monetization processing error:",
+                mErr?.message
+              );
+            }
+            break;
+          }
+
+          // ── Subscription checkout (existing billing flow) ──────────
           const uid = session.metadata?.userId;
           if (!uid) {
             console.warn("[stripe] checkout.session.completed missing userId");
@@ -1202,7 +1323,31 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       updates.errorMessage = errorMessage;
     }
 
+    // Mark storage as counted if transitioning to ready with a known file size.
+    // This flag prevents double-counting if the post-stop head-check also fires.
+    const alreadyCounted = recordingData.storageCounted === true;
+    if (finalStatus === "ready" && typeof fileSize === "number" && fileSize > 0 && !alreadyCounted) {
+      updates.storageCounted = true;
+    }
+
     await recordingRef.update(updates);
+
+    // Count storage for this recording (only once, when transitioning to ready)
+    if (finalStatus === "ready" && typeof fileSize === "number" && fileSize > 0 && !alreadyCounted) {
+      const recUserId = typeof recordingData.userId === "string" ? recordingData.userId : "";
+      if (recUserId) {
+        try {
+          await reserveStorageUsage(recUserId, fileSize, {
+            caller: "webhook.egress_ended",
+            recordingId,
+          });
+        } catch (e: any) {
+          console.error("[livekit-webhook] STORAGE ACCOUNTING FAILED for recording:", {
+            userId: recUserId, recordingId, fileSize, error: e?.message || e,
+          });
+        }
+      }
+    }
 
     // Best-effort: keep room latest recording pointer in sync.
     try {
@@ -1233,6 +1378,32 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
         await maybeCountRecordingUsage({ recordingRef, recordingData, now });
       } catch (e: any) {
         console.warn("[livekit-webhook] failed to count recording usage", { recordingId, error: e?.message || e });
+      }
+    }
+
+    // Auto-create saved_video so recording appears in My Content
+    if (finalStatus === "ready" && normalizedObjectKey) {
+      try {
+        const recUserId = typeof recordingData.userId === "string" ? recordingData.userId : "";
+        const recRoomName = typeof recordingData.roomName === "string" ? recordingData.roomName : "";
+        const recDuration = typeof recordingData.durationSeconds === "number" ? recordingData.durationSeconds : null;
+        if (recUserId) {
+          const videoUrl = typeof recordingData.videoUrl === "string" ? recordingData.videoUrl : "";
+          const thumbUrl = typeof recordingData.thumbnailUrl === "string" ? recordingData.thumbnailUrl : null;
+          const durationMs = recDuration ? Math.round(recDuration * 1000) : 0;
+          await createSavedVideoFromRecording({
+            userId: recUserId,
+            recordingId,
+            title: recRoomName || recordingData.title || "Untitled Recording",
+            playbackUrl: videoUrl,
+            thumbnailUrl: thumbUrl,
+            durationMs,
+            fileSize: typeof fileSize === "number" ? fileSize : undefined,
+          });
+          console.log(`[livekit-webhook] Saved video created for recording ${recordingId}`);
+        }
+      } catch (savedErr: any) {
+        console.warn("[livekit-webhook] failed to auto-create saved_video:", savedErr?.message);
       }
     }
 

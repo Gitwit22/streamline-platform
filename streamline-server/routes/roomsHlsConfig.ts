@@ -26,6 +26,8 @@ router.get("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
     return res.json({
       roomId: ctx.roomId,
       hlsConfig,
+      monetizationEnabled: (ctx.room as any).monetizationEnabled === true,
+      payPerViewEnabled: (ctx.room as any).payPerViewEnabled === true,
     });
   } catch (err: any) {
     if (err instanceof RoomPermissionError) {
@@ -43,7 +45,7 @@ router.put("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
     return res.status(400).json({ error: "invalid_room_id" });
   }
 
-  const { enabled, title, subtitle, logoUrl, offlineMessage, theme } = req.body || {};
+  const { enabled, title, subtitle, logoUrl, offlineMessage, theme, monetizationEnabled, payPerViewEnabled } = req.body || {};
 
   // Minimal validation and safe defaults
   if (typeof enabled !== "boolean") {
@@ -88,18 +90,36 @@ router.put("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
     if (offlineMessage !== undefined) nextConfig.offlineMessage = offlineMessage;
     if (theme !== undefined) nextConfig.theme = theme;
 
-    // Merge update to rooms/{roomId}.hlsConfig ONLY (no runtime hls state).
-    await db.collection("rooms").doc(ctx.roomId).set(
-      {
-        hlsConfig: nextConfig,
-      },
-      { merge: true },
-    );
+    // Build the merge payload — always update hlsConfig, optionally update monetization toggles.
+    const mergePayload: Record<string, any> = { hlsConfig: nextConfig };
+
+    // Room-level monetization toggles (only persist when explicitly sent).
+    if (typeof monetizationEnabled === "boolean") {
+      // Monetization requires HLS to be enabled on this room.
+      mergePayload.monetizationEnabled = nextConfig.enabled ? monetizationEnabled : false;
+    }
+    if (typeof payPerViewEnabled === "boolean") {
+      // PPV requires both HLS AND monetization to be enabled.
+      const effectiveMonetization = typeof monetizationEnabled === "boolean"
+        ? monetizationEnabled
+        : (ctx.room as any).monetizationEnabled === true;
+      mergePayload.payPerViewEnabled = (nextConfig.enabled && effectiveMonetization) ? payPerViewEnabled : false;
+    }
+
+    // If HLS is being disabled, force-disable monetization + PPV.
+    if (!nextConfig.enabled) {
+      mergePayload.monetizationEnabled = false;
+      mergePayload.payPerViewEnabled = false;
+    }
+
+    await db.collection("rooms").doc(ctx.roomId).set(mergePayload, { merge: true });
 
     return res.json({
       success: true,
       roomId: ctx.roomId,
       hlsConfig: nextConfig,
+      monetizationEnabled: mergePayload.monetizationEnabled ?? (ctx.room as any).monetizationEnabled ?? false,
+      payPerViewEnabled: mergePayload.payPerViewEnabled ?? (ctx.room as any).payPerViewEnabled ?? false,
     });
   } catch (err: any) {
     if (err instanceof RoomPermissionError) {

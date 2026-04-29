@@ -7,6 +7,7 @@ import { getCurrentMonthKey } from "../lib/usageTracker";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { getCurrentStorageUsage, resolveMaxStorageBytesFromPlan } from "../usageHelper";
 
 // Helper function to get the next reset date (start of next month)
 function getNextResetDate(): Date {
@@ -58,25 +59,81 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
 
   // If missing, do NOT fail—return a zeroed shape so the UI is stable.
   const legacyUsage = userData.usage || {};
-  const legacyHours = Number(legacyUsage.hoursStreamedThisMonth || 0);
-  const legacyParticipantMinutes = Math.max(0, Math.round(legacyHours * 60));
 
+  // ── Billing-period boundary check ──
+  // If billing.currentPeriodEnd is in the past the billing period has rolled
+  // over. Legacy hours should NOT seed the new period and any existing
+  // usageMonthly doc needs its currentPeriod counters zeroed (safety net in
+  // case the Stripe invoice.paid webhook was delayed or missed).
+  const billingPeriodEnd = (userData as any)?.billing?.currentPeriodEnd;
+  const billingPeriodExpired =
+    typeof billingPeriodEnd === "number" && billingPeriodEnd > 0 && billingPeriodEnd < Date.now();
+
+  // Legacy hours are no longer used to seed new monthly docs (the monthKey
+  // change is the period reset), but the billing-period-expired flag is still
+  // used by the lazy-reset path for existing docs.
   let usageMonthly: any;
   if (usageSnap.exists) {
     usageMonthly = usageSnap.data() as any;
+
+    // Lazy reset: if the billing period has expired and we haven't already
+    // reset this doc for that period, zero out the currentPeriod counters now.
+    const lastReset = usageMonthly.lastBillingReset ?? 0;
+    if (billingPeriodExpired && lastReset < billingPeriodEnd) {
+      const prevMinutes = usageMonthly.usage?.minutes || {};
+      const prevYtd = usageMonthly.ytd || {};
+
+      const resetPatch: any = {
+        usage: {
+          ...(usageMonthly.usage || {}),
+          participantMinutes: 0,
+          transcodeMinutes: 0,
+          hlsMinutes: 0,
+          minutes: {
+            ...prevMinutes,
+            live: {
+              currentPeriod: 0,
+              lifetime: Number(prevMinutes.live?.lifetime || prevYtd.minutes?.live?.lifetime || 0),
+            },
+            transcode: {
+              currentPeriod: 0,
+              lifetime: Number(prevMinutes.transcode?.lifetime || prevYtd.minutes?.transcode?.lifetime || 0),
+            },
+            recording: {
+              currentPeriod: 0,
+              lifetime: Number(prevMinutes.recording?.lifetime || prevYtd.minutes?.recording?.lifetime || 0),
+            },
+          },
+        },
+        lastBillingReset: Date.now(),
+        updatedAt: Timestamp.now(),
+      };
+
+      await usageRef.set(resetPatch, { merge: true });
+      // Reflect the reset in the local copy we'll use for the response
+      usageMonthly = { ...usageMonthly, ...resetPatch };
+      console.log(
+        `[usage] Lazy billing-period reset for uid=${uid}, monthKey=${monthKey}`
+      );
+    }
   } else {
+    // New monthly doc: the monthKey change IS the period reset, so
+    // currentPeriod counters must start at 0. Legacy hoursStreamedThisMonth
+    // is not reliably reset at month boundaries and must NOT seed the new
+    // period (this was the bug that caused in-room minutes to carry over
+    // while broadcast minutes correctly started at 0).
     const legacyYtdMinutes = Math.max(0, Math.round(Number(legacyUsage.ytdHours || 0) * 60));
     usageMonthly = {
       uid,
       monthKey,
       usage: {
-        participantMinutes: legacyParticipantMinutes,
+        participantMinutes: 0,
         transcodeMinutes: 0,
         hlsMinutes: 0,
         minutes: {
           live: {
-            currentPeriod: legacyParticipantMinutes,
-            lifetime: legacyParticipantMinutes,
+            currentPeriod: 0,
+            lifetime: legacyYtdMinutes,
           },
           recording: {
             currentPeriod: 0,
@@ -157,6 +214,13 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
 
   const resetDateISO = getNextResetDate().toISOString();
 
+  // ── Storage accounting ──
+  const storageUsedBytes = await getCurrentStorageUsage(uid);
+  const maxStorageBytes = resolveMaxStorageBytesFromPlan(plan.raw || {});
+  const GB = 1024 * 1024 * 1024;
+  const storageUsedGB = Math.round((storageUsedBytes / GB) * 100) / 100;
+  const storageLimitGB = Math.round((maxStorageBytes / GB) * 100) / 100;
+
   return {
     status: 200,
     body: {
@@ -166,6 +230,12 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
       resetDate: resetDateISO,
       participantMinutes: participantUsed,
       transcodeMinutes: transcodeUsed,
+
+      // Storage accounting fields (bytes are source of truth, GB for display)
+      storageUsedBytes,
+      storageLimitBytes: maxStorageBytes,
+      storageUsedGB,
+      storageLimitGB,
 
       billing: {
         overagesEnabled,
@@ -186,6 +256,7 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
           participantMinutes: participantLimit,
           transcodeMinutes: transcodeLimit,
           maxGuests: Number(plan.limits.maxGuests || 0),
+          storageGB: storageLimitGB,
         },
       },
 

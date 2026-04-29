@@ -11,6 +11,7 @@ import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { canAccessFeature } from "./featureAccess";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { logDelegatedRoomAction } from "../lib/collaborators";
 import { evaluateUsageGate } from "../lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
@@ -129,7 +130,20 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
     if (!uid) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
-    const featureAccess = await canAccessFeature((req as any).account || uid, "hls");
+
+    try {
+      await assertRoomPerm(req as any, roomId, "canStream");
+    } catch (err: any) {
+      if (err instanceof RoomPermissionError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+      throw err;
+    }
+
+    const { ref: roomRef, data: room } = await getRoom(roomId);
+    const ownerUid = String((room as any).ownerId || uid).trim() || uid;
+
+    const featureAccess = await canAccessFeature(ownerUid, "hls");
     if (!featureAccess.allowed) {
       if (featureAccess.code === LIMIT_ERRORS.FEATURE_DISABLED) {
         return res.status(403).json({
@@ -143,64 +157,49 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
       });
     }
 
-    try {
-      await assertRoomPerm(req as any, roomId, "canStream");
-    } catch (err: any) {
-      if (err instanceof RoomPermissionError) {
-        return res.status(err.status).json({ error: err.code });
-      }
-      throw err;
-    }
-
     // Monthly usage gate (HLS consumes transcode):
     // - Non-overage plans are blocked when over limit
     // - Pro continues and (when exceeded) logs overage totals
-    // - Internal unlimited plans bypass the usage gate entirely
     try {
-      const entitlements = await getEffectiveEntitlements((req as any).account || uid);
+      const entitlements = await getEffectiveEntitlements(ownerUid);
+      const monthKey = getCurrentMonthKey();
+      const usageDocId = `${ownerUid}_${monthKey}`;
+      const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
+      const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
+      const usage = existing.usage || {};
 
-      if (entitlements.planId.toLowerCase() !== "internal_unlimited") {
-        const monthKey = getCurrentMonthKey();
-        const usageDocId = `${uid}_${monthKey}`;
-        const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
-        const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
-        const usage = existing.usage || {};
+      const decision = evaluateUsageGate({
+        allowsOverages: !!(entitlements.features as any).allowsOverages,
+        limits: {
+          participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
+          transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
+        },
+        usage: {
+          participantMinutes: Number(usage.participantMinutes || 0),
+          transcodeMinutes: Number(usage.transcodeMinutes || 0),
+        },
+        checkParticipant: true,
+        checkTranscode: true,
+      });
 
-        const decision = evaluateUsageGate({
-          allowsOverages: !!(entitlements.features as any).allowsOverages,
-          limits: {
-            participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
-            transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
-          },
-          usage: {
-            participantMinutes: Number(usage.participantMinutes || 0),
-            transcodeMinutes: Number(usage.transcodeMinutes || 0),
-          },
-          checkParticipant: true,
-          checkTranscode: true,
+      if (!decision.allowed) {
+        return res.status(403).json({
+          error: decision.reason || LIMIT_ERRORS.USAGE_EXHAUSTED,
+          reason: "Monthly usage limit reached",
         });
+      }
 
-        if (!decision.allowed) {
-          return res.status(403).json({
-            error: decision.reason || LIMIT_ERRORS.USAGE_EXHAUSTED,
-            reason: "Monthly usage limit reached",
-          });
-        }
-
-        if (decision.shouldLogOverages && decision.overageTotals) {
-          await upsertUsageMonthlyOverageTotals({
-            uid,
-            monthKey,
-            totals: decision.overageTotals,
-          });
-        }
+      if (decision.shouldLogOverages && decision.overageTotals) {
+        await upsertUsageMonthlyOverageTotals({
+          uid: ownerUid,
+          monthKey,
+          totals: decision.overageTotals,
+        });
       }
     } catch (e) {
       // Do not block HLS start on bookkeeping failures.
       console.error("[hls] usage gate failed", e);
     }
-
-    const { ref: roomRef, data: room } = await getRoom(roomId);
 
     if (room.roomType !== "rtc") return res.status(400).json({ error: "roomType must be rtc" });
 
@@ -228,7 +227,7 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
     let capMinutes: number | null = null;
     let stopAt: string | null = null;
     try {
-      const entitlements = await getEffectiveEntitlements((req as any).account || uid);
+      const entitlements = await getEffectiveEntitlements(ownerUid);
       const rawCap = entitlements?.caps?.hlsMaxMinutesPerSession;
       const n = rawCap === null || rawCap === undefined ? null : Number(rawCap);
       if (n !== null && Number.isFinite(n) && n > 0) {
@@ -279,6 +278,16 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
         }
       }
 
+      if (ownerUid !== uid) {
+        await logDelegatedRoomAction({
+          actedByUid: uid,
+          ownerUid,
+          roomId,
+          action: "hls_start",
+          metadata: { presetId },
+        }).catch(() => {});
+      }
+
       return res.json({
         roomId,
         status: "live",
@@ -318,7 +327,20 @@ router.get("/status/:roomId", requireAuth as any, requireRoomAccessToken as any,
   try {
     const uid = (req as any).user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    const featureAccess = await canAccessFeature((req as any).account || uid, "hls");
+
+    let room;
+    try {
+      const ctx = await assertRoomPerm(req as any, roomId, "canStream");
+      room = ctx.room;
+    } catch (err: any) {
+      if (err instanceof RoomPermissionError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+      throw err;
+    }
+
+    const ownerUid = String((room as any).ownerId || uid).trim() || uid;
+    const featureAccess = await canAccessFeature(ownerUid, "hls");
     if (!featureAccess.allowed) {
       if (featureAccess.code === LIMIT_ERRORS.FEATURE_DISABLED) {
         return res.status(403).json({
@@ -330,17 +352,6 @@ router.get("/status/:roomId", requireAuth as any, requireRoomAccessToken as any,
         error: "hls_not_in_plan",
         reason: featureAccess.reason || "HLS is not available on your plan",
       });
-    }
-
-    let room;
-    try {
-      const ctx = await assertRoomPerm(req as any, roomId, "canStream");
-      room = ctx.room;
-    } catch (err: any) {
-      if (err instanceof RoomPermissionError) {
-        return res.status(err.status).json({ error: err.code });
-      }
-      throw err;
     }
 
     const hls = room.hls || {};
@@ -434,19 +445,6 @@ router.post("/stop/:roomId", requireAuth as any, requireRoomAccessToken as any, 
   try {
     const uid = (req as any).user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    const featureAccess = await canAccessFeature((req as any).account || uid, "hls");
-    if (!featureAccess.allowed) {
-      if (featureAccess.code === LIMIT_ERRORS.FEATURE_DISABLED) {
-        return res.status(403).json({
-          error: featureAccess.code,
-          reason: featureAccess.reason || "HLS is temporarily disabled",
-        });
-      }
-      return res.status(403).json({
-        error: "hls_not_in_plan",
-        reason: featureAccess.reason || "HLS is not available on your plan",
-      });
-    }
 
     let roomRef;
     let room;
@@ -459,6 +457,21 @@ router.post("/stop/:roomId", requireAuth as any, requireRoomAccessToken as any, 
         return res.status(err.status).json({ error: err.code });
       }
       throw err;
+    }
+
+    const ownerUid = String((room as any).ownerId || uid).trim() || uid;
+    const featureAccess = await canAccessFeature(ownerUid, "hls");
+    if (!featureAccess.allowed) {
+      if (featureAccess.code === LIMIT_ERRORS.FEATURE_DISABLED) {
+        return res.status(403).json({
+          error: featureAccess.code,
+          reason: featureAccess.reason || "HLS is temporarily disabled",
+        });
+      }
+      return res.status(403).json({
+        error: "hls_not_in_plan",
+        reason: featureAccess.reason || "HLS is not available on your plan",
+      });
     }
 
     const hls = room.hls || {};
@@ -516,6 +529,15 @@ router.post("/stop/:roomId", requireAuth as any, requireRoomAccessToken as any, 
       capMinutes: null,
       updatedAt: new Date().toISOString(),
     };
+
+    if (ownerUid !== uid) {
+      await logDelegatedRoomAction({
+        actedByUid: uid,
+        ownerUid,
+        roomId,
+        action: "hls_stop",
+      }).catch(() => {});
+    }
 
     return res.json({ roomId, hls: updated });
   } catch (e: any) {

@@ -17,17 +17,14 @@ router.get("/", requireAuth, async (req, res) => {
 
     const uid = (req as any).user?.uid;
     if (!uid) {
-      console.error("[adminStatus] Missing uid in request. user:", (req as any).user);
-      return res.status(401).json({ error: "Unauthorized: missing uid" });
+      return res.status(401).json({ error: "Unauthorized" });
     }
-
-    console.log("[adminStatus] Checking admin for UID:", uid);
 
     const isAdminUser = await isAdmin(uid);
     res.json({ isAdmin: isAdminUser });
   } catch (err) {
-    console.error("[adminStatus] Unexpected error:", err?.message, err?.stack || err);
-    res.status(500).json({ error: "Internal server error", message: "Failed to verify admin status" });
+    console.error("[adminStatus] Unexpected error:", err);
+    res.status(500).json({ error: "Failed to verify admin status" });
   }
 });
 

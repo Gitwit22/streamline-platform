@@ -63,9 +63,9 @@ export const DEFAULT_ROLE_PROFILES: DefaultRoleProfile[] = [
     lockedName: true,
     isSystemDefault: true,
     permissions: perms({
-      canStream: true,
-      canRecord: true,
-      canDestinations: true,
+      canStream: false,
+      canRecord: false,
+      canDestinations: false,
       canModerate: false,
       canLayout: true,
       canScreenShare: true,

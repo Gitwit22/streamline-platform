@@ -5,6 +5,8 @@ export type GuestSessionClaims = {
   inviteId: string;
   roomId: string;
   role: "guest" | "participant"; // guest = invite-based, participant = authenticated
+  /** Display name persisted in the session so token refresh can recover it. */
+  displayName?: string;
   iat?: number;
   exp?: number;
 };
@@ -21,25 +23,36 @@ export function signGuestSession(
 }
 
 function extractGuestSessionToken(req: Request): string | null {
-  // 1. Check Authorization: Bearer header first (most secure, works everywhere)
-  const authHeader = req.headers.authorization || (req.headers as any).Authorization;
-  if (typeof authHeader === "string") {
-    const match = authHeader.match(/^Bearer\s+(.+)$/i);
-    if (match?.[1]) return match[1].trim();
-  }
-
-  // 2. Check custom headers
+  // 1) Check custom headers (preferred to avoid colliding with user auth)
   const hdr = (req.headers as any) || {};
   const fromHeader = hdr["x-guest-session"] ?? hdr["x-guest-session-token"];
   if (typeof fromHeader === "string" && fromHeader.trim()) return fromHeader.trim();
 
-  // 3. Check request body
+  // 2) Check request body
   const fromBody = (req as any)?.body?.guestSessionToken;
   if (typeof fromBody === "string" && fromBody.trim()) return fromBody.trim();
 
-  // 4. Check query params (including 'gst' shorthand for invite links)
+  // 3) Check query params (including 'gst' shorthand for invite links)
   const fromQuery = (req as any)?.query?.guestSessionToken || (req as any)?.query?.gst;
   if (typeof fromQuery === "string" && fromQuery.trim()) return fromQuery.trim();
+
+  // 4) Deprecated fallback: Authorization: Bearer <guestSessionToken>
+  // During Firebase migration, Authorization is reserved for *user* auth.
+  // Keep this only for legacy clients and warn when used.
+  const allowDeprecated = process.env.ALLOW_DEPRECATED_AUTHZ_TOKENS !== "0";
+  if (allowDeprecated) {
+    const authHeader = req.headers.authorization || (req.headers as any).Authorization;
+    if (typeof authHeader === "string") {
+      const match = authHeader.match(/^Bearer\s+(.+)$/i);
+      const token = match?.[1]?.trim();
+      if (token) {
+        console.warn(
+          "[deprecation] guest session provided via Authorization header; send x-guest-session or use sl_guest cookie instead"
+        );
+        return token;
+      }
+    }
+  }
 
   return null;
 }
@@ -65,10 +78,13 @@ export function tryGetGuestSession(req: Request): GuestSessionClaims | null {
       role = "guest"; // Map legacy "viewer" to "guest" for RTC participants
     }
     if (!inviteId || !roomId || !role) return null;
+    // Extract displayName if present in the JWT (added for Phase 4 display name persistence)
+    const displayName = typeof decoded?.displayName === "string" ? decoded.displayName.trim() : undefined;
     return {
       inviteId,
       roomId,
       role,
+      displayName: displayName || undefined,
       iat: typeof decoded?.iat === "number" ? decoded.iat : undefined,
       exp: typeof decoded?.exp === "number" ? decoded.exp : undefined,
     };

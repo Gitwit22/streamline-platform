@@ -6,6 +6,7 @@ type AccessResult = {
   allowed: boolean;
   code?: string;
   reason?: string;
+  _diag?: Record<string, any>;
 };
 
 const BAD_BILLING_STATUSES = new Set([
@@ -99,6 +100,21 @@ export async function canAccessFeature(
         allowed: false,
         code: LIMIT_ERRORS.FEATURE_DISABLED,
         reason: "Feature disabled platform-wide",
+        _diag: { uid, planId, feature: featureKey, failedAt: "platform_gate" },
+      };
+    }
+  }
+
+  // Monetization / Pay-Per-View platform gates (default DISABLED when missing)
+  if (featureKey === "monetization" || featureKey === "payPerView") {
+    const platformEnabled = await getPlatformMonetizationFlag(featureKey);
+    if (!platformEnabled) {
+      const label = featureKey === "monetization" ? "Monetization" : "Pay-per-view";
+      return {
+        allowed: false,
+        code: LIMIT_ERRORS.FEATURE_DISABLED,
+        reason: `${label} is not enabled on this platform`,
+        _diag: { uid, planId, feature: featureKey, failedAt: "platform_gate" },
       };
     }
   }
@@ -145,6 +161,7 @@ export async function canAccessFeature(
         allowed: false,
         code: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
         reason: `Billing issue: ${billingBlockReason}`,
+        _diag: { uid, planId, feature: featureKey, failedAt: "billing_block", billingBlockReason, effectiveBillingEnabled: account.effectiveBillingEnabled, billingStatus: user?.billingStatus, billingActive: user?.billingActive, subscriptionId: !!(user?.stripeSubscriptionId || user?.billing?.subscriptionId) },
       };
     }
   }
@@ -152,7 +169,7 @@ export async function canAccessFeature(
   // 3) Load plan
   const planSnap = await db.collection("plans").doc(planId).get();
   if (!planSnap.exists) {
-    return { allowed: false, code: LIMIT_ERRORS.FEATURE_NOT_ENTITLED, reason: "Plan not found" };
+    return { allowed: false, code: LIMIT_ERRORS.FEATURE_NOT_ENTITLED, reason: "Plan not found", _diag: { uid, planId, feature: featureKey, failedAt: "plan_not_found", rawPlanId: user?.planId, accountPlanId: account.planId } };
   }
 
   const plan = planSnap.data() as any;
@@ -205,6 +222,19 @@ export async function canAccessFeature(
           `[featureAccess] alias check result enabled=${enabled} via hls|canHls|hlsBroadcast`
         );
       }
+    } else if (featureKey === "monetization") {
+      enabled = Boolean(
+        plan?.features?.monetization ||
+        plan?.monetizationEnabled ||
+        plan?.monetization
+      );
+    } else if (featureKey === "payPerView") {
+      enabled = Boolean(
+        plan?.features?.payPerView ||
+        plan?.features?.ppv ||
+        plan?.payPerViewEnabled ||
+        plan?.ppvEnabled
+      );
     }
   }
 
@@ -213,6 +243,7 @@ export async function canAccessFeature(
       allowed: false,
       code: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
       reason: "Feature not available on your plan",
+      _diag: { uid, planId, feature: featureKey, failedAt: "feature_flag", featureValue: plan?.features?.[featureKey] },
     };
   }
 
@@ -225,6 +256,13 @@ let cachedRecordingEnabled: boolean | null = null;
 let cachedRecordingEnabledAt = 0;
 let cachedHlsEnabled: boolean | null = null;
 let cachedHlsEnabledAt = 0;
+
+// Monetization platform flags — default DISABLED (opt-in)
+let cachedMonetizationEnabled: boolean | null = null;
+let cachedMonetizationEnabledAt = 0;
+let cachedPayPerViewEnabled: boolean | null = null;
+let cachedPayPerViewEnabledAt = 0;
+
 const PLATFORM_FEATURE_TTL_MS = 30 * 1000;
 
 async function getPlatformFeatureEnabled(featureKey: "recording" | "hls"): Promise<boolean> {
@@ -267,5 +305,49 @@ async function getPlatformFeatureEnabled(featureKey: "recording" | "hls"): Promi
     cachedHlsEnabled = true;
     cachedHlsEnabledAt = now;
     return cachedHlsEnabled;
+  }
+}
+
+/**
+ * Platform-level monetization flags — default DISABLED when missing.
+ * Firestore docs: featureFlags/monetizationEnabled, featureFlags/payPerViewEnabled
+ */
+export async function getPlatformMonetizationFlag(
+  key: "monetization" | "payPerView"
+): Promise<boolean> {
+  const now = Date.now();
+  const docId = key === "monetization" ? "monetizationEnabled" : "payPerViewEnabled";
+
+  if (key === "monetization") {
+    if (cachedMonetizationEnabled !== null && now - cachedMonetizationEnabledAt < PLATFORM_FEATURE_TTL_MS) {
+      return cachedMonetizationEnabled;
+    }
+    try {
+      const snap = await db.collection("featureFlags").doc(docId).get();
+      const data = snap.exists ? snap.data() || {} : {};
+      cachedMonetizationEnabled = (data as any).enabled === true;
+      cachedMonetizationEnabledAt = now;
+      return cachedMonetizationEnabled;
+    } catch {
+      cachedMonetizationEnabled = false;
+      cachedMonetizationEnabledAt = now;
+      return false;
+    }
+  }
+
+  // payPerView
+  if (cachedPayPerViewEnabled !== null && now - cachedPayPerViewEnabledAt < PLATFORM_FEATURE_TTL_MS) {
+    return cachedPayPerViewEnabled;
+  }
+  try {
+    const snap = await db.collection("featureFlags").doc(docId).get();
+    const data = snap.exists ? snap.data() || {} : {};
+    cachedPayPerViewEnabled = (data as any).enabled === true;
+    cachedPayPerViewEnabledAt = now;
+    return cachedPayPerViewEnabled;
+  } catch {
+    cachedPayPerViewEnabled = false;
+    cachedPayPerViewEnabledAt = now;
+    return false;
   }
 }

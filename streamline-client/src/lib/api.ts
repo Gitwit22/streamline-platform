@@ -1,5 +1,6 @@
 
 import { API_BASE } from "./apiBase";
+import { getFirebaseIdToken } from "./firebaseClient";
 
 /**
  * Read the auth token from localStorage for header-based auth fallback.
@@ -117,26 +118,51 @@ export async function apiFetch(path: string, init: RequestInit = {}, options?: {
 export async function apiFetchAuth(
   path: string,
   init: RequestInit = {},
-  options?: { allowNonOk?: boolean }
+  options?: { allowNonOk?: boolean; suppressAuthSideEffects?: boolean }
 ) {
   if (typeof window === "undefined") {
     throw new ApiUnauthorizedError();
   }
 
-  let token: string | null = null;
-  try {
-    token = window.localStorage.getItem("authToken");
-  } catch {}
-
-  if (!token || !looksLikeJwt(token)) {
-    clearAuthToken();
-    emitUnauthorizedEventOnce("missing_or_invalid_token");
-    throw new ApiUnauthorizedError();
-  }
+  const suppressAuthSideEffects = !!options?.suppressAuthSideEffects;
 
   const headers = new Headers(init.headers || {});
   const hadExplicitAuthHeader = headers.has("Authorization");
-  if (!hadExplicitAuthHeader) {
+
+
+  let token: string | null = null;
+  let tokenSource: "firebase" | "legacy" | "explicit" | null = null;
+
+  if (hadExplicitAuthHeader) {
+    tokenSource = "explicit";
+  } else {
+    // 1) Firebase ID token (preferred)
+    token = await getFirebaseIdToken();
+    if (token && looksLikeJwt(token)) {
+      tokenSource = "firebase";
+    } else {
+      token = null;
+    }
+
+    // 2) Legacy header JWT fallback (localStorage)
+    if (!token) {
+      try {
+        const legacy = window.localStorage.getItem("authToken");
+        if (legacy && looksLikeJwt(legacy)) {
+          token = legacy;
+          tokenSource = "legacy";
+        }
+      } catch {}
+    }
+
+    if (!token) {
+      if (!suppressAuthSideEffects) {
+        clearAuthToken();
+        emitUnauthorizedEventOnce("missing_token");
+      }
+      throw new ApiUnauthorizedError();
+    }
+
     headers.set("Authorization", `Bearer ${token}`);
   }
 
@@ -144,7 +170,46 @@ export async function apiFetchAuth(
   // the same thrown error shape as apiFetch for other non-ok responses.
   const res = await apiFetch(path, { ...init, headers }, { allowNonOk: true });
 
+  // If the server indicates our legacy header token was stale and it used a cookie
+  // session instead, clear the cached legacy token so we don't keep sending it.
+  try {
+    const headerInvalid = String(res.headers.get("x-sl-auth-header-invalid") || "").trim();
+    if (headerInvalid === "1" || headerInvalid.toLowerCase() === "true") {
+      clearAuthToken();
+      logClearedStaleHeaderTokenOnce();
+    }
+  } catch {
+    // ignore
+  }
+
   if (res.status === 401) {
+    // Firebase tokens can expire; attempt a single force-refresh retry.
+    if (!hadExplicitAuthHeader && tokenSource === "firebase") {
+      try {
+        const refreshed = await getFirebaseIdToken({ forceRefresh: true });
+        if (refreshed && looksLikeJwt(refreshed)) {
+          const retryHeaders = new Headers(init.headers || {});
+          retryHeaders.set("Authorization", `Bearer ${refreshed}`);
+          const retryRes = await apiFetch(path, { ...init, headers: retryHeaders }, { allowNonOk: true });
+          if (retryRes.status !== 401) {
+            if (!options?.allowNonOk && !retryRes.ok) {
+              let errBody: any = null;
+              try {
+                errBody = await retryRes.json();
+              } catch {}
+              throw Object.assign(new Error(`HTTP ${retryRes.status}`), {
+                status: retryRes.status,
+                body: errBody,
+              });
+            }
+            return retryRes;
+          }
+        }
+      } catch {
+        // ignore refresh failures; fall through to unauthorized handling
+      }
+    }
+
     // Tiny but high ROI: a single retry can recover from multi-tab token updates
     // or very small races where authToken was updated after this request began.
     if (!hadExplicitAuthHeader) {
@@ -173,8 +238,10 @@ export async function apiFetchAuth(
       }
     }
 
-    clearAuthToken();
-    emitUnauthorizedEventOnce("401");
+    if (!suppressAuthSideEffects) {
+      clearAuthToken();
+      emitUnauthorizedEventOnce("401");
+    }
     throw new ApiUnauthorizedError();
   }
 
@@ -190,18 +257,6 @@ export async function apiFetchAuth(
   }
 
   return res;
-}
-
-export async function getToken(
-  roomId: string,
-  userId: string,
-  role: "host" | "guest"
-) {
-  const res = await apiFetch("/v1/rooms/token", {
-    method: "POST",
-    body: JSON.stringify({ roomId, userId, role }),
-  });
-  return res.json() as Promise<{ token: string; wsUrl: string }>;
 }
 
 export async function apiStartRecording(
@@ -237,11 +292,14 @@ export async function apiStopRecording(recordingId: string, roomAccessToken?: st
 
 export type RoomLayoutMode = "speaker" | "grid" | "carousel" | "pip";
 
+export type OutputFormat = "landscape_16x9" | "vertical_9x16" | "square_1x1";
+
 export type RoomLayout = {
   mode: RoomLayoutMode;
   maxTiles?: number;
   followSpeaker?: boolean;
   pinnedIdentity?: string | null;
+  outputFormat?: OutputFormat;
 };
 
 export async function apiGetRoomLayout(roomId: string, roomAccessToken: string) {
@@ -255,8 +313,10 @@ export async function apiGetRoomLayout(roomId: string, roomAccessToken: string) 
     ok: true;
     roomId: string;
     roomLayout: RoomLayout | null;
+    outputFormat: OutputFormat;
     effectiveLayoutMode: "speaker" | "grid";
     effectiveLayoutSource: "roomLayout" | "legacyRecordingLayout" | "request" | "default";
+    availablePresets: Array<{ id: string; label: string; participantCount: number }>;
   }>;
 }
 
@@ -273,6 +333,76 @@ export async function apiUpdateRoomLayout(
     },
   });
   return res.json() as Promise<{ ok: true; roomId: string; roomLayout: RoomLayout }>;
+}
+
+// ---------------------------------------------------------------------------
+// Studio Layout API (preset-based canvas composition)
+// ---------------------------------------------------------------------------
+
+import type { StudioLayout } from "./studioLayout";
+
+export async function apiGetStudioLayout(roomId: string, roomAccessToken: string) {
+  const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/studio-layout`, {
+    method: "GET",
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+  return res.json() as Promise<{
+    ok: true;
+    roomId: string;
+    studioLayout: StudioLayout | null;
+  }>;
+}
+
+export async function apiUpdateStudioLayout(
+  roomId: string,
+  roomAccessToken: string,
+  studioLayout: StudioLayout,
+) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/studio-layout`, {
+    method: "PATCH",
+    body: JSON.stringify({ studioLayout }),
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; studioLayout: StudioLayout }>;
+}
+
+// ---------------------------------------------------------------------------
+// Program State (shared output/compositor state)
+// ---------------------------------------------------------------------------
+
+import type { ProgramState } from "./programState";
+
+export async function apiGetProgramState(roomId: string, roomAccessToken: string) {
+  const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/program-state`, {
+    method: "GET",
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+  return res.json() as Promise<{
+    ok: true;
+    roomId: string;
+    programState: ProgramState | null;
+  }>;
+}
+
+export async function apiUpdateProgramState(
+  roomId: string,
+  roomAccessToken: string,
+  patch: Partial<ProgramState>,
+) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/program-state`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+    headers: {
+      "x-room-access-token": roomAccessToken,
+    },
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; programState: ProgramState }>;
 }
 
 export type RoomPolicy = {

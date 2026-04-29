@@ -298,7 +298,10 @@ export async function getFileMetadata(remotePath: string): Promise<HeadObjectCom
  * @returns Formatted path for recordings
  */
 export function generateRecordingPath(userId: string, roomName: string, timestamp: number): string {
-  return `recordings/${userId}/${roomName}/${timestamp}.mp4`;
+  const rawRoot = String(process.env.R2_RECORDINGS_ROOT_PREFIX ?? "").trim();
+  const rootNoLeadingSlash = rawRoot.replace(/^\/+/, "");
+  const root = rootNoLeadingSlash ? (rootNoLeadingSlash.endsWith("/") ? rootNoLeadingSlash : `${rootNoLeadingSlash}/`) : "";
+  return `${root}recordings/${userId}/${roomName}/${timestamp}.mp4`;
 }
 
 /**

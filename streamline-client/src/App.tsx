@@ -1,44 +1,24 @@
-import PricingExplainerPage from "./pages/PricingExplainerPage";
 import { useEffect, useState } from "react";
-import { Routes, Route, Navigate, useLocation, useNavigate, useParams } from "react-router-dom";
-import AdminUsage from './pages/AdminUsage';
-import AdminDashboard from './pages/AdminDashboard';
-
-import Welcome from "./pages/Welcome";
+import { Routes, Route, Navigate, useLocation, useNavigate } from "react-router-dom";
 import { LoginPage } from "./pages/LoginPage";
 import { SignupPage } from "./pages/SignupPage";
-import Join from "./pages/Join";
-import Room from "./pages/Room";
-import InviteLanding from "./pages/InviteLanding";
-import InviteRedeem from "./pages/InviteRedeem";
-import Live from "./pages/Live";
-import SettingsDestinations from "./pages/SettingsDestinations";
-import RoomExitPage from "./pages/RoomExitPage";
-import AssetLibrary from "./editing/AssetLibrary";
-import ProjectsDashboard from "./editing/ProjectsDashboard";
-import EditorPage from "./editing/EditorPage";
-import RenderAndUploadPage from "./editing/pages/RenderAndUploadPage";
-import EditorDisabled from "./pages/EditorDisabled";
-import LearnMore from "./pages/LearnMore";
-import Checkout from "./pages/Checkout";
 import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
 import Support from "./pages/Support";
 import BillingCanceled from "./pages/BillingCanceled";
 import BillingSuccess from "./pages/BillingSuccess";
+import ForgotPasswordPage from "./pages/ForgotPasswordPage";
+import PpvViewer from "./pages/PpvViewer";
+import RecoverySetupPage from "./pages/RecoverySetupPage";
 import { ProtectedRoute } from "./components/ProtectedRoute";
-import PostStreamSummary from "./pages/PostStreamSummary";
+import { creatorRoutes } from "./creator/routes";
 
 import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
 import { clearPlatformFlagsCache } from "./lib/platformFlagsCache";
 import { useFeatureAccess } from "./hooks/useFeatureAccess";
 import { useEffectiveEntitlements } from "./hooks/useEffectiveEntitlements";
-
-
-// Stripe/Billing pages
-import SettingsBilling from "./pages/SettingsBilling";
-import MyContentDisabled from "./pages/MyContentDisabled";
+import { cleanTrackingParams } from "./lib/cleanTrackingParams";
 
 
 function App() {
@@ -53,36 +33,76 @@ function App() {
   const canEditor = access.editor.allowed;
   const canMyContentRecordings = !!access?.myContentRecordings?.allowed;
   const canMyContent = !!access?.myContent?.allowed;
+  const canMonetization = !!access?.monetization?.platformEnabled;
 
-  const myContentTarget = canProjects
-    ? "/projects"
-    : (canContentLibrary || canMyContentRecordings)
-      ? "/content"
-      : null;
+  const myContentTarget = (canContentLibrary || canMyContentRecordings)
+    ? "/content"
+    : null;
+
+  useEffect(() => {
+    // Strip tracking parameters (fbclid, utm_*, etc.) that social platforms
+    // and email clients append when users click shared invite links.
+    cleanTrackingParams();
+  }, []);
 
   useEffect(() => {
     const onUnauthorized = () => {
       const path = window.location.pathname || "";
 
-      // Guest-accessible paths should never be redirected to login.
-      // Guests visiting via invite links have no auth token, so any
-      // apiFetchAuth call would emit sl:unauthorized.  Preserve their
-      // guest session tokens (sl_guestSessionToken, etc.) and skip the
-      // redirect so the invite flow can complete normally.
-      const guestPaths = ["/invite", "/i", "/join", "/room", "/live", "/ig"];
-      if (guestPaths.some((p) => path === p || path.startsWith(p + "/"))) {
-        clearMeCache();
+      // ── Public / auth pages: suppress ALL side-effects ──────────────
+      // These pages don't require auth, so a 401 is expected and
+      // must NOT clear tokens or flash the "Session expired" banner —
+      // otherwise we race with a freshly-stored login token.
+      if (
+        path.startsWith("/login") || path.startsWith("/signup") ||
+        path === "/welcome" || path === "/" ||
+        path.startsWith("/privacy") || path.startsWith("/terms") ||
+        path.startsWith("/support") || path.startsWith("/learnmore") ||
+        path.startsWith("/i/") || path.startsWith("/invite/") ||
+        path.startsWith("/billing/") || path.startsWith("/ppv/")
+      ) {
         return;
       }
 
+      // ── Invite join flow: suppress banner when arriving via invite ──
+      // /join?t=<token> is a guest invite entry-point — a 401 is expected
+      // because the participant has no account yet.
+      if (path.startsWith("/join")) {
+        const sp = new URLSearchParams(window.location.search);
+        if (sp.has("t") || sp.has("inviteToken") || sp.has("room")) {
+          return;
+        }
+      }
+
+      // ── Guest detection: suppress banner for guest sessions ─────────
+      // Guests who joined via an invite link have a guest session token
+      // but no account. A 401 on auth endpoints is expected for them and
+      // should not trigger the "Session expired" banner.
+      if (path.startsWith("/room") || path.startsWith("/join") || path.startsWith("/live") || path.startsWith("/ig/")) {
+        const sp = new URLSearchParams(window.location.search);
+        const hasGuestToken = sp.has("gst");
+        let hasStoredGuestSession = false;
+        try {
+          hasStoredGuestSession = !!localStorage.getItem("sl_guestSessionToken");
+        } catch { /* ignore */ }
+        if (hasGuestToken || hasStoredGuestSession) {
+          // Guest user — do not show "Session expired" banner
+          return;
+        }
+
+        // Authenticated user whose session expired — show banner but do NOT redirect.
+        // The Room page manages its own `needsReauth` state and shows an
+        // in-room re-auth prompt. Clearing storage here would destroy
+        // the room-access-token and force-boot the user.
+        setShowUnauthorized(true);
+        return;
+      }
+
+      // ── Protected pages: full logout + redirect ─────────────────────
       clearAuthStorage();
       clearMeCache();
       clearPlatformFlagsCache();
       setShowUnauthorized(true);
-
-      if (path.startsWith("/login") || path.startsWith("/signup")) {
-        return;
-      }
 
       const next = `${window.location.pathname}${window.location.search}`;
       const sp = new URLSearchParams();
@@ -149,99 +169,39 @@ function App() {
       )}
 
       <Routes>
-      <Route path="/learnmore" element={<LearnMore />} />
+      {/* Redirect legacy lane paths to creator welcome */}
+      <Route path="/streamline/corporate/*" element={<Navigate to="/welcome" replace />} />
+      <Route path="/streamline/edu/*" element={<Navigate to="/welcome" replace />} />
+      <Route path="/demo" element={<Navigate to="/welcome" replace />} />
 
-      <Route path="/admin/usage" element={<AdminUsage />} />
       {/* Public / auth flow */}
-      <Route path="/" element={<Welcome />} />
+      <Route path="/" element={<Navigate to="/welcome" replace />} />
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       <Route path="/signup" element={<SignupPage />} />
-      <Route path="/checkout" element={<Checkout />} />
-
-      {/* Invite landing */}
-      <Route path="/i/:inviteToken" element={<InviteLanding />} />
-      {/* New guest invite flow (Firestore-backed) */}
-      <Route path="/invite/:inviteId" element={<InviteRedeem />} />
-      {/* Policy & Support */}
+      <Route
+        path="/account-recovery/setup"
+        element={
+          <ProtectedRoute>
+            <RecoverySetupPage />
+          </ProtectedRoute>
+        }
+      />
       <Route path="/privacy" element={<Privacy />} />
       <Route path="/terms" element={<Terms />} />
       <Route path="/support" element={<Support />} />
-      {/* Stripe Checkout return routes */}
       <Route path="/billing/canceled" element={<BillingCanceled />} />
       <Route path="/billing/success" element={<BillingSuccess />} />
-      <Route path="/admin/dashboard" element={<AdminDashboard />} />
-      {/* Streaming flow */}
-      <Route path="/join" element={<Join />} />
-      <Route
-        path="/my-content"
-        element={canMyContent && myContentTarget ? <Navigate to={myContentTarget} replace /> : <MyContentDisabled />}
-      />
-      <Route path="/room" element={<Room />} />
-      <Route path="/room/:roomName" element={<Room />} />
-      <Route path="/live" element={<Live />} />
-      {/* New stable viewer URL: /live/:savedEmbedId */}
-      <Route path="/live/:savedEmbedId" element={<Live />} />
-      {/* Instagram-only viewer URL (fullscreen, minimal UI): /ig/:savedEmbedId */}
-      <Route path="/ig/:savedEmbedId" element={<Live />} />
-      <Route path="/settings/destinations" element={<SettingsDestinations />} />
-      <Route path="/room-exit/:recordingId" element={<RoomExitPage />} />
 
-      {/* Legacy: /stream-summary -> canonical /room-exit */}
-      <Route path="/stream-summary/:recordingId" element={<LegacyStreamSummaryRedirect />} />
-      <Route
-        path="/editing/post-stream"
-        element={<PostStreamSummary />}
-      />
-      
-      {/* Thank You / Post-Stream */}
-      <Route path="/thanks" element={<Navigate to="/room-exit/unknown" replace />} />
+      {/* PPV viewer (public, no auth required) */}
+      <Route path="/ppv/:eventId" element={<PpvViewer />} />
 
-      {/* Blocked Editing Routes - Coming Soon */}
-      <Route path="/edit" element={<EditorDisabled />} />
-      <Route path="/edit/:id" element={<EditorDisabled />} />
-      <Route path="/editor" element={<EditorDisabled />} />
-      <Route path="/editor/:id" element={<EditorDisabled />} />
+      {/* Creator lane */}
+      {creatorRoutes({ canContentLibrary, canMyContentRecordings, canProjects, canEditor, canMyContent, canMonetization, myContentTarget })}
 
-      {/* Segmented feature routes */}
-      <Route
-        path="/content"
-        element={(canContentLibrary || canMyContentRecordings) ? <AssetLibrary /> : <Navigate to="/join" replace />}
-      />
-      <Route
-        path="/projects"
-        element={canProjects ? <ProjectsDashboard /> : <Navigate to="/join" replace />}
-      />
-
-      {/* Legacy aliases */}
-      <Route
-        path="/editing/assets"
-        element={(canContentLibrary || canMyContentRecordings) ? <Navigate to="/content" replace /> : <Navigate to="/join" replace />}
-      />
-      <Route
-        path="/editing/projects"
-        element={canProjects ? <Navigate to="/projects" replace /> : <Navigate to="/join" replace />}
-      />
-      <Route
-        path="/editing/editor/:projectId"
-        element={canEditor ? <EditorPage /> : <EditorDisabled />}
-      />
-      <Route
-        path="/editing/export/:projectId"
-        element={canEditor ? <RenderAndUploadPage /> : <EditorDisabled />}
-      />
-
-      {/* Stripe/Billing routes */}
-      <Route path="/settings/billing" element={<SettingsBilling />} />
-      <Route path="/pricing/explainer" element={<PricingExplainerPage />} />
-      
       </Routes>
     </>
   );
-}
-function LegacyStreamSummaryRedirect() {
-  const { recordingId } = useParams<{ recordingId: string }>();
-  const target = recordingId ? `/room-exit/${encodeURIComponent(recordingId)}` : '/room-exit/unknown';
-  return <Navigate to={target} replace state={{ exitRole: 'host' }} />;
 }
 
 export default App;

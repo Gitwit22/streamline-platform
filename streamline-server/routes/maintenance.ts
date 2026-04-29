@@ -1,8 +1,9 @@
 import { Router } from "express";
 import { firestore } from "../firebaseAdmin";
 import { requireAdmin } from "../middleware/adminAuth";
-import { deleteFiles, deletePrefix } from "../lib/storageClient";
+import { deleteFile, deleteFiles, deletePrefix } from "../lib/storageClient";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
+import { releaseStorageUsage } from "../usageHelper";
 import { stopEgress } from "../services/livekitEgress";
 import { setHlsIdle } from "../services/rooms";
 
@@ -38,20 +39,25 @@ function toDate(value: any): Date | null {
 //
 // Supports two auth mechanisms:
 // 1) Standard admin auth via requireAdmin (JWT/cookie/body)
-// 2) Static maintenance key for cron jobs: header x-maintenance-key or Authorization: Bearer <key>
+// 2) Static maintenance key for cron jobs: header x-maintenance-key
+//    (Authorization: Bearer <key> is deprecated; use only for legacy clients)
 router.use((req, res, next) => {
   const key = process.env.MAINTENANCE_KEY;
   if (!key) return requireAdmin(req, res, next);
 
   const headerKey = String(req.headers["x-maintenance-key"] || "").trim();
+  const allowDeprecated = process.env.ALLOW_DEPRECATED_AUTHZ_TOKENS !== "0";
   const authHeader = req.headers["authorization"] || req.headers["Authorization"];
   const bearer =
-    typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+    allowDeprecated && typeof authHeader === "string" && authHeader.startsWith("Bearer ")
       ? authHeader.slice("Bearer ".length).trim()
       : "";
 
   if (headerKey && headerKey === key) return next();
-  if (bearer && bearer === key) return next();
+  if (bearer && bearer === key) {
+    console.warn("[deprecation] maintenance key provided via Authorization header; send x-maintenance-key instead");
+    return next();
+  }
 
   return requireAdmin(req, res, next);
 });
@@ -89,6 +95,26 @@ async function expireEmergencyRecordings(now: Date): Promise<{ deletedCount: num
         await deletePrefix(prefix);
       }
 
+      // Release storage quota for the deleted recording
+      if (uid && recordingId) {
+        try {
+          const recSnap = await firestore.collection("recordings").doc(recordingId).get();
+          const recData = recSnap.exists ? (recSnap.data() || {}) as any : {};
+          const fileSize = typeof recData.fileSize === "number" ? recData.fileSize : 0;
+          const storageReleased = recData.storageReleased === true;
+          if (fileSize > 0 && !storageReleased) {
+            await releaseStorageUsage(uid, fileSize, {
+              caller: "maintenance.expireEmergencyRecordings",
+              recordingId,
+            });
+          }
+        } catch (e: any) {
+          console.warn("[maintenance/expire-emergency-recordings] storage release failed", {
+            uid, recordingId, error: e?.message || e,
+          });
+        }
+      }
+
       // Mark pointer deleted
       await doc.ref.set(
         {
@@ -103,7 +129,7 @@ async function expireEmergencyRecordings(now: Date): Promise<{ deletedCount: num
         await firestore
           .collection("recordings")
           .doc(recordingId)
-          .set({ status: "deleted", deletedAt: now, updatedAt: now }, { merge: true });
+          .set({ status: "deleted", deletedAt: now, updatedAt: now, storageReleased: true }, { merge: true });
       }
 
       // Best-effort: annotate user doc so we can audit deletions later
@@ -153,6 +179,78 @@ async function purgeDeletedAccounts(now: Date): Promise<{ purgedCount: number }>
     try {
       // Best-effort cleanup of known user-owned data.
       // Note: Firestore does not automatically delete subcollections.
+
+      // Release storage for user's recordings before deleting user doc
+      try {
+        const recSnap = await firestore
+          .collection("recordings")
+          .where("userId", "==", uid)
+          .limit(500)
+          .get();
+        let totalBytes = 0;
+        for (const recDoc of recSnap.docs) {
+          const recData = (recDoc.data() || {}) as any;
+          const fs = typeof recData.fileSize === "number" ? recData.fileSize : 0;
+          const released = recData.storageReleased === true;
+          if (fs > 0 && !released) {
+            totalBytes += fs;
+          }
+          try {
+            await deleteRecordingStorage(recData);
+            await recDoc.ref.set({ status: "deleted", storageReleased: true, deletedAt: now, updatedAt: now }, { merge: true });
+          } catch (e: any) {
+            console.warn("[maintenance/purge-deleted-accounts] recording cleanup failed", { uid, recordingId: recDoc.id, error: e?.message || e });
+          }
+        }
+        if (totalBytes > 0) {
+          try {
+            await releaseStorageUsage(uid, totalBytes, {
+              caller: "maintenance.purgeDeletedAccounts",
+              recordingCount: recSnap.size,
+            });
+          } catch (e: any) {
+            console.warn("[maintenance/purge-deleted-accounts] storage release failed", { uid, totalBytes, error: e?.message || e });
+          }
+        }
+      } catch (e: any) {
+        console.warn("[maintenance/purge-deleted-accounts] failed to clean recordings", { uid, error: e?.message || e });
+      }
+
+      // Release storage for user's saved_videos (uploaded ones with storagePath)
+      try {
+        const svSnap = await firestore
+          .collection("saved_videos")
+          .where("userId", "==", uid)
+          .limit(500)
+          .get();
+        let totalBytes = 0;
+        for (const svDoc of svSnap.docs) {
+          const svData = (svDoc.data() || {}) as any;
+          const storagePath = typeof svData.storagePath === "string" ? svData.storagePath : null;
+          const sizeBytes = typeof svData.sizeBytes === "number" ? svData.sizeBytes : 0;
+          if (storagePath) {
+            try {
+              await deleteFile(storagePath);
+              if (sizeBytes > 0) totalBytes += sizeBytes;
+            } catch (e: any) {
+              console.warn("[maintenance/purge-deleted-accounts] saved_video file delete failed", { uid, storagePath, error: e?.message || e });
+            }
+          }
+          try { await svDoc.ref.delete(); } catch (e: any) {
+            console.warn("[maintenance/purge-deleted-accounts] saved_video doc delete failed", { uid, docId: svDoc.id, error: e?.message || e });
+          }
+        }
+        // Note: storage release for deleted user is best-effort since user doc is being deleted
+        if (totalBytes > 0) {
+          try {
+            await releaseStorageUsage(uid, totalBytes, { caller: "maintenance.purgeDeletedAccounts.savedVideos" });
+          } catch (e: any) {
+            console.warn("[maintenance/purge-deleted-accounts] saved_videos storage release failed", { uid, totalBytes, error: e?.message || e });
+          }
+        }
+      } catch (e: any) {
+        console.warn("[maintenance/purge-deleted-accounts] failed to clean saved_videos", { uid, error: e?.message || e });
+      }
 
       // users/{uid}/rolePresets
       try {
@@ -233,6 +331,10 @@ async function purgeExpiredRecordings(now: Date, opts?: { limit?: number }): Pro
     const status = String(data.status || "").toLowerCase();
     if (status === "deleted") continue;
 
+    // Capture file size and userId before deletion for storage accounting
+    const fileSize = typeof data.fileSize === "number" ? data.fileSize : 0;
+    const userId = typeof data.userId === "string" ? data.userId : null;
+    const storageReleased = data.storageReleased === true;
 
     try {
       await deleteRecordingStorage(data);
@@ -240,9 +342,23 @@ async function purgeExpiredRecordings(now: Date, opts?: { limit?: number }): Pro
       console.warn("[maintenance/purge-expired-recordings] deleteRecordingStorage failed", { recordingId: doc.id, error: e?.message || e });
     }
 
+    // Release storage quota after R2 bytes are removed
+    if (userId && fileSize > 0 && !storageReleased) {
+      try {
+        await releaseStorageUsage(userId, fileSize, {
+          caller: "maintenance.purgeExpiredRecordings",
+          recordingId: doc.id,
+        });
+      } catch (e: any) {
+        console.warn("[maintenance/purge-expired-recordings] storage release failed", {
+          userId, recordingId: doc.id, fileSize, error: e?.message || e,
+        });
+      }
+    }
+
     try {
       await doc.ref.set(
-        { status: "deleted", deleteReason: "expired_retention", deletedAt: now, updatedAt: now },
+        { status: "deleted", deleteReason: "expired_retention", deletedAt: now, updatedAt: now, storageReleased: true },
         { merge: true }
       );
       deletedCount += 1;
@@ -396,6 +512,127 @@ router.post("/purge-stale-hls", async (req, res) => {
   const limit = req.query.limit ? Number(req.query.limit) : undefined;
   const result = await purgeStaleHls(now, { ttlMinutes, limit });
   return res.json(result);
+});
+
+// ---------------------------------------------------------------------------
+// 24-hour recording retention
+// Deletes ready/stopped/processing recordings whose createdAt is older than
+// retentionHours (default: 24).  Active recordings (status "recording" or
+// "starting") and already-deleted recordings are skipped.
+// Supports dryRun mode: set query param dryRun=1 or env RECORDING_CLEANUP_DRY_RUN=1.
+// ---------------------------------------------------------------------------
+
+export const RECORDING_RETENTION_HOURS = 24;
+
+const ACTIVE_STATUSES = new Set(["recording", "starting"]);
+
+export async function purgeOldRecordings(
+  now: Date,
+  opts?: { limit?: number; dryRun?: boolean; retentionHours?: number }
+): Promise<{ deletedCount: number; skippedCount: number; dryRun: boolean }> {
+  const retentionHours =
+    typeof opts?.retentionHours === "number" && Number.isFinite(opts.retentionHours)
+      ? Math.max(1, opts.retentionHours)
+      : RECORDING_RETENTION_HOURS;
+  const cutoff = new Date(now.getTime() - retentionHours * 60 * 60 * 1000);
+  const limit =
+    typeof opts?.limit === "number" && Number.isFinite(opts.limit)
+      ? Math.max(1, Math.min(500, opts.limit))
+      : 200;
+  const dryRun = opts?.dryRun === true;
+
+  let snap: FirebaseFirestore.QuerySnapshot;
+  try {
+    snap = await firestore
+      .collection("recordings")
+      .where("createdAt", "<", cutoff)
+      .limit(limit)
+      .get();
+  } catch (e: any) {
+    console.warn("[maintenance/purge-old-recordings] query failed", e?.message || e);
+    return { deletedCount: 0, skippedCount: 0, dryRun };
+  }
+
+  let deletedCount = 0;
+  let skippedCount = 0;
+
+  for (const doc of snap.docs) {
+    const data = (doc.data() || {}) as any;
+    const status = String(data.status || "").toLowerCase();
+
+    // Never delete active or already-deleted recordings.
+    if (status === "deleted" || ACTIVE_STATUSES.has(status)) {
+      skippedCount += 1;
+      continue;
+    }
+
+    if (dryRun) {
+      console.log(`[maintenance/purge-old-recordings] DRY RUN — would delete recording: ${doc.id}`);
+      deletedCount += 1;
+      continue;
+    }
+
+    const fileSize = typeof data.fileSize === "number" ? data.fileSize : 0;
+    const userId = typeof data.userId === "string" ? data.userId : null;
+    const storageReleased = data.storageReleased === true;
+
+    let storageDeleted = false;
+    try {
+      await deleteRecordingStorage(data);
+      storageDeleted = true;
+    } catch (e: any) {
+      console.warn(`[maintenance/purge-old-recordings] Failed to delete recording: ${doc.id}`, e?.message || e);
+    }
+
+    if (storageDeleted && userId && fileSize > 0 && !storageReleased) {
+      try {
+        await releaseStorageUsage(userId, fileSize, {
+          caller: "maintenance.purgeOldRecordings",
+          recordingId: doc.id,
+        });
+      } catch (e: any) {
+        console.warn("[maintenance/purge-old-recordings] storage release failed", {
+          userId, recordingId: doc.id, fileSize, error: e?.message || e,
+        });
+      }
+    }
+
+    try {
+      await doc.ref.set(
+        { status: "deleted", deleteReason: "expired_24h_retention", deletedAt: now, updatedAt: now, storageReleased: storageDeleted || storageReleased },
+        { merge: true }
+      );
+      deletedCount += 1;
+      if (storageDeleted) {
+        console.log(`[maintenance/purge-old-recordings] Deleted expired recording: ${doc.id}`);
+      } else {
+        console.warn(`[maintenance/purge-old-recordings] Marked deleted in Firestore (R2 deletion had failed): ${doc.id}`);
+      }
+    } catch (e: any) {
+      console.warn("[maintenance/purge-old-recordings] failed to update Firestore", { recordingId: doc.id, error: e?.message || e });
+    }
+  }
+
+  return { deletedCount, skippedCount, dryRun };
+}
+
+// POST/GET /api/maintenance/purge-old-recordings?limit=200&dryRun=1
+router.get("/purge-old-recordings", async (req, res) => {
+  const now = new Date();
+  const limit = req.query.limit ? Number(req.query.limit) : undefined;
+  const dryRun = req.query.dryRun === "1" || req.query.dryRun === "true" ||
+    process.env.RECORDING_CLEANUP_DRY_RUN === "1";
+  const result = await purgeOldRecordings(now, { limit, dryRun });
+  return res.json({ ok: true, ...result });
+});
+
+router.post("/purge-old-recordings", async (req, res) => {
+  const now = new Date();
+  const limit = req.query.limit ? Number(req.query.limit) : undefined;
+  const dryRun = req.query.dryRun === "1" || req.query.dryRun === "true" ||
+    process.env.RECORDING_CLEANUP_DRY_RUN === "1";
+  const result = await purgeOldRecordings(now, { limit, dryRun });
+  return res.json({ ok: true, ...result });
 });
 
 export default router;
