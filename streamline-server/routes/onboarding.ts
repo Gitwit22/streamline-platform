@@ -7,6 +7,8 @@ import { requireAdmin } from "../middleware/adminAuth";
 import { requireAuth } from "../middleware/requireAuth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { buildNewUserDoc } from "../lib/newUserDefaults";
+import { sendEmail } from "../lib/emailService.js";
+import { buildEduWelcomeEmail } from "../lib/emailTemplates.js";
 
 const router = Router();
 
@@ -364,6 +366,24 @@ router.post("/create-top-admin", async (req, res) => {
     // Mint session token/cookie
     const token = jwt.sign({ uid }, getJwtSecret(), { expiresIn: "7d" });
     (res as any).cookie("token", token, cookieOptions());
+
+    // Send EDU welcome email — non-blocking; failure must not prevent account creation.
+    // Idempotency: store welcomeEmailSentAt on the user doc after a successful send.
+    setImmediate(async () => {
+      try {
+        const { subject, html } = buildEduWelcomeEmail({ email, displayName, orgName });
+        const emailResult = await sendEmail({ to: email, subject, html });
+        if (emailResult.ok && emailResult.messageId !== "disabled") {
+          await firestore
+            .collection("users")
+            .doc(uid)
+            .set({ welcomeEmailSentAt: Date.now() }, { merge: true })
+            .catch(() => undefined);
+        }
+      } catch {
+        // Swallow — email is best-effort; account creation already succeeded
+      }
+    });
 
     return res.json({
       ok: true,

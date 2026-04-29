@@ -1,0 +1,25 @@
+{
+  "name": "@cores/notifications",
+  "version": "1.0.0",
+  "description": "Shared email/notification core for the StreamLine platform",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^5.9.3"
+  }
+}

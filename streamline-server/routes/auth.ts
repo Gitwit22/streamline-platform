@@ -29,6 +29,8 @@ import { getUserAccount } from "../lib/userAccount";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { buildNewUserDoc } from "../lib/newUserDefaults";
+import { sendEmail } from "../lib/emailService.js";
+import { buildWelcomeEmail } from "../lib/emailTemplates.js";
 
 console.log("✅ auth router loaded");
 
@@ -446,6 +448,24 @@ router.post("/signup", async (req, res) => {
     });
 
     await userRef.set(userData);
+
+    // Send welcome email — non-blocking; a failure must never prevent account creation.
+    // Idempotency: store welcomeEmailSentAt on the user doc after a successful send.
+    setImmediate(async () => {
+      try {
+        const { subject, html } = buildWelcomeEmail({ email: emailNorm, displayName });
+        const emailResult = await sendEmail({ to: emailNorm, subject, html });
+        if (emailResult.ok && emailResult.messageId !== "disabled") {
+          await db
+            .collection("users")
+            .doc(uid)
+            .set({ welcomeEmailSentAt: Date.now() }, { merge: true })
+            .catch(() => undefined);
+        }
+      } catch {
+        // Swallow — email is best-effort; account creation already succeeded
+      }
+    });
 
     const token = signLegacySessionToken(uid);
 
