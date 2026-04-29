@@ -2,10 +2,26 @@ import React, { FormEvent, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { apiFetchAuth, clearAuthStorage } from "../lib/api";
 
-// Email validation function
+// Email validation function – operates on an already-normalized (trimmed + lowercased) address.
 function validateEmail(email: string): boolean {
   const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   return re.test(email);
+}
+
+/** Normalize an email address: trim whitespace and lowercase. */
+function normalizeEmail(raw: string): string {
+  return raw.trim().toLowerCase();
+}
+
+/** Log auth events only in development mode. Never logs passwords. */
+function logAuthDev(msg: string, data?: Record<string, unknown>) {
+  if (import.meta.env.DEV) {
+    if (data) {
+      console.log(`[Login] ${msg}`, data);
+    } else {
+      console.log(`[Login] ${msg}`);
+    }
+  }
 }
 
 /**
@@ -23,6 +39,7 @@ export const LoginPage: React.FC = () => {
   const location = useLocation();
   const [email, setEmail] = useState<string>("");
   const [password, setPassword] = useState<string>("");
+  const [showPassword, setShowPassword] = useState<boolean>(false);
   const [error, setError] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
@@ -64,18 +81,25 @@ export const LoginPage: React.FC = () => {
     setError("");
     setLoading(true);
 
-    if (!validateEmail(email)) {
+    // Normalize before any validation or submission.
+    const normalizedEmail = normalizeEmail(email);
+    logAuthDev("Attempting login", { normalizedEmail });
+
+    if (!validateEmail(normalizedEmail)) {
+      logAuthDev("Frontend validation FAILED – invalid email format");
       setError("Please enter a valid email address.");
       setLoading(false);
       return;
     }
+
+    logAuthDev("Frontend validation PASSED – calling auth API");
 
     try {
       const res = await fetch(`${API_BASE}/api/auth/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email: normalizedEmail, password }),
       });
 
       if (!res.ok) {
@@ -273,7 +297,9 @@ export const LoginPage: React.FC = () => {
                 Email Address
               </label>
               <input
-                type="email"
+                type="text"
+                inputMode="email"
+                autoComplete="email"
                 placeholder="you@example.com"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -312,32 +338,76 @@ export const LoginPage: React.FC = () => {
               >
                 Password
               </label>
-              <input
-                type="password"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-                style={{
-                  width: "100%",
-                  padding: "14px 16px",
-                  background: "rgba(0, 0, 0, 0.4)",
-                  border: "1px solid rgba(255, 255, 255, 0.1)",
-                  borderRadius: "12px",
-                  color: "#ffffff",
-                  fontSize: "15px",
-                  outline: "none",
-                  transition: "all 0.3s ease",
-                }}
-                onFocus={(e) => {
-                  e.currentTarget.style.borderColor = "rgba(220, 38, 38, 0.5)";
-                  e.currentTarget.style.boxShadow = "0 0 0 3px rgba(220, 38, 38, 0.1)";
-                }}
-                onBlur={(e) => {
-                  e.currentTarget.style.borderColor = "rgba(255, 255, 255, 0.1)";
-                  e.currentTarget.style.boxShadow = "none";
-                }}
-              />
+              <div style={{ position: "relative" }}>
+                <input
+                  type={showPassword ? "text" : "password"}
+                  autoComplete="current-password"
+                  placeholder="••••••••"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  required
+                  style={{
+                    width: "100%",
+                    padding: "14px 48px 14px 16px",
+                    background: "rgba(0, 0, 0, 0.4)",
+                    border: "1px solid rgba(255, 255, 255, 0.1)",
+                    borderRadius: "12px",
+                    color: "#ffffff",
+                    fontSize: "15px",
+                    outline: "none",
+                    transition: "all 0.3s ease",
+                    boxSizing: "border-box",
+                  }}
+                  onFocus={(e) => {
+                    e.currentTarget.style.borderColor = "rgba(220, 38, 38, 0.5)";
+                    e.currentTarget.style.boxShadow = "0 0 0 3px rgba(220, 38, 38, 0.1)";
+                  }}
+                  onBlur={(e) => {
+                    e.currentTarget.style.borderColor = "rgba(255, 255, 255, 0.1)";
+                    e.currentTarget.style.boxShadow = "none";
+                  }}
+                />
+                <button
+                  type="button"
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                  onClick={() => setShowPassword((v) => !v)}
+                  style={{
+                    position: "absolute",
+                    right: "14px",
+                    top: "50%",
+                    transform: "translateY(-50%)",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    padding: "0",
+                    color: "#6b7280",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.color = "#9ca3af";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.color = "#6b7280";
+                  }}
+                >
+                  {showPassword ? (
+                    // Eye-off icon (hide)
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
+                      <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+                      <line x1="1" y1="1" x2="23" y2="23"/>
+                    </svg>
+                  ) : (
+                    // Eye icon (show)
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                      <circle cx="12" cy="12" r="3"/>
+                    </svg>
+                  )}
+                </button>
+              </div>
             </div>
 
             {error && (
