@@ -30,6 +30,7 @@ import {
   type EmailMessage,
   type EmailResult,
 } from "@cores/notifications";
+import { Resend } from "resend";
 import { logger } from "./logger.js";
 
 // ---------------------------------------------------------------------------
@@ -46,7 +47,6 @@ function buildUseCase(): SendEmailUseCase {
   if (config.provider === "resend" && config.resendApiKey) {
     // Resend client is created here in the server so @cores/notifications
     // has no runtime dependency on the resend npm package.
-    const { Resend } = require("resend") as typeof import("resend");
     provider = new ResendEmailProvider(new Resend(config.resendApiKey));
   } else {
     provider = new ConsoleEmailProvider();

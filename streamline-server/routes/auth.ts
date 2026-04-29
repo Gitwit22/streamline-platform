@@ -460,7 +460,9 @@ router.post("/signup", async (req, res) => {
             .collection("users")
             .doc(uid)
             .set({ welcomeEmailSentAt: Date.now() }, { merge: true })
-            .catch(() => undefined);
+            .catch((err: unknown) => {
+              console.warn("[auth/signup] Failed to write welcomeEmailSentAt:", err instanceof Error ? err.message : String(err));
+            });
         }
       } catch {
         // Swallow — email is best-effort; account creation already succeeded
