@@ -52,7 +52,7 @@ export const SignupPage = () => {
     setError("");
     setLoading(true);
 
-    if (!validateEmail(email)) {
+    if (!validateEmail(email.trim().toLowerCase())) {
       setError("Please enter a valid email address.");
       setLoading(false);
       return;
