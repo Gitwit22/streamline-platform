@@ -248,7 +248,12 @@ export default function Live() {
     void fetchHlsStatus();
   }, [reloadViewerConfig, fetchHlsStatus]);
 
-  // Poll loop
+  // Poll loop — interval adapts to stream state to avoid hammering when offline.
+  // live/starting: 3s (fast, user is watching)
+  // offline/error/loading: 15s (stream not running, no urgency)
+  const POLL_INTERVAL_ACTIVE = 3000;
+  const POLL_INTERVAL_IDLE = 15000;
+
   useEffect(() => {
     const currentRoomId = (roomId || "").trim();
     if (!currentRoomId) return;
@@ -260,9 +265,12 @@ export default function Live() {
     }
 
     fetchHlsStatus();
-    const t = window.setInterval(fetchHlsStatus, 3000);
+
+    const isActive = status === "live" || status === "starting";
+    const interval = isActive ? POLL_INTERVAL_ACTIVE : POLL_INTERVAL_IDLE;
+    const t = window.setInterval(fetchHlsStatus, interval);
     return () => window.clearInterval(t);
-  }, [roomId, fetchHlsStatus]);
+  }, [roomId, fetchHlsStatus, status]);
 
   const handleRefreshGoLive = useCallback(() => {
     void reloadViewerConfig();
