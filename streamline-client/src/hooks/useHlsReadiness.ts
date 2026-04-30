@@ -21,14 +21,18 @@ export function useHlsReadiness(manifestUrl: string | null, resetKey?: unknown) 
 
       try {
         setStatus((s) => (s === "ready" ? "ready" : "starting"));
-        const res = await fetch(url, { method: "GET", cache: "no-store" });
+        // Use no-cors so CORS-restricted origins (e.g. R2 without a CORS policy)
+        // resolve as opaque responses rather than throwing a TypeError.
+        // An opaque response (type === "opaque") means the server responded —
+        // treat it as ready and let hls.js handle any segment-level retries.
+        const res = await fetch(url, { method: "GET", cache: "no-store", mode: "no-cors" });
 
-        if (!cancelled && res.ok) {
+        if (!cancelled && (res.ok || res.type === "opaque")) {
           setStatus("ready");
           return;
         }
       } catch {
-        // ignore; keep polling
+        // Genuine network error (DNS failure, offline, etc.); keep polling.
       }
 
       attempt++;

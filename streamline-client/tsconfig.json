@@ -12,6 +12,7 @@
     "skipLibCheck": true,
     "noEmit": true,
     "types": ["vite/client", "react", "react-dom", "vitest/globals"],
+    "ignoreDeprecations": "6.0",
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]
