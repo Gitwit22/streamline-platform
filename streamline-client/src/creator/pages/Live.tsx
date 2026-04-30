@@ -109,6 +109,7 @@ export default function Live() {
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const hlsRetryCountRef = useRef(0);
 
   const manifestReadiness = useHlsReadiness(playlistUrl, playerNonce);
 
@@ -352,17 +353,29 @@ export default function Live() {
       hls.attachMedia(video);
 
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        // Reset retry counter on successful manifest parse.
+        hlsRetryCountRef.current = 0;
         video.muted = isMuted;
         video.volume = clampVolume(volume);
 
         const onMeta = () => {
           snapToLiveEdge(video);
           void video.play().catch(() => {
-            // autoplay blocked until user interacts
+            // autoplay blocked — try once more after a short delay.
+            window.setTimeout(() => void video.play().catch(() => {}), 1000);
           });
         };
 
         video.addEventListener("loadedmetadata", onMeta, { once: true });
+
+        // Watchdog: if the video is still paused 5s after manifest parsed,
+        // nudge play() in case the loadedmetadata event was already fired.
+        window.setTimeout(() => {
+          if (video.paused) {
+            snapToLiveEdge(video);
+            void video.play().catch(() => {});
+          }
+        }, 5000);
       });
 
       hls.on(Hls.Events.ERROR, (evt, data) => {
@@ -382,12 +395,21 @@ export default function Live() {
         }
 
         if (data?.fatal) {
-          setStatus("error");
-          setError("Stream playback error");
           try {
             hls.destroy();
           } catch {
             // ignore
+          }
+          const MAX_AUTO_RETRIES = 3;
+          if (hlsRetryCountRef.current < MAX_AUTO_RETRIES) {
+            hlsRetryCountRef.current += 1;
+            console.info(`[hls] fatal error, auto-retry ${hlsRetryCountRef.current}/${MAX_AUTO_RETRIES}`);
+            // Bump playerNonce after a short delay to fully remount the player.
+            window.setTimeout(() => setPlayerNonce((n) => n + 1), 2500);
+          } else {
+            hlsRetryCountRef.current = 0;
+            setStatus("error");
+            setError("Stream playback error");
           }
         }
       });
