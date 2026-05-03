@@ -42,6 +42,21 @@ services:
       - key: FIREBASE_SERVICE_ACCOUNT_BASE64
         sync: false
 
+      # Email (via @cores/notifications → Resend)
+      # Set RESEND_API_KEY to enable real delivery; leave blank for console-only logging.
+      - key: RESEND_API_KEY
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: EMAIL_REPLY_TO
+        sync: false
+      - key: EMAIL_SEND_ENABLED
+        value: "true"
+      - key: EMAIL_LOG_LEVEL
+        value: info
+      - key: STREAMLINE_APP_URL
+        sync: false
+
       # R2 (only if multistream/recording uses it)
       - key: R2_ACCOUNT_ACCESS_KEY_ID
         sync: false
