@@ -24,6 +24,8 @@ import { logAuthSecurityEvent } from "../lib/authAudit";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
+import { sendEmail } from "../lib/emailService.js";
+import { buildAdminResetNotificationEmail } from "../lib/emailTemplates.js";
 
 const router = express.Router();
 
@@ -221,6 +223,22 @@ router.post("/users/:userId/enable-password-reset", async (req, res) => {
         expiresAt: passwordReset.expiresAt,
       },
     });
+
+    // Notify the user that their admin has enabled a password reset — non-blocking.
+    const userEmail = typeof targetUser.email === "string" ? targetUser.email.trim() : "";
+    if (userEmail) {
+      setImmediate(async () => {
+        try {
+          const { subject, html } = buildAdminResetNotificationEmail({
+            email: userEmail,
+            displayName: typeof targetUser.displayName === "string" ? targetUser.displayName : undefined,
+          });
+          await sendEmail({ to: userEmail, subject, html });
+        } catch {
+          // Swallow — email is best-effort; the admin action already completed
+        }
+      });
+    }
 
     return res.json({
       success: true,

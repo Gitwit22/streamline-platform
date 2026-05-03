@@ -30,7 +30,7 @@ import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { buildNewUserDoc } from "../lib/newUserDefaults";
 import { sendEmail } from "../lib/emailService.js";
-import { buildWelcomeEmail } from "../lib/emailTemplates.js";
+import { buildWelcomeEmail, buildPasswordResetConfirmationEmail } from "../lib/emailTemplates.js";
 
 console.log("✅ auth router loaded");
 
@@ -696,6 +696,20 @@ router.post("/forgot-password/reset", async (req, res) => {
         recoverySetupRequired: requiresRecoverySetup,
         recoveryMethod: selectedMethod,
       },
+    });
+
+    // Send password-changed security notification — non-blocking; never blocks the reset.
+    const resetEmail = String(user.email || loginNorm);
+    setImmediate(async () => {
+      try {
+        const { subject, html } = buildPasswordResetConfirmationEmail({
+          email: resetEmail,
+          displayName: user.displayName,
+        });
+        await sendEmail({ to: resetEmail, subject, html });
+      } catch {
+        // Swallow — email is best-effort; the reset already succeeded
+      }
     });
 
     return res.json({

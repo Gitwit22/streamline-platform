@@ -217,3 +217,65 @@ test("email templates: sensitive data is not present in HTML", () => {
   assert.ok(!html.toLowerCase().includes("api_key"), "API key must not appear in template");
   assert.ok(!html.toLowerCase().includes("secret"), "secrets must not appear in template");
 });
+
+// ---------------------------------------------------------------------------
+// Tests: password reset confirmation template
+// ---------------------------------------------------------------------------
+
+test("buildPasswordResetConfirmationEmail: contains expected content", () => {
+  process.env.CLIENT_URL = "http://localhost:5173";
+  const { buildPasswordResetConfirmationEmail } = require("./emailTemplates.js");
+  const { subject, html } = buildPasswordResetConfirmationEmail({
+    email: "user@example.com",
+    displayName: "Carol White",
+  });
+
+  assert.match(subject, /password/i);
+  assert.match(html, /Carol/);
+  assert.match(html, /password/i);
+  assert.match(html, /localhost/);
+});
+
+test("buildPasswordResetConfirmationEmail: warns about unauthorised change", () => {
+  const { buildPasswordResetConfirmationEmail } = require("./emailTemplates.js");
+  const { html } = buildPasswordResetConfirmationEmail({ email: "user@example.com" });
+
+  // Should include guidance for the user if they didn't make the change
+  assert.match(html, /contact support|didn.*t make|did not make/i);
+});
+
+test("buildPasswordResetConfirmationEmail: does not contain the new password", () => {
+  const { buildPasswordResetConfirmationEmail } = require("./emailTemplates.js");
+  const { html } = buildPasswordResetConfirmationEmail({ email: "user@example.com" });
+
+  assert.ok(!html.toLowerCase().includes("api_key"), "API key must not appear");
+  assert.ok(!html.toLowerCase().includes("secret"), "secrets must not appear");
+});
+
+// ---------------------------------------------------------------------------
+// Tests: admin reset notification template
+// ---------------------------------------------------------------------------
+
+test("buildAdminResetNotificationEmail: contains expected content", () => {
+  process.env.CLIENT_URL = "http://localhost:5173";
+  const { buildAdminResetNotificationEmail } = require("./emailTemplates.js");
+  const { subject, html } = buildAdminResetNotificationEmail({
+    email: "staff@school.edu",
+    displayName: "Dave Brown",
+  });
+
+  assert.match(subject, /password/i);
+  assert.match(html, /Dave/);
+  assert.match(html, /administrator|admin/i);
+  assert.match(html, /localhost/);
+});
+
+test("buildAdminResetNotificationEmail: HTML-escapes displayName", () => {
+  const { buildAdminResetNotificationEmail } = require("./emailTemplates.js");
+  const { html } = buildAdminResetNotificationEmail({
+    email: "staff@school.edu",
+    displayName: '<img src=x onerror=alert(1)>',
+  });
+
+  assert.ok(!html.includes("<img"), "raw <img> tag must not appear in HTML output");
+});

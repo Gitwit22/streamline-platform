@@ -3,6 +3,9 @@ dist/
 dist-node/
 **/dist/
 **/dist-node/
+# Keep the Cores/notifications pre-compiled output so the server can consume it
+# without a separate build step at deploy time.
+!Cores/notifications/dist/
 .env
 .env.*
 !.env.example

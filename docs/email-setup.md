@@ -88,6 +88,8 @@ EMAIL_SEND_ENABLED=false
 |---|---|---|
 | Self-service signup (`POST /api/auth/signup`) | Welcome | `buildWelcomeEmail()` in `lib/emailTemplates.ts` |
 | EDU top-admin creation (`POST /api/onboarding/create-top-admin`) | EDU admin account ready | `buildEduWelcomeEmail()` in `lib/emailTemplates.ts` |
+| Successful password reset (`POST /api/auth/forgot-password/reset`) | Password changed security notice | `buildPasswordResetConfirmationEmail()` in `lib/emailTemplates.ts` |
+| Admin enables password reset (`POST /api/admin/users/:userId/enable-password-reset`) | Password reset available notification | `buildAdminResetNotificationEmail()` in `lib/emailTemplates.ts` |
 
 ### Idempotency
 

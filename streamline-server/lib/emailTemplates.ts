@@ -22,6 +22,14 @@ function loginUrl(): string {
 }
 
 function baseHtml(content: string): string {
+  return baseHtmlWithFooter(
+    content,
+    `You received this email because an account was created on ${APP_NAME}.<br />
+    If you did not sign up, you can safely ignore this message.`,
+  );
+}
+
+function baseHtmlWithFooter(content: string, footerText: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -47,8 +55,7 @@ function baseHtml(content: string): string {
     <div class="body">${content}</div>
     <hr class="divider" />
     <div class="footer">
-      <p>You received this email because an account was created on ${APP_NAME}.<br />
-      If you did not sign up, you can safely ignore this message.</p>
+      <p>${footerText}</p>
     </div>
   </div>
 </body>
@@ -109,6 +116,70 @@ export function buildEduWelcomeEmail(data: EduWelcomeEmailData): { subject: stri
   return {
     subject: `Your ${APP_NAME} administrator account is ready`,
     html: baseHtml(content),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Password reset confirmation — sent after a successful self-service reset
+// ---------------------------------------------------------------------------
+
+export interface PasswordResetConfirmationEmailData {
+  email: string;
+  displayName?: string;
+}
+
+export function buildPasswordResetConfirmationEmail(
+  data: PasswordResetConfirmationEmailData,
+): { subject: string; html: string } {
+  const name = data.displayName ? data.displayName.split(" ")[0] : data.email;
+  const url = loginUrl();
+
+  const content = `
+    <p>Hi ${escapeHtml(name)},</p>
+    <p>Your ${APP_NAME} password was successfully changed.</p>
+    <p>You can sign in with your new password at any time:</p>
+    <a class="cta" href="${url}">Sign in to ${APP_NAME}</a>
+    <p>If you did not make this change, please contact support immediately — someone may have access to your account.</p>
+  `;
+
+  return {
+    subject: `Your ${APP_NAME} password has been changed`,
+    html: baseHtmlWithFooter(
+      content,
+      "You received this security notice because a password change was completed on your account.",
+    ),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Admin-enabled reset notification — sent when an admin unlocks password reset
+// ---------------------------------------------------------------------------
+
+export interface AdminResetNotificationEmailData {
+  email: string;
+  displayName?: string;
+}
+
+export function buildAdminResetNotificationEmail(
+  data: AdminResetNotificationEmailData,
+): { subject: string; html: string } {
+  const name = data.displayName ? data.displayName.split(" ")[0] : data.email;
+  const url = loginUrl();
+
+  const content = `
+    <p>Hi ${escapeHtml(name)},</p>
+    <p>An administrator has enabled a one-time password reset for your ${APP_NAME} account.</p>
+    <p>Visit the sign-in page and use the <strong>Forgot password</strong> option to choose a new password:</p>
+    <a class="cta" href="${url}">Go to sign-in</a>
+    <p>This reset link will expire shortly. If you did not request this, please contact your administrator.</p>
+  `;
+
+  return {
+    subject: `Action needed: reset your ${APP_NAME} password`,
+    html: baseHtmlWithFooter(
+      content,
+      "You received this email because an administrator enabled a password reset for your account.",
+    ),
   };
 }
 
