@@ -282,6 +282,18 @@ export default function RoomSetup() {
           </button>
           <h1 style={styles.title}>Room Setup</h1>
           <p style={styles.subtitle}>Configure your room before going live.</p>
+          <button
+            style={{
+              ...styles.btnSecondary,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: "8px",
+              marginTop: "12px",
+            }}
+            onClick={() => nav(`/rooms/${encodeURIComponent(roomId!)}/customize`)}
+          >
+            🎨 Advanced Customization
+          </button>
         </div>
         
         <section style={styles.section}>

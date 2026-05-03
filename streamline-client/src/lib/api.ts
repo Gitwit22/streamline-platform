@@ -530,6 +530,35 @@ export async function apiUpdateRoomCustomization(
   return res.json() as Promise<{ ok: true; roomId: string; customization: RoomCustomizationConfig }>;
 }
 
+// ── Greenroom Policy API helpers ────────────────────────────────────────────
+
+export type GreenroomPolicy = {
+  mode: "off" | "prejoin" | "hls_waiting";
+  requireApproval: boolean;
+  autoAdmit: boolean;
+  vipBypass: boolean;
+  vipList: string[];
+  blockedList: string[];
+};
+
+export async function apiGetGreenroomPolicy(roomId: string) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/greenroom-policy`, {
+    method: "GET",
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; greenroom: GreenroomPolicy }>;
+}
+
+export async function apiUpdateGreenroomPolicy(
+  roomId: string,
+  patch: Partial<GreenroomPolicy>
+) {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/greenroom-policy`, {
+    method: "PUT",
+    body: JSON.stringify(patch),
+  });
+  return res.json() as Promise<{ ok: true; roomId: string; greenroom: GreenroomPolicy }>;
+}
+
 // ── Intro Clip API helpers ──────────────────────────────────────────────────
 
 export type IntroClipRuntime = {
