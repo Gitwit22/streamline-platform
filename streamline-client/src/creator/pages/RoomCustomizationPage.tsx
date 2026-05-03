@@ -368,8 +368,6 @@ function toServerCustomization(config: RoomConfig): Partial<RoomCustomizationCon
       height: config.banner.height,
       opacity: config.banner.opacity,
     };
-  } else {
-    patch.banner = undefined;
   }
 
   if (config.background.type !== "animated") {
@@ -1777,7 +1775,7 @@ function BrandingTab({
               value={config.logo?.position || "top-right"}
               onChange={(e) =>
                 updateConfig("logo", {
-                  ...config.logo!,
+                  ...(config.logo ?? {}),
                   position: e.target.value as LogoConfig["position"],
                 })
               }
@@ -1802,7 +1800,7 @@ function BrandingTab({
               max="200"
               value={config.logo.size}
               onChange={(e) =>
-                updateConfig("logo", { ...config.logo!, size: parseInt(e.target.value) })
+                updateConfig("logo", { ...(config.logo ?? {}), size: parseInt(e.target.value) })
               }
               style={rangeStyle}
             />
@@ -1844,7 +1842,7 @@ function BrandingTab({
               value={config.banner?.position || "top"}
               onChange={(e) =>
                 updateConfig("banner", {
-                  ...config.banner!,
+                  ...(config.banner ?? {}),
                   position: e.target.value as "top" | "bottom",
                 })
               }
@@ -1896,7 +1894,7 @@ function BrandingTab({
                 value={config.watermark.opacity * 100}
                 onChange={(e) =>
                   updateConfig("watermark", {
-                    ...config.watermark!,
+                    ...(config.watermark ?? {}),
                     opacity: parseInt(e.target.value) / 100,
                   })
                 }
@@ -1911,7 +1909,7 @@ function BrandingTab({
                 value={config.watermark.position}
                 onChange={(e) =>
                   updateConfig("watermark", {
-                    ...config.watermark!,
+                    ...(config.watermark ?? {}),
                     position: e.target.value as WatermarkConfig["position"],
                   })
                 }
@@ -2210,7 +2208,7 @@ function AudioTab({
               value={config.themeMusic.volume * 100}
               onChange={(e) =>
                 updateConfig("themeMusic", {
-                  ...config.themeMusic!,
+                  ...(config.themeMusic ?? {}),
                   volume: parseInt(e.target.value) / 100,
                 })
               }
@@ -2287,7 +2285,7 @@ function OverlaysTab({
             checked={config.lowerThird?.enabled || false}
             onChange={(e) =>
               updateConfig("lowerThird", {
-                ...config.lowerThird!,
+                ...(config.lowerThird ?? {}),
                 enabled: e.target.checked,
               })
             }
@@ -2308,7 +2306,7 @@ function OverlaysTab({
                     key={style}
                     onClick={() =>
                       updateConfig("lowerThird", {
-                        ...config.lowerThird!,
+                        ...(config.lowerThird ?? {}),
                         template: style,
                       })
                     }
@@ -2341,10 +2339,10 @@ function OverlaysTab({
                   </label>
                   <input
                     type="color"
-                    value={config.lowerThird![field]}
+                    value={(config.lowerThird ?? {})[field]}
                     onChange={(e) =>
                       updateConfig("lowerThird", {
-                        ...config.lowerThird!,
+                        ...(config.lowerThird ?? {}),
                         [field]: e.target.value,
                       })
                     }
@@ -2390,7 +2388,7 @@ function OverlaysTab({
                 value={config.ticker.messages.join("\n")}
                 onChange={(e) =>
                   updateConfig("ticker", {
-                    ...config.ticker!,
+                    ...(config.ticker ?? {}),
                     messages: e.target.value
                       .split("\n")
                       .filter((m) => m.trim()),
@@ -2411,7 +2409,7 @@ function OverlaysTab({
                   value={config.ticker.backgroundColor}
                   onChange={(e) =>
                     updateConfig("ticker", {
-                      ...config.ticker!,
+                      ...(config.ticker ?? {}),
                       backgroundColor: e.target.value,
                     })
                   }
@@ -2429,7 +2427,7 @@ function OverlaysTab({
                   value={config.ticker.speed}
                   onChange={(e) =>
                     updateConfig("ticker", {
-                      ...config.ticker!,
+                      ...(config.ticker ?? {}),
                       speed: parseInt(e.target.value),
                     })
                   }
