@@ -154,5 +154,25 @@ export async function updateSettings(
 export async function fetchAnalytics(): Promise<AnalyticsOverview> {
   const res = await apiFetchAuth("/api/corp/admin/analytics");
   if (!res.ok) throw new Error("fetch_analytics_failed");
-  return res.json();
+  const raw: AnalyticsOverview = await res.json();
+
+  // Flatten the nested `overview` block onto the top-level shape that the UI
+  // consumes, so callers can always use `a.totalCalls`, `a.complianceRate`, etc.
+  const ov = raw.overview;
+  const normalized: AnalyticsOverview = {
+    ...raw,
+    totalBroadcasts: raw.totalBroadcasts ?? ov?.totalBroadcasts,
+    totalCalls: raw.totalCalls ?? ov?.totalCalls,
+    totalTraining: raw.totalTraining ?? ov?.totalTrainingModules,
+    totalUsers: raw.totalUsers ?? ov?.totalMembers,
+    complianceRate: raw.complianceRate ?? ov?.avgCompletionRate,
+    departments: (raw.departments || []).map(d => ({
+      ...d,
+      // API uses complianceRate; UI column expects `compliance`
+      compliance: d.compliance ?? d.complianceRate,
+      // API uses totalModules; UI column expects `meetings`
+      meetings: d.meetings ?? d.totalModules,
+    })),
+  };
+  return normalized;
 }

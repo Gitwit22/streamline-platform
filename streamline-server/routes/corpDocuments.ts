@@ -175,6 +175,15 @@ router.post("/documents/:id/acknowledge", requireAuth, async (req, res) => {
     const ackId = `${docId}_${uid}`;
     const now = Date.now();
 
+    // Idempotency check: if this user already acknowledged, return the current
+    // count without double-incrementing.
+    const existingAck = await db.collection("corpDocumentAcks").doc(ackId).get();
+    if (existingAck.exists) {
+      const currentSnap = await db.collection("corpDocuments").doc(docId).get();
+      const totalAcknowledged = (currentSnap.data() as any)?.totalAcknowledged ?? 0;
+      return res.json({ ok: true, totalAcknowledged });
+    }
+
     await db.collection("corpDocumentAcks").doc(ackId).set({
       orgId: ctx.orgId,
       documentId: docId,

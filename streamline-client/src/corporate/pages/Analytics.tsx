@@ -56,8 +56,10 @@ export default function Analytics() {
   useEffect(() => { load(); }, [load]);
 
   const a = analytics;
-  const meetingData = demoMeetingData;
-  const engagementData = demoEngagementData;
+  // Chart data: only populated in bypass/demo mode.
+  // In production the server does not yet supply per-day time-series; show empty until API is extended.
+  const meetingData = bypass ? demoMeetingData : [];
+  const engagementData = bypass ? demoEngagementData : [];
 
   return (
     <div className="flex flex-col h-full animate-fade-in">

@@ -126,6 +126,7 @@ router.post("/chat/rooms/:id/messages", requireAuth, async (req, res) => {
     const account = (req as any).account || {};
 
     const doc = {
+      orgId: ctx.orgId,
       roomId,
       senderUid: uid,
       senderName: asString(account.displayName || account.name || "User"),
