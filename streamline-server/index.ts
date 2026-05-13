@@ -71,11 +71,8 @@ import { PERMISSION_ERRORS } from "./lib/permissionErrors";
 import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "./middleware/roomAccessToken";
 
 import { requireAdmin } from "./middleware/adminAuth";
-
-
+import rateLimit from "express-rate-limit";
 import { uploadVideo } from "./lib/storageClient";
-
-
 console.log("CLIENT_URL:", process.env.CLIENT_URL);
 
 const PORT = process.env.PORT || 5137;
@@ -169,11 +166,29 @@ app.use("/api/webhooks", webhookRouter);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use("/api/auth", authRoutes);
+
+// Rate limiters
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please try again later." },
+});
+
+const adminLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please try again later." },
+});
+
+app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/account", accountRoutes);
 
 // Admin routes
-app.use("/api/admin", adminRoutes);
+app.use("/api/admin", adminLimiter, adminRoutes);
 
 // Maintenance routes (admin-only)
 app.use("/api/maintenance", maintenanceRoutes);
@@ -734,7 +749,7 @@ app.get("/api/health", (_req, res) => {
 // NOTE: /api/usage/summary is implemented in routes/usageRoutes.ts
 // and is requireAuth-protected with a stable payload.
 
-app.post("/api/usage/streamEnded", requireAuth, async (req, res) => {
+app.post("/api/usage/streamEnded", requireAuth, rateLimit({ windowMs: 60 * 1000, max: 10 }), async (req, res) => {
   try {
     const uid = (req as any).user?.uid as string | undefined;
     if (!uid) {

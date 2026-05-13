@@ -157,8 +157,11 @@ async function incrementHlsMinutes(params: {
   const usageDocId = `${params.uid}_${monthKey}`;
   const usageRef = db.collection("usageMonthly").doc(usageDocId);
 
-  await usageRef.set(
-    {
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(usageRef);
+    const isNew = !snap.exists;
+
+    const updates: Record<string, any> = {
       uid: params.uid,
       monthKey,
       "usage.hlsMinutes": FieldValue.increment(safeMinutes),
@@ -166,9 +169,14 @@ async function incrementHlsMinutes(params: {
       "ytd.hlsMinutes": FieldValue.increment(safeMinutes),
       "ytd.transcodeMinutes": FieldValue.increment(safeMinutes),
       updatedAt: params.now,
-    },
-    { merge: true }
-  );
+    };
+
+    if (isNew) {
+      updates.createdAt = params.now;
+    }
+
+    tx.set(usageRef, updates, { merge: true });
+  });
 }
 
 async function maybeCountRecordingUsage(params: {

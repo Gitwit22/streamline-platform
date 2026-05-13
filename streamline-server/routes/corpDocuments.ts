@@ -182,13 +182,16 @@ router.post("/documents/:id/acknowledge", requireAuth, async (req, res) => {
       acknowledgedAt: now,
     }, { merge: true });
 
-    // Atomically increment the acknowledged counter
+    // Atomically increment the acknowledged counter and return new total
     await db.collection("corpDocuments").doc(docId).update({
       totalAcknowledged: FieldValue.increment(1),
       updatedAt: now,
     });
 
-    return res.json({ ok: true });
+    const updatedSnap = await db.collection("corpDocuments").doc(docId).get();
+    const totalAcknowledged = (updatedSnap.data() as any)?.totalAcknowledged ?? 0;
+
+    return res.json({ ok: true, totalAcknowledged });
   } catch (err: any) {
     console.error("[corp/documents] acknowledge error:", err?.message || err);
     return res.status(500).json({ error: "internal" });
