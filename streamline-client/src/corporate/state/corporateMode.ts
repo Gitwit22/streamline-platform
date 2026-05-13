@@ -38,7 +38,13 @@ export const clearCorporateLane = () => {
   } catch {}
 };
 
+/**
+ * Demo/bypass mode is only available in development builds.
+ * In production (`import.meta.env.PROD`) this always returns false so that
+ * demo data and the fake admin identity can never leak into a real deployment.
+ */
 export const isCorporateBypassEnabled = () => {
+  if ((import.meta as any).env?.PROD) return false;
   try {
     return localStorage.getItem("sl_corporate_bypass") === "1";
   } catch {
@@ -47,6 +53,7 @@ export const isCorporateBypassEnabled = () => {
 };
 
 export const setCorporateBypassEnabled = () => {
+  if ((import.meta as any).env?.PROD) return;
   try {
     localStorage.setItem("sl_corporate_bypass", "1");
   } catch {}

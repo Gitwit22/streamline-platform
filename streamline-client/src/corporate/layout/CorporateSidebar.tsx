@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useCorporateMe } from "./CorporateProtectedRoute";
+import { clearAuthStorage, apiFetch } from "../../lib/api";
+import { clearCorporateBypassEnabled, clearCorporateLane } from "../state/corporateMode";
 
 type NavItem = { id: string; label: string; path: string };
 
@@ -46,8 +48,15 @@ export default function CorporateSidebar() {
     };
   }, [menuOpen]);
 
-  function onLogout() {
-    // TODO: wire real logout
+  async function onLogout() {
+    try {
+      await apiFetch("/api/auth/logout", { method: "POST" }, { allowNonOk: true });
+    } catch {
+      // Non-fatal — always clear local state even if server call fails.
+    }
+    clearCorporateBypassEnabled();
+    clearCorporateLane();
+    clearAuthStorage();
     nav("/streamline/corporate/login", { replace: true });
   }
 
