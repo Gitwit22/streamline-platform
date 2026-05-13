@@ -158,15 +158,15 @@ export async function fetchAnalytics(): Promise<AnalyticsOverview> {
 
   // Flatten the nested `overview` block onto the top-level shape that the UI
   // consumes, so callers can always use `a.totalCalls`, `a.complianceRate`, etc.
-  const ov = raw.overview;
+  const { overview: ov, ...rest } = raw;
   const normalized: AnalyticsOverview = {
-    ...raw,
-    totalBroadcasts: raw.totalBroadcasts ?? ov?.totalBroadcasts,
-    totalCalls: raw.totalCalls ?? ov?.totalCalls,
-    totalTraining: raw.totalTraining ?? ov?.totalTrainingModules,
-    totalUsers: raw.totalUsers ?? ov?.totalMembers,
-    complianceRate: raw.complianceRate ?? ov?.avgCompletionRate,
-    departments: (raw.departments || []).map(d => ({
+    ...rest,
+    totalBroadcasts: rest.totalBroadcasts ?? ov?.totalBroadcasts,
+    totalCalls: rest.totalCalls ?? ov?.totalCalls,
+    totalTraining: rest.totalTraining ?? ov?.totalTrainingModules,
+    totalUsers: rest.totalUsers ?? ov?.totalMembers,
+    complianceRate: rest.complianceRate ?? ov?.avgCompletionRate,
+    departments: (rest.departments || []).map(d => ({
       ...d,
       // API uses complianceRate; UI column expects `compliance`
       compliance: d.compliance ?? d.complianceRate,

@@ -74,9 +74,9 @@ export default function Admin() {
 
   useEffect(() => { if (activeTab !== "Overview") loadTab(activeTab); }, [activeTab, loadTab]);
 
-  const handleRoleChange = async (memberId: string, role: string) => {
-    if (!bypass) await updateUserRole(memberId, role);
-    setUsers(prev => prev.map(u => (u.id || u.uid) === memberId ? { ...u, role } : u));
+  const handleRoleChange = async (userDocId: string, role: string) => {
+    if (!bypass) await updateUserRole(userDocId, role);
+    setUsers(prev => prev.map(u => (u.id || u.uid) === userDocId ? { ...u, role } : u));
   };
 
   const handleInvite = async () => {
