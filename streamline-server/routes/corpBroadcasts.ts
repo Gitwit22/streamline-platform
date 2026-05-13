@@ -484,11 +484,12 @@ router.get("/broadcasts/:id/watch", requireAuth, async (req, res) => {
       viewerCount = await getParticipantCount(data.livekitRoomName);
     }
 
+    const watchedAt = Date.now();
     // Increment viewer count on broadcast doc atomically (best-effort)
     if (isLive) {
       db.collection("corpBroadcasts").doc(broadcastId).update({
         viewers: FieldValue.increment(1),
-        updatedAt: Date.now(),
+        updatedAt: watchedAt,
       }).catch(() => {});
     }
 

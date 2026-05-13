@@ -749,7 +749,15 @@ app.get("/api/health", (_req, res) => {
 // NOTE: /api/usage/summary is implemented in routes/usageRoutes.ts
 // and is requireAuth-protected with a stable payload.
 
-app.post("/api/usage/streamEnded", requireAuth, rateLimit({ windowMs: 60 * 1000, max: 10 }), async (req, res) => {
+const streamEndedLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many requests, please try again later." },
+});
+
+app.post("/api/usage/streamEnded", requireAuth, streamEndedLimiter, async (req, res) => {
   try {
     const uid = (req as any).user?.uid as string | undefined;
     if (!uid) {

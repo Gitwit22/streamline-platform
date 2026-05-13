@@ -189,6 +189,8 @@ router.post("/documents/:id/acknowledge", requireAuth, async (req, res) => {
     });
 
     const updatedSnap = await db.collection("corpDocuments").doc(docId).get();
+    // Note: the returned count is a best-effort display value; concurrent
+    // acknowledgments may have incremented it further between the update and this read.
     const totalAcknowledged = (updatedSnap.data() as any)?.totalAcknowledged ?? 0;
 
     return res.json({ ok: true, totalAcknowledged });
