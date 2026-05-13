@@ -1,5 +1,6 @@
 import express from "express";
 import { firestore as db } from "../firebaseAdmin";
+import { FieldValue } from "firebase-admin/firestore";
 import { requireAuth } from "../middleware/requireAuth";
 import { getCorpOrgContext, assertCorpRole, asString, coerceMillis } from "../lib/corpOrg";
 import { writeCorpAudit } from "../lib/corpAudit";
@@ -181,18 +182,13 @@ router.post("/documents/:id/acknowledge", requireAuth, async (req, res) => {
       acknowledgedAt: now,
     }, { merge: true });
 
-    // Increment the acknowledged counter
-    const ackSnap = await db.collection("corpDocumentAcks")
-      .where("documentId", "==", docId)
-      .get();
-    const totalAcknowledged = ackSnap.size;
-
-    await db.collection("corpDocuments").doc(docId).set({
-      totalAcknowledged,
+    // Atomically increment the acknowledged counter
+    await db.collection("corpDocuments").doc(docId).update({
+      totalAcknowledged: FieldValue.increment(1),
       updatedAt: now,
-    }, { merge: true });
+    });
 
-    return res.json({ ok: true, totalAcknowledged });
+    return res.json({ ok: true });
   } catch (err: any) {
     console.error("[corp/documents] acknowledge error:", err?.message || err);
     return res.status(500).json({ error: "internal" });

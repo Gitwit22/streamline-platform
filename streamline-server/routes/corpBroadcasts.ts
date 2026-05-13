@@ -1,6 +1,7 @@
 import express from "express";
 import jwt from "jsonwebtoken";
 import { firestore as db } from "../firebaseAdmin";
+import { FieldValue } from "firebase-admin/firestore";
 import { requireAuth } from "../middleware/requireAuth";
 import { getCorpOrgContext, assertCorpRole, asString, coerceMillis } from "../lib/corpOrg";
 import { writeCorpAudit } from "../lib/corpAudit";
@@ -27,6 +28,10 @@ function normalizeBroadcast(docId: string, data: any) {
     viewers: typeof data?.viewers === "number" ? data.viewers : 0,
     createdAt: coerceMillis(data?.createdAt),
     createdBy: asString(data?.createdBy),
+    roomId: asString(data?.roomId),
+    livekitRoomName: asString(data?.livekitRoomName),
+    playlistUrl: asString(data?.playlistUrl),
+    egressId: asString(data?.egressId),
   };
 }
 
@@ -479,12 +484,12 @@ router.get("/broadcasts/:id/watch", requireAuth, async (req, res) => {
       viewerCount = await getParticipantCount(data.livekitRoomName);
     }
 
-    // Increment viewer count on broadcast doc (best-effort)
+    // Increment viewer count on broadcast doc atomically (best-effort)
     if (isLive) {
-      db.collection("corpBroadcasts").doc(broadcastId).set({
-        viewers: (data.viewers || 0) + 1,
+      db.collection("corpBroadcasts").doc(broadcastId).update({
+        viewers: FieldValue.increment(1),
         updatedAt: Date.now(),
-      }, { merge: true }).catch(() => {});
+      }).catch(() => {});
     }
 
     return res.json({

@@ -113,6 +113,7 @@ router.post("/chat/rooms/:id/messages", requireAuth, async (req, res) => {
     const roomId = req.params.id;
     const content = asString(req.body.content).trim();
     if (!content) return res.status(400).json({ error: "content_required" });
+    if (content.length > 4000) return res.status(400).json({ error: "content_too_long" });
 
     // Verify room
     const roomSnap = await db.collection("corpChatRooms").doc(roomId).get();
