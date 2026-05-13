@@ -1,5 +1,6 @@
 import express from "express";
 import { firestore as db } from "../firebaseAdmin";
+import { FieldValue } from "firebase-admin/firestore";
 import { requireAuth } from "../middleware/requireAuth";
 import { getCorpOrgContext, assertCorpRole, asString, coerceMillis } from "../lib/corpOrg";
 import { writeCorpAudit } from "../lib/corpAudit";
@@ -181,16 +182,16 @@ router.post("/documents/:id/acknowledge", requireAuth, async (req, res) => {
       acknowledgedAt: now,
     }, { merge: true });
 
-    // Increment the acknowledged counter
-    const ackSnap = await db.collection("corpDocumentAcks")
-      .where("documentId", "==", docId)
-      .get();
-    const totalAcknowledged = ackSnap.size;
-
-    await db.collection("corpDocuments").doc(docId).set({
-      totalAcknowledged,
+    // Atomically increment the acknowledged counter and return new total
+    await db.collection("corpDocuments").doc(docId).update({
+      totalAcknowledged: FieldValue.increment(1),
       updatedAt: now,
-    }, { merge: true });
+    });
+
+    const updatedSnap = await db.collection("corpDocuments").doc(docId).get();
+    // Note: the returned count is a best-effort display value; concurrent
+    // acknowledgments may have incremented it further between the update and this read.
+    const totalAcknowledged = (updatedSnap.data() as any)?.totalAcknowledged ?? 0;
 
     return res.json({ ok: true, totalAcknowledged });
   } catch (err: any) {

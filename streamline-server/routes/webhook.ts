@@ -156,31 +156,27 @@ async function incrementHlsMinutes(params: {
   const monthKey = getCurrentMonthKey();
   const usageDocId = `${params.uid}_${monthKey}`;
   const usageRef = db.collection("usageMonthly").doc(usageDocId);
-  const snap = await usageRef.get();
-  const existing = snap.exists ? (snap.data() as any) : {};
-  const prevUsage = existing.usage || {};
-  const prevYtd = existing.ytd || {};
 
-  await usageRef.set(
-    {
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(usageRef);
+    const isNew = !snap.exists;
+
+    const updates: Record<string, any> = {
       uid: params.uid,
       monthKey,
-      usage: {
-        ...prevUsage,
-        hlsMinutes: toNumber(prevUsage.hlsMinutes) + safeMinutes,
-        // HLS is billed as transcode/egress time.
-        transcodeMinutes: toNumber(prevUsage.transcodeMinutes) + safeMinutes,
-      },
-      ytd: {
-        ...prevYtd,
-        hlsMinutes: toNumber(prevYtd.hlsMinutes) + safeMinutes,
-        transcodeMinutes: toNumber(prevYtd.transcodeMinutes) + safeMinutes,
-      },
-      createdAt: existing.createdAt || params.now,
+      "usage.hlsMinutes": FieldValue.increment(safeMinutes),
+      "usage.transcodeMinutes": FieldValue.increment(safeMinutes),
+      "ytd.hlsMinutes": FieldValue.increment(safeMinutes),
+      "ytd.transcodeMinutes": FieldValue.increment(safeMinutes),
       updatedAt: params.now,
-    },
-    { merge: true }
-  );
+    };
+
+    if (isNew) {
+      updates.createdAt = params.now;
+    }
+
+    tx.set(usageRef, updates, { merge: true });
+  });
 }
 
 async function maybeCountRecordingUsage(params: {

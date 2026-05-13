@@ -105,12 +105,6 @@ export async function requireAdmin(
       }
     }
 
-    // 3. Fallback: adminUserId in body or query
-    if (!userId) {
-      userId = (req.body && req.body.adminUserId) || (req.query && req.query.adminUserId) || null;
-      if (userId) jwtSource = 'body/query';
-    }
-
     // Minimal debug for tracing auth source without exposing user data
     console.log(`[requireAdmin] auth source: ${jwtSource || "none"}, path: ${req.path}`);
 
@@ -118,8 +112,6 @@ export async function requireAdmin(
       res.status(401).json({ error: "Missing admin user ID or valid token" });
       return;
     }
-
-    console.log("[requireAdmin] resolved userId:", userId);
 
     const isAdminUser = await isAdmin(userId);
     if (!isAdminUser) {

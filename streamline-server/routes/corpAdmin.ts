@@ -240,6 +240,7 @@ router.get("/admin/settings", requireAuth, async (req, res) => {
       ssoProvider: asString(org.ssoProvider),
       mfaRequired: !!org.mfaRequired,
       defaultRole: asString(org.defaultRole || "member"),
+      allowGuestAccess: !!org.allowGuestAccess,
     });
   } catch (err: any) {
     console.error("[corp/admin] settings error:", err?.message || err);
@@ -271,6 +272,7 @@ router.patch("/admin/settings", requireAuth, async (req, res) => {
     if (req.body.ssoProvider !== undefined) updates.ssoProvider = asString(req.body.ssoProvider).trim();
     if (req.body.mfaRequired !== undefined) updates.mfaRequired = !!req.body.mfaRequired;
     if (req.body.defaultRole !== undefined) updates.defaultRole = asString(req.body.defaultRole).trim();
+    if (req.body.allowGuestAccess !== undefined) updates.allowGuestAccess = !!req.body.allowGuestAccess;
 
     await db.collection("orgs").doc(ctx.orgId).set(updates, { merge: true });
 
@@ -300,6 +302,9 @@ router.get("/admin/analytics", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
+    if (!assertCorpRole(ctx.orgRole, ["admin", "manager"])) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
 
     const [broadcastsSnap, callsSnap, trainingSnap, membersSnap, messagesSnap] = await Promise.all([
       db.collection("corpBroadcasts").where("orgId", "==", ctx.orgId).get().catch(() => ({ size: 0, docs: [] } as any)),

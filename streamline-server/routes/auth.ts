@@ -178,7 +178,6 @@ router.post("/login", async (req, res) => {
     console.error("POST /api/auth/login failed:", err?.message || err);
     return res.status(500).json({
       error: "Login failed",
-      detail: err?.message || String(err),
     });
   }
 });
@@ -341,7 +340,6 @@ router.post("/signup", async (req, res) => {
     console.error("POST /api/auth/signup failed:", err?.message || err);
     return res.status(500).json({
       error: "Signup failed",
-      detail: err?.message || String(err),
     });
   }
 });
