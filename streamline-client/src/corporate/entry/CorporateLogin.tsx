@@ -217,6 +217,10 @@ export default function CorporateLogin() {
     }
   };
 
+  const submitLabel = loading
+    ? (authMode === 'signup' ? 'Creating account…' : 'Signing in…')
+    : (authMode === 'signup' ? 'Create Account' : 'Sign In');
+
   const handleForgotPassword = async () => {
     setError('');
     if (!isFirebaseWebConfigured()) {
@@ -448,7 +452,7 @@ export default function CorporateLogin() {
                 )}
 
                 <button type="submit" className="submit-btn" disabled={loading}>
-                  {loading ? (authMode === 'signup' ? 'Creating account…' : 'Signing in…') : (authMode === 'signup' ? 'Create Account' : 'Sign In')}
+                  {submitLabel}
                 </button>
               </form>
 
