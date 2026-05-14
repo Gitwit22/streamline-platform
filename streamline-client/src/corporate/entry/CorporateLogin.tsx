@@ -7,6 +7,26 @@ import { firebaseSignInWithCustomToken, isFirebaseWebConfigured, firebaseSendPas
 
 type AuthMode = 'signin' | 'signup';
 
+function isValidEmail(input: string): boolean {
+  const email = String(input || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return false;
+  const [local, domain] = email.split('@');
+  if (!local || !domain) return false;
+  if (local.startsWith('.') || local.endsWith('.')) return false;
+  if (domain.startsWith('.') || domain.endsWith('.')) return false;
+  if (local.includes('..') || domain.includes('..')) return false;
+  return true;
+}
+
+function detectTimeZone(): string {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return String(tz || '').trim() || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
 export default function CorporateLogin() {
   const nav = useNavigate();
   const location = useLocation();
@@ -135,7 +155,7 @@ export default function CorporateLogin() {
 
   const handleSignUp = async (): Promise<boolean> => {
     const emailNorm = String(email || '').trim().toLowerCase();
-    if (!emailNorm || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
+    if (!isValidEmail(emailNorm)) {
       setError('Enter a valid work email address.');
       return false;
     }
@@ -155,7 +175,7 @@ export default function CorporateLogin() {
       return false;
     }
 
-    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const timeZone = detectTimeZone();
 
     const res = await apiFetch(
       '/api/auth/signup',
@@ -228,7 +248,7 @@ export default function CorporateLogin() {
       return;
     }
     const emailNorm = String(email || '').trim().toLowerCase();
-    if (!emailNorm || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
+    if (!isValidEmail(emailNorm)) {
       setError('Enter your work email above, then click Forgot.');
       return;
     }
