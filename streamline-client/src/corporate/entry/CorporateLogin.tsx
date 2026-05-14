@@ -62,7 +62,7 @@ export default function CorporateLogin() {
     nav('/streamline/corporate/dashboard', { replace: true });
   };
 
-  const finalizeAuthSuccess = async () => {
+  const completeAuthenticationFlow = async () => {
     // Hydrate /api/account/me so lane guards have orgType.
     try {
       const meRes = await apiFetchAuth('/api/account/me', { cache: 'no-store' });
@@ -77,7 +77,7 @@ export default function CorporateLogin() {
     nav(returnTo || '/streamline/corporate/dashboard', { replace: true });
   };
 
-  const handleSignIn = async (): Promise<boolean> => {
+  const performSignIn = async (): Promise<boolean> => {
     if (!email.trim() || !password.trim()) {
       setError('Email and password are required.');
       return false;
@@ -153,7 +153,7 @@ export default function CorporateLogin() {
     return true;
   };
 
-  const handleSignUp = async (): Promise<boolean> => {
+  const performSignUp = async (): Promise<boolean> => {
     const emailNorm = String(email || '').trim().toLowerCase();
     if (!isValidEmail(emailNorm)) {
       setError('Enter a valid work email address.');
@@ -225,9 +225,9 @@ export default function CorporateLogin() {
     setLoading(true);
 
     try {
-      const ok = authMode === 'signup' ? await handleSignUp() : await handleSignIn();
+      const ok = authMode === 'signup' ? await performSignUp() : await performSignIn();
       if (ok) {
-        await finalizeAuthSuccess();
+        await completeAuthenticationFlow();
       }
     } catch (err: any) {
       console.error(err);
