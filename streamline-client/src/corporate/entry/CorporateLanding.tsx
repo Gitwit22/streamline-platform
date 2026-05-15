@@ -1,11 +1,12 @@
 import { Link } from "react-router-dom";
 import '../corporate.css';
+import BrandLogo from "../../components/BrandLogo";
 
 export default function CorporateLanding() {
   return (
     <div id="landing-page" className="page active">
       <nav id="main-nav">
-        <img src="/corp_logo.png" alt="StreamLine Logo" className="nav-logo" />
+        <BrandLogo className="nav-logo" />
         <div className="nav-links">
           <a href="#features" className="nav-link">Features</a>
           <a href="#pricing" className="nav-link">Pricing</a>
@@ -13,8 +14,8 @@ export default function CorporateLanding() {
         </div>
         <div className="nav-spacer"></div>
         <div className="nav-btns">
-          <Link to="/streamline/corporate/login" className="btn btn-outline">Log In</Link>
-          <Link to="/streamline/corporate/login" className="btn btn-primary">Get Started</Link>
+          <Link to="/corporate/login" className="btn btn-outline">Log In</Link>
+          <Link to="/corporate/login" className="btn btn-primary">Get Started</Link>
         </div>
       </nav>
 
@@ -37,7 +38,7 @@ export default function CorporateLanding() {
               StreamLine provides a unified platform for internal broadcasts, secure meetings, and compliance-ready media management.
             </p>
             <div className="hero-ctas">
-              <Link to="/streamline/corporate/login" className="btn btn-primary btn-xl">Get Started</Link>
+              <Link to="/corporate/login" className="btn btn-primary btn-xl">Get Started</Link>
               <a href="#features" className="btn btn-outline btn-xl">Explore Features</a>
             </div>
             <div className="hero-trust">
@@ -57,7 +58,7 @@ export default function CorporateLanding() {
             <div className="mockup-inner">
               <div className="faux-dash">
                 <div className="fd-topbar">
-                  <img src="/corp_logo_sm.png" alt="logo" className="fd-logo" />
+                  <BrandLogo className="fd-logo" />
                   <div className="fd-search">Search...</div>
                   <div className="fd-spacer"></div>
                   <div className="fd-dot"></div>
@@ -234,7 +235,7 @@ export default function CorporateLanding() {
               Join organizations that trust StreamLine for secure, reliable enterprise broadcasting.
             </p>
             <div className="hero-ctas" style={{ justifyContent: 'center' }}>
-              <Link to="/streamline/corporate/login" className="btn btn-primary btn-xl">Get Started</Link>
+              <Link to="/corporate/login" className="btn btn-primary btn-xl">Get Started</Link>
               <a href="#features" className="btn btn-outline btn-xl">Explore Features</a>
             </div>
           </div>

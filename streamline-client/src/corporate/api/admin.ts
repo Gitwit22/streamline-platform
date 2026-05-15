@@ -1,4 +1,5 @@
 import { apiFetchAuth } from "@/lib/api";
+import type { CorporateInvite } from "./invites";
 
 export interface OrgUser {
   id?: string;
@@ -104,12 +105,10 @@ export async function updateUserRole(
 }
 
 export async function inviteUser(body: {
-  email: string;
-  name?: string;
-  role?: string;
-  department?: string;
-}): Promise<{ inviteId: string }> {
-  const res = await apiFetchAuth("/api/corp/admin/users/invite", {
+  invitedEmail: string;
+  invitedRole: string;
+}): Promise<{ invite: CorporateInvite }> {
+  const res = await apiFetchAuth("/api/corporate/invites", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -119,6 +118,26 @@ export async function inviteUser(body: {
     throw new Error(data.error || "invite_failed");
   }
   return res.json();
+}
+
+export async function fetchInvites(): Promise<{ invites: CorporateInvite[] }> {
+  const res = await apiFetchAuth("/api/corporate/invites");
+  if (!res.ok) throw new Error("fetch_invites_failed");
+  return res.json();
+}
+
+export async function resendInvite(inviteId: string): Promise<void> {
+  const res = await apiFetchAuth(`/api/corporate/invites/${encodeURIComponent(inviteId)}/resend`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("resend_invite_failed");
+}
+
+export async function revokeInvite(inviteId: string): Promise<void> {
+  const res = await apiFetchAuth(`/api/corporate/invites/${encodeURIComponent(inviteId)}/revoke`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error("revoke_invite_failed");
 }
 
 export async function fetchAuditLog(params?: {

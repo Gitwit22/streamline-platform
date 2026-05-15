@@ -49,7 +49,7 @@ nav::after {
   position: absolute; bottom: 0; left: 10%; right: 10%; height: 1px;
   background: linear-gradient(90deg, transparent, rgba(91,196,245,0.3), transparent);
 }
-.nav-logo { height: 40px; width: auto; object-fit: contain; }
+.nav-logo { height: 40px; max-height: 40px; width: auto; max-width: 220px; object-fit: contain; object-position: left; display: block; }
 .nav-links { display: flex; gap: 4px; margin-left: 40px; }
 .nav-link {
   padding: 8px 14px; border-radius: 8px;
@@ -252,7 +252,7 @@ nav::after {
   border-bottom: 1px solid var(--border);
   display: flex; align-items: center; padding: 0 14px; gap: 10px;
 }
-.fd-logo { width: 80px; height: 24px; object-fit: contain; object-position: left; }
+.fd-logo { width: auto; max-width: 120px; height: 24px; max-height: 24px; object-fit: contain; object-position: left; display: block; }
 .fd-search {
   background: var(--surface3); border: 1px solid var(--border);
   border-radius: 5px; padding: 4px 10px;
@@ -554,7 +554,7 @@ footer {
   height: 100%;
   padding: 40px 56px;
 }
-.ll-logo { height: 42px; width: auto; object-fit: contain; object-position: left; margin-bottom: 48px; }
+.ll-logo { height: 42px; max-height: 42px; width: auto; max-width: min(100%, 260px); object-fit: contain; object-position: left; margin-bottom: 48px; display: block; }
 .ll-headline {
   font-family: 'Instrument Serif', serif;
   font-size: 42px; font-weight: 400; line-height: 1.15;

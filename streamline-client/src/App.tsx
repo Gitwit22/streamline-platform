@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Routes, Route, Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { Routes, Route, Navigate, Outlet, useLocation, useNavigate, useParams } from "react-router-dom";
 
 import Privacy from "./pages/Privacy";
 import Terms from "./pages/Terms";
@@ -8,7 +8,10 @@ import LaneEnforcer from "./components/LaneEnforcer";
 
 import CorporateLanding from "./corporate/entry/CorporateLanding";
 import CorporateLogin from "./corporate/entry/CorporateLogin";
+import CorporateCreateAccount from "./corporate/entry/CorporateCreateAccount";
+import CorporateInviteAccept from "./corporate/entry/CorporateInviteAccept";
 import CorporateProtectedRoute from "./corporate/layout/CorporateProtectedRoute";
+import CorporateAdminRoute from "./corporate/layout/CorporateAdminRoute";
 import CorporateShell from "./corporate/layout/CorporateShell";
 import CorporateDashboard from "./corporate/pages/Dashboard";
 import CorporateCalls from "./corporate/pages/Calls";
@@ -25,11 +28,21 @@ import { clearAuthStorage } from "./lib/api";
 import { clearMeCache } from "./lib/meCache";
 import { clearPlatformFlagsCache } from "./lib/platformFlagsCache";
 
+function LegacyCorporateInviteRedirect() {
+  const params = useParams();
+  const token = params.token ? encodeURIComponent(params.token) : "";
+  return <Navigate to={token ? `/corporate/invite/${token}` : "/corporate"} replace />;
+}
+
 
 function App() {
   const nav = useNavigate();
   const location = useLocation();
   const [showUnauthorized, setShowUnauthorized] = useState(false);
+
+  useEffect(() => {
+    document.title = "StreamLine Corporate";
+  }, []);
 
   useEffect(() => {
     const onUnauthorized = () => {
@@ -45,6 +58,11 @@ function App() {
 
       // ── Corporate landing / login: suppress ─────────────────────────
       if (
+        path.startsWith("/corporate/login") ||
+        path.startsWith("/corporate/create-account") ||
+        path.startsWith("/corporate/invite") ||
+        path === "/corporate" ||
+        path === "/corporate/" ||
         path === "/streamline/corporate" ||
         path === "/streamline/corporate/" ||
         path.startsWith("/streamline/corporate/landing") ||
@@ -62,7 +80,7 @@ function App() {
       const next = `${window.location.pathname}${window.location.search}`;
       const sp = new URLSearchParams();
       sp.set("returnTo", next);
-      nav(`/streamline/corporate/login?${sp.toString()}`);
+      nav(`/corporate/login?${sp.toString()}`);
     };
 
     window.addEventListener("sl:unauthorized", onUnauthorized as any);
@@ -74,6 +92,11 @@ function App() {
   // Hide the banner once the user is on the corporate login/landing.
   useEffect(() => {
     if (
+      location.pathname.startsWith("/corporate/login") ||
+      location.pathname.startsWith("/corporate/create-account") ||
+      location.pathname.startsWith("/corporate/invite") ||
+      location.pathname === "/corporate" ||
+      location.pathname === "/corporate/" ||
       location.pathname.startsWith("/streamline/corporate/login") ||
       location.pathname.startsWith("/streamline/corporate/landing") ||
       location.pathname === "/streamline/corporate" ||
@@ -111,7 +134,7 @@ function App() {
               const next = `${window.location.pathname}${window.location.search}`;
               const sp = new URLSearchParams();
               sp.set("returnTo", next);
-              nav(`/streamline/corporate/login?${sp.toString()}`);
+              nav(`/corporate/login?${sp.toString()}`);
             }}
             style={{
               fontSize: 12,
@@ -130,10 +153,12 @@ function App() {
 
       <Routes>
       {/* Corporate lane */}
-      <Route path="/streamline/corporate" element={<Outlet />}>
+      <Route path="/corporate" element={<Outlet />}>
         <Route index element={<CorporateLanding />} />
         <Route path="landing" element={<CorporateLanding />} />
         <Route path="login" element={<CorporateLogin />} />
+        <Route path="create-account" element={<CorporateCreateAccount />} />
+        <Route path="invite/:token" element={<CorporateInviteAccept />} />
 
         <Route
           element={
@@ -151,10 +176,25 @@ function App() {
           <Route path="training" element={<CorporateTraining />} />
           <Route path="documents" element={<CorporateDocuments />} />
           <Route path="analytics" element={<CorporateAnalytics />} />
-          <Route path="admin" element={<CorporateAdmin />} />
-          <Route path="*" element={<Navigate to="/streamline/corporate/dashboard" replace />} />
+          <Route path="admin" element={<CorporateAdminRoute><CorporateAdmin /></CorporateAdminRoute>} />
+          <Route path="*" element={<Navigate to="/corporate/dashboard" replace />} />
         </Route>
       </Route>
+
+      {/* Legacy corporate URLs */}
+      <Route path="/streamline/corporate" element={<Navigate to="/corporate" replace />} />
+      <Route path="/streamline/corporate/landing" element={<Navigate to="/corporate/landing" replace />} />
+      <Route path="/streamline/corporate/login" element={<Navigate to="/corporate/login" replace />} />
+      <Route path="/streamline/corporate/create-account" element={<Navigate to="/corporate/create-account" replace />} />
+      <Route path="/streamline/corporate/invite/:token" element={<LegacyCorporateInviteRedirect />} />
+      <Route path="/streamline/corporate/dashboard" element={<Navigate to="/corporate/dashboard" replace />} />
+      <Route path="/streamline/corporate/calls" element={<Navigate to="/corporate/calls" replace />} />
+      <Route path="/streamline/corporate/broadcasts" element={<Navigate to="/corporate/broadcasts" replace />} />
+      <Route path="/streamline/corporate/chat" element={<Navigate to="/corporate/chat" replace />} />
+      <Route path="/streamline/corporate/training" element={<Navigate to="/corporate/training" replace />} />
+      <Route path="/streamline/corporate/documents" element={<Navigate to="/corporate/documents" replace />} />
+      <Route path="/streamline/corporate/analytics" element={<Navigate to="/corporate/analytics" replace />} />
+      <Route path="/streamline/corporate/admin" element={<Navigate to="/corporate/admin" replace />} />
 
       {/* Public pages */}
       <Route path="/privacy" element={<Privacy />} />

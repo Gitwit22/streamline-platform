@@ -1,9 +1,10 @@
 import { useEffect, useState, useCallback } from "react";
 import { Shield, Users, Settings, Key, FileText, Loader2, Plus, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { fetchUsers, updateUserRole, inviteUser, fetchAuditLog, fetchSettings, updateSettings, type OrgUser, type AuditEntry, type OrgSettings } from "../api/admin";
+import { fetchUsers, updateUserRole, inviteUser, fetchInvites, resendInvite, revokeInvite, fetchAuditLog, fetchSettings, updateSettings, type OrgUser, type AuditEntry, type OrgSettings } from "../api/admin";
 import { useCorporateMe } from "../layout/CorporateProtectedRoute";
 import { isCorporateBypassEnabled } from "../state/corporateMode";
+import type { CorporateInvite } from "../api/invites";
 
 const tabs = ["Overview", "Users", "Roles", "Security", "Audit Logs", "Settings"] as const;
 type Tab = (typeof tabs)[number];
@@ -44,20 +45,28 @@ export default function Admin() {
 
   const [activeTab, setActiveTab] = useState<Tab>("Overview");
   const [users, setUsers] = useState<OrgUser[]>([]);
+  const [invites, setInvites] = useState<CorporateInvite[]>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
   const [settings, setSettings] = useState<OrgSettings | null>(null);
   const [loading, setLoading] = useState(false);
 
   // Invite state
   const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState("member");
   const [inviting, setInviting] = useState(false);
 
   const loadTab = useCallback(async (tab: Tab) => {
     setLoading(true);
     try {
       if (tab === "Users" || tab === "Roles") {
-        if (bypass) setUsers(demoUsers);
-        else { const res = await fetchUsers(); setUsers(res.users); }
+        if (bypass) {
+          setUsers(demoUsers);
+          setInvites([]);
+        } else {
+          const [usersRes, invitesRes] = await Promise.all([fetchUsers(), fetchInvites()]);
+          setUsers(usersRes.users);
+          setInvites(invitesRes.invites);
+        }
       }
       if (tab === "Audit Logs") {
         if (bypass) setAudit(demoAudit);
@@ -82,9 +91,27 @@ export default function Admin() {
     if (!inviteEmail.trim()) return;
     setInviting(true);
     try {
-      if (!bypass) await inviteUser({ email: inviteEmail.trim() });
+      if (!bypass) {
+        await inviteUser({ invitedEmail: inviteEmail.trim(), invitedRole: inviteRole });
+        const refreshed = await fetchInvites();
+        setInvites(refreshed.invites);
+      }
       setInviteEmail("");
     } finally { setInviting(false); }
+  };
+
+  const handleResendInvite = async (inviteId: string) => {
+    if (bypass) return;
+    await resendInvite(inviteId);
+    const refreshed = await fetchInvites();
+    setInvites(refreshed.invites);
+  };
+
+  const handleRevokeInvite = async (inviteId: string) => {
+    if (bypass) return;
+    await revokeInvite(inviteId);
+    const refreshed = await fetchInvites();
+    setInvites(refreshed.invites);
   };
 
   const handleSettingsUpdate = async (patch: Partial<OrgSettings>) => {
@@ -134,8 +161,18 @@ export default function Admin() {
         {activeTab === "Users" && !loading && (
           <>
             {isAdmin && (
-              <div className="flex gap-3">
+              <div className="flex gap-3 items-center">
                 <input value={inviteEmail} onChange={e => setInviteEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && handleInvite()} placeholder="Invite by email…" className="flex-1 max-w-sm bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-foreground outline-none focus:border-primary placeholder:text-muted-foreground/50" />
+                <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)} className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-foreground outline-none">
+                  {[
+                    ["admin", "Admin"],
+                    ["manager", "Manager"],
+                    ["member", "Member"],
+                    ["viewer", "Viewer"],
+                  ].map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
                 <button disabled={inviting || !inviteEmail.trim()} onClick={handleInvite} className="px-4 h-9 rounded-lg bg-primary text-primary-foreground text-[13px] font-semibold disabled:opacity-50 inline-flex items-center gap-1.5">
                   <Plus className="w-3.5 h-3.5" /> {inviting ? "Sending…" : "Invite"}
                 </button>
@@ -163,6 +200,37 @@ export default function Admin() {
                 </div>
               ))}
               {users.length === 0 && <div className="text-center py-8 text-sm text-muted-foreground">No users found</div>}
+            </div>
+
+            <div className="bg-surface border border-border rounded-xl overflow-hidden mt-3">
+              <div className="grid grid-cols-[200px_120px_120px_120px_1fr] gap-4 px-[18px] py-3 border-b border-border text-[10px] font-semibold text-muted-foreground tracking-[1px] uppercase">
+                <span>Email</span><span>Role</span><span>Status</span><span>Expires</span><span>Actions</span>
+              </div>
+              {invites.map((invite) => (
+                <div key={invite.inviteId} className="grid grid-cols-[200px_120px_120px_120px_1fr] gap-4 items-center px-[18px] py-3 border-b border-border last:border-b-0">
+                  <span className="text-xs text-foreground truncate">{invite.invitedEmail}</span>
+                  <span className="text-xs text-muted-foreground">{invite.invitedRole}</span>
+                  <span className="text-xs text-muted-foreground">{invite.status}</span>
+                  <span className="text-xs text-muted-foreground">{invite.expiresAt ? formatDate(invite.expiresAt) : "-"}</span>
+                  <div className="flex gap-2">
+                    <button
+                      className="px-2 py-1 text-xs rounded border border-border"
+                      onClick={() => handleResendInvite(invite.inviteId)}
+                      disabled={invite.status !== "pending"}
+                    >
+                      Resend
+                    </button>
+                    <button
+                      className="px-2 py-1 text-xs rounded border border-border"
+                      onClick={() => handleRevokeInvite(invite.inviteId)}
+                      disabled={invite.status !== "pending"}
+                    >
+                      Revoke
+                    </button>
+                  </div>
+                </div>
+              ))}
+              {invites.length === 0 ? <div className="text-center py-8 text-sm text-muted-foreground">No invites found</div> : null}
             </div>
           </>
         )}

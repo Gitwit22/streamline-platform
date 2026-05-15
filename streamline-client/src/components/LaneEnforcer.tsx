@@ -13,6 +13,8 @@ import { useLocation, useNavigate } from "react-router-dom";
  * Returns true when the given path is allowed in the corporate-only app.
  */
 function isAllowedPath(path: string): boolean {
+  if (path.startsWith("/corporate")) return true;
+
   // Corporate lane — all sub-routes
   if (path.startsWith("/streamline/corporate")) return true;
 
@@ -36,7 +38,7 @@ export default function LaneEnforcer({ children }: { children: React.ReactNode }
     if (isAllowedPath(pathname)) return;
 
     // Redirect any non-corporate path to corporate dashboard
-    nav("/streamline/corporate/dashboard", { replace: true });
+    nav("/corporate/dashboard", { replace: true });
   }, [pathname, nav]);
 
   return <>{children}</>;

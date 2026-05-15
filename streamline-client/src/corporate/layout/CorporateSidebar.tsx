@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useCorporateMe } from "./CorporateProtectedRoute";
+import BrandLogo from "../../components/BrandLogo";
+import { corporateLogout } from "../api/auth";
+import { clearAuthStorage } from "@/lib/api";
 
 type NavItem = { id: string; label: string; path: string };
 
@@ -12,20 +15,20 @@ export default function CorporateSidebar() {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
-  const role = String(me?.orgRole || me?.role || "viewer");
-  const orgName = String(me?.orgName || "Your Organization");
+  const role = String(me?.role || "viewer");
+  const orgName = String(me?.corporateAccount?.name || "Your Organization");
   const isAdmin = role === "admin";
 
   const items = useMemo<NavItem[]>(
     () => [
-      { id: "dashboard", label: "Dashboard", path: "/streamline/corporate/dashboard" },
-      { id: "calls", label: "Calls", path: "/streamline/corporate/calls" },
-      { id: "broadcasts", label: "Broadcasts", path: "/streamline/corporate/broadcasts" },
-      { id: "chat", label: "Chat", path: "/streamline/corporate/chat" },
-      { id: "training", label: "Training", path: "/streamline/corporate/training" },
-      { id: "documents", label: "Documents", path: "/streamline/corporate/documents" },
-      { id: "analytics", label: "Analytics", path: "/streamline/corporate/analytics" },
-      ...(isAdmin ? [{ id: "admin", label: "Admin", path: "/streamline/corporate/admin" }] : []),
+      { id: "dashboard", label: "Dashboard", path: "/corporate/dashboard" },
+      { id: "calls", label: "Calls", path: "/corporate/calls" },
+      { id: "broadcasts", label: "Broadcasts", path: "/corporate/broadcasts" },
+      { id: "chat", label: "Chat", path: "/corporate/chat" },
+      { id: "training", label: "Training", path: "/corporate/training" },
+      { id: "documents", label: "Documents", path: "/corporate/documents" },
+      { id: "analytics", label: "Analytics", path: "/corporate/analytics" },
+      ...(isAdmin ? [{ id: "admin", label: "Admin", path: "/corporate/admin" }] : []),
     ],
     [isAdmin],
   );
@@ -46,9 +49,14 @@ export default function CorporateSidebar() {
     };
   }, [menuOpen]);
 
-  function onLogout() {
-    // TODO: wire real logout
-    nav("/streamline/corporate/login", { replace: true });
+  async function onLogout() {
+    try {
+      await corporateLogout();
+    } catch {
+      // no-op
+    }
+    clearAuthStorage();
+    nav("/corporate/login", { replace: true });
   }
 
   return (
@@ -66,13 +74,13 @@ export default function CorporateSidebar() {
       >
         <div className="flex items-center gap-3">
           <div
-            className="flex h-12 w-12 items-center justify-center rounded-xl"
+            className="flex h-12 w-28 items-center justify-center rounded-xl"
             style={{
               border: "1px solid hsl(215 35% 20% / 0.6)",
               background: "hsl(218 50% 6% / 0.4)",
             }}
           >
-            <img src="/corp_logo_sm.png" alt="Corp" className="h-10 w-10 object-contain" />
+            <BrandLogo className="h-9 w-full max-w-[104px] object-contain" />
           </div>
           <div>
             <div className="font-bold tracking-tight" style={{ color: "#fff" }}>StreamLine</div>
@@ -156,7 +164,7 @@ export default function CorporateSidebar() {
                 color: "#fff",
               }}
             >
-              {String(me?.displayName || "U")
+              {String(me?.name || "U")
                 .split(" ")
                 .filter(Boolean)
                 .slice(0, 2)
@@ -164,7 +172,7 @@ export default function CorporateSidebar() {
                 .join("") || "U"}
             </div>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-medium">{String(me?.displayName || "User")}</div>
+              <div className="truncate text-sm font-medium">{String(me?.name || "User")}</div>
               <div
                 className="font-mono text-[11px] tracking-[0.15em]"
                 style={{ color: "hsl(214 25% 45%)" }}

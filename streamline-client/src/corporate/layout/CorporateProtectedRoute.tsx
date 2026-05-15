@@ -50,14 +50,25 @@ export default function CorporateProtectedRoute({ children }: { children: ReactN
 
     if (isCorporateBypassEnabled()) {
       setMe({
+        id: "corp-demo",
         uid: "corp-demo",
-        orgType: "corporate",
-        role: "admin",
-        orgRole: "admin",
-        orgName: "StreamLine Corporate HQ",
+        name: "Demo Admin",
         displayName: "Demo Admin",
         email: "demo@streamline.corp",
+        role: "admin",
+        orgRole: "admin",
+        orgType: "corporate",
         orgId: "demo-org",
+        orgName: "StreamLine Corporate HQ",
+        permissions: ["corp:admin", "corp:invite:create", "corp:invite:manage", "corp:member:manage"],
+        corporateAccountId: "demo-org",
+        organizationId: "demo-org",
+        corporateAccount: {
+          id: "demo-org",
+          name: "StreamLine Corporate HQ",
+          status: "active",
+          planId: "enterprise",
+        },
       });
       setLoading(false);
       return;
@@ -95,16 +106,11 @@ export default function CorporateProtectedRoute({ children }: { children: ReactN
   if (!me) {
     const sp = new URLSearchParams();
     sp.set("returnTo", `${loc.pathname}${loc.search}`);
-    return <Navigate to={`/streamline/corporate/login?${sp.toString()}`} replace />;
+    return <Navigate to={`/corporate/login?${sp.toString()}`} replace />;
   }
 
-  // Prevent non-corporate users from accessing Corporate routes.
-  if (me.orgType !== "corporate") {
-    if ((me as any).orgType === "edu") {
-      return <Navigate to="/streamline/edu/dashboard" replace />;
-    }
-    // Fallback: Corporate login page (not Creator /join)
-    return <Navigate to="/streamline/corporate/login" replace />;
+  if (!me.corporateAccountId) {
+    return <Navigate to="/corporate/login" replace />;
   }
 
   return <CorporateAuthContext.Provider value={{ me }}>{children}</CorporateAuthContext.Provider>;

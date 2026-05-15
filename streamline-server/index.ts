@@ -50,6 +50,8 @@ import corpTrainingRoutes from "./routes/corpTraining";
 import corpDocumentsRoutes from "./routes/corpDocuments";
 import corpChatRoutes from "./routes/corpChat";
 import corpAdminRoutes from "./routes/corpAdmin";
+import corporateAuthRoutes from "./routes/corporateAuth";
+import corporateInvitesRoutes from "./routes/corporateInvites";
 import onboardingRoutes from "./routes/onboarding";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
@@ -278,6 +280,10 @@ app.use("/api/corp", corpTrainingRoutes);
 app.use("/api/corp", corpDocumentsRoutes);
 app.use("/api/corp", corpChatRoutes);
 app.use("/api/corp", corpAdminRoutes);
+
+// New Corporate auth/invite endpoints used by Corporate lane onboarding.
+app.use("/api/corporate/auth", corporateAuthRoutes);
+app.use("/api/corporate", corporateInvitesRoutes);
 
 // Billing routes
 app.use("/api/billing", billingRoutes);

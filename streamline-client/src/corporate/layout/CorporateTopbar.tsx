@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { useLocation } from "react-router-dom";
+import BrandLogo from "../../components/BrandLogo";
 
 function titleForPath(pathname: string): { title: string; subtitle: string | null } {
   if (pathname.endsWith("/dashboard")) return { title: "Command Center", subtitle: "Overview" };
@@ -25,9 +26,12 @@ export default function CorporateTopbar() {
         background: "hsl(218 35% 11% / 0.6)",
       }}
     >
-      <div>
-        <h1 className="text-xl font-bold" style={{ color: "#fff" }}>{title}</h1>
-        {subtitle && <p className="text-sm" style={{ color: "hsl(214 25% 55%)" }}>{subtitle}</p>}
+      <div className="flex items-center gap-4">
+        <BrandLogo className="h-7 w-auto max-w-[150px] object-contain" />
+        <div>
+          <h1 className="text-xl font-bold" style={{ color: "#fff" }}>{title}</h1>
+          {subtitle && <p className="text-sm" style={{ color: "hsl(214 25% 55%)" }}>{subtitle}</p>}
+        </div>
       </div>
       <div className="flex items-center gap-4">
         <button
