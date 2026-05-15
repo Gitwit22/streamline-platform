@@ -5,11 +5,37 @@ import { setCorporateBypassEnabled, setCorporateLane } from '../state/corporateM
 import { apiFetch, apiFetchAuth, clearAuthStorage } from '../../lib/api';
 import { firebaseSignInWithCustomToken, isFirebaseWebConfigured, firebaseSendPasswordReset } from '../../lib/firebaseClient';
 
+type AuthMode = 'signin' | 'signup';
+
+function isValidEmail(input: string): boolean {
+  const email = String(input || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return false;
+  const [local, domain] = email.split('@');
+  if (!local || !domain) return false;
+  if (local.startsWith('.') || local.endsWith('.')) return false;
+  if (domain.startsWith('.') || domain.endsWith('.')) return false;
+  if (local.includes('..') || domain.includes('..')) return false;
+  return true;
+}
+
+function detectTimeZone(): string {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return String(tz || '').trim() || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}
+
 export default function CorporateLogin() {
   const nav = useNavigate();
   const location = useLocation();
+  const [authMode, setAuthMode] = useState<AuthMode>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [tosAccepted, setTosAccepted] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [showCredentials, setShowCredentials] = useState(false);
@@ -25,10 +51,172 @@ export default function CorporateLogin() {
     }
   }, [location.search]);
 
+  const switchAuthMode = (mode: AuthMode) => {
+    setAuthMode(mode);
+    setError('');
+  };
+
   const handleDemo = () => {
     setCorporateLane();
     setCorporateBypassEnabled();
     nav('/streamline/corporate/dashboard', { replace: true });
+  };
+
+  const completeAuthenticationFlow = async () => {
+    // Hydrate /api/account/me so lane guards have orgType.
+    try {
+      const meRes = await apiFetchAuth('/api/account/me', { cache: 'no-store' });
+      const me = await meRes.json();
+      try { localStorage.setItem('sl_user', JSON.stringify(me)); } catch {}
+      try { window.dispatchEvent(new CustomEvent('sl:auth-changed')); } catch {}
+    } catch {
+      // non-fatal
+    }
+
+    setCorporateLane();
+    nav(returnTo || '/streamline/corporate/dashboard', { replace: true });
+  };
+
+  const performSignIn = async (): Promise<boolean> => {
+    if (!email.trim() || !password.trim()) {
+      setError('Email and password are required.');
+      return false;
+    }
+
+    if (!isFirebaseWebConfigured()) {
+      // Legacy token-based login
+      const res = await apiFetch(
+        '/api/auth/login',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        },
+        { allowNonOk: true },
+      );
+
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 403) clearAuthStorage();
+        const ct = res.headers.get('content-type') || '';
+        const errBody = ct.includes('application/json') ? await res.json().catch(() => ({})) : {};
+        setError((errBody as any)?.error || 'Invalid credentials');
+        return false;
+      }
+
+      let loginBody: any = null;
+      try {
+        const ct = res.headers.get('content-type') || '';
+        loginBody = ct.includes('application/json') ? await res.json() : null;
+      } catch {
+        loginBody = null;
+      }
+
+      const token = (loginBody as any)?.token as string | undefined;
+      if (!token) {
+        clearAuthStorage();
+        setError('Login failed: missing token from server');
+        return false;
+      }
+      try { localStorage.setItem('authToken', token); } catch {}
+      return true;
+    }
+
+    // Firebase custom-token login
+    const res = await apiFetch(
+      '/api/auth/legacy-login',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      },
+      { allowNonOk: true },
+    );
+
+    if (!res.ok) {
+      if (res.status === 401 || res.status === 403) clearAuthStorage();
+      const ct = res.headers.get('content-type') || '';
+      const errBody = ct.includes('application/json') ? await res.json().catch(() => ({})) : {};
+      const msg = (errBody as any)?.error || (res.status === 409 ? 'Email conflict. Contact support.' : 'Invalid credentials');
+      setError(msg);
+      return false;
+    }
+
+    const payload = await res.json().catch(() => null as any);
+    const customToken = String(payload?.customToken || '').trim();
+    if (!customToken) {
+      setError('Login failed: missing customToken');
+      return false;
+    }
+
+    try { localStorage.removeItem('authToken'); } catch {}
+    await firebaseSignInWithCustomToken(customToken);
+    return true;
+  };
+
+  const performSignUp = async (): Promise<boolean> => {
+    const emailNorm = String(email || '').trim().toLowerCase();
+    if (!isValidEmail(emailNorm)) {
+      setError('Enter a valid work email address.');
+      return false;
+    }
+
+    if (!password || password.length < 8) {
+      setError('Password must be at least 8 characters.');
+      return false;
+    }
+
+    if (password !== confirmPassword) {
+      setError('Passwords do not match.');
+      return false;
+    }
+
+    if (!tosAccepted) {
+      setError('Please accept the Terms of Service to continue.');
+      return false;
+    }
+
+    const timeZone = detectTimeZone();
+
+    const res = await apiFetch(
+      '/api/auth/signup',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: emailNorm,
+          password,
+          displayName: displayName.trim() || undefined,
+          timeZone: timeZone || undefined,
+          tosAccepted: true,
+        }),
+      },
+      { allowNonOk: true },
+    );
+
+    if (!res.ok) {
+      const ct = res.headers.get('content-type') || '';
+      const errBody = ct.includes('application/json') ? await res.json().catch(() => ({})) : {};
+      const rawError = String((errBody as any)?.error || '').trim();
+      if (res.status === 409) {
+        setError('This email is already in use. Sign in instead.');
+      } else if (rawError === 'tos_required') {
+        setError('Please accept the Terms of Service to continue.');
+      } else {
+        setError(rawError || 'Could not create account. Please try again.');
+      }
+      return false;
+    }
+
+    const payload = await res.json().catch(() => null as any);
+    const token = String(payload?.token || '').trim();
+    if (!token) {
+      clearAuthStorage();
+      setError('Create account failed: missing token from server');
+      return false;
+    }
+
+    try { localStorage.setItem('authToken', token); } catch {}
+    return true;
   };
 
   const handleSubmit = async (e: FormEvent) => {
@@ -36,108 +224,31 @@ export default function CorporateLogin() {
     setError('');
     setLoading(true);
 
-    if (!email.trim() || !password.trim()) {
-      setError('Email and password are required.');
-      setLoading(false);
-      return;
-    }
-
     try {
-      if (!isFirebaseWebConfigured()) {
-        // Legacy token-based login
-        const res = await apiFetch(
-          '/api/auth/login',
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, password }),
-          },
-          { allowNonOk: true },
-        );
-
-        if (!res.ok) {
-          if (res.status === 401 || res.status === 403) clearAuthStorage();
-          const ct = res.headers.get('content-type') || '';
-          const errBody = ct.includes('application/json') ? await res.json().catch(() => ({})) : {};
-          setError((errBody as any)?.error || 'Invalid credentials');
-          setLoading(false);
-          return;
-        }
-
-        let loginBody: any = null;
-        try {
-          const ct = res.headers.get('content-type') || '';
-          loginBody = ct.includes('application/json') ? await res.json() : null;
-        } catch { loginBody = null; }
-
-        const token = (loginBody as any)?.token as string | undefined;
-        if (!token) {
-          clearAuthStorage();
-          setError('Login failed: missing token from server');
-          setLoading(false);
-          return;
-        }
-        try { localStorage.setItem('authToken', token); } catch {}
-      } else {
-        // Firebase custom-token login
-        const res = await apiFetch(
-          '/api/auth/legacy-login',
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ email, password }),
-          },
-          { allowNonOk: true },
-        );
-
-        if (!res.ok) {
-          if (res.status === 401 || res.status === 403) clearAuthStorage();
-          const ct = res.headers.get('content-type') || '';
-          const errBody = ct.includes('application/json') ? await res.json().catch(() => ({})) : {};
-          const msg = (errBody as any)?.error || (res.status === 409 ? 'Email conflict. Contact support.' : 'Invalid credentials');
-          setError(msg);
-          setLoading(false);
-          return;
-        }
-
-        const payload = await res.json().catch(() => null as any);
-        const customToken = String(payload?.customToken || '').trim();
-        if (!customToken) {
-          setError('Login failed: missing customToken');
-          setLoading(false);
-          return;
-        }
-
-        try { localStorage.removeItem('authToken'); } catch {}
-        await firebaseSignInWithCustomToken(customToken);
+      const ok = authMode === 'signup' ? await performSignUp() : await performSignIn();
+      if (ok) {
+        await completeAuthenticationFlow();
       }
-
-      // Hydrate /api/account/me so lane guards have orgType.
-      try {
-        const meRes = await apiFetchAuth('/api/account/me', { cache: 'no-store' });
-        const me = await meRes.json();
-        try { localStorage.setItem('sl_user', JSON.stringify(me)); } catch {}
-        try { window.dispatchEvent(new CustomEvent('sl:auth-changed')); } catch {}
-      } catch { /* non-fatal */ }
-
-      setCorporateLane();
-      setLoading(false);
-      nav(returnTo || '/streamline/corporate/dashboard', { replace: true });
     } catch (err: any) {
       console.error(err);
       setError(err?.message || 'Something went wrong. Try again.');
+    } finally {
       setLoading(false);
     }
   };
 
+  const submitLabel = loading
+    ? (authMode === 'signup' ? 'Creating account…' : 'Signing in…')
+    : (authMode === 'signup' ? 'Create Account' : 'Sign In');
+
   const handleForgotPassword = async () => {
     setError('');
     if (!isFirebaseWebConfigured()) {
-      setError('Password reset isn\u2019t available yet (Firebase not configured). Contact your admin.');
+      setError('Password reset isn’t available yet (Firebase not configured). Contact your admin.');
       return;
     }
     const emailNorm = String(email || '').trim().toLowerCase();
-    if (!emailNorm || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailNorm)) {
+    if (!isValidEmail(emailNorm)) {
       setError('Enter your work email above, then click Forgot.');
       return;
     }
@@ -226,65 +337,154 @@ export default function CorporateLogin() {
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 14, height: 14, transition: 'transform 0.2s', transform: showCredentials ? 'rotate(90deg)' : 'rotate(0deg)' }}>
                 <polyline points="9 18 15 12 9 6" />
               </svg>
-              Sign in with credentials
+              {authMode === 'signup' ? 'Create an account' : 'Sign in with credentials'}
             </span>
           </div>
 
-          {showCredentials && (<>
-          <button className="sso-btn">
-            <span className="sso-icon sso-microsoft">M</span>
-            Sign in with Microsoft
-          </button>
-          <button className="sso-btn">
-            <span className="sso-icon sso-okta">Okta</span>
-            Sign in with Okta
-          </button>
-          <div className="or-divider">OR</div>
-          <form onSubmit={handleSubmit}>
-            {error && (
-              <div style={{ color: '#f87171', fontSize: 13, marginBottom: 8, background: 'rgba(248,113,113,0.08)', padding: '8px 12px', borderRadius: 8 }}>
-                {error}
+          {showCredentials && (
+            <>
+              <div style={{ display: 'flex', gap: 8, marginBottom: 12 }}>
+                <button
+                  type="button"
+                  className={`nav-tab ${authMode === 'signin' ? 'active-tab' : ''}`}
+                  onClick={() => switchAuthMode('signin')}
+                  style={{ flex: 1, border: '1px solid var(--border)' }}
+                >
+                  Sign in
+                </button>
+                <button
+                  type="button"
+                  className={`nav-tab ${authMode === 'signup' ? 'active-tab' : ''}`}
+                  onClick={() => switchAuthMode('signup')}
+                  style={{ flex: 1, border: '1px solid var(--border)' }}
+                >
+                  Create account
+                </button>
               </div>
-            )}
-            <div className="form-group">
-              <label className="form-label" htmlFor="email">Work Email</label>
-              <div className="input-wrap">
-                <input
-                  type="email"
-                  id="email"
-                  className="form-input"
-                  placeholder="you@company.com"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                />
-              </div>
-            </div>
-            <div className="form-group">
-              <label className="form-label" htmlFor="password">
-                <span>Password</span>
-                <button type="button" onClick={handleForgotPassword} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 'inherit', textDecoration: 'underline', padding: 0 }}>Forgot?</button>
-              </label>
-              <div className="input-wrap">
-                <input
-                  type="password"
-                  id="password"
-                  className="form-input"
-                  placeholder="••••••••••••"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                />
-              </div>
-            </div>
-            <div className="form-check">
-              <input type="checkbox" id="remember" />
-              <label htmlFor="remember">Remember me</label>
-            </div>
-            <button type="submit" className="submit-btn" disabled={loading}>
-              {loading ? 'Signing in\u2026' : 'Sign In'}
-            </button>
-          </form>
-          </>)}
 
+              {authMode === 'signin' && (
+                <>
+                  <button className="sso-btn" type="button">
+                    <span className="sso-icon sso-microsoft">M</span>
+                    Sign in with Microsoft
+                  </button>
+                  <button className="sso-btn" type="button">
+                    <span className="sso-icon sso-okta">Okta</span>
+                    Sign in with Okta
+                  </button>
+                </>
+              )}
+
+              <div className="or-divider">OR</div>
+
+              <form onSubmit={handleSubmit}>
+                {error && (
+                  <div style={{ color: '#f87171', fontSize: 13, marginBottom: 8, background: 'rgba(248,113,113,0.08)', padding: '8px 12px', borderRadius: 8 }}>
+                    {error}
+                  </div>
+                )}
+
+                <div className="form-group">
+                  <label className="form-label" htmlFor="email">Work Email</label>
+                  <div className="input-wrap">
+                    <input
+                      type="email"
+                      id="email"
+                      className="form-input"
+                      placeholder="you@company.com"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                {authMode === 'signup' && (
+                  <div className="form-group">
+                    <label className="form-label" htmlFor="display-name">Full Name (optional)</label>
+                    <div className="input-wrap">
+                      <input
+                        type="text"
+                        id="display-name"
+                        className="form-input"
+                        placeholder="Jane Doe"
+                        value={displayName}
+                        onChange={(e) => setDisplayName(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                <div className="form-group">
+                  <label className="form-label" htmlFor="password">
+                    <span>Password</span>
+                    {authMode === 'signin' ? (
+                      <button type="button" onClick={handleForgotPassword} style={{ background: 'none', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: 'inherit', textDecoration: 'underline', padding: 0 }}>Forgot?</button>
+                    ) : null}
+                  </label>
+                  <div className="input-wrap">
+                    <input
+                      type="password"
+                      id="password"
+                      className="form-input"
+                      placeholder="••••••••••••"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                    />
+                  </div>
+                </div>
+
+                {authMode === 'signup' && (
+                  <div className="form-group">
+                    <label className="form-label" htmlFor="confirm-password">Confirm Password</label>
+                    <div className="input-wrap">
+                      <input
+                        type="password"
+                        id="confirm-password"
+                        className="form-input"
+                        placeholder="••••••••••••"
+                        value={confirmPassword}
+                        onChange={(e) => setConfirmPassword(e.target.value)}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {authMode === 'signup' ? (
+                  <div className="form-check">
+                    <input
+                      type="checkbox"
+                      id="accept-tos"
+                      checked={tosAccepted}
+                      onChange={(e) => setTosAccepted(e.target.checked)}
+                    />
+                    <label htmlFor="accept-tos">
+                      I agree to the{' '}
+                      <a href="/terms" style={{ color: 'var(--blue)' }}>Terms</a>
+                      {' '}and{' '}
+                      <a href="/privacy" style={{ color: 'var(--blue)' }}>Privacy Policy</a>.
+                    </label>
+                  </div>
+                ) : (
+                  <div className="form-check">
+                    <input type="checkbox" id="remember" />
+                    <label htmlFor="remember">Remember me</label>
+                  </div>
+                )}
+
+                <button type="submit" className="submit-btn" disabled={loading}>
+                  {submitLabel}
+                </button>
+              </form>
+
+              <p className="lf-footer" style={{ marginTop: 12 }}>
+                {authMode === 'signup' ? (
+                  <>Already have an account? <button type="button" onClick={() => switchAuthMode('signin')} style={{ background: 'none', border: 0, color: 'var(--blue)', cursor: 'pointer', fontWeight: 600, padding: 0 }}>Sign in</button></>
+                ) : (
+                  <>New here? <button type="button" onClick={() => switchAuthMode('signup')} style={{ background: 'none', border: 0, color: 'var(--blue)', cursor: 'pointer', fontWeight: 600, padding: 0 }}>Create account</button></>
+                )}
+              </p>
+            </>
+          )}
 
           <p className="lf-footer">
             Need access? <a href="mailto:nxtlvl@gmail.com?subject=StreamLine%20Corporate%20Access%20Request">Contact us</a>
