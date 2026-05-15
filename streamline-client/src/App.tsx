@@ -48,6 +48,7 @@ function App() {
     const onUnauthorized = () => {
       const path = window.location.pathname || "";
 
+<<<<<<< HEAD
       // ── Public / auth pages: suppress ALL side-effects ──────────────
       if (
         path.startsWith("/privacy") || path.startsWith("/terms") ||
@@ -72,11 +73,31 @@ function App() {
       }
 
       // ── Protected pages: full logout + redirect ─────────────────────
+=======
+      // Guest-accessible paths should never be redirected to login.
+      // Guests visiting via invite links have no auth token, so any
+      // apiFetchAuth call would emit sl:unauthorized.  Preserve their
+      // guest session tokens (sl_guestSessionToken, etc.) and skip the
+      // redirect so the invite flow can complete normally.
+      const guestPaths = ["/invite", "/i", "/join", "/room", "/live", "/ig"];
+      if (guestPaths.some((p) => path === p || path.startsWith(p + "/"))) {
+        clearMeCache();
+        return;
+      }
+
+>>>>>>> f6cf248bd3a33fe3f9dcbd69d0ed728263f87cad
       clearAuthStorage();
       clearMeCache();
       clearPlatformFlagsCache();
       setShowUnauthorized(true);
 
+<<<<<<< HEAD
+=======
+      if (path.startsWith("/login") || path.startsWith("/signup")) {
+        return;
+      }
+
+>>>>>>> f6cf248bd3a33fe3f9dcbd69d0ed728263f87cad
       const next = `${window.location.pathname}${window.location.search}`;
       const sp = new URLSearchParams();
       sp.set("returnTo", next);

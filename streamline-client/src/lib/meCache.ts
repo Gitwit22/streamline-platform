@@ -1,4 +1,4 @@
-import { apiFetchAuth } from "./api";
+import { apiFetchAuth, getAuthToken } from "./api";
 import { setPlatformFlagsValue } from "./platformFlagsStore";
 
 // Simple in-memory cache for /api/account/me so Settings and other pages
@@ -21,6 +21,14 @@ export async function getMeCached(): Promise<any | null> {
   // Fast path: reuse any cached value (including explicit null) without
   // triggering a new network request.
   if (cachedMe !== undefined) return cachedMe;
+
+  // If there is no auth token, the user is a guest (e.g. joined via invite
+  // link).  Return null immediately so we never fire sl:unauthorized, which
+  // would redirect guests to the login page and wipe their session tokens.
+  if (!getAuthToken()) {
+    cachedMe = null;
+    return null;
+  }
 
   if (!inFlightMe) {
     inFlightMe = (async () => {
