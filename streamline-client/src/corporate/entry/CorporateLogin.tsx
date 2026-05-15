@@ -37,7 +37,9 @@ export default function CorporateLogin() {
   const [displayName, setDisplayName] = useState('');
   const [tosAccepted, setTosAccepted] = useState(false);
   const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
   const [loading, setLoading] = useState(false);
+  const [resendingVerification, setResendingVerification] = useState(false);
   const [showCredentials, setShowCredentials] = useState(false);
 
   const returnTo = useMemo(() => {
@@ -54,6 +56,7 @@ export default function CorporateLogin() {
   const switchAuthMode = (mode: AuthMode) => {
     setAuthMode(mode);
     setError('');
+    setNotice('');
   };
 
   const handleDemo = () => {
@@ -222,6 +225,7 @@ export default function CorporateLogin() {
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError('');
+    setNotice('');
     setLoading(true);
 
     try {
@@ -243,6 +247,7 @@ export default function CorporateLogin() {
 
   const handleForgotPassword = async () => {
     setError('');
+    setNotice('');
     if (!isFirebaseWebConfigured()) {
       setError('Password reset isn’t available yet (Firebase not configured). Contact your admin.');
       return;
@@ -258,9 +263,46 @@ export default function CorporateLogin() {
         ? { url: continueUrl, handleCodeInApp: false }
         : { url: window.location.origin + '/streamline/corporate/login', handleCodeInApp: false };
       await firebaseSendPasswordReset(emailNorm, settings as any);
-      setError('Password reset email sent (check your inbox).');
+      setNotice('Password reset email sent (check your inbox).');
     } catch (err: any) {
       setError(String(err?.code || err?.message || 'reset_failed'));
+    }
+  };
+
+  const handleResendVerification = async () => {
+    setError('');
+    setNotice('');
+
+    const emailNorm = String(email || '').trim().toLowerCase();
+    if (!isValidEmail(emailNorm)) {
+      setError('Enter your work email above, then click Resend verification.');
+      return;
+    }
+
+    setResendingVerification(true);
+    try {
+      const res = await apiFetch(
+        '/api/auth/resend-verification',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: emailNorm }),
+        },
+        { allowNonOk: true },
+      );
+
+      const ct = res.headers.get('content-type') || '';
+      const body = ct.includes('application/json') ? await res.json().catch(() => ({})) : {};
+      if (!res.ok) {
+        setError(String((body as any)?.error || 'Could not resend verification email.'));
+        return;
+      }
+
+      setNotice(String((body as any)?.message || 'Verification email resend requested.'));
+    } catch (err: any) {
+      setError(String(err?.message || 'Could not resend verification email.'));
+    } finally {
+      setResendingVerification(false);
     }
   };
 
@@ -271,7 +313,7 @@ export default function CorporateLogin() {
           <div className="ll-grid"></div>
         </div>
         <div className="ll-content">
-          <img src="/corp_logo.png" alt="StreamLine Logo" className="ll-logo" />
+          <img src="/logo.png" alt="StreamLine Logo" className="ll-logo" />
           <h1 className="ll-headline">
             The operating system for <em>enterprise communication</em>.
           </h1>
@@ -383,6 +425,11 @@ export default function CorporateLogin() {
                     {error}
                   </div>
                 )}
+                {notice && (
+                  <div style={{ color: '#86efac', fontSize: 13, marginBottom: 8, background: 'rgba(34,197,94,0.12)', padding: '8px 12px', borderRadius: 8 }}>
+                    {notice}
+                  </div>
+                )}
 
                 <div className="form-group">
                   <label className="form-label" htmlFor="email">Work Email</label>
@@ -474,6 +521,18 @@ export default function CorporateLogin() {
                 <button type="submit" className="submit-btn" disabled={loading}>
                   {submitLabel}
                 </button>
+
+                {authMode === 'signin' ? (
+                  <button
+                    type="button"
+                    className="submit-btn"
+                    onClick={handleResendVerification}
+                    disabled={loading || resendingVerification}
+                    style={{ marginTop: 8, background: 'transparent', border: '1px solid var(--border)', color: 'rgba(255,255,255,0.85)' }}
+                  >
+                    {resendingVerification ? 'Resending verification…' : 'Resend verification email'}
+                  </button>
+                ) : null}
               </form>
 
               <p className="lf-footer" style={{ marginTop: 12 }}>
