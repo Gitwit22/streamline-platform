@@ -1,10 +1,3 @@
-import {
-  ConsoleEmailLogger,
-  ResendEmailProvider,
-  SendEmailUseCase,
-  loadNotificationConfig,
-} from "@nxtlvl/notification-core";
-
 type InviteEmailInput = {
   to: string;
   inviteLink: string;
@@ -20,19 +13,17 @@ type InviteEmailResult = {
   messageId?: string;
 };
 
-let emailUseCase: SendEmailUseCase | null = null;
-
 function isValidEmail(value: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
-function ensureNotificationEnvDefaults() {
+function ensureEmailEnvDefaults() {
   if (!process.env.EMAIL_SEND_ENABLED) {
     process.env.EMAIL_SEND_ENABLED = "false";
   }
 
   if (!process.env.EMAIL_PROVIDER) {
-    process.env.EMAIL_PROVIDER = "resend";
+    process.env.EMAIL_PROVIDER = "stub";
   }
 
   if (!process.env.EMAIL_FROM) {
@@ -44,41 +35,47 @@ function ensureNotificationEnvDefaults() {
   }
 }
 
-function getEmailUseCase(): SendEmailUseCase {
-  if (emailUseCase) return emailUseCase;
+function shouldSendEmails(): boolean {
+  ensureEmailEnvDefaults();
+  return String(process.env.EMAIL_SEND_ENABLED || "false").trim().toLowerCase() === "true";
+}
 
-  ensureNotificationEnvDefaults();
+function getEmailProvider(): string {
+  ensureEmailEnvDefaults();
+  return String(process.env.EMAIL_PROVIDER || "stub").trim().toLowerCase();
+}
 
-  const provider = String(process.env.EMAIL_PROVIDER || "resend").trim().toLowerCase();
-  if (provider !== "resend") {
-    throw new Error(`Unsupported EMAIL_PROVIDER: ${provider}`);
-  }
+function getEmailFrom(): string {
+  ensureEmailEnvDefaults();
+  return String(process.env.EMAIL_FROM || "StreamLine <no-reply@nxtlvlts.com>").trim();
+}
 
-  const config = loadNotificationConfig();
-  const logger = new ConsoleEmailLogger(config.logLevel);
-  const resendProvider = new ResendEmailProvider(config);
+function getReplyTo(): string | undefined {
+  const value = String(process.env.EMAIL_REPLY_TO || "").trim();
+  return value || undefined;
+}
 
-  emailUseCase = new SendEmailUseCase({
-    provider: resendProvider,
-    config,
-    logger,
-  });
-
-  return emailUseCase;
+function escapeHtml(value: string): string {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function buildInviteHtml(input: InviteEmailInput): string {
   return `
   <div style="font-family:Arial,sans-serif;color:#0f172a;line-height:1.5;">
     <p>Hello,</p>
-    <p>You have been invited to join <strong>${input.orgName}</strong> on StreamLine Corporate.</p>
-    <p>Role: <strong>${input.role}</strong></p>
+    <p>You have been invited to join <strong>${escapeHtml(input.orgName)}</strong> on StreamLine Corporate.</p>
+    <p>Role: <strong>${escapeHtml(input.role)}</strong></p>
     <p>
-      <a href="${input.inviteLink}" style="display:inline-block;background:#0ea5e9;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">
+      <a href="${escapeHtml(input.inviteLink)}" style="display:inline-block;background:#0ea5e9;color:#ffffff;text-decoration:none;padding:10px 16px;border-radius:8px;">
         Accept Invite
       </a>
     </p>
-    <p>This invite expires on ${input.expiresAtIso}.</p>
+    <p>This invite expires on ${escapeHtml(input.expiresAtIso)}.</p>
     <p>If you did not expect this invite, you can safely ignore this message.</p>
     <p>StreamLine Team</p>
   </div>
@@ -100,37 +97,54 @@ function buildInviteText(input: InviteEmailInput): string {
   ].join("\n");
 }
 
+async function sendViaResend(input: InviteEmailInput): Promise<InviteEmailResult> {
+  const apiKey = String(process.env.RESEND_API_KEY || "").trim();
+  if (!apiKey) {
+    return { ok: false, skipped: false, reason: "missing_resend_api_key" };
+  }
+
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: getEmailFrom(),
+      to: [input.to],
+      reply_to: getReplyTo(),
+      subject: "You're invited to join StreamLine Corporate",
+      html: buildInviteHtml(input),
+      text: buildInviteText(input),
+      tags: [
+        { name: "type", value: "corporate_invite" },
+        { name: "role", value: input.role },
+      ],
+    }),
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const message = String((body as any)?.message || (body as any)?.error || "resend_request_failed");
+    return { ok: false, skipped: false, reason: message };
+  }
+
+  return {
+    ok: true,
+    skipped: false,
+    messageId: String((body as any)?.id || ""),
+  };
+}
+
 export async function sendCorporateInviteEmail(input: InviteEmailInput): Promise<InviteEmailResult> {
   if (!isValidEmail(input.to)) {
     return { ok: false, skipped: true, reason: "invalid_email" };
   }
 
-  const emailSender = getEmailUseCase();
-  const result = await emailSender.execute({
-    to: input.to,
-    subject: "You're invited to join StreamLine Corporate",
-    html: buildInviteHtml(input),
-    text: buildInviteText(input),
-    programDomain: "streamline-corporate",
-    organizationId: input.orgName,
-    metadata: {
-      type: "corporate_invite",
-      role: input.role,
-    },
-  });
-
-  if (result.success) {
-    console.info("[corporate-invite-email] sent", {
-      to: input.to,
-      messageId: result.messageId,
-    });
-    return { ok: true, skipped: false, messageId: result.messageId };
-  }
-
-  if ("skipped" in result && result.skipped) {
+  if (!shouldSendEmails() || getEmailProvider() === "stub") {
     console.info("[corporate-invite-email] skipped", {
       to: input.to,
-      reason: result.reason,
+      reason: shouldSendEmails() ? "stub_provider" : "email_send_disabled",
       payload: {
         subject: "You're invited to join StreamLine Corporate",
         orgName: input.orgName,
@@ -139,18 +153,28 @@ export async function sendCorporateInviteEmail(input: InviteEmailInput): Promise
         expiresAtIso: input.expiresAtIso,
       },
     });
-    return { ok: true, skipped: true, reason: result.reason };
+    return { ok: true, skipped: true, reason: shouldSendEmails() ? "stub_provider" : "email_send_disabled" };
   }
 
-  if ("error" in result) {
+  if (getEmailProvider() !== "resend") {
+    return { ok: false, skipped: false, reason: `unsupported_email_provider:${getEmailProvider()}` };
+  }
+
+  const result = await sendViaResend(input);
+  if (result.ok) {
+    console.info("[corporate-invite-email] sent", {
+      to: input.to,
+      messageId: result.messageId,
+    });
+    return result;
+  }
+
+  if (result.reason) {
     console.error("[corporate-invite-email] failed", {
       to: input.to,
-      code: result.error.code,
-      message: result.error.message,
+      reason: result.reason,
     });
-
-    return { ok: false, skipped: false, reason: result.error.code };
   }
 
-  return { ok: false, skipped: false, reason: "unknown_error" };
+  return result.ok ? result : { ok: false, skipped: false, reason: result.reason || "unknown_error" };
 }
