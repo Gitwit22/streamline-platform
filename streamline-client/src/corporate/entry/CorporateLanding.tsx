@@ -5,7 +5,7 @@ export default function CorporateLanding() {
   return (
     <div id="landing-page" className="page active">
       <nav id="main-nav">
-        <img src="/corp_logo.png" alt="StreamLine Logo" className="nav-logo" />
+        <img src="/logo.png" alt="StreamLine Logo" className="nav-logo" />
         <div className="nav-links">
           <a href="#features" className="nav-link">Features</a>
           <a href="#pricing" className="nav-link">Pricing</a>
@@ -57,7 +57,7 @@ export default function CorporateLanding() {
             <div className="mockup-inner">
               <div className="faux-dash">
                 <div className="fd-topbar">
-                  <img src="/corp_logo_sm.png" alt="logo" className="fd-logo" />
+                  <img src="/logosmall.png" alt="StreamLine logo" className="fd-logo" />
                   <div className="fd-search">Search...</div>
                   <div className="fd-spacer"></div>
                   <div className="fd-dot"></div>

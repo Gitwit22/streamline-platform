@@ -81,7 +81,7 @@ export default function CorporateSidebar() {
               background: "hsl(218 50% 6% / 0.4)",
             }}
           >
-            <img src="/corp_logo_sm.png" alt="Corp" className="h-10 w-10 object-contain" />
+            <img src="/logosmall.png" alt="StreamLine" className="h-10 w-10 object-contain" />
           </div>
           <div>
             <div className="font-bold tracking-tight" style={{ color: "#fff" }}>StreamLine</div>
