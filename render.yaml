@@ -151,7 +151,6 @@ services:
   - type: cron
     name: streamline-expire-emergency-recordings
     runtime: node
-    plan: free
     repo: https://github.com/Gitwit22/streamline-platform
     branch: test
     rootDir: streamline-server
