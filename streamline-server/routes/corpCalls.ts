@@ -74,6 +74,9 @@ router.post("/calls", requireAuth, async (req, res) => {
   try {
     const ctx = await getCorpOrgContext(uid);
     if (!ctx) return res.status(403).json({ error: "not_corporate_member" });
+    if (!assertCorpRole(ctx.orgRole, ["admin", "manager"])) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
 
     const title = asString(req.body.title).trim();
     if (!title) return res.status(400).json({ error: "title_required" });

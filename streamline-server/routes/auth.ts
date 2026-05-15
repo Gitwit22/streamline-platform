@@ -178,7 +178,6 @@ router.post("/login", async (req, res) => {
     console.error("POST /api/auth/login failed:", err?.message || err);
     return res.status(500).json({
       error: "Login failed",
-      detail: err?.message || String(err),
     });
   }
 });
@@ -341,8 +340,33 @@ router.post("/signup", async (req, res) => {
     console.error("POST /api/auth/signup failed:", err?.message || err);
     return res.status(500).json({
       error: "Signup failed",
-      detail: err?.message || String(err),
     });
+  }
+});
+
+/**
+ * POST /api/auth/resend-verification
+ * Body: { email }
+ *
+ * Stub endpoint to support client verification-resend UX.
+ */
+router.post("/resend-verification", async (req, res) => {
+  try {
+    const email = String((req.body as any)?.email || "").trim().toLowerCase();
+    if (!email) {
+      return res.status(400).json({ error: "Email is required" });
+    }
+
+    // Stub only: avoid exposing account existence details.
+    console.log("[auth] resend-verification stub requested", { email });
+    return res.json({
+      ok: true,
+      stub: true,
+      message: "Verification email resend requested (stub).",
+    });
+  } catch (err: any) {
+    console.error("POST /api/auth/resend-verification failed:", err?.message || err);
+    return res.status(500).json({ error: "resend_verification_failed" });
   }
 });
 

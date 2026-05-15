@@ -50,10 +50,11 @@ export default function Admin() {
   const [settings, setSettings] = useState<OrgSettings | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Invite state
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
   const [inviting, setInviting] = useState(false);
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [inviteSuccess, setInviteSuccess] = useState<string | null>(null);
 
   const loadTab = useCallback(async (tab: Tab) => {
     setLoading(true);
@@ -82,14 +83,16 @@ export default function Admin() {
 
   useEffect(() => { if (activeTab !== "Overview") loadTab(activeTab); }, [activeTab, loadTab]);
 
-  const handleRoleChange = async (uid: string, role: string) => {
-    if (!bypass) await updateUserRole(uid, role);
-    setUsers(prev => prev.map(u => u.uid === uid ? { ...u, role } : u));
+  const handleRoleChange = async (userDocId: string, role: string) => {
+    if (!bypass) await updateUserRole(userDocId, role);
+    setUsers(prev => prev.map(u => (u.id || u.uid) === userDocId ? { ...u, role } : u));
   };
 
   const handleInvite = async () => {
     if (!inviteEmail.trim()) return;
     setInviting(true);
+    setInviteError(null);
+    setInviteSuccess(null);
     try {
       if (!bypass) {
         await inviteUser({ invitedEmail: inviteEmail.trim(), invitedRole: inviteRole });
@@ -97,6 +100,9 @@ export default function Admin() {
         setInvites(refreshed.invites);
       }
       setInviteEmail("");
+      setInviteSuccess(`Invite sent to ${inviteEmail.trim()}`);
+    } catch (err: any) {
+      setInviteError(err?.message || "invite_failed");
     } finally { setInviting(false); }
   };
 
@@ -161,21 +167,25 @@ export default function Admin() {
         {activeTab === "Users" && !loading && (
           <>
             {isAdmin && (
-              <div className="flex gap-3 items-center">
-                <input value={inviteEmail} onChange={e => setInviteEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && handleInvite()} placeholder="Invite by email…" className="flex-1 max-w-sm bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-foreground outline-none focus:border-primary placeholder:text-muted-foreground/50" />
-                <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)} className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-foreground outline-none">
-                  {[
-                    ["admin", "Admin"],
-                    ["manager", "Manager"],
-                    ["member", "Member"],
-                    ["viewer", "Viewer"],
-                  ].map(([value, label]) => (
-                    <option key={value} value={value}>{label}</option>
-                  ))}
-                </select>
-                <button disabled={inviting || !inviteEmail.trim()} onClick={handleInvite} className="px-4 h-9 rounded-lg bg-primary text-primary-foreground text-[13px] font-semibold disabled:opacity-50 inline-flex items-center gap-1.5">
-                  <Plus className="w-3.5 h-3.5" /> {inviting ? "Sending…" : "Invite"}
-                </button>
+              <div className="flex flex-col gap-2">
+                <div className="flex gap-3 items-center">
+                  <input value={inviteEmail} onChange={e => setInviteEmail(e.target.value)} onKeyDown={e => e.key === "Enter" && handleInvite()} placeholder="Invite by email…" className="flex-1 max-w-sm bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-foreground outline-none focus:border-primary placeholder:text-muted-foreground/50" />
+                  <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)} className="bg-surface-2 border border-border rounded-lg px-3 py-2 text-sm text-foreground outline-none">
+                    {[
+                      ["admin", "Admin"],
+                      ["manager", "Manager"],
+                      ["member", "Member"],
+                      ["viewer", "Viewer"],
+                    ].map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                  </select>
+                  <button disabled={inviting || !inviteEmail.trim()} onClick={handleInvite} className="px-4 h-9 rounded-lg bg-primary text-primary-foreground text-[13px] font-semibold disabled:opacity-50 inline-flex items-center gap-1.5">
+                    <Plus className="w-3.5 h-3.5" /> {inviting ? "Sending…" : "Invite"}
+                  </button>
+                </div>
+                {inviteSuccess && <p className="text-[12px] text-sl-green">{inviteSuccess}</p>}
+                {inviteError && <p className="text-[12px] text-sl-red">{inviteError}</p>}
               </div>
             )}
             <div className="bg-surface border border-border rounded-xl overflow-hidden">
@@ -188,7 +198,7 @@ export default function Admin() {
                   <span className="text-xs text-muted-foreground truncate">{u.email}</span>
                   <div>
                     {isAdmin ? (
-                      <select value={u.role} onChange={e => handleRoleChange(u.uid, e.target.value)} className="bg-surface-2 border border-border rounded px-2 py-1 text-xs text-foreground outline-none">
+                      <select value={u.role} onChange={e => handleRoleChange(u.id || u.uid, e.target.value)} className="bg-surface-2 border border-border rounded px-2 py-1 text-xs text-foreground outline-none">
                         {["admin", "manager", "member", "viewer"].map(r => <option key={r} value={r}>{r}</option>)}
                       </select>
                     ) : (

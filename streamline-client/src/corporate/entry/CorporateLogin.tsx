@@ -29,12 +29,6 @@ export default function CorporateLogin() {
     setError('');
     setLoading(true);
 
-    if (!email.trim() || !password.trim()) {
-      setError('Email and password are required.');
-      setLoading(false);
-      return;
-    }
-
     try {
       const payload = await corporateLogin({
         email: email.trim(),
@@ -49,11 +43,11 @@ export default function CorporateLogin() {
       }
 
       setCorporateLane();
-      setLoading(false);
       nav(returnTo || '/corporate/dashboard', { replace: true });
     } catch (err: any) {
       console.error(err);
       setError(err?.message || 'Something went wrong. Try again.');
+    } finally {
       setLoading(false);
     }
   };
@@ -89,7 +83,7 @@ export default function CorporateLogin() {
             </div>
           </div>
           <div className="ll-footer">
-            <a href="#">© 2026 Nxt Lvl Technology Solutions</a>
+            <a href="#">(c) 2026 Nxt Lvl Technology Solutions</a>
             <a href="#">Terms of Service</a>
             <a href="#">Privacy Policy</a>
           </div>
@@ -129,7 +123,7 @@ export default function CorporateLogin() {
                   type="password"
                   id="password"
                   className="form-input"
-                  placeholder="••••••••••••"
+                  placeholder="************"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                 />
@@ -140,10 +134,9 @@ export default function CorporateLogin() {
               <label htmlFor="remember">Remember me</label>
             </div>
             <button type="submit" className="submit-btn" disabled={loading}>
-              {loading ? 'Signing in\u2026' : 'Sign In'}
+              {loading ? 'Signing in...' : 'Sign In'}
             </button>
           </form>
-
 
           <p className="lf-footer">
             Need access? <a href="mailto:nxtlvl@gmail.com?subject=StreamLine%20Corporate%20Access%20Request">Contact us</a>

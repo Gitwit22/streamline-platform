@@ -173,7 +173,7 @@ router.patch("/training/:id/progress", requireAuth, async (req, res) => {
 
     await db.collection("corpTrainingProgress").doc(progressId).set(progressDoc, { merge: true });
 
-    return res.json({ progress: progressDoc });
+    return res.json({ progress: progressDoc.progress, status: progressDoc.status });
   } catch (err: any) {
     console.error("[corp/training] progress error:", err?.message || err);
     return res.status(500).json({ error: "internal" });

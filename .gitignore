@@ -5,6 +5,8 @@ dist-node/
 **/dist-node/
 .env
 .env.local
+**/.env
+**/.env.local
 *.log
 .DS_Store
 .vscode/settings.json

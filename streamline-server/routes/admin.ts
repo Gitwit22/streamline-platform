@@ -44,13 +44,13 @@ router.use((req, res, next) => {
   next();
 });
 
-router.get('/me', (req, res) => {
+router.get('/me', requireAdmin, (req, res) => {
   res.json({ isAdmin: true, user: req.adminUser });
 });
 
 // Lightweight environment sanity endpoint for admins.
 // Returns current admin's user + plan docs, resolved limits and key feature flags.
-router.get("/env-sanity", async (req, res) => {
+router.get("/env-sanity", requireAdmin, async (req, res) => {
   try {
     const adminUser = req.adminUser;
     const uid = adminUser?.uid;
@@ -124,7 +124,7 @@ router.get("/env-sanity", async (req, res) => {
 
 
 
-router.get("/plans", async (req, res) => {
+router.get("/plans", requireAdmin, async (req, res) => {
   console.log("🎯 1. Plans route handler started (admin, all plans)");
   try {
     console.log("🎯 2. About to query Firestore for ALL plans");
@@ -142,7 +142,7 @@ router.get("/plans", async (req, res) => {
   }
 });
 
-router.put("/plans/:planId", async (req, res) => {
+router.put("/plans/:planId", requireAdmin, async (req, res) => {
   try {
     const { planId } = req.params;
     const updateData = { ...req.body };
@@ -167,7 +167,7 @@ router.put("/plans/:planId", async (req, res) => {
  * GET /api/admin/users
  * List all users with usage information
  */
-router.get("/users", async (req, res) => {
+router.get("/users", requireAdmin, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit as string) || 50;
     const offset = parseInt(req.query.offset as string) || 0;
@@ -232,7 +232,7 @@ router.get("/users", async (req, res) => {
  * DELETE /api/admin/users/:userId
  * Delete a user by userId
  */
-router.delete("/users/:userId", async (req, res) => {
+router.delete("/users/:userId", requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
     const userRef = firestore.collection("users").doc(userId);
@@ -257,7 +257,7 @@ router.delete("/users/:userId", async (req, res) => {
  * GET /api/admin/users/:userId
  * Get detailed information about a specific user
  */
-router.get("/users/:userId", async (req, res) => {
+router.get("/users/:userId", requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
 
@@ -335,7 +335,7 @@ router.get("/users/:userId", async (req, res) => {
  * POST /api/admin/users/:userId/grant-minutes
  * Grant bonus minutes to a user
  */
-router.post("/users/:userId/grant-minutes", async (req, res) => {
+router.post("/users/:userId/grant-minutes", requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
     const { minutes, reason } = req.body;
@@ -389,7 +389,7 @@ router.post("/users/:userId/grant-minutes", async (req, res) => {
  * POST /api/admin/users/:userId/change-plan
  * Change a user's plan
  */
-router.post("/users/:userId/change-plan", async (req, res) => {
+router.post("/users/:userId/change-plan", requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
     const { newPlan, reason } = req.body;
@@ -449,7 +449,7 @@ const validPlans: string[] = plansSnap.docs.map((d) => d.id);
  * POST /api/admin/users/:userId/toggle-billing
  * Enable or disable billing for a user
  */
-router.post("/users/:userId/toggle-billing", async (req, res) => {
+router.post("/users/:userId/toggle-billing", requireAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
     const { enabled, reason } = req.body;
@@ -509,7 +509,7 @@ router.post("/users/:userId/toggle-billing", async (req, res) => {
  * - Ensures feature flags are booleans (default false).
  * - Ensures known numeric limits are numbers (default 0).
  */
-router.post("/plans/migrate-schema", async (req, res) => {
+router.post("/plans/migrate-schema", requireAdmin, async (req, res) => {
   try {
     const snap = await firestore.collection("plans").get();
     const report: Array<{
@@ -649,7 +649,7 @@ router.post("/plans/migrate-schema", async (req, res) => {
  *
  * Persists to config/features.billingSystemEnabled and logs an admin action.
  */
-router.post("/feature-flags/billing", async (req, res) => {
+router.post("/feature-flags/billing", requireAdmin, async (req, res) => {
   try {
     const { enabled, reason } = req.body || {};
 
@@ -716,7 +716,7 @@ router.post("/feature-flags/billing", async (req, res) => {
  * GET /api/admin/usage
  * Get usage statistics across all users
  */
-router.get("/usage", async (req, res) => {
+router.get("/usage", requireAdmin, async (req, res) => {
   try {
     const limit = parseInt(req.query.limit as string) || 100;
     const planFilter = req.query.plan as PlanId | undefined;
@@ -835,7 +835,7 @@ router.get("/usage", async (req, res) => {
  * Admin-only usage summary lookup for any user.
  * Uses the same payload shape as GET /api/usage/summary.
  */
-router.get("/usage/summary", async (req, res) => {
+router.get("/usage/summary", requireAdmin, async (req, res) => {
   try {
     const uid = String(req.query.uid || "").trim();
     if (!uid) {
@@ -858,7 +858,7 @@ router.get("/usage/summary", async (req, res) => {
  * GET /api/admin/stats
  * Get overall platform statistics
  */
-router.get("/stats", async (req, res) => {
+router.get("/stats", requireAdmin, async (req, res) => {
   try {
     const usersSnapshot = await firestore.collection("users").get();
     const includeDeleted = (() => {
@@ -933,7 +933,7 @@ router.get("/stats", async (req, res) => {
  * POST /api/admin/features/toggle
  * Toggle a global feature flag
  */
-router.post("/features/toggle", async (req, res) => {
+router.post("/features/toggle", requireAdmin, async (req, res) => {
   try {
     const { featureName, enabled, reason } = req.body;
 
@@ -983,7 +983,7 @@ router.post("/features/toggle", async (req, res) => {
  * GET /api/admin/features
  * List all feature flags
  */
-router.get("/features", async (req, res) => {
+router.get("/features", requireAdmin, async (req, res) => {
   try {
     const snapshot = await firestore.collection("featureFlags").get();
 
