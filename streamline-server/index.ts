@@ -104,6 +104,8 @@ const allowedOrigins = new Set(
     // Render deployments
     "https://streamline-platform.onrender.com",
     "https://streamline-hls-dev-web.onrender.com",
+    // Corporate lane frontend
+    "https://streamline-corporate.onrender.com",
     // Production custom domains
     "https://streamline.nxtlvlts.com",
     "https://www.streamline.nxtlvlts.com",

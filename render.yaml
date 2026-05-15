@@ -83,6 +83,69 @@ services:
         destination: /index.html
 
   # -------------------------
+  # BACKEND (CORPORATE)
+  # -------------------------
+  - type: web
+    name: streamline-backend-corporate
+    runtime: node
+    plan: free
+    repo: https://github.com/Gitwit22/streamline-platform
+    branch: corporate
+    rootDir: streamline-server
+    buildCommand: npm install && npm run build
+    startCommand: npm run start
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: JWT_SECRET
+        sync: false
+      - key: FIREBASE_SERVICE_ACCOUNT_BASE64
+        sync: false
+      - key: CLIENT_URL
+        value: https://streamline-corporate.onrender.com
+      # Email (invite system)
+      - key: EMAIL_PROVIDER
+        value: stub
+      - key: EMAIL_SEND_ENABLED
+        value: "false"
+      - key: RESEND_API_KEY
+        sync: false
+      - key: CORPORATE_INVITE_BASE_URL
+        value: https://streamline-corporate.onrender.com/corporate/invite
+      # LiveKit
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+
+  # -------------------------
+  # FRONTEND (CORPORATE)
+  # -------------------------
+  - type: web
+    name: streamline-corporate
+    runtime: static
+    repo: https://github.com/Gitwit22/streamline-platform
+    branch: corporate
+    rootDir: streamline-client
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    autoDeploy: true
+    envVars:
+      - key: VITE_API_BASE
+        value: https://streamline-backend-corporate.onrender.com
+      - key: VITE_LIVEKIT_URL
+        sync: false
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+  # -------------------------
   # MAINTENANCE CRON (TEST)
   # -------------------------
   - type: cron
