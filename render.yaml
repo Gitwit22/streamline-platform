@@ -82,6 +82,16 @@ services:
         source: /*
         destination: /index.html
 
+    headers:
+      # Allow the live viewer page to be embedded in iframes on customer sites.
+      # Keep X-Frame-Options absent for /live/* so legacy browsers also allow framing.
+      - path: /live/*
+        name: Content-Security-Policy
+        value: "frame-ancestors *"
+      - path: /ig/*
+        name: Content-Security-Policy
+        value: "frame-ancestors *"
+
   # -------------------------
   # MAINTENANCE CRON (TEST)
   # -------------------------
