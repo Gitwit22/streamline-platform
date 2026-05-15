@@ -157,7 +157,7 @@ services:
     rootDir: streamline-server
     buildCommand: npm install && npm run build
     schedule: "*/10 * * * *"
-    command: npm run cron:expire-emergency
+    startCommand: npm run cron:expire-emergency
     envVars:
       - key: MAINTENANCE_EXPIRE_URL
         sync: false
