@@ -34,7 +34,6 @@ function LegacyCorporateInviteRedirect() {
   return <Navigate to={token ? `/corporate/invite/${token}` : "/corporate"} replace />;
 }
 
-
 function App() {
   const nav = useNavigate();
   const location = useLocation();
@@ -48,56 +47,50 @@ function App() {
     const onUnauthorized = () => {
       const path = window.location.pathname || "";
 
-<<<<<<< HEAD
-      // ── Public / auth pages: suppress ALL side-effects ──────────────
+      // Public legal/support pages: never force auth redirect.
       if (
-        path.startsWith("/privacy") || path.startsWith("/terms") ||
+        path.startsWith("/privacy") ||
+        path.startsWith("/terms") ||
         path.startsWith("/support")
       ) {
         return;
       }
 
-      // ── Corporate landing / login: suppress ─────────────────────────
+      // Corporate entry pages: never force auth redirect.
       if (
         path.startsWith("/corporate/login") ||
         path.startsWith("/corporate/create-account") ||
         path.startsWith("/corporate/invite") ||
         path === "/corporate" ||
         path === "/corporate/" ||
-        path === "/streamline/corporate" ||
-        path === "/streamline/corporate/" ||
+        path.startsWith("/streamline/corporate") ||
+        path.startsWith("/streamline/corporate/") ||
         path.startsWith("/streamline/corporate/landing") ||
         path.startsWith("/streamline/corporate/login")
       ) {
         return;
       }
 
-      // ── Protected pages: full logout + redirect ─────────────────────
-=======
       // Guest-accessible paths should never be redirected to login.
       // Guests visiting via invite links have no auth token, so any
-      // apiFetchAuth call would emit sl:unauthorized.  Preserve their
-      // guest session tokens (sl_guestSessionToken, etc.) and skip the
-      // redirect so the invite flow can complete normally.
+      // apiFetchAuth call would emit sl:unauthorized. Preserve their
+      // guest session tokens and skip redirect so invite flow can complete.
       const guestPaths = ["/invite", "/i", "/join", "/room", "/live", "/ig"];
       if (guestPaths.some((p) => path === p || path.startsWith(p + "/"))) {
         clearMeCache();
         return;
       }
 
->>>>>>> f6cf248bd3a33fe3f9dcbd69d0ed728263f87cad
+      // Legacy public auth routes.
+      if (path.startsWith("/login") || path.startsWith("/signup")) {
+        return;
+      }
+
       clearAuthStorage();
       clearMeCache();
       clearPlatformFlagsCache();
       setShowUnauthorized(true);
 
-<<<<<<< HEAD
-=======
-      if (path.startsWith("/login") || path.startsWith("/signup")) {
-        return;
-      }
-
->>>>>>> f6cf248bd3a33fe3f9dcbd69d0ed728263f87cad
       const next = `${window.location.pathname}${window.location.search}`;
       const sp = new URLSearchParams();
       sp.set("returnTo", next);
@@ -147,9 +140,7 @@ function App() {
             gap: 12,
           }}
         >
-          <div style={{ fontSize: 13 }}>
-            Session expired. Please sign in again.
-          </div>
+          <div style={{ fontSize: 13 }}>Session expired. Please sign in again.</div>
           <button
             onClick={() => {
               const next = `${window.location.pathname}${window.location.search}`;
@@ -173,58 +164,57 @@ function App() {
       )}
 
       <Routes>
-      {/* Corporate lane */}
-      <Route path="/corporate" element={<Outlet />}>
-        <Route index element={<CorporateLanding />} />
-        <Route path="landing" element={<CorporateLanding />} />
-        <Route path="login" element={<CorporateLogin />} />
-        <Route path="create-account" element={<CorporateCreateAccount />} />
-        <Route path="invite/:token" element={<CorporateInviteAccept />} />
+        {/* Corporate lane */}
+        <Route path="/corporate" element={<Outlet />}>
+          <Route index element={<CorporateLanding />} />
+          <Route path="landing" element={<CorporateLanding />} />
+          <Route path="login" element={<CorporateLogin />} />
+          <Route path="create-account" element={<CorporateCreateAccount />} />
+          <Route path="invite/:token" element={<CorporateInviteAccept />} />
 
-        <Route
-          element={
-            <CorporateProtectedRoute>
-              <CorporateShell />
-            </CorporateProtectedRoute>
-          }
-        >
-          <Route path="dashboard" element={<CorporateDashboard />} />
-          <Route path="calls" element={<CorporateCalls />} />
-          <Route path="broadcasts" element={<CorporateBroadcasts />} />
-          <Route path="broadcasts/:id/studio" element={<CorporateBroadcastStudio />} />
-          <Route path="broadcasts/:id/watch" element={<CorporateBroadcastViewer />} />
-          <Route path="chat" element={<CorporateChat />} />
-          <Route path="training" element={<CorporateTraining />} />
-          <Route path="documents" element={<CorporateDocuments />} />
-          <Route path="analytics" element={<CorporateAnalytics />} />
-          <Route path="admin" element={<CorporateAdminRoute><CorporateAdmin /></CorporateAdminRoute>} />
-          <Route path="*" element={<Navigate to="/corporate/dashboard" replace />} />
+          <Route
+            element={
+              <CorporateProtectedRoute>
+                <CorporateShell />
+              </CorporateProtectedRoute>
+            }
+          >
+            <Route path="dashboard" element={<CorporateDashboard />} />
+            <Route path="calls" element={<CorporateCalls />} />
+            <Route path="broadcasts" element={<CorporateBroadcasts />} />
+            <Route path="broadcasts/:id/studio" element={<CorporateBroadcastStudio />} />
+            <Route path="broadcasts/:id/watch" element={<CorporateBroadcastViewer />} />
+            <Route path="chat" element={<CorporateChat />} />
+            <Route path="training" element={<CorporateTraining />} />
+            <Route path="documents" element={<CorporateDocuments />} />
+            <Route path="analytics" element={<CorporateAnalytics />} />
+            <Route path="admin" element={<CorporateAdminRoute><CorporateAdmin /></CorporateAdminRoute>} />
+            <Route path="*" element={<Navigate to="/corporate/dashboard" replace />} />
+          </Route>
         </Route>
-      </Route>
 
-      {/* Legacy corporate URLs */}
-      <Route path="/streamline/corporate" element={<Navigate to="/corporate" replace />} />
-      <Route path="/streamline/corporate/landing" element={<Navigate to="/corporate/landing" replace />} />
-      <Route path="/streamline/corporate/login" element={<Navigate to="/corporate/login" replace />} />
-      <Route path="/streamline/corporate/create-account" element={<Navigate to="/corporate/create-account" replace />} />
-      <Route path="/streamline/corporate/invite/:token" element={<LegacyCorporateInviteRedirect />} />
-      <Route path="/streamline/corporate/dashboard" element={<Navigate to="/corporate/dashboard" replace />} />
-      <Route path="/streamline/corporate/calls" element={<Navigate to="/corporate/calls" replace />} />
-      <Route path="/streamline/corporate/broadcasts" element={<Navigate to="/corporate/broadcasts" replace />} />
-      <Route path="/streamline/corporate/chat" element={<Navigate to="/corporate/chat" replace />} />
-      <Route path="/streamline/corporate/training" element={<Navigate to="/corporate/training" replace />} />
-      <Route path="/streamline/corporate/documents" element={<Navigate to="/corporate/documents" replace />} />
-      <Route path="/streamline/corporate/analytics" element={<Navigate to="/corporate/analytics" replace />} />
-      <Route path="/streamline/corporate/admin" element={<Navigate to="/corporate/admin" replace />} />
+        {/* Legacy corporate URLs */}
+        <Route path="/streamline/corporate" element={<Navigate to="/corporate" replace />} />
+        <Route path="/streamline/corporate/landing" element={<Navigate to="/corporate/landing" replace />} />
+        <Route path="/streamline/corporate/login" element={<Navigate to="/corporate/login" replace />} />
+        <Route path="/streamline/corporate/create-account" element={<Navigate to="/corporate/create-account" replace />} />
+        <Route path="/streamline/corporate/invite/:token" element={<LegacyCorporateInviteRedirect />} />
+        <Route path="/streamline/corporate/dashboard" element={<Navigate to="/corporate/dashboard" replace />} />
+        <Route path="/streamline/corporate/calls" element={<Navigate to="/corporate/calls" replace />} />
+        <Route path="/streamline/corporate/broadcasts" element={<Navigate to="/corporate/broadcasts" replace />} />
+        <Route path="/streamline/corporate/chat" element={<Navigate to="/corporate/chat" replace />} />
+        <Route path="/streamline/corporate/training" element={<Navigate to="/corporate/training" replace />} />
+        <Route path="/streamline/corporate/documents" element={<Navigate to="/corporate/documents" replace />} />
+        <Route path="/streamline/corporate/analytics" element={<Navigate to="/corporate/analytics" replace />} />
+        <Route path="/streamline/corporate/admin" element={<Navigate to="/corporate/admin" replace />} />
 
-      {/* Public pages */}
-      <Route path="/privacy" element={<Privacy />} />
-      <Route path="/terms" element={<Terms />} />
-      <Route path="/support" element={<Support />} />
+        {/* Public pages */}
+        <Route path="/privacy" element={<Privacy />} />
+        <Route path="/terms" element={<Terms />} />
+        <Route path="/support" element={<Support />} />
 
-      {/* Catch-all → corporate landing */}
-      <Route path="*" element={<Navigate to="/streamline/corporate" replace />} />
-
+        {/* Catch-all -> corporate landing */}
+        <Route path="*" element={<Navigate to="/streamline/corporate" replace />} />
       </Routes>
     </LaneEnforcer>
   );
