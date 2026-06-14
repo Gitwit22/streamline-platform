@@ -6,10 +6,11 @@
  * - Fixed/PWYW: paywall until access code is redeemed
  * - Success redirect: shows access code after payment
  */
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { apiFetch } from "../lib/api";
 import { API_BASE } from "../lib/apiBase";
+import { HlsPlayer } from "./HlsPlayes";
 
 type MonetizationMode = "off" | "fixed" | "pwyw" | "donation";
 
@@ -66,6 +67,39 @@ export default function PpvViewer() {
 
   // Checkout
   const [checkingOut, setCheckingOut] = useState(false);
+
+  // HLS stream status and playlist URL (polled from public endpoint)
+  const [playlistUrl, setPlaylistUrl] = useState<string | null>(null);
+  const hlsPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!event?.roomId) return;
+    let stopped = false;
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const res = await fetch(`${API_BASE}/api/public/hls/${encodeURIComponent(event.roomId)}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data.playlistUrl) {
+            setPlaylistUrl(data.playlistUrl);
+          } else {
+            setPlaylistUrl(null);
+          }
+        }
+      } catch {}
+      if (!stopped) {
+        hlsPollRef.current = setTimeout(poll, 8000);
+      }
+    };
+
+    poll();
+    return () => {
+      stopped = true;
+      if (hlsPollRef.current) clearTimeout(hlsPollRef.current);
+    };
+  }, [event?.roomId]);
 
   // ── Load event ────────────────────────────────────────────────────
   useEffect(() => {
@@ -373,22 +407,29 @@ export default function PpvViewer() {
     );
   }
 
-  // ── Player placeholder ────────────────────────────────────────────
-  const PlayerPlaceholder = () => (
-    <div style={{
-      background: "#000",
-      borderRadius: 12,
-      aspectRatio: "16/9",
-      display: "flex",
-      alignItems: "center",
-      justifyContent: "center",
-      marginBottom: 16,
-      fontSize: 14,
-      color: "#666",
-    }}>
-      {event.status === "live" ? "🔴 Live Stream Player" : "Stream not yet live"}
-    </div>
-  );
+  // ── Player area ───────────────────────────────────────────────────
+  const PlayerArea = () =>
+    playlistUrl ? (
+      <HlsPlayer
+        playlistUrl={playlistUrl}
+        status={event.status}
+        autoPlay
+      />
+    ) : (
+      <div style={{
+        background: "#000",
+        borderRadius: 12,
+        aspectRatio: "16/9",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        marginBottom: 16,
+        fontSize: 14,
+        color: "#666",
+      }}>
+        {event.status === "live" ? "🔴 Stream starting…" : "Stream not yet live"}
+      </div>
+    );
 
   // ── Donation section ──────────────────────────────────────────────
   const DonationSection = () => (
@@ -450,7 +491,7 @@ export default function PpvViewer() {
             {new Date(event.startsAt).toLocaleString()}
           </p>
         )}
-        <PlayerPlaceholder />
+        <PlayerArea />
         <DonationSection />
       </div>
     );
@@ -461,7 +502,7 @@ export default function PpvViewer() {
     return (
       <div style={container}>
         <h1 style={{ fontSize: 20, marginBottom: 4 }}>{event.name}</h1>
-        <PlayerPlaceholder />
+        <PlayerArea />
       </div>
     );
   }
@@ -476,7 +517,7 @@ export default function PpvViewer() {
             {new Date(event.startsAt).toLocaleString()}
           </p>
         )}
-        <PlayerPlaceholder />
+        <PlayerArea />
         <p style={{ color: "#22c55e", fontSize: 13 }}>✓ Access granted</p>
       </div>
     );
