@@ -420,7 +420,7 @@ router.post("/enter", async (req: Request, res: Response) => {
 // GET /api/monetization/hls-rooms — returns rooms owned by the user that have HLS enabled
 router.get("/hls-rooms", requireAuth, async (req: Request, res: Response) => {
   try {
-    const uid = (req as any).uid;
+    const uid = (req as any).user?.uid;
     if (!uid) return res.status(401).json({ error: "unauthorized" });
 
     const snap = await db.collection("rooms").where("ownerId", "==", uid).get();
