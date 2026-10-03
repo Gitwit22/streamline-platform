@@ -4,7 +4,8 @@ import { PLAN_IDS, PlanId, isPlanId } from "../../lib/planIds";
 import { API_BASE } from "../../lib/apiBase";
 import { logAuthDebugContext } from "../../lib/logAuthDebug";
 import { useNavigate, useSearchParams,} from "react-router-dom";
-import { apiFetch, apiFetchAuth, clearAuthStorage } from "../../lib/api";
+import { apiFetchAuth } from "../../lib/api";
+import { logout } from "../../lib/logout";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
 import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
 import { usageLabels } from "../../lib/usageLabels";
@@ -1602,13 +1603,8 @@ export default function Join() {
         <div style={{ textAlign: "center" }}>
           <button
             onClick={async () => {
+              await logout();
               try {
-                await apiFetch("/api/auth/logout", { method: "POST" }, { allowNonOk: true });
-              } catch {
-                // ignore network errors; we'll still clear client state
-              }
-              try {
-                clearAuthStorage();
                 localStorage.removeItem("sl_displayName");
                 localStorage.removeItem("sl_created_rooms");
                 localStorage.removeItem("sl_current_role");

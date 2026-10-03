@@ -526,8 +526,11 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
 
       const storage = await deleteRecordingStorage(data);
 
-      // Release storage quota after R2 bytes are removed
-      if (fileSize > 0) {
+      // Release storage quota after R2 bytes are removed. Skip when another
+      // path (recordings DELETE, retention purge) already released it, or the
+      // doc is soft-deleted; otherwise the bytes are subtracted twice.
+      const alreadyReleased = data?.storageReleased === true || data?.status === "deleted";
+      if (fileSize > 0 && !alreadyReleased) {
         try {
           await releaseStorageUsage(userId, fileSize, {
             caller: "editing.DELETE.recording",
@@ -1422,7 +1425,14 @@ router.put("/:recordingId", async (req: Request, res: Response) => {
     // Update recording metadata
     const updateData: any = { updatedAt: new Date() };
     if (typeof duration === 'number') updateData.duration = duration;
-    if (status) updateData.status = status;
+    // Status is server-managed (recording/processing/ready/deleted drive
+    // retention and billing). Owners may only mark a recording as failed.
+    if (status !== undefined && status !== null && status !== "") {
+      if (status !== "failed") {
+        return res.status(400).json({ error: "status_not_editable" });
+      }
+      updateData.status = status;
+    }
     if (typeof viewerCount === 'number') updateData.viewerCount = viewerCount;
     if (typeof peakViewers === 'number') updateData.peakViewers = peakViewers;
 

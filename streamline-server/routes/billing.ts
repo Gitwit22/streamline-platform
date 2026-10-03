@@ -256,6 +256,15 @@ function priceIdFor(plan: PlanId, planMeta?: any) {
 type CheckoutPlanVariant = `${PlanId}_paid` | `${PlanId}_trial` | PlanId;
 
 function planIdFromStripeSubscription(sub: any): PlanId {
+  // The current price is authoritative: scheduled downgrades change the price
+  // but leave subscription metadata.plan at the old value.
+  const currentPriceId = sub?.items?.data?.[0]?.price?.id;
+  if (currentPriceId) {
+    if (currentPriceId === process.env.STRIPE_PRICE_STARTER) return "starter";
+    if (currentPriceId === process.env.STRIPE_PRICE_BASIC) return "basic";
+    if (currentPriceId === process.env.STRIPE_PRICE_PRO) return "pro";
+  }
+
   const metaPlan = String(sub?.metadata?.plan || "").trim();
   if (isPlanId(metaPlan as any)) return metaPlan as PlanId;
 

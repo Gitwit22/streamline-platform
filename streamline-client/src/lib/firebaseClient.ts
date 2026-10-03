@@ -5,6 +5,7 @@ import {
   type Auth,
   type User,
   signInWithCustomToken,
+  signOut,
   signInWithEmailAndPassword,
   sendPasswordResetEmail,
   type ActionCodeSettings,
@@ -102,4 +103,13 @@ export async function firebaseSignInWithEmailAndPassword(email: string, password
 export async function firebaseSendPasswordReset(email: string, actionCodeSettings?: ActionCodeSettings) {
   const auth = getFirebaseAuth();
   return sendPasswordResetEmail(auth, email, actionCodeSettings);
+}
+
+export async function firebaseSignOut(): Promise<void> {
+  if (!isFirebaseWebConfigured()) return;
+  try {
+    await signOut(getFirebaseAuth());
+  } catch {
+    // best-effort; local state is cleared by the caller regardless
+  }
 }

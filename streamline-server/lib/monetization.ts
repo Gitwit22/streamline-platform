@@ -217,6 +217,20 @@ export async function listMonetizedEventsByRoom(
   return snap.docs.map((d) => d.data() as MonetizedEvent);
 }
 
+/**
+ * True when the room has a non-ended event that requires payment (fixed/PWYW).
+ * Used to keep the HLS playlist URL off public endpoints for paywalled rooms.
+ * Single-field query so it doesn't depend on a composite index.
+ */
+export async function roomHasActivePaidEvent(roomId: string): Promise<boolean> {
+  const snap = await eventsCol().where("roomId", "==", roomId).get();
+  return snap.docs.some((d) => {
+    const e = d.data() as MonetizedEvent;
+    const paid = e.monetizationMode === "fixed" || e.monetizationMode === "pwyw";
+    return paid && e.status !== "ended";
+  });
+}
+
 // ---------------------------------------------------------------------------
 // CRUD — Purchase
 // ---------------------------------------------------------------------------
@@ -231,10 +245,21 @@ export interface CreatePurchaseInput {
   payerEmail?: string | null;
 }
 
+function isAlreadyExists(err: any): boolean {
+  return err?.code === 6 || err?.code === "already-exists" || /ALREADY_EXISTS/i.test(String(err?.message || ""));
+}
+
+/**
+ * Idempotent per Stripe checkout session: the purchase doc id is the session
+ * id, so a redelivered webhook returns the existing purchase (created=false)
+ * instead of recording a second one.
+ */
 export async function createPurchase(
   input: CreatePurchaseInput
-): Promise<Purchase> {
-  const ref = purchasesCol(input.eventId).doc();
+): Promise<Purchase & { created: boolean }> {
+  const ref = input.stripeCheckoutSessionId
+    ? purchasesCol(input.eventId).doc(input.stripeCheckoutSessionId)
+    : purchasesCol(input.eventId).doc();
   const purchase: Purchase = {
     id: ref.id,
     eventId: input.eventId,
@@ -247,8 +272,14 @@ export async function createPurchase(
     status: "paid",
     createdAt: FieldValue.serverTimestamp(),
   };
-  await ref.set(purchase);
-  return purchase;
+  try {
+    await ref.create(purchase);
+  } catch (err: any) {
+    if (!isAlreadyExists(err)) throw err;
+    const existing = await ref.get();
+    return { ...(existing.data() as Purchase), created: false };
+  }
+  return { ...purchase, created: true };
 }
 
 export async function getPurchaseBySessionId(
@@ -273,10 +304,14 @@ export interface CreateAccessCodeInput {
   codeHash: string;
 }
 
+/**
+ * One access code per purchase (doc id = purchaseId). Returns null when a code
+ * was already issued for this purchase (e.g. a redelivered webhook).
+ */
 export async function createAccessCode(
   input: CreateAccessCodeInput
-): Promise<AccessCode> {
-  const ref = accessCodesCol(input.eventId).doc();
+): Promise<AccessCode | null> {
+  const ref = accessCodesCol(input.eventId).doc(input.purchaseId);
   const code: AccessCode = {
     id: ref.id,
     eventId: input.eventId,
@@ -287,7 +322,12 @@ export async function createAccessCode(
     claimedDeviceId: null,
     createdAt: FieldValue.serverTimestamp(),
   };
-  await ref.set(code);
+  try {
+    await ref.create(code);
+  } catch (err: any) {
+    if (isAlreadyExists(err)) return null;
+    throw err;
+  }
   return code;
 }
 

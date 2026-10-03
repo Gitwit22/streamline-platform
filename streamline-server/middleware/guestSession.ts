@@ -12,7 +12,12 @@ export type GuestSessionClaims = {
 };
 
 function getGuestSessionSecret(): string {
-  return process.env.GUEST_SESSION_SECRET || process.env.JWT_SECRET || "dev-secret";
+  const raw = String(process.env.GUEST_SESSION_SECRET || process.env.JWT_SECRET || "").trim();
+  const env = String(process.env.NODE_ENV || "development").toLowerCase();
+  if ((env === "production" || env === "staging") && (!raw || raw === "dev-secret")) {
+    throw new Error("GUEST_SESSION_SECRET (or JWT_SECRET) must be set (no dev-secret in production)");
+  }
+  return raw || "dev-secret";
 }
 
 export function signGuestSession(

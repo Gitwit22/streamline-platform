@@ -108,6 +108,14 @@ export default function Live() {
   const [playerNonce, setPlayerNonce] = useState(0);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  // The <video> is conditionally rendered, so track the element in state too:
+  // the attach effect must rerun when a new element mounts (e.g. after an
+  // error -> live transition) even if the URL and nonce are unchanged.
+  const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null);
+  const setVideoRef = useCallback((el: HTMLVideoElement | null) => {
+    videoRef.current = el;
+    setVideoEl(el);
+  }, []);
   const hlsRef = useRef<Hls | null>(null);
   const hlsRetryCountRef = useRef(0);
 
@@ -307,9 +315,19 @@ export default function Live() {
   // NOTE: This hook MUST live before any conditional returns (isIgMode, etc.)
   // so that React hook call order is consistent across all renders.
   useEffect(() => {
-    const video = videoRef.current;
+    const video = videoEl;
     if (!playlistUrl || !video) return;
     if (manifestReadiness !== "ready") return;
+
+    // Timers scheduled by this attach; cleared on teardown so they can't act
+    // on a torn-down player or bump the nonce after unmount.
+    const timers: number[] = [];
+    const later = (fn: () => void, ms: number) => {
+      timers.push(window.setTimeout(fn, ms));
+    };
+    const clearTimers = () => {
+      for (const t of timers) window.clearTimeout(t);
+    };
 
     // reset state for a fresh attach
     setError(null);
@@ -328,6 +346,8 @@ export default function Live() {
 
       video.addEventListener("loadedmetadata", onMeta, { once: true });
       return () => {
+        video.removeEventListener("loadedmetadata", onMeta);
+        clearTimers();
         try {
           video.pause();
         } catch {
@@ -370,7 +390,7 @@ export default function Live() {
           snapToLiveEdge(video);
           void video.play().catch(() => {
             // autoplay blocked — try once more after a short delay.
-            window.setTimeout(() => void video.play().catch(() => {}), 1000);
+            later(() => void video.play().catch(() => {}), 1000);
           });
         };
 
@@ -378,7 +398,7 @@ export default function Live() {
 
         // Watchdog: if the video is still paused 5s after manifest parsed,
         // nudge play() in case the loadedmetadata event was already fired.
-        window.setTimeout(() => {
+        later(() => {
           if (video.paused) {
             snapToLiveEdge(video);
             void video.play().catch(() => {});
@@ -413,7 +433,7 @@ export default function Live() {
             hlsRetryCountRef.current += 1;
             console.info(`[hls] fatal error, auto-retry ${hlsRetryCountRef.current}/${MAX_AUTO_RETRIES}`);
             // Bump playerNonce after a short delay to fully remount the player.
-            window.setTimeout(() => setPlayerNonce((n) => n + 1), 2500);
+            later(() => setPlayerNonce((n) => n + 1), 2500);
           } else {
             hlsRetryCountRef.current = 0;
             setStatus("error");
@@ -442,6 +462,7 @@ export default function Live() {
       });
 
       return () => {
+        clearTimers();
         try {
           hls.destroy();
         } catch {
@@ -468,7 +489,7 @@ export default function Live() {
       setStatus("error");
       setError("HLS not supported in this browser.");
     }
-  }, [playlistUrl, manifestReadiness, playerNonce]);
+  }, [playlistUrl, manifestReadiness, playerNonce, videoEl]);
 
   // Apply audio settings ONLY (no src/hls work here). This ensures mute/volume
   // changes never recreate the player or reload the stream.
@@ -490,7 +511,7 @@ export default function Live() {
           <>
             <video
               key={playerNonce}
-              ref={videoRef}
+              ref={setVideoRef}
               className="w-full h-full object-cover"
               autoPlay
               muted={isMuted}
@@ -698,7 +719,7 @@ export default function Live() {
                   <>
                     <video
                       key={playerNonce}
-                      ref={videoRef}
+                      ref={setVideoRef}
                       className="w-full h-full object-contain"
                       autoPlay
                       muted={isMuted}

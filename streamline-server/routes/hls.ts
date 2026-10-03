@@ -16,6 +16,7 @@ import { evaluateUsageGate } from "../lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { deletePrefix } from "../lib/storageClient";
+import { roomHasActivePaidEvent } from "../lib/monetization";
 
 const router = Router();
 
@@ -98,9 +99,19 @@ router.get("/public/:roomId", async (req: any, res) => {
   try {
     const { data: room } = await getRoom(roomId);
     const hls = room.hls || {};
+    // Paywalled rooms only expose the playlist via /api/monetization/enter.
+    let paywalled = false;
+    if (hls.playlistUrl) {
+      try {
+        paywalled = await roomHasActivePaidEvent(roomId);
+      } catch {
+        paywalled = true;
+      }
+    }
     return res.json({
       status: hls.status || "idle",
-      playlistUrl: hls.playlistUrl || null,
+      playlistUrl: paywalled ? null : hls.playlistUrl || null,
+      paywalled: paywalled || undefined,
     });
   } catch (e: any) {
     if (e?.message === PERMISSION_ERRORS.ROOM_NOT_FOUND) {
@@ -339,22 +350,28 @@ router.get("/status/:roomId", requireAuth as any, requireRoomAccessToken as any,
       throw err;
     }
 
-    const ownerUid = String((room as any).ownerId || uid).trim() || uid;
-    const featureAccess = await canAccessFeature(ownerUid, "hls");
-    if (!featureAccess.allowed) {
-      if (featureAccess.code === LIMIT_ERRORS.FEATURE_DISABLED) {
+    const hls = room.hls || {};
+
+    // Entitlement only matters when nothing is running. An in-flight egress
+    // must stay observable (and cap auto-stop below must keep working) even if
+    // HLS was kill-switched or the plan was downgraded mid-stream.
+    const hlsActive = (hls as any).status === "live" || (hls as any).status === "starting";
+    if (!hlsActive) {
+      const ownerUid = String((room as any).ownerId || uid).trim() || uid;
+      const featureAccess = await canAccessFeature(ownerUid, "hls");
+      if (!featureAccess.allowed) {
+        if (featureAccess.code === LIMIT_ERRORS.FEATURE_DISABLED) {
+          return res.status(403).json({
+            error: featureAccess.code,
+            reason: featureAccess.reason || "HLS is temporarily disabled",
+          });
+        }
         return res.status(403).json({
-          error: featureAccess.code,
-          reason: featureAccess.reason || "HLS is temporarily disabled",
+          error: "hls_not_in_plan",
+          reason: featureAccess.reason || "HLS is not available on your plan",
         });
       }
-      return res.status(403).json({
-        error: "hls_not_in_plan",
-        reason: featureAccess.reason || "HLS is not available on your plan",
-      });
     }
-
-    const hls = room.hls || {};
 
     // Option B (MVP): enforce cap on status polling.
     // If stopAt has passed and status is live, stop egress and mark idle.
@@ -460,20 +477,8 @@ router.post("/stop/:roomId", requireAuth as any, requireRoomAccessToken as any, 
     }
 
     const ownerUid = String((room as any).ownerId || uid).trim() || uid;
-    const featureAccess = await canAccessFeature(ownerUid, "hls");
-    if (!featureAccess.allowed) {
-      if (featureAccess.code === LIMIT_ERRORS.FEATURE_DISABLED) {
-        return res.status(403).json({
-          error: featureAccess.code,
-          reason: featureAccess.reason || "HLS is temporarily disabled",
-        });
-      }
-      return res.status(403).json({
-        error: "hls_not_in_plan",
-        reason: featureAccess.reason || "HLS is not available on your plan",
-      });
-    }
-
+    // No entitlement check here: stopping must always work, including when
+    // HLS is kill-switched or the plan changed while live.
     const hls = room.hls || {};
     const egressId = hls.egressId;
 

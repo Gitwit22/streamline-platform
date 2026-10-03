@@ -82,7 +82,6 @@ import { uploadVideo } from "./lib/storageClient";
 console.log("CLIENT_URL:", process.env.CLIENT_URL);
 
 const PORT = process.env.PORT || 5137;
-const JWT_SECRET = process.env.JWT_SECRET || "dev-secret";
 
 
 const app = express();
@@ -206,8 +205,29 @@ app.use(
 app.use("/api/webhooks", webhookRouter);
 
 // Body parsers for the rest of the API
-app.use(express.json());
+// Keep the raw bytes for routes that verify HMAC signatures over the body
+// (e.g. Horizon bot /events) but are mounted after this global parser.
+app.use(
+  express.json({
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(express.urlencoded({ extended: true }));
+// CSRF: the session cookie is SameSite=None, so a cross-site form POST would
+// carry it. For state-changing requests from a browser Origin we don't trust,
+// drop the cookies before parsing so the request is treated as unauthenticated
+// (Bearer-token and server-to-server callers, which send no Origin, are unaffected).
+app.use((req, _res, next) => {
+  const method = req.method.toUpperCase();
+  if (method === "GET" || method === "HEAD" || method === "OPTIONS") return next();
+  const origin = req.headers.origin;
+  if (typeof origin === "string" && origin && !allowedOrigins.has(normalizeOrigin(origin))) {
+    delete req.headers.cookie;
+  }
+  next();
+});
 app.use(cookieParser());
 
 // Egress compositor templates – served as static HTML so LiveKit's headless

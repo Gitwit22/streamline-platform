@@ -908,10 +908,20 @@ router.post("/forgot-password/reset", async (req, res) => {
         passwordHash,
         passwordReset: nextPasswordReset,
         recovery: nextRecovery,
+        // Invalidate sessions issued before the reset (e.g. an attacker's token).
+        // Floor to the second: JWT iat is in seconds, and the new session token
+        // below is issued within this same second.
+        authRevokedAtMs: Math.floor(now / 1000) * 1000,
         updatedAt: now,
       },
       { merge: true }
     );
+
+    try {
+      await firebaseAuth.revokeRefreshTokens(uid);
+    } catch (err: any) {
+      console.warn("[auth] revokeRefreshTokens after password reset failed:", err?.message || err);
+    }
 
     const token = signLegacySessionToken(uid);
     const customToken = await ensureFirebaseCustomToken(uid, String(user.email || loginNorm), String(newPassword));

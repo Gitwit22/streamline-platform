@@ -45,7 +45,12 @@ export function getHorizonWebhookConfig(): HorizonWebhookConfig {
  *  Uses constant-time comparison to prevent timing attacks. */
 export function verifyHorizonSecret(bearerToken: string | undefined): boolean {
   const secret = getHorizonWebhookConfig().webhookSecret;
-  if (!secret) return true; // no secret configured → allow (internal network trust)
+  if (!secret) {
+    // Fail closed: these endpoints are reachable from the public internet, so
+    // "no secret" must not mean "no auth". Local dev/test can opt out.
+    const env = String(process.env.NODE_ENV || "").toLowerCase();
+    return env === "development" || env === "test" || process.env.HORIZON_ALLOW_UNAUTHENTICATED === "1";
+  }
   if (!bearerToken) return false;
   const raw = bearerToken.startsWith("Bearer ") ? bearerToken.slice(7) : bearerToken;
   const a = Buffer.from(raw);

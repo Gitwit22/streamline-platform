@@ -11,38 +11,51 @@ export function useHlsReadiness(manifestUrl: string | null, resetKey?: unknown) 
       return;
     }
 
+    // A new URL (or reset) must be re-probed; don't inherit "ready".
+    setStatus("starting");
+
     let cancelled = false;
     let attempt = 0;
+    let timer: number | undefined;
 
     async function tick() {
       if (cancelled) return;
 
-      const url = `${manifestUrl}${manifestUrl.includes("?") ? "&" : "?"}t=${Date.now()}`;
+      const url = `${manifestUrl}${manifestUrl!.includes("?") ? "&" : "?"}t=${Date.now()}`;
 
+      let ready = false;
       try {
-        setStatus((s) => (s === "ready" ? "ready" : "starting"));
-        // Use no-cors so CORS-restricted origins (e.g. R2 without a CORS policy)
-        // resolve as opaque responses rather than throwing a TypeError.
-        // An opaque response (type === "opaque") means the server responded —
-        // treat it as ready and let hls.js handle any segment-level retries.
-        const res = await fetch(url, { method: "GET", cache: "no-store", mode: "no-cors" });
-
-        if (!cancelled && (res.ok || res.type === "opaque")) {
-          setStatus("ready");
-          return;
-        }
+        // CORS fetch first so a 404/403 (manifest not uploaded yet) is visible.
+        // hls.js needs CORS on the origin anyway, so this normally succeeds.
+        const res = await fetch(url, { method: "GET", cache: "no-store" });
+        ready = res.ok;
       } catch {
-        // Genuine network error (DNS failure, offline, etc.); keep polling.
+        // CORS-blocked or network error. Native HLS (Safari) can still play a
+        // non-CORS origin, so fall back to an opaque probe: it can't see the
+        // status code, but proves the origin responded.
+        try {
+          const res = await fetch(url, { method: "GET", cache: "no-store", mode: "no-cors" });
+          ready = res.type === "opaque";
+        } catch {
+          // Genuine network error (DNS failure, offline, etc.); keep polling.
+        }
+      }
+
+      if (cancelled) return;
+      if (ready) {
+        setStatus("ready");
+        return;
       }
 
       attempt++;
       const delayMs = Math.min(1000 + attempt * 250, 3000);
-      window.setTimeout(tick, delayMs);
+      timer = window.setTimeout(tick, delayMs);
     }
 
     tick();
     return () => {
       cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
     };
   }, [manifestUrl, resetKey]);
 

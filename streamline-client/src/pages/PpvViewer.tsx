@@ -9,7 +9,6 @@
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { apiFetch } from "../lib/api";
-import { API_BASE } from "../lib/apiBase";
 import { HlsPlayer } from "./HlsPlayes";
 
 type MonetizationMode = "off" | "fixed" | "pwyw" | "donation";
@@ -68,25 +67,33 @@ export default function PpvViewer() {
   // Checkout
   const [checkingOut, setCheckingOut] = useState(false);
 
-  // HLS stream status and playlist URL (polled from public endpoint)
+  // HLS playlist URL. Comes from the access-gated /enter endpoint (the public
+  // HLS endpoint withholds it for paywalled rooms), so only poll once the
+  // viewer has access.
   const [playlistUrl, setPlaylistUrl] = useState<string | null>(null);
   const hlsPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (!event?.roomId) return;
+    if (!eventId || !event?.roomId || !hasAccess) return;
     let stopped = false;
 
     const poll = async () => {
       if (stopped) return;
       try {
-        const res = await fetch(`${API_BASE}/api/public/hls/${encodeURIComponent(event.roomId)}`);
+        const res = await apiFetch("/api/monetization/enter", {
+          method: "POST",
+          body: JSON.stringify({ eventId }),
+        }, { allowNonOk: true });
+        if (stopped) return;
         if (res.ok) {
           const data = await res.json();
-          if (data.playlistUrl) {
-            setPlaylistUrl(data.playlistUrl);
-          } else {
+          if (stopped) return;
+          if (!data.access) {
+            setHasAccess(false);
             setPlaylistUrl(null);
+            return;
           }
+          setPlaylistUrl(data.playlistUrl || null);
         }
       } catch {}
       if (!stopped) {
@@ -99,26 +106,31 @@ export default function PpvViewer() {
       stopped = true;
       if (hlsPollRef.current) clearTimeout(hlsPollRef.current);
     };
-  }, [event?.roomId]);
+  }, [eventId, event?.roomId, hasAccess]);
 
   // ── Load event ────────────────────────────────────────────────────
   useEffect(() => {
     if (!eventId) return;
+    let cancelled = false;
     (async () => {
       try {
-        const res = await apiFetch(`/api/monetization/events/${eventId}`, {}, { allowNonOk: true });
+        const res = await apiFetch(`/api/monetization/events/${encodeURIComponent(eventId)}`, {}, { allowNonOk: true });
+        if (cancelled) return;
         if (!res.ok) {
           setError("Event not found");
           return;
         }
         const data = await res.json();
-        setEvent(data.event);
+        if (!cancelled) setEvent(data.event);
       } catch (err: any) {
-        setError("Failed to load event");
+        if (!cancelled) setError("Failed to load event");
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [eventId]);
 
   // ── Check access (gate) ──────────────────────────────────────────
@@ -408,7 +420,9 @@ export default function PpvViewer() {
   }
 
   // ── Player area ───────────────────────────────────────────────────
-  const PlayerArea = () =>
+  // Plain elements, not inner components: an inner component is a new type on
+  // every render, which would remount HlsPlayer and the donation input.
+  const playerArea =
     playlistUrl ? (
       <HlsPlayer
         playlistUrl={playlistUrl}
@@ -432,7 +446,7 @@ export default function PpvViewer() {
     );
 
   // ── Donation section ──────────────────────────────────────────────
-  const DonationSection = () => (
+  const donationSection = (
     <div style={card}>
       <h3 style={{ fontSize: 15, marginBottom: 12 }}>Support this stream</h3>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
@@ -491,8 +505,8 @@ export default function PpvViewer() {
             {new Date(event.startsAt).toLocaleString()}
           </p>
         )}
-        <PlayerArea />
-        <DonationSection />
+        {playerArea}
+        {donationSection}
       </div>
     );
   }
@@ -502,7 +516,7 @@ export default function PpvViewer() {
     return (
       <div style={container}>
         <h1 style={{ fontSize: 20, marginBottom: 4 }}>{event.name}</h1>
-        <PlayerArea />
+        {playerArea}
       </div>
     );
   }
@@ -517,7 +531,7 @@ export default function PpvViewer() {
             {new Date(event.startsAt).toLocaleString()}
           </p>
         )}
-        <PlayerArea />
+        {playerArea}
         <p style={{ color: "#22c55e", fontSize: 13 }}>✓ Access granted</p>
       </div>
     );

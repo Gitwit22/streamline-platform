@@ -2,6 +2,7 @@ import { Router } from "express";
 import { getRoom } from "../services/rooms";
 import { getLiveKitSdk } from "../lib/livekit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { roomHasActivePaidEvent } from "../lib/monetization";
 
 const router = Router();
 
@@ -62,9 +63,23 @@ router.get("/:roomId", async (req: any, res) => {
       }
     }
 
+    // Paywalled rooms: never expose the playlist publicly. Viewers get it from
+    // POST /api/monetization/enter once their device has a claimed code.
+    // Fail closed if the lookup errors.
+    let paywalled = false;
+    if (isLive) {
+      try {
+        paywalled = await roomHasActivePaidEvent(roomId);
+      } catch (err: any) {
+        console.warn("[publicHls] paywall lookup failed", err?.message || err);
+        paywalled = true;
+      }
+    }
+
     return res.json({
       status: isLive ? "live" : "idle",
-      playlistUrl: isLive ? hls.playlistUrl : null,
+      playlistUrl: isLive && !paywalled ? hls.playlistUrl : null,
+      paywalled: paywalled || undefined,
       viewerCount: viewerCount ?? undefined,
     });
   } catch (e: any) {

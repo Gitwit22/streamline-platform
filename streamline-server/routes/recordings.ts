@@ -18,6 +18,7 @@
  */
 
 import { Router } from "express";
+import crypto from "crypto";
 import { firestore } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "../middleware/roomAccessToken";
@@ -44,6 +45,7 @@ import { resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { createSavedVideoFromRecording } from "./myContent";
 import { releaseStorageUsage, reserveStorageUsage } from "../usageHelper";
+import { requireAdmin } from "../middleware/adminAuth";
 
 const router = Router();
 
@@ -1368,7 +1370,20 @@ router.post(
 // Intended for a scheduled job / admin trigger
 // =============================================================================
 
-router.post("/sweep", async (_req, res) => {
+// Cron callers send x-maintenance-key (same key as /api/maintenance); anyone
+// else must be an admin.
+function requireMaintenanceOrAdmin(req: any, res: any, next: any) {
+  const key = String(process.env.MAINTENANCE_KEY || "").trim();
+  const headerKey = String(req.headers["x-maintenance-key"] || "").trim();
+  if (key && headerKey) {
+    const a = Buffer.from(headerKey);
+    const b = Buffer.from(key);
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) return next();
+  }
+  return requireAdmin(req, res, next);
+}
+
+router.post("/sweep", requireMaintenanceOrAdmin, async (_req, res) => {
   const now = new Date();
   console.log("[recordings/sweep] Starting sweep at", now.toISOString());
 
@@ -1411,10 +1426,11 @@ router.post("/sweep", async (_req, res) => {
 // POST /stop - Stop Recording
 // =============================================================================
 
+// No requireMyContentRecordingsEnabled here: a running egress must always be
+// stoppable, even if recordings were kill-switched mid-session.
 router.post(
   "/stop",
   requireAuth,
-  requireMyContentRecordingsEnabled as any,
   requireRoomAccessToken as any,
   async (req, res) => {
   console.log("[recordings/stop] Request received");
@@ -1497,6 +1513,12 @@ router.post(
     // =========================================================================
     let usageCountedAlready = false;
 
+    // Account against the recording's owner (who started it and holds the
+    // activeRecordings lock), not whoever pressed stop (e.g. a cohost).
+    const accountUid: string = typeof (data as any).userId === "string" && (data as any).userId.trim()
+      ? (data as any).userId.trim()
+      : uid;
+
     const usageType = typeof data.usageType === "string" ? data.usageType : "recording_only";
 
     await firestore.runTransaction(async (tx) => {
@@ -1505,7 +1527,7 @@ router.post(
       const recData = recSnap.data() || {};
 
       const monthKey = getCurrentMonthKey();
-      const usageRef = firestore.collection("usageMonthly").doc(`${uid}_${monthKey}`);
+      const usageRef = firestore.collection("usageMonthly").doc(`${accountUid}_${monthKey}`);
       const usageSnap = await tx.get(usageRef);
       const existingUsage = usageSnap.exists ? (usageSnap.data() as any) : {};
       const usage = existingUsage.usage || {};
@@ -1596,7 +1618,7 @@ router.post(
       tx.set(
         usageRef,
         {
-          uid,
+          uid: accountUid,
           monthKey,
           usage: {
             ...usage,
@@ -1621,7 +1643,7 @@ router.post(
       const roomName = typeof data.roomName === "string" ? data.roomName : null;
       const roomKey = roomId || roomName;
       if (roomKey) {
-        const activeKey = `${uid}_${roomKey}`;
+        const activeKey = `${accountUid}_${roomKey}`;
         const activeRef = firestore.collection("activeRecordings").doc(activeKey);
         await activeRef.set(
           {
@@ -1661,16 +1683,16 @@ router.post(
             console.log(`[recordings/stop] ✅ File confirmed via head-check: ${objectKey} (${size} bytes)`);
 
             // Count storage for this recording (only if not already counted by webhook)
-            if (!alreadyCounted && uid) {
+            if (!alreadyCounted && accountUid) {
               try {
-                await reserveStorageUsage(uid, size, {
+                await reserveStorageUsage(accountUid, size, {
                   caller: "recordings.stop.headcheck",
                   recordingId,
                   objectKey,
                 });
               } catch (e: any) {
                 console.error("[recordings/stop] storage accounting failed:", {
-                  userId: uid, recordingId, size, error: e?.message || e,
+                  userId: accountUid, recordingId, size, error: e?.message || e,
                 });
               }
             }
@@ -1682,7 +1704,7 @@ router.post(
               const thumbUrl = typeof data.thumbnailUrl === "string" ? data.thumbnailUrl : null;
               const durationSec = typeof data.durationSeconds === "number" ? data.durationSeconds : null;
               await createSavedVideoFromRecording({
-                userId: uid,
+                userId: accountUid,
                 recordingId,
                 title: roomName || data.title || "Untitled Recording",
                 playbackUrl: videoUrl,

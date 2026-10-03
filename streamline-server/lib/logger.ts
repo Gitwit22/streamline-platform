@@ -17,7 +17,17 @@ export const logger = pino({
       "req.headers.authorization",
       "req.headers.cookie",
       'req.headers["x-room-access-token"]',
+      // Room-access (?t=) and guest-session (?gst=) tokens ride in the query
+      // string for SSE; keep them out of request logs.
+      "req.url",
+      "req.query.t",
+      "req.query.gst",
     ],
-    censor: "[REDACTED]",
+    censor: (value: unknown, path: string[]) => {
+      if (path[path.length - 1] === "url" && typeof value === "string") {
+        return value.replace(/([?&](?:t|gst|token)=)[^&#]*/gi, "$1[REDACTED]");
+      }
+      return "[REDACTED]";
+    },
   },
 });

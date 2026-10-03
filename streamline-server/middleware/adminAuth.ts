@@ -77,6 +77,7 @@ export async function requireAdmin(
 ): Promise<void> {
   try {
     let userId: string | null = null;
+    let iatSec: number | null = null;
     let jwtSource = null;
 
     // 1. Try JWT in httpOnly cookie ('token')
@@ -84,6 +85,7 @@ export async function requireAdmin(
       try {
         const user = jwt.verify(req.cookies.token, getJwtSecret()) as any;
         userId = user.uid || user.id || null;
+        iatSec = typeof user.iat === "number" ? user.iat : null;
         jwtSource = 'cookie';
       } catch (err) {
         console.warn('[requireAdmin] Invalid JWT in cookie:', err?.message || err);
@@ -98,6 +100,7 @@ export async function requireAdmin(
         try {
           const user = jwt.verify(token, getJwtSecret()) as any;
           userId = user.uid || user.id || null;
+          iatSec = typeof user.iat === "number" ? user.iat : null;
           jwtSource = 'header';
         } catch (err) {
           console.warn('[requireAdmin] Invalid JWT in Authorization header:', err?.message || err);
@@ -128,6 +131,18 @@ export async function requireAdmin(
       const userDoc = await firestore.collection("users").doc(userId).get();
       userData = userDoc.data() || {};
     } catch {}
+
+    // Same session checks as requireAuth: deleted accounts and tokens issued
+    // before a revocation ("log out everywhere", password reset) are rejected.
+    if (typeof userData.deletedAtMs === "number" && userData.deletedAtMs > 0) {
+      res.status(403).json({ error: "account_deleted" });
+      return;
+    }
+    const revokedAtMs = typeof userData.authRevokedAtMs === "number" ? userData.authRevokedAtMs : null;
+    if (revokedAtMs && revokedAtMs > 0 && (iatSec === null || iatSec * 1000 < revokedAtMs)) {
+      res.status(401).json({ error: "session_revoked" });
+      return;
+    }
 
     req.adminUser = {
       uid: userId,

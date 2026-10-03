@@ -349,6 +349,14 @@ function planIdFromPrice(priceId?: string) {
 }
 
 function canonicalPlanFromSubscription(subscription: any): "free" | "starter" | "basic" | "pro" {
+  // The current price is authoritative: scheduled downgrades change the price
+  // but leave subscription metadata.plan at the old value.
+  const currentPriceId = subscription?.items?.data?.[0]?.price?.id;
+  const fromCurrentPrice = planIdFromPrice(currentPriceId);
+  if (fromCurrentPrice === "starter" || fromCurrentPrice === "basic" || fromCurrentPrice === "pro") {
+    return fromCurrentPrice;
+  }
+
   const metaPlan = String(subscription?.metadata?.plan || "").trim();
   if (metaPlan === "free" || metaPlan === "starter" || metaPlan === "basic" || metaPlan === "pro") {
     return metaPlan;
@@ -612,6 +620,15 @@ router.post(
 
           // ── Monetization one-time payments ──────────────────────────
           if (session.metadata?.source === "streamline_monetization") {
+            // Delayed payment methods complete checkout before funds settle;
+            // never issue access for an unpaid session.
+            if (session.payment_status !== "paid" && session.payment_status !== "no_payment_required") {
+              console.warn("[stripe-webhook] Monetization session not paid; skipping", {
+                sessionId: session.id,
+                paymentStatus: session.payment_status,
+              });
+              break;
+            }
             try {
               const {
                 createPurchase,
@@ -647,11 +664,19 @@ router.post(
               if (mType === "access") {
                 const rawCode = generateAccessCode();
                 const codeHash = hashAccessCode(rawCode);
-                await createAccessCode({
+                const issued = await createAccessCode({
                   eventId: mEventId,
                   purchaseId: purchase.id,
                   codeHash,
                 });
+                if (!issued) {
+                  console.log("[stripe-webhook] Monetization access code already issued (redelivery)", {
+                    eventId: mEventId,
+                    purchaseId: purchase.id,
+                    sessionId: session.id,
+                  });
+                  break;
+                }
                 storeRawCode(session.id, rawCode);
                 console.log("[stripe-webhook] Monetization access code issued", {
                   eventId: mEventId,
@@ -670,6 +695,9 @@ router.post(
                 "[stripe-webhook] Monetization processing error:",
                 mErr?.message
               );
+              // Rethrow so the handler returns 500 and Stripe retries; the
+              // purchase/code writes above are idempotent per session.
+              throw mErr;
             }
             break;
           }

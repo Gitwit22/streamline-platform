@@ -9,7 +9,11 @@
 import type { Request, Response, NextFunction } from "express";
 import { logger } from "../lib/logger";
 
-const isProduction = String(process.env.NODE_ENV || "development").toLowerCase() === "production";
+// Fail closed: only expose error messages/stacks when explicitly running in
+// development or test. An unset NODE_ENV (e.g. a misconfigured deploy) must
+// not leak internals to clients.
+const nodeEnv = String(process.env.NODE_ENV || "").toLowerCase();
+const isProduction = !(nodeEnv === "development" || nodeEnv === "test");
 
 export function globalErrorHandler(
   err: any,

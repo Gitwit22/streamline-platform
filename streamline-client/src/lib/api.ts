@@ -183,6 +183,23 @@ export async function apiFetchAuth(
   }
 
   if (res.status === 401) {
+    // A retry that gets past 401 is returned (or thrown as a normal HTTP error)
+    // outside the try/catch blocks so a 403/500 isn't mistaken for a logout.
+    let recoveredRes: Response | null = null;
+    const finishRecovered = async (retryRes: Response) => {
+      if (!options?.allowNonOk && !retryRes.ok) {
+        let errBody: any = null;
+        try {
+          errBody = await retryRes.json();
+        } catch {}
+        throw Object.assign(new Error(`HTTP ${retryRes.status}`), {
+          status: retryRes.status,
+          body: errBody,
+        });
+      }
+      return retryRes;
+    };
+
     // Firebase tokens can expire; attempt a single force-refresh retry.
     if (!hadExplicitAuthHeader && tokenSource === "firebase") {
       try {
@@ -192,22 +209,13 @@ export async function apiFetchAuth(
           retryHeaders.set("Authorization", `Bearer ${refreshed}`);
           const retryRes = await apiFetch(path, { ...init, headers: retryHeaders }, { allowNonOk: true });
           if (retryRes.status !== 401) {
-            if (!options?.allowNonOk && !retryRes.ok) {
-              let errBody: any = null;
-              try {
-                errBody = await retryRes.json();
-              } catch {}
-              throw Object.assign(new Error(`HTTP ${retryRes.status}`), {
-                status: retryRes.status,
-                body: errBody,
-              });
-            }
-            return retryRes;
+            recoveredRes = retryRes;
           }
         }
       } catch {
         // ignore refresh failures; fall through to unauthorized handling
       }
+      if (recoveredRes) return finishRecovered(recoveredRes);
     }
 
     // Tiny but high ROI: a single retry can recover from multi-tab token updates
@@ -220,22 +228,13 @@ export async function apiFetchAuth(
           retryHeaders.set("Authorization", `Bearer ${nextToken}`);
           const retryRes = await apiFetch(path, { ...init, headers: retryHeaders }, { allowNonOk: true });
           if (retryRes.status !== 401) {
-            if (!options?.allowNonOk && !retryRes.ok) {
-              let errBody: any = null;
-              try {
-                errBody = await retryRes.json();
-              } catch {}
-              throw Object.assign(new Error(`HTTP ${retryRes.status}`), {
-                status: retryRes.status,
-                body: errBody,
-              });
-            }
-            return retryRes;
+            recoveredRes = retryRes;
           }
         }
       } catch {
         // ignore retry failures; fall through to unauthorized handling
       }
+      if (recoveredRes) return finishRecovered(recoveredRes);
     }
 
     if (!suppressAuthSideEffects) {

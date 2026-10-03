@@ -386,6 +386,21 @@ router.post("/redeem", async (req: Request, res: Response) => {
   }
 });
 
+// Playlist URL for a live HLS room, or null. Only returned to viewers who
+// passed the access gate below (the public HLS endpoint withholds it for
+// paywalled rooms).
+async function livePlaylistUrl(roomId: string | null | undefined): Promise<string | null> {
+  if (!roomId) return null;
+  try {
+    const snap = await db.collection("rooms").doc(roomId).get();
+    const hls = (snap.data() as any)?.hls || {};
+    const url = String(hls.playlistUrl || "").trim();
+    return hls.status === "live" && url ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // POST /enter – gate check: can viewer watch?
 // ---------------------------------------------------------------------------
@@ -399,7 +414,7 @@ router.post("/enter", async (req: Request, res: Response) => {
 
     // Donation mode: always ok
     if (event.monetizationMode === "donation" || event.monetizationMode === "off") {
-      return res.json({ ok: true, access: true });
+      return res.json({ ok: true, access: true, playlistUrl: await livePlaylistUrl(event.roomId) });
     }
 
     // Paid modes: check device cookie
@@ -409,7 +424,7 @@ router.post("/enter", async (req: Request, res: Response) => {
       return res.json({ ok: true, access: false, reason: "no_claimed_code" });
     }
 
-    return res.json({ ok: true, access: true });
+    return res.json({ ok: true, access: true, playlistUrl: await livePlaylistUrl(event.roomId) });
   } catch (err: any) {
     console.error("[monetization] enter error:", err?.message);
     return res.status(500).json({ error: "internal_error" });

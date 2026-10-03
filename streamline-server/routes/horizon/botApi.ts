@@ -113,7 +113,13 @@ router.post(
     try {
       // ── HMAC signature verification ──────────────────────────────
       const cfg = getHorizonWebhookConfig();
-      const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(String(req.body));
+      // The global express.json() runs first, so req.body is usually already
+      // parsed; use the raw bytes it captured for signature verification.
+      const rawBody: Buffer = Buffer.isBuffer(req.body)
+        ? req.body
+        : Buffer.isBuffer((req as any).rawBody)
+          ? (req as any).rawBody
+          : Buffer.from(JSON.stringify(req.body ?? null));
       if (cfg.webhookSecret) {
         const sigHeader = req.headers["x-horizon-signature"] as string | undefined;
         if (!verifySignature(cfg.webhookSecret, rawBody, sigHeader)) {

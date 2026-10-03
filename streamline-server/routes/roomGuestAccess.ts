@@ -260,19 +260,32 @@ function roleGrant(role: "guest" | "participant" | "host", presenceMode?: Presen
     ? applyPresenceModeToGrant(participantPerm, presenceMode)
     : participantPerm;
 
-  // NOTE: canPublishSources is intentionally omitted from the LiveKit grant.
-  // livekit-server-sdk v2.x expects TrackSource enum (protobuf int) values, not
-  // the string literals our permission layer uses. Omitting it is safe because
-  // canPublish: true already allows all sources at the LiveKit level; fine-grained
-  // source control is enforced at the application layer via our own permissions.
+  // Enforce allowed sources at the LiveKit level, not just in our app layer,
+  // so a modified client can't e.g. screen-share as a guest. The SDK expects
+  // protobuf TrackSource enum values (it converts them to strings in toJwt).
+  const canPublishSources = effectivePerm.canPublish
+    ? effectivePerm.canPublishSources
+        .map((src) => LIVEKIT_TRACK_SOURCE_ENUM[src])
+        .filter((n): n is number => typeof n === "number")
+    : [];
+
   return {
     roomJoin: true,
     canSubscribe: effectivePerm.canSubscribe,
     canPublish: effectivePerm.canPublish,
     canPublishData: effectivePerm.canPublishData,
+    ...(canPublishSources.length ? { canPublishSources } : {}),
     roomAdmin: isHost,
   } as const;
 }
+
+// livekit.TrackSource protobuf values (@livekit/protocol).
+const LIVEKIT_TRACK_SOURCE_ENUM: Record<string, number> = {
+  camera: 1,
+  microphone: 2,
+  screen_share: 3,
+  screen_share_audio: 4,
+};
 
 const router = Router();
 
@@ -1386,6 +1399,21 @@ router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
     // Policy: room must allow guests
     if (!allowGuests) {
       return res.status(403).json({ error: "guests_not_allowed" });
+    }
+
+    // Policy: same room gates as /token. Anonymous direct join must not get
+    // into private or paid rooms, or rooms that explicitly require login.
+    // (requiresAuth defaults to true on /token; here only an explicit `true`
+    // is enforced so existing open rooms keep working.)
+    const visibility = typeof room.visibility === "string" ? room.visibility.trim().toLowerCase() : "";
+    if (visibility === "private") {
+      return res.status(403).json({ error: "not_allowed" });
+    }
+    if (room.requiresPayment === true) {
+      return res.status(402).json({ error: "payment_required" });
+    }
+    if (room.requiresAuth === true) {
+      return res.status(401).json({ error: "login_required" });
     }
 
     // Policy: room must be live for direct guest join (unless env override)

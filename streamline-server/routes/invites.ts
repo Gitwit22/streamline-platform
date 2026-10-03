@@ -18,7 +18,12 @@ type InviteTokenClaims = {
 };
 
 function getInviteSecret(): string {
-  return process.env.INVITE_TOKEN_SECRET || process.env.JWT_SECRET || "dev-secret";
+  const raw = String(process.env.INVITE_TOKEN_SECRET || process.env.JWT_SECRET || "").trim();
+  const env = String(process.env.NODE_ENV || "development").toLowerCase();
+  if ((env === "production" || env === "staging") && (!raw || raw === "dev-secret")) {
+    throw new Error("INVITE_TOKEN_SECRET (or JWT_SECRET) must be set (no dev-secret in production)");
+  }
+  return raw || "dev-secret";
 }
 
 function requiresAuthForRole(role: InviteRole): boolean {
