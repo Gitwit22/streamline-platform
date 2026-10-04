@@ -4,6 +4,7 @@ import { apiFetchAuth } from "../../lib/api";
 import { editingApi } from "../../lib/editingApi";
 import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
+import StreamSummaryCard from "../components/StreamSummaryCard";
 // downloadService no longer used for direct downloads; we rely on signed links
 
 /**
@@ -29,6 +30,14 @@ export default function RoomExitPage() {
   const exitRole = (location.state as any)?.exitRole as "guest" | "host" | undefined;
   const hasRecording = !!recordingId && recordingId !== "unknown";
   const isHost = exitRole === "host" || hasRecording;
+  // Room for the post-stream summary: router state (Room.tsx host leave),
+  // ?roomId=, or the recording's room.
+  const summaryRoomId = String(
+    (location.state as any)?.roomId ||
+      new URLSearchParams(location.search).get("roomId") ||
+      (recording as any)?.roomId ||
+      ""
+  ).trim();
 
   // Guests should be done-done: no navigation back into the app.
   useEffect(() => {
@@ -398,9 +407,11 @@ export default function RoomExitPage() {
             Stream Ended
           </h1>
           <p style={{ fontSize: '15px', color: '#9ca3af', marginBottom: '24px', lineHeight: '1.6' }}>
-            {canMyContentRecordings
-              ? 'Your recording is being processed. It will appear in My Content when ready.'
-              : 'Your recording is being processed. The download button will activate when ready.'}
+            {!hasRecording
+              ? 'Your session has ended.'
+              : canMyContentRecordings
+                ? 'Your recording is being processed. It will appear in My Content when ready.'
+                : 'Your recording is being processed. The download button will activate when ready.'}
           </p>
 
           {recording && (
@@ -455,6 +466,9 @@ export default function RoomExitPage() {
             </div>
           )}
         </div>
+
+        {/* STREAM SUMMARY (host/cohost; hidden when the room never went live) */}
+        {summaryRoomId && <StreamSummaryCard roomId={summaryRoomId} />}
 
         {/* ACTION BUTTONS */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>

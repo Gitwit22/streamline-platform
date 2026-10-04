@@ -3978,7 +3978,8 @@ function RoomPage() {
     }
 
     if (isHost) {
-      nav('/join', { replace: true });
+      // Post-stream page: stream summary (viewers, duration, outputs) + Back to Join.
+      nav('/room-exit/unknown', { replace: true, state: { exitRole: 'host', roomId: roomId || undefined } });
       return;
     }
     // Guests / participants / co-hosts: thank-you screen on this page (with

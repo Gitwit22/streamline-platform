@@ -5,11 +5,13 @@
  * Layout (no composite indexes needed):
  *   rooms/{roomId}.viewerStats = { sessionId, startedAt, endedAt|null, peak,
  *                                  totalUnique, totalUniqueRtc, totalUniqueHls }
- *   rooms/{roomId}/viewerSessions/{sessionId}            session summary (on end)
+ *   rooms/{roomId}/viewerSessions/{sessionId}            final stats + .summary
+ *       (lib/streamSummary.ts: duration, peak, uniques, avgWatchSeconds)
  *   rooms/{roomId}/viewerSessions/{sessionId}/viewers/{viewerKey}
- *       = { kind, firstSeenAt, lastSeenAt, identity? }   one doc per unique viewer
+ *       = { kind, firstSeenAt, lastSeenAt, leftAt?, identity? }  one doc per
+ *         unique viewer (RTC leftAt from the participant_left webhook)
  *   rooms/{roomId}/hlsViewers/{viewerId}
- *       = { sessionId, firstSeenAt, lastSeenAtMs }       HLS presence; "current"
+ *       = { sessionId, firstSeenAt, lastSeenAtMs, leftAtMs? }  HLS presence; "current"
  *         is a count() over the single-field range lastSeenAtMs >= now - TTL.
  *
  * Every hook is best-effort: callers wrap these in try/catch or `void ...catch`.
@@ -18,6 +20,7 @@
 import { randomUUID } from "node:crypto";
 import { firestore as db } from "../firebaseAdmin";
 import { getLiveKitSdk } from "./livekit";
+import { persistSessionSummary, sessionWatchStats } from "./streamSummary";
 import {
   HLS_VIEWER_TTL_MS,
   currentViewerTotal,
@@ -30,6 +33,7 @@ import {
   summarizeRtcParticipants,
   viewerKeyFor,
   withNewViewer,
+  type RecordingViewerFields,
   type RtcCounts,
   type ViewerKind,
   type ViewerStats,
@@ -80,7 +84,13 @@ export async function endLiveSession(roomId: string): Promise<ViewerStats | null
   });
   sessionCache.delete(roomId);
   currentCache.delete(roomId);
-  if (final) void pruneHlsPresence(roomId).catch(() => {});
+  if (final) {
+    // Summary first: HLS watch times live on the presence docs being pruned.
+    void persistSessionSummary(roomId, final)
+      .catch((err) => warn("persistSessionSummary", roomId, err))
+      .then(() => pruneHlsPresence(roomId))
+      .catch(() => {});
+  }
   return final;
 }
 
@@ -173,9 +183,35 @@ export async function markHlsViewerLeft(roomId: string, viewerId: string): Promi
   const pRef = hlsViewersCol(roomId).doc(viewerId);
   const pSnap = await pRef.get();
   if (!pSnap.exists) return;
-  await pRef.set({ lastSeenAtMs: 0 }, { merge: true });
+  // leftAtMs keeps the real leave time for watch-time stats.
+  await pRef.set({ lastSeenAtMs: 0, leftAtMs: Date.now() }, { merge: true });
   currentCache.delete(roomId);
 }
+
+/**
+ * LiveKit participant_left: stamp the RTC viewer's leave time on its doc in
+ * the room's current (or just-ended) session, so watch time is measurable.
+ * Only updates an existing viewer doc (hosts/agents never get one).
+ */
+export async function recordRtcViewerLeft(roomId: string, identity: string): Promise<boolean> {
+  const id = String(identity || "").trim();
+  if (!id) return false;
+  const snap = await roomRef(roomId).get();
+  const stats = snap.exists ? readViewerStats((snap.data() as any)?.viewerStats) : null;
+  if (!stats) return false;
+  const now = Date.now();
+  // A leave long after the session ended belongs to no session we track.
+  if (stats.endedAt !== null && now - stats.endedAt > RTC_LEAVE_GRACE_MS) return false;
+  const vRef = sessionRef(roomId, stats.sessionId).collection("viewers").doc(viewerKeyFor("rtc", id));
+  const vSnap = await vRef.get();
+  if (!vSnap.exists) return false;
+  const leftAt = stats.endedAt !== null ? Math.min(now, stats.endedAt) : now;
+  await vRef.set({ lastSeenAt: leftAt, leftAt }, { merge: true });
+  return true;
+}
+
+/** participant_left may arrive shortly after room_finished ended the session. */
+const RTC_LEAVE_GRACE_MS = 2 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Current viewers
@@ -201,7 +237,7 @@ export type RtcCountsResult = RtcCounts & {
 };
 
 /** LiveKit participants split into host / on stage / audience. */
-export async function rtcCounts(livekitRoomName: string, ownerUid?: string | null): Promise<RtcCountsResult> {
+async function rtcCounts(livekitRoomName: string, ownerUid?: string | null): Promise<RtcCountsResult> {
   const empty = { host: 0, onStage: 0, audience: 0 };
   const name = String(livekitRoomName || "").trim();
   const serviceUrl = deriveServiceUrl();
@@ -365,19 +401,22 @@ export async function onRoomFinished(roomId: string): Promise<void> {
 }
 
 /**
- * Copies the room's live-session viewer numbers onto a recording doc
- * (viewerCount = unique total, peakViewers = peak). Best-effort; returns
- * the fields written, or null when the room has no session.
+ * Copies the room's live-session numbers onto a recording doc:
+ * viewerCount (unique total), peakViewers, streamDurationSec,
+ * avgWatchSeconds (null when unmeasured), streamSessionId. Best-effort;
+ * returns the fields written, or null when the room has no session.
  */
 export async function copyViewerStatsToRecording(
   recordingRef: FirebaseFirestore.DocumentReference,
   roomId: string | null | undefined
-): Promise<{ viewerCount: number; peakViewers: number } | null> {
+): Promise<RecordingViewerFields | null> {
   const id = String(roomId || "").trim();
   if (!id || id.includes("/")) return null;
   try {
     const stats = await getViewerStats(id);
-    const fields = recordingViewerFields(stats);
+    if (!stats) return null;
+    const watch = await sessionWatchStats(id, stats).catch(() => null);
+    const fields = recordingViewerFields(stats, { avgWatchSeconds: watch?.avgWatchSeconds ?? null, nowMs: Date.now() });
     if (!fields) return null;
     await recordingRef.set(fields, { merge: true });
     return fields;
@@ -388,7 +427,7 @@ export async function copyViewerStatsToRecording(
 }
 
 /** Reads the room's current viewerStats (no writes). */
-export async function getViewerStats(roomId: string): Promise<ViewerStats | null> {
+async function getViewerStats(roomId: string): Promise<ViewerStats | null> {
   const snap = await roomRef(roomId).get();
   return snap.exists ? readViewerStats((snap.data() as any)?.viewerStats) : null;
 }

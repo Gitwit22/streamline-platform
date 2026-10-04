@@ -11,6 +11,8 @@
  *   GET /api/rooms/:roomId/viewers
  *     -> { sessionId, startedAt, live, current: { total, hls, rtcAudience, onStage },
  *          totalUnique: { total, hls, rtc }, peak }
+ *   GET /api/rooms/:roomId/stream-summary?sessionId=
+ *     -> post-stream summary (see the route below)
  */
 import express, { Router } from "express";
 import { firestore } from "../firebaseAdmin";
@@ -31,6 +33,7 @@ import {
   readViewerStats,
 } from "../lib/viewerStatsPure";
 import { checkRoomHostAccess } from "./invites";
+import { getStreamSummary } from "../lib/streamSummary";
 
 // ---------------------------------------------------------------------------
 // Public heartbeat
@@ -150,6 +153,48 @@ roomViewersRouter.get("/:roomId/viewers", async (req, res) => {
     });
   } catch (err: any) {
     console.error("[rooms/viewers] failed", { roomId, error: err?.message || err });
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Post-stream summary
+// ---------------------------------------------------------------------------
+
+/**
+ * GET /api/rooms/:roomId/stream-summary?sessionId=<optional; default latest>
+ * Auth: host/cohost (user auth or a host/cohost x-room-access-token).
+ * -> { sessionId, startedAt, endedAt, live, durationSec, peakConcurrent,
+ *      uniqueViewers: { total, hls, rtc }, avgWatchSeconds | null,
+ *      watchSampleSize,
+ *      outputs: [{ egressId, kind, destinations: [{ platform, label, status?, error? }],
+ *                  startedAt, endedAt, durationSec, status, error? }] }
+ * Timestamps are epoch ms. output.status: live | completed | failed | stopped_limit.
+ * 404 { error: "no_session" } when the room never went live.
+ */
+roomViewersRouter.get("/:roomId/stream-summary", async (req, res) => {
+  const roomId = String(req.params.roomId || "").trim();
+  if (!isValidViewerRoomId(roomId)) return res.status(400).json({ error: "invalid_room_id" });
+  const rawSession = typeof req.query.sessionId === "string" ? req.query.sessionId.trim() : "";
+  if (rawSession && !isValidViewerRoomId(rawSession)) return res.status(400).json({ error: "invalid_session_id" });
+  try {
+    const roomSnap = await firestore.collection("rooms").doc(roomId).get();
+    if (!roomSnap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
+    const room = (roomSnap.data() || {}) as any;
+
+    const denied = await checkRoomHostAccess(req, roomId, room);
+    if (denied) {
+      return res
+        .status(denied)
+        .json({ error: denied === 401 ? PERMISSION_ERRORS.UNAUTHORIZED : PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    const summary = await getStreamSummary(roomId, room, rawSession || null);
+    if (!summary) return res.status(404).json({ error: "no_session" });
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(summary);
+  } catch (err: any) {
+    console.error("[rooms/stream-summary] failed", { roomId, error: err?.message || err });
     return res.status(500).json({ error: "internal_error" });
   }
 });

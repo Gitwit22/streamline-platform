@@ -148,6 +148,21 @@ test("parseHeartbeatBody handles beacon text and objects", () => {
 
 test("recordingViewerFields maps totals to recording fields", () => {
   assert.equal(recordingViewerFields(null), null);
-  const s = { ...newViewerStats("s", 1), totalUnique: 7, peak: 4 };
-  assert.deepEqual(recordingViewerFields(s), { viewerCount: 7, peakViewers: 4 });
+  const s = { ...newViewerStats("s", 1_000), totalUnique: 7, peak: 4, endedAt: 61_000 };
+  assert.deepEqual(recordingViewerFields(s), {
+    viewerCount: 7,
+    peakViewers: 4,
+    streamDurationSec: 60,
+    avgWatchSeconds: null,
+    streamSessionId: "s",
+  });
+  // Live session: duration runs to now; avg watch is rounded.
+  const live = { ...newViewerStats("live", 10_000), totalUnique: 2, peak: 2 };
+  assert.deepEqual(recordingViewerFields(live, { avgWatchSeconds: 41.6, nowMs: 130_000 }), {
+    viewerCount: 2,
+    peakViewers: 2,
+    streamDurationSec: 120,
+    avgWatchSeconds: 42,
+    streamSessionId: "live",
+  });
 });

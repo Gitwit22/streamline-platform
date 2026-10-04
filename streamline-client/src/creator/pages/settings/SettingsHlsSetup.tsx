@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { API_BASE } from "../../../lib/apiBase";
 import { S } from "../SettingsBilling.styles";
 import { apiFetchAuth } from "../../../lib/api";
+import { useEffectiveEntitlements } from "../../../hooks/useEffectiveEntitlements";
+import HlsBrandingEditor from "../../components/HlsBrandingEditor";
 
 type SavedEmbed = {
   embedId: string;
@@ -84,6 +86,20 @@ export default function SettingsHlsSetup({
 }) {
   const canCustomize = !!_canCustomize;
   const onUpgrade = _onUpgrade;
+
+  // Branding is gated on the server by entitlements.features.hlsCustomization
+  // (plan AND platform switch). Mirror it; fall back to the plan prop until loaded.
+  const { effectiveEntitlements } = useEffectiveEntitlements();
+  const brandingAccess = useMemo(() => {
+    const features = effectiveEntitlements?.features;
+    const planFeatures = effectiveEntitlements?.planFeatures;
+    if (!features || typeof features.hlsCustomization !== "boolean") {
+      return { allowed: canCustomize, reason: canCustomize ? null : ("plan" as const) };
+    }
+    if (features.hlsCustomization) return { allowed: true, reason: null };
+    const planHas = planFeatures?.hlsCustomization === true;
+    return { allowed: false, reason: planHas ? ("platform" as const) : ("plan" as const) };
+  }, [effectiveEntitlements, canCustomize]);
 
   const [embeds, setEmbeds] = useState<SavedEmbed[]>([]);
   const [loadingList, setLoadingList] = useState(false);
@@ -488,8 +504,7 @@ export default function SettingsHlsSetup({
               />
             </div>
             <div style={{ fontSize: 12, color: "#9ca3af" }}>
-              Branding (title, logo, colors, offline message) is coming soon.
-              For now, each embed uses a default viewer page you can share.
+              After creating, customize the title, logo, theme and offline message under Channel branding.
             </div>
             <div style={{ fontSize: 11, color: "#6b7280" }}>
               <span>{60 - createName.length}</span> name characters left · <span>{200 - createDescription.length}</span> description characters left
@@ -507,42 +522,37 @@ export default function SettingsHlsSetup({
           )}
         </div>
 
-        {/* C) Branding (coming soon) */}
+        {/* C) Channel branding (per saved embed: stored on the embed's room hlsConfig) */}
         <div style={panelStyle}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-            <div style={{ fontWeight: 800, color: "#e5e7eb" }}>Branding (coming soon)</div>
+            <div style={{ fontWeight: 800, color: "#e5e7eb" }}>Channel branding</div>
+            {selectedEmbed && (
+              <div style={{ fontSize: 12, color: "#9ca3af" }}>
+                Editing: <span style={{ color: "#e5e7eb", fontWeight: 800 }}>{selectedEmbed.label}</span>
+              </div>
+            )}
           </div>
 
           {!selectedEmbed && (
             <div style={{ marginTop: 10, color: "#9ca3af", fontSize: 13 }}>
-              Select an embed from the list on the right to see its viewer link.
+              {canCustomize
+                ? "Select a saved embed on the right to edit its viewer page branding."
+                : "Viewer page branding (title, logo, theme, offline message) is available on plans with HLS customization."}
             </div>
           )}
 
-          {selectedEmbed && (
-            <div style={{ marginTop: 12, display: "grid", gap: 10 }}>
-              <div style={{ fontSize: 13, color: "#9ca3af" }}>
-                Selected embed: <span style={{ color: "#e5e7eb", fontWeight: 800 }}>{selectedEmbed.label}</span>
-              </div>
-
-              <div style={{ fontSize: 12, color: "#9ca3af" }}>
-                Embed page URL: <span style={{ color: "#e5e7eb" }}>{absoluteViewerUrlFromPath(selectedEmbed.viewerPath, selectedEmbed.embedId)}</span>
-              </div>
-
-              <div
-                style={{
-                  marginTop: 4,
-                  padding: "10px 12px",
-                  borderRadius: 12,
-                  background: "rgba(30,64,175,0.25)",
-                  border: "1px solid rgba(59,130,246,0.6)",
-                  color: "#dbeafe",
-                  fontSize: 13,
-                }}
-              >
-                Branding controls (title, logo, colors, offline message) are coming soon.
-                For now, share the viewer link or embed code from the Saved Embeds list on the right.
-              </div>
+          {selectedEmbed && selectedEmbed.roomId && (
+            <div style={{ marginTop: 12 }}>
+              <HlsBrandingEditor
+                key={selectedEmbed.embedId}
+                roomId={selectedEmbed.roomId}
+                embedName={selectedEmbed.label}
+                embedDescription={selectedEmbed.description}
+                viewerUrl={absoluteViewerUrlFromPath(selectedEmbed.viewerPath, selectedEmbed.embedId)}
+                allowed={brandingAccess.allowed}
+                blockedReason={brandingAccess.reason}
+                onUpgrade={onUpgrade}
+              />
             </div>
           )}
         </div>

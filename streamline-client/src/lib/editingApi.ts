@@ -78,6 +78,12 @@ export type Recording = {
   createdAt: string;
   fileSize?: number;
   userId?: string;
+  roomId?: string;
+  /** Live-session stats copied at finalize (server copyViewerStatsToRecording). */
+  viewerCount?: number;
+  peakViewers?: number;
+  streamDurationSec?: number;
+  avgWatchSeconds?: number | null;
 };
 
 export type ExportSettings = {

@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { editingApi, type Recording } from "../../../lib/editingApi";
 import { createProject } from "../../../lib/projectsApi";
+import { recordingStatChips } from "../../../lib/streamSummary";
 import { useEffectiveEntitlements } from "../../../hooks/useEffectiveEntitlements";
 import { useFeatureAccess } from "../../../hooks/useFeatureAccess";
 
@@ -602,6 +603,7 @@ function RecordingCard({
   const dateStr = _d && !isNaN(_d.getTime())
     ? _d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
     : recording.createdAt ? 'Unknown Date' : '';
+  const statChips = recordingStatChips(recording);
 
   return (
     <div
@@ -722,6 +724,30 @@ function RecordingCard({
           {recording.roomName && dateStr && <span style={{ opacity: 0.4 }}>·</span>}
           {dateStr && <span>📅 {dateStr}</span>}
         </div>
+        {statChips.length > 0 && (
+          <div
+            data-testid="recording-stream-stats"
+            style={{ display: 'flex', gap: '0.35rem', flexWrap: 'wrap', marginBottom: '0.5rem' }}
+          >
+            {statChips.map((chip) => (
+              <span
+                key={chip.key}
+                title={chip.title}
+                style={{
+                  fontSize: '0.65rem',
+                  fontWeight: 600,
+                  color: '#e5e7eb',
+                  background: 'rgba(255,255,255,0.06)',
+                  border: '1px solid rgba(255,255,255,0.1)',
+                  borderRadius: '999px',
+                  padding: '0.1rem 0.45rem',
+                }}
+              >
+                {chip.label}
+              </span>
+            ))}
+          </div>
+        )}
         <div style={{ marginTop: 'auto', display: 'flex', gap: '0.5rem' }}
           onClick={(e) => e.stopPropagation()}
         >

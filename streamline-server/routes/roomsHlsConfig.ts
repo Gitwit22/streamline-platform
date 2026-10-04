@@ -7,6 +7,7 @@ import { DEFAULT_ROOM_HLS_CONFIG } from "../services/rooms";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { checkFeature, type EffectiveEntitlements, type FeatureKey } from "../lib/entitlements";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
+import { validateBrandingInput } from "../lib/hlsBrandingPure";
 
 const router = Router();
 
@@ -112,6 +113,10 @@ router.put("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
       error: "invalid_input",
       details: 'theme must be "light" or "dark" if provided',
     });
+  }
+  const branding = validateBrandingInput({ title, subtitle, logoUrl, offlineMessage });
+  if (!branding.ok) {
+    return res.status(400).json({ error: "invalid_input", field: branding.field, details: branding.details });
   }
 
   try {

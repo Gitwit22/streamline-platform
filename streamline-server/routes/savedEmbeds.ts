@@ -10,6 +10,7 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { checkFeature } from "../lib/entitlements";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
+import { publicBranding } from "../lib/hlsBrandingPure";
 
 const router = Router();
 
@@ -296,11 +297,26 @@ router.get("/public/:savedEmbedId", async (req: any, res) => {
     const description = (data.description || "") as string | undefined;
     const activeRoomId = typeof data.activeRoomId === "string" ? data.activeRoomId : null;
 
+    // Channel branding lives on the embed's own room (rooms/{roomId}.hlsConfig,
+    // edited in Settings -> HLS). It applies whichever room is live on the
+    // channel, and also while the channel is offline.
+    let branding: ReturnType<typeof publicBranding> = null;
+    const homeRoomId = typeof data.roomId === "string" ? data.roomId.trim() : "";
+    if (homeRoomId && !homeRoomId.includes("/")) {
+      try {
+        const homeSnap = await db.collection("rooms").doc(homeRoomId).get();
+        branding = homeSnap.exists ? publicBranding((homeSnap.data() as any)?.hlsConfig) : null;
+      } catch (e: any) {
+        console.warn("GET /api/saved-embeds/public: branding lookup failed", { savedEmbedId, error: e?.message || e });
+      }
+    }
+
     return res.json({
       savedEmbedId,
       name,
       description,
       activeRoomId,
+      branding,
       viewerPath: viewerPath(savedEmbedId),
     });
   } catch (err) {

@@ -184,8 +184,29 @@ export function parseHeartbeatBody(body: unknown): { roomId?: unknown; viewerId?
   return body && typeof body === "object" ? (body as any) : {};
 }
 
-/** Recording fields copied from a session (recordings show unique total + peak). */
-export function recordingViewerFields(stats: ViewerStats | null): { viewerCount: number; peakViewers: number } | null {
+export type RecordingViewerFields = {
+  viewerCount: number;
+  peakViewers: number;
+  /** Live session length (not the recording's own duration). */
+  streamDurationSec: number;
+  avgWatchSeconds: number | null;
+  streamSessionId: string;
+};
+
+/** Recording fields copied from a session (unique total, peak, duration, avg watch). */
+export function recordingViewerFields(
+  stats: ViewerStats | null,
+  opts: { avgWatchSeconds?: number | null; nowMs?: number } = {}
+): RecordingViewerFields | null {
   if (!stats) return null;
-  return { viewerCount: stats.totalUnique, peakViewers: stats.peak };
+  const end = stats.endedAt ?? opts.nowMs ?? Date.now();
+  const streamDurationSec = stats.startedAt && end > stats.startedAt ? Math.round((end - stats.startedAt) / 1000) : 0;
+  const avg = opts.avgWatchSeconds;
+  return {
+    viewerCount: stats.totalUnique,
+    peakViewers: stats.peak,
+    streamDurationSec,
+    avgWatchSeconds: typeof avg === "number" && Number.isFinite(avg) ? Math.max(0, Math.round(avg)) : null,
+    streamSessionId: stats.sessionId,
+  };
 }

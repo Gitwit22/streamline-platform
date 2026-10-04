@@ -15,7 +15,8 @@ import crypto from "crypto";
 import { deletePrefix } from "../lib/storageClient";
 import { setHlsIdle } from "../services/rooms";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
-import { copyViewerStatsToRecording, ensureLiveSession, onHlsIdle, onRoomFinished, recordViewer } from "../lib/viewerStats";
+import { copyViewerStatsToRecording, ensureLiveSession, onHlsIdle, onRoomFinished, recordRtcViewerLeft, recordViewer } from "../lib/viewerStats";
+import { recordEgressOutcome } from "../lib/streamSummary";
 import { isCountableRtcViewer, viewerKeyFor } from "../lib/viewerStatsPure";
 import Stripe from "stripe";
 import { firestore as db } from "../firebaseAdmin";
@@ -777,6 +778,11 @@ async function handleViewerCountEvent(eventName: string, livekitRoomName: string
   }
   const identity = String(participant?.identity || "").trim();
   if (!identity) return;
+  if (eventName === "participant_left") {
+    // Leave time for watch-time stats (only touches an existing viewer doc).
+    await recordRtcViewerLeft(roomId, identity);
+    return;
+  }
   const roomSnap = await db.collection("rooms").doc(roomId).get();
   const ownerUid = String((roomSnap.data() as any)?.ownerId || "").trim();
   if (!isCountableRtcViewer(participant, ownerUid)) return;
@@ -859,8 +865,12 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     }
 
     // Viewer counting (best-effort; never affects the response):
-    // participant_joined -> unique RTC viewer, room_finished -> end session.
-    if ((eventName === "participant_joined" || eventName === "room_finished") && livekitRoomName) {
+    // participant_joined -> unique RTC viewer, participant_left -> leave time,
+    // room_finished -> end session.
+    if (
+      (eventName === "participant_joined" || eventName === "participant_left" || eventName === "room_finished") &&
+      livekitRoomName
+    ) {
       try {
         await handleViewerCountEvent(eventName, String(livekitRoomName), event?.participant);
       } catch (e: any) {
@@ -895,6 +905,14 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       meterHandled = !!billed;
     } catch (e: any) {
       console.error("[livekit-webhook] streaming meter close failed", { egressId, error: e?.message || e });
+    }
+
+    // Destination performance: keep LiveKit's outcome (status, error,
+    // per-stream results; RTMP URLs redacted) on the output interval.
+    try {
+      await recordEgressOutcome(egressId, egressInfo);
+    } catch (e: any) {
+      console.warn("[livekit-webhook] failed to store egress outcome", { egressId, error: e?.message || e });
     }
 
     // If this egressId belongs to an HLS session (rooms.hls.egressId), do an

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 import Hls from "hls.js";
 import { API_BASE } from "../../lib/apiBase";
+import { resolveViewerBranding, type HlsBranding } from "../../lib/hlsBranding";
 import { getPublicHls } from "../../services/hls";
 import { useHlsReadiness } from "../../hooks/useHlsReadiness";
 import { useHlsViewerHeartbeat, useVideoPlaying } from "../../hooks/useHlsViewerHeartbeat";
@@ -48,6 +49,8 @@ type PublicSavedEmbedResponse = {
   name: string;
   description?: string;
   activeRoomId: string | null;
+  /** Channel branding from the embed's own room (null on older servers). */
+  branding?: Partial<HlsBranding> | null;
   viewerPath: string;
 };
 
@@ -512,6 +515,16 @@ export default function Live() {
     setIsMuted((prev) => !prev);
   };
 
+  // Channel branding (saved embed) wins over the live room's hlsConfig;
+  // same resolver as the settings preview (creator/components/HlsBrandingEditor).
+  const branding = resolveViewerBranding({
+    channelBranding: savedEmbedMeta?.branding ?? null,
+    roomConfig: viewerConfig,
+    embedName: savedEmbedMeta?.name,
+    embedDescription: savedEmbedMeta?.description,
+    roomName,
+  });
+
   if (isIgMode) {
     return (
       <div className="fixed inset-0 bg-black">
@@ -562,7 +575,7 @@ export default function Live() {
         ) : (
           <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-6">
             <img
-              src={(viewerConfig?.logoUrl || DEFAULT_LOGO_URL) as string}
+              src={branding.logoUrl || DEFAULT_LOGO_URL}
               alt="StreamLine"
               className="h-12 w-auto opacity-95"
             />
@@ -572,7 +585,7 @@ export default function Live() {
             </div>
 
             <div className="mt-2 text-sm text-slate-300 max-w-md">
-              {status === "offline" ? "When the host goes live, playback will start automatically." : "Preparing video feed (this can take a few seconds)."}
+              {status === "offline" ? branding.offlineMessage : "Preparing video feed (this can take a few seconds)."}
             </div>
 
             {(status === "starting" || (status === "live" && manifestReadiness !== "ready") || status === "loading") ? (
@@ -632,10 +645,10 @@ export default function Live() {
     );
   };
 
-  const displayTitle = (viewerConfig?.title || "").trim() || (savedEmbedMeta?.name || roomName || "").trim() || "StreamLine";
-  const displaySubtitle = (viewerConfig?.subtitle || "").trim() || (savedEmbedMeta?.description || "Live Viewer");
-  const displayLogoUrl = (viewerConfig?.logoUrl || "").trim();
-  const isLightTheme = (viewerConfig?.theme || "dark") === "light";
+  const displayTitle = branding.title;
+  const displaySubtitle = branding.subtitle;
+  const displayLogoUrl = branding.logoUrl;
+  const isLightTheme = branding.isLightTheme;
 
   return (
     <div className={["min-h-screen relative overflow-hidden", isLightTheme ? "bg-white" : "bg-black"].join(" ")}>
@@ -817,7 +830,7 @@ export default function Live() {
                 ) : (
                   <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-6">
                     <img
-                      src={(viewerConfig?.logoUrl || DEFAULT_LOGO_URL) as string}
+                      src={branding.logoUrl || DEFAULT_LOGO_URL}
                       alt="StreamLine"
                       className="h-12 w-auto opacity-95"
                     />
@@ -826,7 +839,7 @@ export default function Live() {
                       <>
                         <div className="mt-4 text-xl font-semibold text-white">Stream is offline</div>
                         <div className="mt-2 text-sm text-neutral-500 max-w-md">
-                          When the host goes live, playback will start automatically.
+                          {branding.offlineMessage}
                         </div>
                       </>
                     ) : (
