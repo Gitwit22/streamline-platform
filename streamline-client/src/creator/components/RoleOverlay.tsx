@@ -1,7 +1,7 @@
 import React from "react";
 import { useParticipants, useLocalParticipant, useRoomContext } from "@livekit/components-react";
 import { normalizeUiRolePresetId, isParticipantHidden, extractPresenceMetadata, presenceModeLabel } from "../../lib/roles";
-import { apiFetchAuth } from "../../lib/api";
+import { apiFetch, apiFetchAuth } from "../../lib/api";
 import { encodeReconnectMediaMessage, reconnectMedia } from "../../lib/mediaRecovery";
 
 // Normalize API base to avoid trailing slashes that cause "//api/..." URLs
@@ -36,6 +36,26 @@ function extractRolePresetId(rawParticipant: any): RolePresetId | null {
   }
 
   return null;
+}
+
+/**
+ * True when a participant is subscribe-only (viewer / moved to audience).
+ * Prefers live LiveKit permissions; falls back to the role the server
+ * stamped into metadata. Unknown roles are treated as "on stage".
+ */
+function isAudienceParticipant(p: any): boolean {
+  const perms = p?.permissions;
+  if (perms && typeof perms.canPublish === "boolean") return perms.canPublish === false;
+  let meta: any = p?.metadata;
+  if (typeof meta === "string") {
+    try {
+      meta = JSON.parse(meta);
+    } catch {
+      meta = null;
+    }
+  }
+  const role = String(meta?.rolePresetId || meta?.role || "").toLowerCase();
+  return role === "viewer";
 }
 
 export default function RoleOverlay({
@@ -281,12 +301,16 @@ function HostPanel({
     }
   };
 
-  // Load initial muteLock state for this room
+  // Load initial muteLock state for this room. The server persists it by the
+  // canonical roomId (rooms/{roomId}/controls/default.muteLocked); the
+  // display/LiveKit room name is only a fallback for older callers.
   React.useEffect(() => {
+    const key = roomId || roomName;
+    if (!key) return;
     let cancelled = false;
     (async () => {
       try {
-        const res = await apiFetchAuth(`${API_BASE}/api/roomSettings/${encodeURIComponent(roomName)}`, {}, { allowNonOk: true });
+        const res = await apiFetch(`${API_BASE}/api/roomSettings/${encodeURIComponent(key)}`, {}, { allowNonOk: true });
         if (!res.ok) return;
         const data = await res.json();
         if (!cancelled) setMuteLock(!!data.muteLock);
@@ -297,7 +321,31 @@ function HostPanel({
     return () => {
       cancelled = true;
     };
-  }, [roomName]);
+  }, [roomId, roomName]);
+
+  const [stageBusy, setStageBusy] = React.useState<Record<string, boolean>>({});
+  const handleStageChange = async (identity: string, direction: "promote" | "demote") => {
+    if (!roomId || !roomAccessToken) return;
+    setStageBusy((prev) => ({ ...prev, [identity]: true }));
+    try {
+      await apiSetStage(roomId, roomAccessToken, identity, direction);
+      setRoleToast(direction === "promote" ? "Brought on stage" : "Moved to audience");
+      if (roleToastTimeoutRef.current) clearTimeout(roleToastTimeoutRef.current);
+      roleToastTimeoutRef.current = setTimeout(() => {
+        setRoleToast(null);
+        roleToastTimeoutRef.current = null;
+      }, 2000);
+    } catch (e: any) {
+      console.error("stage change failed", e);
+      alert(e?.message || "Couldn't update this participant");
+    } finally {
+      setStageBusy((prev) => {
+        const next = { ...prev };
+        delete next[identity];
+        return next;
+      });
+    }
+  };
 
   const handleMuteAllExceptHost = async () => {
     if (!roomName || !roomAccessToken) return;
@@ -486,6 +534,8 @@ function HostPanel({
           onChangeRole={handleChangeRole}
           roleByIdentity={roleByIdentity}
           roleStatus={roleStatus}
+          onStageChange={handleStageChange}
+          stageBusy={stageBusy}
         />
 
         {/* Hidden attendees: only shown to hosts/admins */}
@@ -881,7 +931,7 @@ function ChatPanel({
     setLoading(true);
     setError(null);
     try {
-      const sessionRes = await apiFetchAuth(
+      const sessionRes = await apiFetch(
         `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/session`,
         {
           method: "GET",
@@ -910,7 +960,7 @@ function ChatPanel({
         return;
       }
 
-      const msgRes = await apiFetchAuth(
+      const msgRes = await apiFetch(
         `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/messages?sessionId=${encodeURIComponent(sid)}&limit=200`,
         {
           method: "GET",
@@ -1017,7 +1067,7 @@ function ChatPanel({
     setDraft("");
     setError(null);
     try {
-      const res = await apiFetchAuth(
+      const res = await apiFetch(
         `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/messages`,
         {
           method: "POST",
@@ -1389,8 +1439,12 @@ function ParticipantList({
   onChangeRole,
   roleByIdentity,
   roleStatus,
+  onStageChange,
+  stageBusy,
 }: {
   participants: ReturnType<typeof useParticipants>;
+  onStageChange?: (identity: string, direction: "promote" | "demote") => void;
+  stageBusy?: Record<string, boolean>;
   canModerate?: boolean;
   onRemove?: (identity: string) => void;
   onMute?: (identity: string, muted: boolean) => void;
@@ -1416,6 +1470,15 @@ function ParticipantList({
           const metaRoleRaw = extractRolePresetId(p as any);
           const metaRole = metaRoleRaw ? normalizeUiRolePresetId(metaRoleRaw) : undefined;
           const currentRole: RolePresetId = (stableRole || metaRole || "participant") as RolePresetId;
+          const inAudience = isAudienceParticipant(p as any);
+          const isSelf = !!localIdentity && p.identity === localIdentity;
+          const showStage =
+            !!onStageChange &&
+            !!canChangeRoles &&
+            !isSelf &&
+            !p.identity.startsWith("producer:") &&
+            (inAudience || currentRole !== "cohost");
+          const stageIsBusy = !!stageBusy?.[p.identity];
 
           return (
         <div
@@ -1433,6 +1496,9 @@ function ParticipantList({
         >
           <div style={{ fontSize: '0.875rem', flex: 1 }}>
             <div style={{ fontWeight: '600', color: '#ffffff' }}>{p.name || "Guest"}</div>
+            {inAudience && (
+              <div style={{ fontSize: '0.7rem', color: 'rgba(147, 197, 253, 0.9)' }}>In audience (watching)</div>
+            )}
             {canModerate && (
               <div
                 style={{
@@ -1489,7 +1555,32 @@ function ParticipantList({
                     )}
                   </div>
                 )}
-              <div style={{ display: 'flex', gap: '0.25rem', justifyContent: 'flex-end' }}>
+              <div style={{ display: 'flex', gap: '0.25rem', justifyContent: 'flex-end', flexWrap: 'wrap' }}>
+                {showStage && (
+                  <button
+                    type="button"
+                    disabled={stageIsBusy}
+                    onClick={() => onStageChange?.(p.identity, inAudience ? "promote" : "demote")}
+                    title={
+                      inAudience
+                        ? "Let this person turn on their mic and camera"
+                        : "Make this person watch-only (their mic and camera turn off)"
+                    }
+                    style={{
+                      borderRadius: '0.25rem',
+                      border: inAudience ? '1px solid rgba(34, 197, 94, 0.7)' : '1px solid rgba(148, 163, 184, 0.6)',
+                      padding: '0.25rem 0.5rem',
+                      fontSize: '0.7rem',
+                      background: inAudience ? 'rgba(22, 101, 52, 0.55)' : 'rgba(31, 41, 55, 0.9)',
+                      color: '#e5e7eb',
+                      cursor: stageIsBusy ? 'not-allowed' : 'pointer',
+                      opacity: stageIsBusy ? 0.6 : 1,
+                      fontWeight: '600',
+                    }}
+                  >
+                    {stageIsBusy ? 'Saving…' : inAudience ? 'Bring on stage' : 'Move to audience'}
+                  </button>
+                )}
                 {onReconnectGuest && localIdentity && p.identity !== localIdentity && (
                   <button
                     style={{
@@ -1691,6 +1782,40 @@ async function apiSetMuteLock(
     throw new Error(data.error || `Mute-lock failed (HTTP ${res.status})`);
   }
   return { muteLock: !!data.muteLock };
+}
+
+async function apiSetStage(
+  roomId: string,
+  roomAccessToken: string,
+  identity: string,
+  direction: "promote" | "demote",
+): Promise<{ role?: string } | null> {
+  const res = await apiFetchAuth(
+    `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/participants/${encodeURIComponent(identity)}/${direction}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-room-access-token": roomAccessToken,
+      },
+      body: JSON.stringify({}),
+    },
+    { allowNonOk: true }
+  );
+
+  const data = await res.json().catch(() => null);
+  if (!res.ok || (data && (data as any).error)) {
+    console.error(`${direction} failed`, { status: res.status, data });
+    const code = (data as any)?.error;
+    const friendly =
+      code === "participant_not_found"
+        ? "That participant has left the room."
+        : code === "cannot_demote_host"
+          ? "The host can't be moved to the audience."
+          : code || `Request failed (HTTP ${res.status})`;
+    throw new Error(friendly);
+  }
+  return data && typeof (data as any).role === "string" ? { role: (data as any).role } : null;
 }
 
 async function apiSetRole(

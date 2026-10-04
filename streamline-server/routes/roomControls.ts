@@ -5,10 +5,269 @@ import { requireAuth } from "../middleware/requireAuth";
 import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "../middleware/roomAccessToken";
 import { getLiveKitSdk } from "../lib/livekit";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
-import { roleToParticipantPermission } from "../lib/livekitPermissions";
+import {
+  roleToParticipantPermission,
+  restrictPermissionByControls,
+  toLiveKitParticipantPermission,
+  LIVEKIT_TRACK_SOURCE_ENUM,
+  type LiveKitParticipantPermissionInit,
+} from "../lib/livekitPermissions";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 
 const router = Router();
+
+// ---------------------------------------------------------------------------
+// LiveKit helpers
+// ---------------------------------------------------------------------------
+
+type BaseRole = "viewer" | "guest" | "participant" | "cohost" | "host";
+
+/** Defensive role normalizer: unknown roles return null (never throw). */
+function normalizeBaseRole(raw: unknown): BaseRole | null {
+  const r = String(raw || "").trim().toLowerCase();
+  if (r === "viewer" || r === "guest" || r === "participant" || r === "cohost" || r === "host") return r;
+  if (r === "moderator" || r === "speaker") return "participant";
+  if (r === "co-host" || r === "co_host") return "cohost";
+  return null;
+}
+
+async function getRoomServiceClient(): Promise<any | null> {
+  const sdk = await getLiveKitSdk();
+  const RoomServiceClient = (sdk as any)?.RoomServiceClient as any;
+  if (!RoomServiceClient || !process.env.LIVEKIT_URL || !process.env.LIVEKIT_API_KEY || !process.env.LIVEKIT_API_SECRET) {
+    return null;
+  }
+  return new RoomServiceClient(process.env.LIVEKIT_URL, process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET);
+}
+
+async function listLiveKitParticipants(roomService: any, livekitRoomName: string): Promise<any[]> {
+  const listResp = await roomService.listParticipants(livekitRoomName);
+  if (Array.isArray((listResp as any)?.participants)) return (listResp as any).participants;
+  if (Array.isArray(listResp)) return listResp as any[];
+  return [];
+}
+
+function mergeParticipantMetadata(existingRaw: unknown, patch: Record<string, unknown>): string {
+  let existing: any = {};
+  if (typeof existingRaw === "string" && existingRaw.trim()) {
+    try {
+      existing = JSON.parse(existingRaw) || {};
+    } catch {
+      existing = {};
+    }
+  }
+  return JSON.stringify({ ...existing, ...patch });
+}
+
+function isLiveKitNotFound(err: unknown): boolean {
+  const message = String((err as any)?.message || err || "");
+  return message.includes("status 404") || message.toLowerCase().includes("not found") || (err as any)?.status === 404;
+}
+
+async function getRoomOwnerUid(roomId: string): Promise<string | null> {
+  try {
+    const snap = await admin.firestore().collection("rooms").doc(roomId).get();
+    const data = (snap.data() || {}) as any;
+    const owner = data.ownerId || data.ownerUid || data.hostUid || data.createdBy || null;
+    return typeof owner === "string" && owner ? owner : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Identities that room controls must never restrict (the host/producers). */
+function isProtectedIdentity(identity: string, ownerUid: string | null, extra: Array<string | null | undefined> = []): boolean {
+  if (!identity) return true;
+  if (ownerUid && identity === ownerUid) return true;
+  if (identity.startsWith("producer:")) return true;
+  return extra.some((x) => !!x && x === identity);
+}
+
+const ENFORCED_CONTROL_KEYS = [
+  "canPublishAudio",
+  "canPublishVideo",
+  "canScreenShare",
+  "forcedMute",
+  "forcedVideoOff",
+  "muteLocked",
+  "tileVisible",
+] as const;
+
+function controlsHaveRestrictions(merged: any): boolean {
+  return (
+    merged?.canPublishAudio === false ||
+    merged?.canPublishVideo === false ||
+    merged?.canScreenShare === false ||
+    merged?.forcedMute === true ||
+    merged?.forcedVideoOff === true ||
+    merged?.muteLocked === true ||
+    merged?.tileVisible === false
+  );
+}
+
+/**
+ * Apply the merged room controls (default + identity override) to a
+ * participant's LiveKit permission so host toggles are enforced
+ * server-side. The base permission comes from, in order:
+ *  1. the identity doc's `role` (set by host role changes / promote / demote)
+ *  2. a snapshot of the participant's original LiveKit permission taken the
+ *     first time we enforced on them (`lkBasePermission`)
+ *  3. `fallbackRole` (e.g. the caller's roomAccessToken role on SSE open)
+ *  4. the participant's current LiveKit permission (and we snapshot it)
+ *
+ * Best-effort: returns a reason string instead of throwing.
+ */
+export async function enforceRoomControlsForIdentity(opts: {
+  roomId: string;
+  livekitRoomName: string;
+  identity: string;
+  roomService?: any;
+  lkParticipant?: any;
+  fallbackRole?: unknown;
+  muteExistingTracks?: boolean;
+}): Promise<{ applied: boolean; reason?: string; permission?: LiveKitParticipantPermissionInit }> {
+  const { roomId, livekitRoomName, identity } = opts;
+  try {
+    const roomService = opts.roomService || (await getRoomServiceClient());
+    if (!roomService) return { applied: false, reason: "not_configured" };
+
+    const identityDocId = normalizeControlsDocId(identity);
+    const [dSnap, iSnap] = await Promise.all([
+      controlsDocRef(roomId, "default").get(),
+      controlsDocRef(roomId, identityDocId).get(),
+    ]);
+    const defaultDoc = dSnap.exists ? ((dSnap.data() as any) || {}) : {};
+    const identityDoc = iSnap.exists ? ((iSnap.data() as any) || {}) : {};
+    const merged = mergeControls(defaultDoc, identityDoc) as any;
+
+    let lkParticipant = opts.lkParticipant;
+    if (!lkParticipant) {
+      try {
+        lkParticipant = await roomService.getParticipant(livekitRoomName, identity);
+      } catch (err) {
+        if (isLiveKitNotFound(err)) return { applied: false, reason: "not_found" };
+        throw err;
+      }
+    }
+
+    let base: any = null;
+    const docRole = normalizeBaseRole(identityDoc.role);
+    if (docRole) {
+      base = roleToParticipantPermission(docRole);
+    } else if (identityDoc.lkBasePermission && typeof identityDoc.lkBasePermission === "object") {
+      base = identityDoc.lkBasePermission;
+    } else {
+      const fallback = normalizeBaseRole(opts.fallbackRole);
+      if (fallback) {
+        base = roleToParticipantPermission(fallback);
+      } else {
+        base = toLiveKitParticipantPermission((lkParticipant as any)?.permission || {});
+      }
+      // Snapshot the pre-restriction permission so later un-restricting
+      // restores exactly what the participant had.
+      try {
+        await controlsDocRef(roomId, identityDocId).set(
+          { lkBasePermission: toLiveKitParticipantPermission(base) },
+          { merge: true },
+        );
+      } catch {
+        // ignore
+      }
+    }
+
+    const baseRole = docRole || normalizeBaseRole(opts.fallbackRole);
+    const permission = restrictPermissionByControls(base, {
+      canPublishAudio: merged.canPublishAudio,
+      canPublishVideo: merged.canPublishVideo,
+      canScreenShare: merged.canScreenShare,
+      forcedMute: merged.forcedMute,
+      forcedVideoOff: merged.forcedVideoOff,
+      muteLocked: merged.muteLocked === true && baseRole !== "host",
+    });
+
+    // Mirror tileVisible into participant metadata so every client can hide
+    // this participant's tile (clients only receive their own controls).
+    const tileHidden = merged.tileVisible === false;
+    let metadataPatch: string | undefined;
+    let existingMeta: any = {};
+    try {
+      existingMeta = JSON.parse(String((lkParticipant as any)?.metadata || "")) || {};
+    } catch {
+      existingMeta = {};
+    }
+    if (!!existingMeta.tileHidden !== tileHidden) {
+      metadataPatch = mergeParticipantMetadata((lkParticipant as any)?.metadata, { tileHidden });
+    }
+
+    await roomService.updateParticipant(
+      livekitRoomName,
+      identity,
+      metadataPatch !== undefined ? { permission, metadata: metadataPatch } : { permission },
+    );
+
+    if (opts.muteExistingTracks !== false) {
+      const allowed = new Set(permission.canPublish === false ? [] : permission.canPublishSources);
+      const allowAll = permission.canPublish !== false && permission.canPublishSources.length === 0;
+      const tracks: any[] = Array.isArray((lkParticipant as any)?.tracks) ? (lkParticipant as any).tracks : [];
+      for (const t of tracks) {
+        const source = typeof t?.source === "number" ? t.source : null;
+        const sid = t?.sid || t?.trackSid;
+        if (!sid || source == null || allowAll || allowed.has(source) || t?.muted === true) continue;
+        try {
+          await roomService.mutePublishedTrack(livekitRoomName, identity, sid, true);
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    return { applied: true, permission };
+  } catch (err) {
+    if (isLiveKitNotFound(err)) return { applied: false, reason: "not_found" };
+    console.warn("[roomControls] enforce controls failed", { roomId, identity, error: (err as any)?.message || String(err) });
+    return { applied: false, reason: "livekit_push_failed" };
+  }
+}
+
+/** Enforce controls on every (non-protected) participant in the room. */
+export async function enforceRoomControlsForRoom(opts: {
+  roomId: string;
+  livekitRoomName: string;
+  skipIdentities?: Array<string | null | undefined>;
+}): Promise<{ applied: number; skipped: number }> {
+  const roomService = await getRoomServiceClient();
+  if (!roomService) return { applied: 0, skipped: 0 };
+  let participants: any[] = [];
+  try {
+    participants = await listLiveKitParticipants(roomService, opts.livekitRoomName);
+  } catch {
+    return { applied: 0, skipped: 0 };
+  }
+  const ownerUid = await getRoomOwnerUid(opts.roomId);
+  let applied = 0;
+  let skipped = 0;
+  for (const p of participants) {
+    const identity = String(p?.identity || "");
+    if (isProtectedIdentity(identity, ownerUid, opts.skipIdentities)) {
+      skipped++;
+      continue;
+    }
+    const r = await enforceRoomControlsForIdentity({
+      roomId: opts.roomId,
+      livekitRoomName: opts.livekitRoomName,
+      identity,
+      roomService,
+      lkParticipant: p,
+    });
+    if (r.applied) applied++;
+    else skipped++;
+  }
+  return { applied, skipped };
+}
+
+function patchTouchesEnforcedKeys(patch: Record<string, unknown>): boolean {
+  return ENFORCED_CONTROL_KEYS.some((k) => k in patch);
+}
 
 type RoomControls = {
   canPublishAudio?: boolean;
@@ -297,9 +556,22 @@ router.patch("/:roomId/controls", requireAuth as any, requireRoomAccessToken as 
     { merge: true },
   );
 
+  // Enforce publish restrictions in LiveKit too, so a modified client
+  // cannot ignore host toggles. Best-effort; the SSE stream still
+  // delivers the change to well-behaved clients.
+  let enforcement: { applied: number; skipped: number } | null = null;
+  if (patchTouchesEnforcedKeys(cleaned as any)) {
+    try {
+      const { livekitRoomName } = getRoomAccess(req as any);
+      enforcement = await enforceRoomControlsForRoom({ roomId, livekitRoomName, skipIdentities: [access.identity] });
+    } catch (err) {
+      console.warn("[roomControls] room-wide enforcement failed", (err as any)?.message || err);
+    }
+  }
+
   const identityDocId = normalizeControlsDocId((req.query as any)?.identity);
   const merged = await readControlsMerged(roomId, identityDocId);
-  return res.json({ ok: true, controls: merged });
+  return res.json({ ok: true, controls: merged, enforcement });
 });
 
 // Host/cohost updates controls for a specific participant identity (override doc).
@@ -352,23 +624,21 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedByUid: uid,
         appliedPresetId: rolePresetId,
+        lkBasePermission: admin.firestore.FieldValue.delete(),
+        // Hint for the participant's controls SSE stream: re-fetch the
+        // room token so roomAccessToken permissions match the new role.
+        tokenRefreshRequestedAt: Date.now(),
       },
       { merge: true },
     );
 
     // Update LiveKit participant permissions to reflect the new role.
     try {
-      const sdk = await getLiveKitSdk();
-      const RoomServiceClient = (sdk as any).RoomServiceClient as any;
+      const roomService = await getRoomServiceClient();
 
-      if (RoomServiceClient && process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET) {
-        const roomService = new RoomServiceClient(
-          process.env.LIVEKIT_URL,
-          process.env.LIVEKIT_API_KEY,
-          process.env.LIVEKIT_API_SECRET,
-        );
-
-        const permission = mapPresetToLivekitPermission(rolePresetId);
+      if (roomService) {
+        const mergedControls = (await readControlsMerged(roomId, identityDocId)) as any;
+        const permission = restrictPermissionByControls(mapPresetToLivekitPermission(rolePresetId), mergedControls);
         const { livekitRoomName } = getRoomAccess(req as any);
 
         console.log("[roomControls] ROLE UPDATE", {
@@ -382,24 +652,9 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
         // render a stable role label and dropdown value.
         let nextMetadata: string | undefined;
         try {
-          const listResp = await (roomService as any).listParticipants(livekitRoomName);
-          const participants: any[] = Array.isArray((listResp as any)?.participants)
-            ? (listResp as any).participants
-            : Array.isArray(listResp)
-            ? (listResp as any)
-            : [];
+          const participants = await listLiveKitParticipants(roomService, livekitRoomName);
           const target = participants.find((p: any) => p && p.identity === rawIdentity);
-          const existingMetaRaw = target?.metadata as string | undefined;
-          let existingMeta: any = {};
-          if (existingMetaRaw && typeof existingMetaRaw === "string") {
-            try {
-              existingMeta = JSON.parse(existingMetaRaw) || {};
-            } catch {
-              existingMeta = {};
-            }
-          }
-          const mergedMeta = { ...existingMeta, rolePresetId: rolePresetId };
-          nextMetadata = JSON.stringify(mergedMeta);
+          nextMetadata = mergeParticipantMetadata(target?.metadata, { rolePresetId });
         } catch {
           nextMetadata = JSON.stringify({ rolePresetId: rolePresetId });
         }
@@ -470,8 +725,26 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
     { merge: true },
   );
 
+  // Enforce mic/camera/screen restrictions in LiveKit (not just via SSE),
+  // so a modified client cannot ignore forcedMute / canPublishAudio etc.
+  let enforcement: { applied: boolean; reason?: string } | null = null;
+  if (patchTouchesEnforcedKeys(cleaned as any)) {
+    try {
+      const { livekitRoomName } = getRoomAccess(req as any);
+      const ownerUid = await getRoomOwnerUid(roomId);
+      if (isProtectedIdentity(rawIdentity, ownerUid, [access.identity])) {
+        enforcement = { applied: false, reason: "protected_identity" };
+      } else {
+        const r = await enforceRoomControlsForIdentity({ roomId, livekitRoomName, identity: rawIdentity });
+        enforcement = { applied: r.applied, reason: r.reason };
+      }
+    } catch (err) {
+      enforcement = { applied: false, reason: "livekit_push_failed" };
+    }
+  }
+
   const merged = await readControlsMerged(roomId, identityDocId);
-  return res.json({ ok: true, controls: merged });
+  return res.json({ ok: true, controls: merged, enforcement });
 });
 
 // Apply a role's permissions to a LiveKit participant immediately.
@@ -528,6 +801,9 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedByUid: uid,
         appliedPresetId: presetId,
+        lkBasePermission: admin.firestore.FieldValue.delete(),
+        // Hint for the participant's controls SSE stream to re-fetch its token.
+        tokenRefreshRequestedAt: Date.now(),
       },
       { merge: true },
     );
@@ -538,17 +814,11 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
     let livekitApplied = false;
     let livekitReason: string | null = null;
     try {
-      const sdk = await getLiveKitSdk();
-      const RoomServiceClient = (sdk as any).RoomServiceClient as any;
+      const roomService = await getRoomServiceClient();
 
-      if (RoomServiceClient && process.env.LIVEKIT_URL && process.env.LIVEKIT_API_KEY && process.env.LIVEKIT_API_SECRET) {
-        const roomService = new RoomServiceClient(
-          process.env.LIVEKIT_URL,
-          process.env.LIVEKIT_API_KEY,
-          process.env.LIVEKIT_API_SECRET,
-        );
-
-        const permission = mapPresetToLivekitPermission(presetId);
+      if (roomService) {
+        const mergedControls = (await readControlsMerged(roomId, identityDocId)) as any;
+        const permission = restrictPermissionByControls(mapPresetToLivekitPermission(presetId), mergedControls);
         const { livekitRoomName } = getRoomAccess(req as any);
 
         console.log("[roomControls] APPLY PERMISSIONS", {
@@ -562,24 +832,9 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
         // render a stable role label and dropdown value.
         let nextMetadata: string | undefined;
         try {
-          const listResp = await (roomService as any).listParticipants(livekitRoomName);
-          const participants: any[] = Array.isArray((listResp as any)?.participants)
-            ? (listResp as any).participants
-            : Array.isArray(listResp)
-            ? (listResp as any)
-            : [];
+          const participants = await listLiveKitParticipants(roomService, livekitRoomName);
           const target = participants.find((p) => p && p.identity === rawIdentity);
-          const existingMetaRaw = target?.metadata as string | undefined;
-          let existingMeta: any = {};
-          if (existingMetaRaw && typeof existingMetaRaw === "string") {
-            try {
-              existingMeta = JSON.parse(existingMetaRaw) || {};
-            } catch {
-              existingMeta = {};
-            }
-          }
-          const mergedMeta = { ...existingMeta, rolePresetId: presetId };
-          nextMetadata = JSON.stringify(mergedMeta);
+          nextMetadata = mergeParticipantMetadata(target?.metadata, { rolePresetId: presetId });
         } catch {
           nextMetadata = JSON.stringify({ rolePresetId: presetId });
         }
@@ -592,22 +847,13 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
         livekitApplied = true;
         livekitReason = null;
 
-        const sources: any[] = Array.isArray((permission as any).canPublishSources)
-          ? (permission as any).canPublishSources
-          : [];
-        const hasScreenShare = sources.some(
-          (s) => s === TrackSource.SCREEN_SHARE || String(s).toLowerCase() === "screen_share",
-        );
-        const lostScreenShare = sources.length > 0 && !hasScreenShare;
+        const sources: number[] = permission.canPublishSources;
+        const hasScreenShare = sources.includes(LIVEKIT_TRACK_SOURCE_ENUM.screen_share);
+        const lostScreenShare = (sources.length > 0 || permission.canPublish === false) && !hasScreenShare;
 
         if (lostScreenShare) {
           try {
-            const listResp = await (roomService as any).listParticipants(livekitRoomName);
-            const participants: any[] = Array.isArray((listResp as any)?.participants)
-              ? (listResp as any).participants
-              : Array.isArray(listResp)
-              ? (listResp as any)
-              : [];
+            const participants = await listLiveKitParticipants(roomService, livekitRoomName);
 
             const target = participants.find((p) => p && p.identity === rawIdentity);
             if (!target) {
@@ -762,18 +1008,34 @@ router.get("/:roomId/controls/stream", requireRoomAccessToken as any, async (req
     }
   };
 
-  const identityDocId = normalizeControlsDocId((req.query as any)?.identity);
+  // Identity binding: only hosts/cohosts may watch another participant's
+  // controls. Everyone else is pinned to their own roomAccessToken identity.
+  const callerRole = String(access.role || "").toLowerCase();
+  const canWatchOthers = callerRole === "host" || callerRole === "cohost";
+  const requestedIdentity = String((req.query as any)?.identity || "").trim();
+  const boundIdentity = canWatchOthers ? requestedIdentity || String(access.identity || "") : String(access.identity || "");
+  const identityDocId = normalizeControlsDocId(boundIdentity);
+  const isOwnStream = !!access.identity && identityDocId === normalizeControlsDocId(access.identity);
   const defaultRef = controlsDocRef(roomId, "default");
   const identityRef = controlsDocRef(roomId, identityDocId);
 
   let lastDefault: any = {};
   let lastIdentity: any = {};
+  let lastRefreshNonce: unknown = undefined;
   const emit = () => write(mergeControls(lastDefault, lastIdentity));
+
+  // A `refresh_token` hint is emitted when the host changes this
+  // participant's role (the role endpoints bump `tokenRefreshRequestedAt`).
+  let initialNonceKnown = false;
 
   // Send an initial payload.
   try {
-    const merged = await readControlsMerged(roomId, identityDocId);
-    write(merged);
+    const [dSnap, iSnap] = await Promise.all([defaultRef.get(), identityRef.get()]);
+    lastDefault = dSnap.exists ? (dSnap.data() as any) : {};
+    lastIdentity = iSnap.exists ? (iSnap.data() as any) : {};
+    lastRefreshNonce = lastIdentity?.tokenRefreshRequestedAt;
+    initialNonceKnown = true;
+    emit();
   } catch {
     write({ ...DEFAULT_CONTROLS });
   }
@@ -793,6 +1055,14 @@ router.get("/:roomId/controls/stream", requireRoomAccessToken as any, async (req
     (snap) => {
       lastIdentity = snap.exists ? (snap.data() as any) : {};
       emit();
+      const nonce = lastIdentity?.tokenRefreshRequestedAt;
+      if (nonce !== undefined && nonce !== lastRefreshNonce) {
+        lastRefreshNonce = nonce;
+        if (initialNonceKnown && isOwnStream) {
+          write({ type: "refresh_token", identity: access.identity, at: nonce });
+        }
+      }
+      initialNonceKnown = true;
     },
     () => {
       lastIdentity = {};
@@ -800,12 +1070,47 @@ router.get("/:roomId/controls/stream", requireRoomAccessToken as any, async (req
     },
   );
 
+  // Server-side enforcement on (re)join: a participant's fresh LiveKit token
+  // is minted from their invite/role, not from room controls, so re-apply any
+  // standing restrictions (mute lock, forced mute, role changes) once they are
+  // connected. LiveKit may not know the participant yet when SSE opens, so
+  // retry a few times.
+  const enforceTimers: Array<ReturnType<typeof setTimeout>> = [];
+  if (isOwnStream && callerRole !== "host") {
+    const livekitRoomName = String(access.livekitRoomName || "").trim();
+    const shouldEnforce = () =>
+      controlsHaveRestrictions(mergeControls(lastDefault, lastIdentity)) || !!normalizeBaseRole(lastIdentity?.role);
+    if (livekitRoomName) {
+      let done = false;
+      for (const delay of [3_000, 10_000, 25_000]) {
+        enforceTimers.push(
+          setTimeout(async () => {
+            if (done || !shouldEnforce()) return;
+            const ownerUid = await getRoomOwnerUid(roomId);
+            if (isProtectedIdentity(access.identity, ownerUid)) {
+              done = true;
+              return;
+            }
+            const r = await enforceRoomControlsForIdentity({
+              roomId,
+              livekitRoomName,
+              identity: access.identity,
+              fallbackRole: access.role,
+            });
+            if (r.applied) done = true;
+          }, delay),
+        );
+      }
+    }
+  }
+
   const heartbeat = setInterval(() => {
     res.write(`: keep-alive ${Date.now()}\n\n`);
   }, 25000);
 
   req.on("close", () => {
     clearInterval(heartbeat);
+    enforceTimers.forEach((t) => clearTimeout(t));
     try {
       unsubDefault();
       unsubIdentity();
@@ -816,24 +1121,21 @@ router.get("/:roomId/controls/stream", requireRoomAccessToken as any, async (req
 });
 
 /**
- * POST /api/rooms/:roomId/participants/:identity/promote
- * 
- * Promotes a viewer guest to speaker (enables mic+cam).
- * 
- * Auth: Requires host role + valid roomAccessToken
- * 
- * Updates LiveKit ParticipantPermission:
- * - canPublish: true
- * - canPublishData: true  
- * - canPublishSources: ["microphone", "camera"]
- * 
- * Also updates Firestore controls doc so the promotion persists if they rejoin.
+ * Shared implementation for "Bring on stage" (promote) and
+ * "Move to audience" (demote).
+ *
+ * - promote: viewer/guest -> speaker ("participant": mic + cam)
+ * - demote:  speaker -> audience ("viewer": subscribe-only)
+ *
+ * Updates the LiveKit ParticipantPermission in real time (with enum-encoded
+ * track sources), merges metadata, persists the role in the identity
+ * controls doc (so it survives a rejoin and is re-enforced on SSE open) and
+ * asks the participant's controls stream to refresh its token.
+ *
+ * Auth: host role + valid roomAccessToken (+ account session).
  */
-router.post(
-  "/:roomId/participants/:identity/promote",
-  requireAuth as any,
-  requireRoomAccessToken as any,
-  async (req: any, res) => {
+function stageChangeHandler(direction: "promote" | "demote") {
+  return async (req: any, res: any) => {
     const roomId = String(req.params.roomId || "").trim();
     const targetIdentity = String(req.params.identity || "").trim();
 
@@ -848,7 +1150,7 @@ router.post(
       return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
     }
 
-    // Only hosts can promote guests to speakers
+    // Only hosts can move people on/off stage.
     if (!isHostOrCohost(access.role)) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
@@ -856,118 +1158,142 @@ router.post(
     const uid = (req as any).user?.uid as string | undefined;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    try {
-      // Get LiveKit SDK
-      const roomService = await getLiveKitSdk();
+    if (direction === "demote") {
+      const ownerUid = await getRoomOwnerUid(roomId);
+      if (isProtectedIdentity(targetIdentity, ownerUid, [access.identity])) {
+        return res.status(400).json({ error: "cannot_demote_host" });
+      }
+    }
 
+    const newRole: BaseRole = direction === "promote" ? "participant" : "viewer";
+    const identityDocId = normalizeControlsDocId(targetIdentity);
+
+    try {
+      const roomService = await getRoomServiceClient();
       if (!roomService) {
         return res.status(500).json({ error: "livekit_not_configured" });
       }
 
       const { livekitRoomName } = getRoomAccess(req as any);
 
-      // Get participant permission for "participant" role (mic + cam)
-      const participantPermission = roleToParticipantPermission("participant");
+      // Persist first so the SSE stream/rejoin enforcement sees the new role.
+      const ref = controlsDocRef(roomId, identityDocId);
+      await ref.set(
+        direction === "promote"
+          ? {
+              role: "participant",
+              canPublishAudio: true,
+              canPublishVideo: true,
+              canScreenShare: false, // Participants can't screen share by default
+              forcedMute: false,
+              forcedVideoOff: false,
+              promotedToSpeaker: true,
+              promotedAt: admin.firestore.FieldValue.serverTimestamp(),
+              promotedBy: uid,
+              lkBasePermission: admin.firestore.FieldValue.delete(),
+              tokenRefreshRequestedAt: Date.now(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              updatedByUid: uid,
+            }
+          : {
+              role: "viewer",
+              promotedToSpeaker: false,
+              demotedAt: admin.firestore.FieldValue.serverTimestamp(),
+              demotedBy: uid,
+              lkBasePermission: admin.firestore.FieldValue.delete(),
+              tokenRefreshRequestedAt: Date.now(),
+              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              updatedByUid: uid,
+            },
+        { merge: true },
+      );
 
-      console.log("[promote] Promoting guest to speaker", {
+      const mergedControls = (await readControlsMerged(roomId, identityDocId)) as any;
+      const permission = restrictPermissionByControls(roleToParticipantPermission(newRole), mergedControls);
+
+      console.log(`[${direction}] stage change`, {
         roomId,
         livekitRoomName,
         targetIdentity,
-        promoterUid: uid,
-        newPermissions: participantPermission,
+        byUid: uid,
+        newRole,
+        permission,
       });
 
-      // Fetch existing metadata to preserve it
-      let nextMetadata: string | undefined;
+      let target: any = null;
+      let nextMetadata: string;
+      const metaPatch =
+        direction === "promote"
+          ? { rolePresetId: "participant", promotedToSpeaker: true, promotedAt: Date.now(), promotedBy: uid }
+          : { rolePresetId: "viewer", promotedToSpeaker: false, demotedAt: Date.now(), demotedBy: uid };
       try {
-        const listResp = await (roomService as any).listParticipants(livekitRoomName);
-        const participants: any[] = Array.isArray((listResp as any)?.participants)
-          ? (listResp as any).participants
-          : Array.isArray(listResp)
-          ? (listResp as any)
-          : [];
-        const target = participants.find((p: any) => p && p.identity === targetIdentity);
-        const existingMetaRaw = target?.metadata as string | undefined;
-        let existingMeta: any = {};
-        if (existingMetaRaw && typeof existingMetaRaw === "string") {
-          try {
-            existingMeta = JSON.parse(existingMetaRaw) || {};
-          } catch {
-            existingMeta = {};
-          }
-        }
-        // Mark as promoted speaker in metadata
-        const mergedMeta = {
-          ...existingMeta,
-          rolePresetId: "participant",
-          promotedToSpeaker: true,
-          promotedAt: Date.now(),
-          promotedBy: uid,
-        };
-        nextMetadata = JSON.stringify(mergedMeta);
+        const participants = await listLiveKitParticipants(roomService, livekitRoomName);
+        target = participants.find((p: any) => p && p.identity === targetIdentity) || null;
+        nextMetadata = mergeParticipantMetadata(target?.metadata, metaPatch);
       } catch {
-        nextMetadata = JSON.stringify({
-          rolePresetId: "participant",
-          promotedToSpeaker: true,
-          promotedAt: Date.now(),
-          promotedBy: uid,
-        });
+        nextMetadata = JSON.stringify(metaPatch);
       }
 
-      // Update LiveKit participant permissions in real-time
       await roomService.updateParticipant(livekitRoomName, targetIdentity, {
-        permission: participantPermission,
+        permission,
         metadata: nextMetadata,
       });
 
-      // Update Firestore controls doc so promotion persists
-      const identityDocId = normalizeControlsDocId(targetIdentity);
-      const ref = controlsDocRef(roomId, identityDocId);
-      await ref.set(
-        {
-          role: "participant",
-          canPublishAudio: true,
-          canPublishVideo: true,
-          canScreenShare: false, // Participants can't screen share by default
-          promotedToSpeaker: true,
-          promotedAt: admin.firestore.FieldValue.serverTimestamp(),
-          promotedBy: uid,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        { merge: true }
-      );
-
-      console.log("[promote] Successfully promoted guest to speaker", {
-        roomId,
-        targetIdentity,
-      });
+      // Demotion: make sure nothing they were publishing stays live.
+      if (direction === "demote" && target) {
+        const tracks: any[] = Array.isArray(target.tracks) ? target.tracks : [];
+        for (const t of tracks) {
+          const sid = t?.sid || t?.trackSid;
+          if (!sid || t?.muted === true) continue;
+          try {
+            await roomService.mutePublishedTrack(livekitRoomName, targetIdentity, sid, true);
+          } catch {
+            // ignore
+          }
+        }
+      }
 
       return res.json({
         ok: true,
         identity: targetIdentity,
-        role: "participant",
-        permissions: {
-          canPublish: true,
-          canPublishData: true,
-          canPublishSources: ["microphone", "camera"],
-        },
+        role: newRole,
+        permissions:
+          direction === "promote"
+            ? { canPublish: true, canPublishData: true, canPublishSources: ["microphone", "camera"] }
+            : { canPublish: false, canPublishData: !!permission.canPublishData, canPublishSources: [] },
+        appliedPermission: permission,
       });
     } catch (err) {
       const message = (err as any)?.message || String(err);
-      console.error("[promote] Failed to promote guest", {
+      console.error(`[${direction}] Failed to change stage`, {
         roomId,
         targetIdentity,
         error: message,
       });
 
-      // If the room/participant no longer exists in LiveKit (404), return specific error
-      if (message.includes("status 404")) {
+      if (isLiveKitNotFound(err)) {
         return res.status(404).json({ error: "participant_not_found" });
       }
 
-      return res.status(500).json({ error: "promotion_failed", message });
+      return res.status(500).json({ error: direction === "promote" ? "promotion_failed" : "demotion_failed", message });
     }
-  }
+  };
+}
+
+// POST /api/rooms/:roomId/participants/:identity/promote  ("Bring on stage")
+router.post(
+  "/:roomId/participants/:identity/promote",
+  requireAuth as any,
+  requireRoomAccessToken as any,
+  stageChangeHandler("promote"),
+);
+
+// POST /api/rooms/:roomId/participants/:identity/demote  ("Move to audience")
+router.post(
+  "/:roomId/participants/:identity/demote",
+  requireAuth as any,
+  requireRoomAccessToken as any,
+  stageChangeHandler("demote"),
 );
 
 export default router;

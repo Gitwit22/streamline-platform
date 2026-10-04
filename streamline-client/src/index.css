@@ -268,3 +268,42 @@ button:focus-visible {
 .sl-screen-popout [data-lk-source="screen_share"] {
   display: none !important;
 }
+
+/* ======================================
+   HOST CONTROLS ENFORCEMENT (room page)
+   ====================================== */
+
+/* Audience (subscribe-only): no publish controls at all. LiveKit's ControlBar
+   also hides these from live permissions; this covers the window before
+   permissions arrive. */
+.sl-viewer .lk-control-bar [data-lk-source="microphone"],
+.sl-viewer .lk-control-bar [data-lk-source="camera"],
+.sl-viewer .lk-control-bar [data-lk-source="screen_share"],
+.sl-viewer .lk-control-bar .lk-button-group:has([data-lk-source="microphone"]),
+.sl-viewer .lk-control-bar .lk-button-group:has([data-lk-source="camera"]) {
+  display: none !important;
+}
+
+/* Host muted / mute-locked / disallowed audio: mic toggle is disabled. */
+.sl-controls-no-audio .lk-control-bar [data-lk-source="microphone"],
+.sl-controls-no-audio .lk-control-bar .lk-button-group:has([data-lk-source="microphone"]) .lk-button-group-menu {
+  pointer-events: none !important;
+  opacity: 0.45 !important;
+  cursor: not-allowed !important;
+}
+
+/* Host turned this participant's camera off / disallowed video. */
+.sl-controls-no-video .lk-control-bar [data-lk-source="camera"],
+.sl-controls-no-video .lk-control-bar .lk-button-group:has([data-lk-source="camera"]) .lk-button-group-menu {
+  pointer-events: none !important;
+  opacity: 0.45 !important;
+  cursor: not-allowed !important;
+}
+
+/* tileVisible=false: hide the participant's camera tile. Tiles are tagged by
+   TileVisibilityEnforcer (data-sl-tile-hidden) for every viewer; the
+   hide-self rule covers the participant's own view immediately. */
+.lk-participant-tile[data-sl-tile-hidden="true"],
+.sl-controls-hide-self .lk-participant-tile[data-lk-local-participant="true"]:not([data-lk-source="screen_share"]) {
+  display: none !important;
+}

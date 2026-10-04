@@ -53,6 +53,18 @@ import { fetchDestinations, preflight, type DestinationItem } from "../../servic
 import { normalizeUiRolePresetId } from "../../lib/roles";
 import { recordingEvents } from "../../lib/recordingEvents";
 import { detectInAppBrowser } from "../../lib/detectInAppBrowser";
+import {
+  getRoomAccessPermissions,
+  isEphemeralGuestIdentity,
+  normalizeRoomRole,
+  type RoomAccessPermissions,
+  type RoomRole,
+} from "../../lib/roomAccessClaims";
+import {
+  HostControlsEnforcer,
+  TileVisibilityEnforcer,
+  type PublishPermissionState,
+} from "../components/HostControlsEnforcer";
 import { apiUpdateProgramState, apiGetProgramState } from "../../lib/api";
 import type { ProgramState } from "../../lib/programState";
 import { DEFAULT_PROGRAM_STATE } from "../../lib/programState";
@@ -770,6 +782,14 @@ type EffectiveControls = {
   canStartStopStream?: boolean;
   canStartStopRecording?: boolean;
   rolePresetId?: "participant" | "cohost";
+
+  // Host-enforced media state (server also enforces via LiveKit permissions).
+  forcedMute?: boolean;
+  forcedVideoOff?: boolean;
+  muteLocked?: boolean;
+  // Raw role from the controls doc, normalized defensively ("viewer" after
+  // "Move to audience", "participant" after "Bring on stage", ...).
+  stageRole?: RoomRole | null;
 };
 
 function ThankYouScreen({ showHomeButton = false, onHome }: { showHomeButton?: boolean; onHome?: () => void }) {
@@ -1193,6 +1213,13 @@ type LiveKitShellProps = {
   presenceMode: "normal" | "invisible";
   showLayoutPicker: boolean;
   onToggleLayoutPicker: () => void;
+  /** Subscribe-only participant (viewer / moved to audience). */
+  isAudience?: boolean;
+  /** Host controls currently forbid mic (canPublishAudio=false, forcedMute, mute lock). */
+  controlsAudioBlocked?: boolean;
+  /** Host controls currently forbid camera (canPublishVideo=false, forcedVideoOff). */
+  controlsVideoBlocked?: boolean;
+  onPublishPermissionChange?: (state: PublishPermissionState) => void;
 };
 
 function LiveKitShell({
@@ -1226,6 +1253,10 @@ function LiveKitShell({
   presenceMode,
   showLayoutPicker,
   onToggleLayoutPicker,
+  isAudience = false,
+  controlsAudioBlocked = false,
+  controlsVideoBlocked = false,
+  onPublishPermissionChange,
 }: LiveKitShellProps) {
   const [guestStatus, setGuestStatus] = useState<GuestStatus>(null);
   const [roomPreviewPreset, setRoomPreviewPreset] = useState<StudioLayoutPresetId | null>(null);
@@ -1354,9 +1385,11 @@ function LiveKitShell({
   return (
     <LiveKitRoom
       data-lk-theme="default"
-      className={`sl-layout${isViewer ? " sl-viewer" : ""}${
-        subjectToControls && !controlsAllowPublishAudio ? " sl-controls-no-audio" : ""
-      }${subjectToControls && !controlsTileVisible ? " sl-controls-hide-self" : ""}${
+      className={`sl-layout${isAudience ? " sl-viewer" : ""}${
+        subjectToControls && (!controlsAllowPublishAudio || controlsAudioBlocked) ? " sl-controls-no-audio" : ""
+      }${subjectToControls && controlsVideoBlocked ? " sl-controls-no-video" : ""}${
+        subjectToControls && !controlsTileVisible ? " sl-controls-hide-self" : ""
+      }${
         subjectToControls && !controlsAllowScreenShare ? " sl-controls-no-screen" : ""
       }${advancedScreenShareEnabled ? ` sl-screen-${screenShareMode}` : ""}${
         roomPreviewPreset ? ` sl-program-${roomPreviewPreset}` : ""
@@ -1364,8 +1397,11 @@ function LiveKitShell({
       token={token}
       serverUrl={serverUrl}
       connect={true}
-      audio={true}
-      video={true}
+      // Viewers are subscribe-only: never try to publish on connect (it
+      // would fail and surface device errors). Promoted viewers turn mic/cam
+      // on themselves via the control bar once LiveKit grants publish.
+      audio={!isAudience && !controlsAudioBlocked}
+      video={!isAudience && !controlsVideoBlocked}
       options={ROOM_OPTIONS}
       connectOptions={undefined}
       onConnected={() => {
@@ -1373,8 +1409,8 @@ function LiveKitShell({
           isViewer, 
           isHost,
           roomId,
-          wantsAudio: true,
-          wantsVideo: true,
+          wantsAudio: !isAudience && !controlsAudioBlocked,
+          wantsVideo: !isAudience && !controlsVideoBlocked,
         });
       }}
       onDisconnected={onDisconnected}
@@ -1404,6 +1440,13 @@ function LiveKitShell({
           onDismiss={() => setMediaPermissionError(null)}
         />
         <ReconnectCommandListener />
+        <HostControlsEnforcer
+          audioBlocked={subjectToControls && (!controlsAllowPublishAudio || controlsAudioBlocked)}
+          videoBlocked={subjectToControls && controlsVideoBlocked}
+          screenBlocked={subjectToControls && !controlsAllowScreenShare}
+          onPublishPermissionChange={onPublishPermissionChange}
+        />
+        <TileVisibilityEnforcer rootRef={mediaRootRef} hideLocal={subjectToControls && !controlsTileVisible} />
         {audioMixerEnabled && <MixerBridge />}
         {advancedScreenShareEnabled && <ScreenSharePopout mode={screenShareMode} onActiveSharerChange={onActiveSharerChange} />}
         {isHost && roomId && roomAccessToken && (
@@ -1438,27 +1481,6 @@ function LiveKitShell({
             }}
           >
             Guest is viewing the join page.
-          </div>
-        )}
-        {isViewer && (
-          <div
-            style={{
-              position: "absolute",
-              top: 10,
-              left: "50%",
-              transform: "translateX(-50%)",
-              padding: "8px 16px",
-              borderRadius: 999,
-              background: "rgba(15,23,42,0.95)",
-              border: "1px solid rgba(59,130,246,0.6)",
-              fontSize: 13,
-              color: "#93c5fd",
-              zIndex: 20,
-              pointerEvents: "none",
-              boxShadow: "0 4px 12px rgba(0,0,0,0.3)",
-            }}
-          >
-            🎥 Connected as guest — you can enable mic/cam below
           </div>
         )}
         {/* When host is invisible, hide their local video tile completely */}
@@ -1692,43 +1714,6 @@ function RoomPage() {
 
   const currentRole = userRole;
   const isGuestRole = currentRole === "guest";
-  const can = (key: keyof RoomPermissions) => !needsReauth && (isHost || !!roomPermissions?.[key]);
-  const canInviteLinks = !needsReauth && !isViewer && (isHost || !!effectiveControls.canInviteLinks || can("canInvite"));
-  const canManageStream =
-    !needsReauth &&
-    !isViewer &&
-    (isHost ||
-      !!effectiveControls.canStartStopStream ||
-      !!effectiveControls.canStartStopRecording ||
-      !!effectiveControls.canManageDestinations ||
-      can("canStream") ||
-      can("canRecord") ||
-      can("canDestinations"));
-  const canMuteGuestsUi =
-    !needsReauth &&
-    !isViewer &&
-    isHost &&
-    (!!effectiveControls.canMuteGuests || can("canModerate"));
-
-  const canRemoveGuestsUi =
-    !needsReauth &&
-    !isViewer &&
-    isHost &&
-    (!!effectiveControls.canRemoveGuests || can("canModerate"));
-
-  const canModerateUi =
-    !needsReauth &&
-    !isViewer &&
-    isHost &&
-    (can("canModerate") ||
-      !!effectiveControls.canRemoveGuests ||
-      !!effectiveControls.canMuteGuests);
-
-  const subjectToControls = !isHost && !isViewer;
-  const controlsAllowPublishAudio = !subjectToControls || effectiveControls.canPublishAudio !== false;
-  const controlsTileVisible = !subjectToControls || effectiveControls.tileVisible !== false;
-  const controlsAllowScreenShare = !subjectToControls || effectiveControls.canScreenShare !== false;
-
   const openReauthInNewTab = () => {
     try {
       const next = `${window.location.pathname}${window.location.search}`;
@@ -1868,6 +1853,113 @@ function RoomPage() {
   const [, setAuthStatus] = useState<"unknown" | "authed" | "guest">("unknown");
     const [effectivePermissionsMode, setEffectivePermissionsMode] = useState<"simple" | "advanced">("simple");
   const roomId = firestoreRoomId ?? routeRoomId ?? null;
+
+  // ---------------------------------------------------------------------------
+  // Token refresh on role change (controls SSE `refresh_token` hint).
+  // We re-run the existing token fetch effect by clearing `token` (its guard
+  // is `if (token && serverUrl) return`). While the new token is minted the
+  // LiveKitShell keeps the previous token so the live connection is not torn
+  // down (LiveKitRoom ignores a token change once connected).
+  // ---------------------------------------------------------------------------
+  const lastLiveKitTokenRef = useRef<string | null>(null);
+  if (token) lastLiveKitTokenRef.current = token;
+  const [tokenRefreshPending, setTokenRefreshPending] = useState(false);
+  const tokenRefreshCtxRef = useRef<{ roomId: string | null; identity: string | null }>({ roomId: null, identity: null });
+  tokenRefreshCtxRef.current = { roomId, identity: participantIdentity };
+  const requestRoomTokenRefresh = React.useCallback(() => {
+    const { roomId: rid, identity } = tokenRefreshCtxRef.current;
+    if (isEphemeralGuestIdentity(identity)) {
+      // Re-minting would assign a new random identity; LiveKit permissions
+      // were already updated server-side, so skip.
+      return;
+    }
+    if (roomTokenMintInFlightRef.current) return;
+    try {
+      if (rid) sessionStorage.removeItem(`sl_lk_token:${rid}`);
+    } catch {
+      // ignore
+    }
+    setTokenRefreshPending(true);
+    setToken(null);
+  }, []);
+  useEffect(() => {
+    if (token && tokenRefreshPending) setTokenRefreshPending(false);
+  }, [token, tokenRefreshPending]);
+  const shellToken = token ?? (tokenRefreshPending ? lastLiveKitTokenRef.current : null);
+
+  // Live LiveKit publish permissions reported from inside the room.
+  const [livekitPublish, setLivekitPublish] = useState<PublishPermissionState | null>(null);
+  const handlePublishPermissionChange = React.useCallback((s: PublishPermissionState) => {
+    setLivekitPublish((prev) =>
+      prev &&
+      prev.canPublish === s.canPublish &&
+      prev.canPublishAudio === s.canPublishAudio &&
+      prev.canPublishVideo === s.canPublishVideo &&
+      prev.canScreenShare === s.canScreenShare
+        ? prev
+        : s,
+    );
+  }, []);
+
+  const can = (key: keyof RoomPermissions) => !needsReauth && (isHost || !!roomPermissions?.[key]);
+  // What the server will actually accept: the roomAccessToken's permissions
+  // (from the /token response, or decoded from the RAT itself). SSE controls
+  // alone are not enough — showing a button the RAT can't back leads to a
+  // 401/403 and a bogus "Session expired" banner.
+  const ratPermissions: RoomAccessPermissions | null = useMemo(
+    () => (roomPermissions as RoomAccessPermissions | null) ?? getRoomAccessPermissions(roomAccessToken),
+    [roomPermissions, roomAccessToken],
+  );
+  const ratAllows = (key: keyof RoomAccessPermissions) => !!ratPermissions?.[key];
+  const canInviteLinks =
+    !needsReauth && !isViewer && (isHost || (!!effectiveControls.canInviteLinks && ratAllows("canInvite")));
+  const canManageStream =
+    !needsReauth &&
+    !isViewer &&
+    (isHost ||
+      (!!effectiveControls.canStartStopStream && ratAllows("canStream")) ||
+      (!!effectiveControls.canStartStopRecording && ratAllows("canRecord")) ||
+      (!!effectiveControls.canManageDestinations && ratAllows("canDestinations")));
+  const canMuteGuestsUi =
+    !needsReauth &&
+    !isViewer &&
+    isHost &&
+    (!!effectiveControls.canMuteGuests || can("canModerate"));
+
+  const canRemoveGuestsUi =
+    !needsReauth &&
+    !isViewer &&
+    isHost &&
+    (!!effectiveControls.canRemoveGuests || can("canModerate"));
+
+  const canModerateUi =
+    !needsReauth &&
+    !isViewer &&
+    isHost &&
+    (can("canModerate") ||
+      !!effectiveControls.canRemoveGuests ||
+      !!effectiveControls.canMuteGuests);
+
+  // Audience (subscribe-only) detection. Live LiveKit permissions win once
+  // known (so "Bring on stage" / "Move to audience" apply without reload);
+  // before that, fall back to the token response (isViewer / role "viewer")
+  // and the controls doc role.
+  const tokenSaysViewer =
+    isViewer || normalizeRoomRole(userRole) === "viewer" || effectiveControls.stageRole === "viewer";
+  const isAudience =
+    !isHost &&
+    presenceMode !== "invisible" &&
+    (livekitPublish && livekitPublish.canPublish !== null ? livekitPublish.canPublish === false : tokenSaysViewer);
+
+  const subjectToControls = !isHost;
+  const controlsAllowPublishAudio = !subjectToControls || effectiveControls.canPublishAudio !== false;
+  const controlsAllowPublishVideo = !subjectToControls || effectiveControls.canPublishVideo !== false;
+  const controlsTileVisible = !subjectToControls || effectiveControls.tileVisible !== false;
+  const controlsAllowScreenShare = !subjectToControls || effectiveControls.canScreenShare !== false;
+  const controlsAudioBlocked =
+    subjectToControls && (!controlsAllowPublishAudio || !!effectiveControls.forcedMute || !!effectiveControls.muteLocked);
+  const controlsVideoBlocked = subjectToControls && (!controlsAllowPublishVideo || !!effectiveControls.forcedVideoOff);
+
 
   // ---------------------------------------------------------------------------
   // Screen share route mode: persist per-room in localStorage + room controls
@@ -2016,20 +2108,33 @@ function RoomPage() {
     let closed = false;
     const es = new EventSource(url, { withCredentials: true } as any);
 
-    let lastRole: "cohost" | "participant" | undefined = undefined;
+    let lastRole: RoomRole | undefined = undefined;
 
     es.onmessage = (ev) => {
       if (closed) return;
       try {
         const data = JSON.parse(ev.data);
 
+        // Server hint: the host changed our role; re-mint the room token so
+        // roomAccessToken permissions match. Not a controls payload.
+        if (data?.type === "refresh_token") {
+          requestRoomTokenRefresh();
+          return;
+        }
+        if (typeof data?.type === "string") return; // unknown event types
+
+        // Defensive: unknown roles are ignored rather than breaking the page.
+        const stageRole = normalizeRoomRole(data?.role);
         const rawRole = data?.role;
-        const nextRole = rawRole === "cohost" || rawRole === "participant" ? normalizeUiRolePresetId(rawRole) : undefined;
+        const nextRole = stageRole && stageRole !== "host" && stageRole !== "guest" ? stageRole : undefined;
 
         if (nextRole && lastRole && nextRole !== lastRole) {
-          const roleName = nextRole === "cohost" ? "Co-host" : "Participant";
-
-          const msg = `You're now a ${roleName}`;
+          const msg =
+            nextRole === "viewer"
+              ? "You've been moved to the audience"
+              : lastRole === "viewer"
+                ? "You're on stage — you can turn on your mic and camera"
+                : `You're now a ${nextRole === "cohost" ? "Co-host" : "Participant"}`;
           setRoleChangeMessage(msg);
 
           if (roleToastTimeoutRef.current) {
@@ -2041,15 +2146,18 @@ function RoomPage() {
           }, 2800);
         }
 
-        if (!lastRole && nextRole) {
-          lastRole = nextRole;
-        } else if (nextRole && nextRole !== lastRole) {
+        if (nextRole) {
           lastRole = nextRole;
         }
 
-        const normalizedRolePresetId = nextRole ? normalizeUiRolePresetId(nextRole) : undefined;
+        const normalizedRolePresetId =
+          rawRole === "cohost" || rawRole === "participant" ? normalizeUiRolePresetId(rawRole) : undefined;
 
         setEffectiveControls({
+          forcedMute: data?.forcedMute === true,
+          forcedVideoOff: data?.forcedVideoOff === true,
+          muteLocked: data?.muteLocked === true,
+          stageRole,
           canPublishAudio: typeof data?.canPublishAudio === "boolean" ? data.canPublishAudio : true,
           tileVisible: typeof data?.tileVisible === "boolean" ? data.tileVisible : true,
           canPublishVideo: typeof data?.canPublishVideo === "boolean" ? data.canPublishVideo : true,
@@ -4109,9 +4217,12 @@ function RoomPage() {
   return (
     <>
       <RoleChangeToast message={roleChangeMessage} />
-      {isViewer && (
-        <div className="w-full bg-amber-500 text-black text-sm font-semibold px-4 py-2 flex items-center gap-2">
-          👀 View-only mode — publishing controls are disabled.
+      {isAudience && (
+        <div
+          role="status"
+          className="w-full bg-amber-500 text-black text-sm font-semibold px-4 py-2 flex items-center gap-2"
+        >
+          You're watching — the host can bring you on stage.
         </div>
       )}
       {/* REMOVED: Old "Not started yet" banner - guests now connect immediately to LiveKit.
@@ -4509,9 +4620,9 @@ function RoomPage() {
         )}
       </div>
 
-      {token && serverUrl && (
+      {shellToken && serverUrl && (
         <LiveKitShell
-          token={token}
+          token={shellToken}
           serverUrl={serverUrl}
           isHost={isHost}
           isViewer={isViewer}
@@ -4543,6 +4654,10 @@ function RoomPage() {
           presenceMode={presenceMode}
           showLayoutPicker={showLayoutPicker}
           onToggleLayoutPicker={() => setShowLayoutPicker(v => !v)}
+          isAudience={isAudience}
+          controlsAudioBlocked={controlsAudioBlocked}
+          controlsVideoBlocked={controlsVideoBlocked}
+          onPublishPermissionChange={handlePublishPermissionChange}
         />
       )}
 

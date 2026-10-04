@@ -119,3 +119,161 @@ export function applyPresenceModeToGrant(
     canPublishSources: [],
   };
 }
+
+// ---------------------------------------------------------------------------
+// RoomService (server API) encoding
+// ---------------------------------------------------------------------------
+//
+// Token grants (VideoGrant in the JWT) accept string sources such as
+// "microphone". The RoomService API (`RoomServiceClient.updateParticipant`)
+// does NOT: it builds a protobuf `ParticipantPermission`, whose
+// `can_publish_sources` field is a repeated `TrackSource` enum. Passing
+// strings there makes livekit-server-sdk 2.x throw
+// "cannot encode field livekit.ParticipantPermission.can_publish_sources to JSON".
+//
+// Always run permissions through `toLiveKitParticipantPermission` before
+// handing them to `updateParticipant`.
+
+/** Numeric values of livekit.TrackSource (protocol enum). */
+export const LIVEKIT_TRACK_SOURCE_ENUM = {
+  unknown: 0,
+  camera: 1,
+  microphone: 2,
+  screen_share: 3,
+  screen_share_audio: 4,
+} as const;
+
+const TRACK_SOURCE_NUMBER_TO_STRING: Record<number, LiveKitTrackSource> = {
+  1: "camera",
+  2: "microphone",
+  3: "screen_share",
+  4: "screen_share_audio",
+};
+
+/**
+ * Map a track source given as a string ("microphone", "SCREEN_SHARE",
+ * "screenShare") or as the protobuf enum number to the enum number.
+ * Returns null for unknown/unsupported values (including UNKNOWN=0).
+ */
+export function toLiveKitTrackSourceNumber(source: unknown): number | null {
+  if (typeof source === "number") {
+    return TRACK_SOURCE_NUMBER_TO_STRING[source] ? source : null;
+  }
+  if (typeof source !== "string") return null;
+  const key = source
+    .trim()
+    .replace(/([a-z])([A-Z])/g, "$1_$2")
+    .toLowerCase();
+  const n = (LIVEKIT_TRACK_SOURCE_ENUM as Record<string, number>)[key];
+  return typeof n === "number" && n > 0 ? n : null;
+}
+
+/** Reverse of toLiveKitTrackSourceNumber (enum number or string -> string). */
+export function toLiveKitTrackSourceString(source: unknown): LiveKitTrackSource | null {
+  const n = toLiveKitTrackSourceNumber(source);
+  return n == null ? null : TRACK_SOURCE_NUMBER_TO_STRING[n] ?? null;
+}
+
+export type LiveKitParticipantPermissionInit = {
+  canSubscribe?: boolean;
+  canPublish?: boolean;
+  canPublishData?: boolean;
+  canPublishSources: number[];
+  hidden?: boolean;
+  recorder?: boolean;
+  canUpdateMetadata?: boolean;
+  canSubscribeMetrics?: boolean;
+};
+
+const PASSTHROUGH_BOOLEAN_PERMISSION_KEYS = [
+  "canSubscribe",
+  "canPublish",
+  "canPublishData",
+  "hidden",
+  "recorder",
+  "canUpdateMetadata",
+  "canSubscribeMetrics",
+] as const;
+
+/**
+ * Convert a permission object (grant-style with string sources, or a
+ * ParticipantPermission read back from listParticipants with numeric
+ * sources) into a plain object that `new ParticipantPermission(...)`
+ * can encode. Unknown keys and unknown sources are dropped; sources are
+ * de-duplicated and keep their original order.
+ */
+export function toLiveKitParticipantPermission(perm: any): LiveKitParticipantPermissionInit {
+  const src = perm && typeof perm === "object" ? perm : {};
+  const out: LiveKitParticipantPermissionInit = { canPublishSources: [] };
+
+  for (const key of PASSTHROUGH_BOOLEAN_PERMISSION_KEYS) {
+    if (typeof src[key] === "boolean") (out as any)[key] = src[key];
+  }
+
+  const rawSources: unknown[] = Array.isArray(src.canPublishSources) ? src.canPublishSources : [];
+  const seen = new Set<number>();
+  for (const s of rawSources) {
+    const n = toLiveKitTrackSourceNumber(s);
+    if (n != null && !seen.has(n)) {
+      seen.add(n);
+      out.canPublishSources.push(n);
+    }
+  }
+
+  return out;
+}
+
+/**
+ * Restrict a LiveKit participant permission according to room controls
+ * (host toggles). Used to enforce canPublishAudio / canPublishVideo /
+ * forcedMute / forcedVideoOff server-side so a modified client cannot
+ * ignore them. Only ever removes sources from the base permission.
+ *
+ * Note: in LiveKit an empty `canPublishSources` list means "all sources",
+ * so when restricting an unrestricted participant we expand to the full
+ * list first.
+ */
+export function restrictPermissionByControls(
+  base: any,
+  controls: {
+    canPublishAudio?: boolean;
+    canPublishVideo?: boolean;
+    canScreenShare?: boolean;
+    forcedMute?: boolean;
+    forcedVideoOff?: boolean;
+    muteLocked?: boolean;
+  },
+): LiveKitParticipantPermissionInit {
+  const perm = toLiveKitParticipantPermission(base);
+  if (perm.canPublish === false) return perm;
+
+  const blockAudio = controls.canPublishAudio === false || controls.forcedMute === true || controls.muteLocked === true;
+  const blockVideo = controls.canPublishVideo === false || controls.forcedVideoOff === true;
+  const blockScreen = controls.canScreenShare === false;
+  if (!blockAudio && !blockVideo && !blockScreen) return perm;
+
+  let sources = perm.canPublishSources.length
+    ? perm.canPublishSources.slice()
+    : [
+        LIVEKIT_TRACK_SOURCE_ENUM.camera,
+        LIVEKIT_TRACK_SOURCE_ENUM.microphone,
+        LIVEKIT_TRACK_SOURCE_ENUM.screen_share,
+        LIVEKIT_TRACK_SOURCE_ENUM.screen_share_audio,
+      ];
+
+  sources = sources.filter((n) => {
+    if (blockAudio && n === LIVEKIT_TRACK_SOURCE_ENUM.microphone) return false;
+    if (blockVideo && n === LIVEKIT_TRACK_SOURCE_ENUM.camera) return false;
+    if (blockScreen && (n === LIVEKIT_TRACK_SOURCE_ENUM.screen_share || n === LIVEKIT_TRACK_SOURCE_ENUM.screen_share_audio)) {
+      return false;
+    }
+    return true;
+  });
+
+  if (sources.length === 0) {
+    // Nothing left to publish. An empty list would mean "everything" to
+    // LiveKit, so turn publishing off instead (data/chat stays as-is).
+    return { ...perm, canPublish: false, canPublishSources: [] };
+  }
+  return { ...perm, canPublishSources: sources };
+}

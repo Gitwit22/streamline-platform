@@ -22,7 +22,7 @@ import multistreamRoutes from "./routes/multistream";
 import roomsResolveRoutes from "./routes/roomsResolve";
 import roomsHlsConfigRoutes from "./routes/roomsHlsConfig";
 import roomsActiveEmbedRoutes from "./routes/roomsActiveEmbed";
-import roomControlsRoutes from "./routes/roomControls";
+import roomControlsRoutes, { enforceRoomControlsForRoom } from "./routes/roomControls";
 import roomChatRoutes from "./routes/roomChat";
 import roomsLayoutRoutes from "./routes/roomsLayout";
 import roomsStudioLayoutRoutes from "./routes/roomsStudioLayout";
@@ -431,8 +431,11 @@ async function getRoomService(): Promise<RoomServiceClient> {
   );
 }
 
-// In-memory room-level flags (non-persistent across server restarts)
-const roomMuteLocks = new Map<string, boolean>();
+// Room-level mute lock is persisted at rooms/{roomId}/controls/default.muteLocked
+// (shared across instances and delivered to clients via the controls SSE stream).
+function muteLockDocRef(roomId: string) {
+  return db.collection("rooms").doc(roomId).collection("controls").doc("default");
+}
 
 async function assertEffectiveRoomControl(
   req: express.Request,
@@ -607,10 +610,10 @@ app.post("/api/roomModeration/mute-all", requireAuth, requireRoomAccessToken as 
   }
 });
 
-// Room-level mute lock flag (in-memory) + LiveKit permissions update (host tools)
+// Room-level mute lock (persisted in Firestore) + LiveKit permissions update (host tools)
 app.post("/api/roomModeration/mute-lock", requireAuth, requireRoomAccessToken as any, async (req, res) => {
   try {
-    const { room, muteLock, hostIdentity } = req.body as {
+    const { muteLock, hostIdentity } = req.body as {
       room?: string;
       muteLock?: boolean;
       hostIdentity?: string;
@@ -620,7 +623,7 @@ app.post("/api/roomModeration/mute-lock", requireAuth, requireRoomAccessToken as
       return res.status(400).json({ error: "muteLock is required" });
     }
 
-    const { roomId, livekitRoomName } = getRoomAccess(req as any);
+    const { access, roomId, livekitRoomName } = getRoomAccess(req as any);
 
     try {
       await assertEffectiveRoomControl(req as any, roomId, "canMuteGuests");
@@ -631,69 +634,37 @@ app.post("/api/roomModeration/mute-lock", requireAuth, requireRoomAccessToken as
       throw err;
     }
 
-    roomMuteLocks.set(livekitRoomName, muteLock);
+    // Persist by canonical roomId (shared across server instances). Writing to
+    // the default controls doc also pushes `muteLocked` to every participant's
+    // controls SSE stream so clients can disable their mic toggle immediately.
+    await muteLockDocRef(roomId).set(
+      {
+        muteLocked: muteLock,
+        muteLockUpdatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        muteLockUpdatedBy: (req as any).user?.uid || null,
+      },
+      { merge: true },
+    );
     console.log("ROOM MODERATION MUTE-LOCK", { roomId, livekitRoomName, muteLock, hostIdentity });
 
-    // Update LiveKit participant permissions so guests can't re-enable mic
+    // Update LiveKit participant permissions so guests can't re-enable their
+    // mic. Permissions are recomputed from each participant's base permission
+    // (numeric TrackSource enums, as read from listParticipants) plus the
+    // current room controls, so unlocking never re-grants audio to someone the
+    // host individually force-muted. Hosts/producers are never restricted.
+    let enforcement: { applied: number; skipped: number } | null = null;
     try {
-      const roomService = await getRoomService();
-      const sdk = (await getLiveKitSdk()) as any;
-      const TrackSource = sdk.TrackSource;
-
-      const toSourceString = (s: any): string => {
-        if (typeof s === "string") return s.toLowerCase();
-        // LiveKit server SDK may surface TrackSource values as enums; normalize to strings
-        if (s === TrackSource.MICROPHONE) return "microphone";
-        if (s === TrackSource.CAMERA) return "camera";
-        if (s === TrackSource.SCREEN_SHARE) return "screen_share";
-        if (s === TrackSource.SCREEN_SHARE_AUDIO) return "screen_share_audio";
-        return String(s).toLowerCase();
-      };
-
-      const participants = await roomService.listParticipants(livekitRoomName);
-
-      for (const p of participants) {
-        if (hostIdentity && p.identity === hostIdentity) continue; // never restrict host
-
-        const currentPerms: any = (p as any).permission || {};
-        const currentSourcesRaw: any[] = Array.isArray(currentPerms.canPublishSources)
-          ? currentPerms.canPublishSources
-          : [];
-        const currentSources = currentSourcesRaw.map(toSourceString).filter(Boolean);
-
-        const isMic = (s: any) => toSourceString(s) === "microphone";
-        const isScreenShareAudio = (s: any) => toSourceString(s) === "screen_share_audio";
-
-        if (muteLock) {
-          // Remove audio-related publish sources (mic + screen share audio)
-          const nextSources = currentSources.filter((s) => !(isMic(s) || isScreenShareAudio(s)));
-
-          await roomService.updateParticipant(livekitRoomName, p.identity, {
-            permission: {
-              ...currentPerms,
-              canPublishSources: nextSources,
-            },
-          });
-        } else {
-          // Restore audio publish ability while preserving any existing sources.
-          // Always use string publish sources for LiveKit compatibility.
-          const toEnsure = ["microphone", "screen_share_audio"];
-          const merged = Array.from(new Set([...(currentSources || []), ...toEnsure]));
-
-          await roomService.updateParticipant(livekitRoomName, p.identity, {
-            permission: {
-              ...currentPerms,
-              canPublishSources: merged,
-            },
-          });
-        }
-      }
+      enforcement = await enforceRoomControlsForRoom({
+        roomId,
+        livekitRoomName,
+        skipIdentities: [access.identity, hostIdentity],
+      });
     } catch (permErr) {
       // Don't fail the whole request if permissions update has issues; just log
       console.error("mute-lock permissions update error", permErr);
     }
 
-    return res.json({ ok: true, muteLock });
+    return res.json({ ok: true, muteLock, roomId, enforcement });
   } catch (e: any) {
     console.error("mute-lock error", e);
     const msg =
@@ -706,14 +677,36 @@ app.post("/api/roomModeration/mute-lock", requireAuth, requireRoomAccessToken as
   }
 });
 
-// Public room settings (currently only muteLock)
-app.get("/api/roomSettings/:room", (req, res) => {
-  const roomParam = String(req.params.room || "").trim();
+// Public room settings (currently only muteLock).
+// Accepts the canonical roomId (path param or ?roomId=); a LiveKit/display
+// room name is resolved to its roomId for backwards compatibility.
+app.get("/api/roomSettings/:room", async (req, res) => {
+  const roomParam = String((req.query as any)?.roomId || req.params.room || "").trim();
   if (!roomParam) {
     return res.status(400).json({ error: "room is required" });
   }
-  const muteLock = !!roomMuteLocks.get(roomParam);
-  return res.json({ muteLock });
+  if (roomParam.includes("/") || roomParam.length > 256) {
+    return res.status(400).json({ error: "invalid_room" });
+  }
+  try {
+    let roomId = roomParam;
+    let snap = await muteLockDocRef(roomId).get();
+    if (!snap.exists) {
+      const roomDoc = await db.collection("rooms").doc(roomParam).get();
+      if (!roomDoc.exists) {
+        const resolved = await resolveRoomIdentity({ roomName: roomParam });
+        if (resolved?.roomId) {
+          roomId = resolved.roomId;
+          snap = await muteLockDocRef(roomId).get();
+        }
+      }
+    }
+    const muteLock = snap.exists ? (snap.data() as any)?.muteLocked === true : false;
+    return res.json({ muteLock, roomId });
+  } catch (err: any) {
+    console.warn("[roomSettings] lookup failed", { room: roomParam, err: err?.message });
+    return res.json({ muteLock: false });
+  }
 });
 
 // Remove/kick a participant
