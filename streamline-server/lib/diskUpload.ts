@@ -3,13 +3,15 @@
 //
 // multer.memoryStorage() with a 500 MB limit can exhaust a 512 MB instance.
 // Uploads are spooled to os.tmpdir() instead and streamed to R2 from disk.
-// Callers must call cleanupUploadedFile() in a finally block.
+// Callers must call cleanupUploadedFile() in a finally block; leftovers
+// (crashes, aborted requests) are removed by the temp-uploads job.
 // ============================================================================
 
 import multer from "multer";
 import os from "os";
 import fs from "fs";
 import crypto from "crypto";
+import { UPLOAD_TEMP_PREFIX } from "./jobs/pure";
 
 /** Shape of a multer disk-storage file; declared locally so the build doesn't
  * depend on @types/multer's global Express.Multer augmentation. */
@@ -31,7 +33,7 @@ export function createDiskUpload(maxBytes: number = MAX_UPLOAD_BYTES) {
     storage: multer.diskStorage({
       destination: (_req, _file, cb) => cb(null, os.tmpdir()),
       // Random name: never trust originalname for a filesystem path.
-      filename: (_req, _file, cb) => cb(null, `sl_upload_${Date.now()}_${crypto.randomBytes(8).toString("hex")}`),
+      filename: (_req, _file, cb) => cb(null, `${UPLOAD_TEMP_PREFIX}${Date.now()}_${crypto.randomBytes(8).toString("hex")}`),
     }),
     limits: { fileSize: maxBytes, files: 1 },
   });

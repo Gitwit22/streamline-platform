@@ -12,6 +12,7 @@ import { clearMeCache } from "../../lib/meCache";
 import { clearPlatformFlagsCache } from "../../lib/platformFlagsCache";
 import { ResetCodeDialog, type IssuedResetCode } from "../components/ResetCodeDialog";
 import { PlanOverridePanel, type AdminPlanOverrideView } from "../components/admin/PlanOverridePanel";
+import { SystemJobsPanel } from "../components/admin/SystemJobsPanel";
 
 // Normalize base so if you set VITE_API_BASE to ".../api" it won't double up.
 const API_BASE = (import.meta.env.VITE_API_BASE || "")
@@ -372,7 +373,7 @@ function categorizeFeature(flag: FeatureFlag): { category: FeatureCategory; labe
 export default function AdminDashboard() {
   const navigate = useNavigate();
 
-  const [activeTab, setActiveTab] = useState<"overview" | "users" | "usage" | "features" | "plans">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "users" | "usage" | "features" | "plans" | "jobs">("overview");
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
 
   // Rename to match “updated admin” mental model
@@ -945,13 +946,14 @@ export default function AdminDashboard() {
 
       {/* Nav */}
       <nav style={S.nav}>
-        {(["overview", "users", "usage", "features", "plans"] as const).map((t) => (
+        {(["overview", "users", "usage", "features", "plans", "jobs"] as const).map((t) => (
           <button key={t} onClick={() => setActiveTab(t)} style={{ ...S.tab, ...(activeTab === t ? S.tabActive : {}) }}>
             {t === "overview" && "📊 Overview"}
             {t === "users" && "👥 Users"}
             {t === "usage" && "📈 Usage"}
             {t === "features" && "🎛️ Features"}
             {t === "plans" && "💎 Plans"}
+            {t === "jobs" && "🕒 System Jobs"}
           </button>
         ))}
       </nav>
@@ -1341,6 +1343,9 @@ export default function AdminDashboard() {
                 })}
               </div>
             )}
+
+            {/* SYSTEM JOBS TAB (self-loading; see SystemJobsPanel) */}
+            {activeTab === "jobs" && <SystemJobsPanel onMessage={showToast} />}
 
             {/* PLANS TAB */}
             {activeTab === "plans" && (

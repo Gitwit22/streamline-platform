@@ -39,14 +39,13 @@ import projectsRoutes from "./routes/projects";
 import myContentRoutes from "./routes/myContent";
 import maintenanceRoutes from "./routes/maintenance";
 import onboardingRoutes from "./routes/onboarding";
-import { startRecordingCleanup, stopRecordingCleanup } from "./services/recordingCleanup";
+import { startScheduledJobs, stopJobScheduler } from "./lib/jobs";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
 import fs from "fs";
 import { getLiveKitSdk } from "./lib/livekit"; // adjust path
 import type { RoomServiceClient } from "livekit-server-sdk";
 import { getStreamingUsageStatus } from "./lib/streamingMeter";
-import { startStreamingMeterSweep, stopStreamingMeterSweep } from "./services/streamingMeterService";
 import admin from "firebase-admin";
 import hlsRoutes from "./routes/hls";
 import publicHlsRoutes from "./routes/publicHls";
@@ -999,14 +998,12 @@ const server = app.listen(PORT, () => {
     });
   }
 
-  // Start the recording retention cleanup service (runs every hour).
-  // Deletes recordings older than 24 hours from R2 and Firestore.
-  // Set RECORDING_CLEANUP_DRY_RUN=1 to preview deletions without actually removing files.
-  startRecordingCleanup();
-
-  // Server-owned streaming meter: bills running outputs, closes outputs that
-  // ended without a stop call, enforces monthly / session caps.
-  startStreamingMeterSweep();
+  // Scheduled jobs (lib/jobs): recording max-length enforcement, streaming
+  // meter sweep, stale HLS, media / account purge, expired sessions, temp
+  // uploads, expired exports. Firestore leases keep multiple instances from
+  // double-running; the Render cron hits /api/maintenance/jobs/run-due as a
+  // backstop while this instance sleeps. JOBS_ENABLED=0 disables the timer.
+  startScheduledJobs();
 });
 
 // Attach Horizon WebSocket (authenticated admin-only WS)
@@ -1035,8 +1032,7 @@ function gracefulShutdown(signal: string) {
   logger.info({ signal }, "Received shutdown signal — closing server");
 
   // Stop background work so nothing new starts while connections drain.
-  stopRecordingCleanup();
-  stopStreamingMeterSweep();
+  stopJobScheduler();
   import("./lib/renderWorker.js")
     .then(({ stopExportWorker }) => stopExportWorker())
     .catch((err) => {

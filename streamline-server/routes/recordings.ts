@@ -299,7 +299,7 @@ async function getSignedDownloadUrl(key: string, expiresIn: number = 300): Promi
 // Internal helper: stop a recording and update usage/locks
 // =============================================================================
 
-async function stopRecordingInternal(options: {
+export async function stopRecordingInternal(options: {
   recordingId: string;
   uid?: string | null;
   reason: "manual" | "auto_cap";
@@ -1137,42 +1137,17 @@ function requireMaintenanceOrAdmin(req: any, res: any, next: any) {
 }
 
 router.post("/sweep", requireMaintenanceOrAdmin, async (_req, res) => {
-  const now = new Date();
-  console.log("[recordings/sweep] Starting sweep at", now.toISOString());
-
-  try {
-    const snap = await firestore
-      .collection("recordings")
-      .where("status", "==", "recording")
-      .where("autoStopAt", "<=", now)
-      .limit(50)
-      .get();
-
-    if (snap.empty) {
-      console.log("[recordings/sweep] No overdue recordings found");
-      return res.json({ ok: true, processed: 0 });
-    }
-
-    const docs = snap.docs;
-    console.log(`[recordings/sweep] Found ${docs.length} overdue recordings`);
-
-    for (const doc of docs) {
-      const recordingId = doc.id;
-      try {
-        await stopRecordingInternal({ recordingId, reason: "auto_cap" });
-      } catch (err: any) {
-        console.error("[recordings/sweep] Failed to stop recording", {
-          recordingId,
-          error: err?.message || String(err),
-        });
-      }
-    }
-
-    return res.json({ ok: true, processed: docs.length });
-  } catch (err: any) {
-    console.error("[recordings/sweep] Error during sweep", err);
-    return res.status(500).json({ error: "sweep_failed", details: err?.message || String(err) });
+  // Same code path as the scheduled "recording-enforcement" job (lib/jobs),
+  // which also computes autoStopAt from entitlements when it is missing.
+  const { runJob } = await import("../lib/jobs/index.js");
+  const out = await runJob("recording-enforcement", { trigger: "maintenance", force: true });
+  if (out.status === "skipped") return res.status(409).json({ ok: false, skipped: true, reason: out.reason });
+  if (!out.ran) return res.status(500).json({ error: "sweep_failed", details: out.error || out.status });
+  const details = (out.details || {}) as Record<string, any>;
+  if (out.status === "error" && Object.keys(details).length === 0) {
+    return res.status(500).json({ error: "sweep_failed", details: out.error });
   }
+  return res.json({ ok: true, processed: Number(details.stopped || 0), ...details });
 });
 
 // =============================================================================

@@ -1,45 +1,19 @@
 import { Router } from "express";
 import crypto from "crypto";
-import { firestore } from "../firebaseAdmin";
-import { FieldValue } from "firebase-admin/firestore";
 import { requireAdmin } from "../middleware/adminAuth";
-import { deleteFile, deleteFiles, deletePrefix } from "../lib/storageClient";
-import { deleteRecordingStorage } from "../lib/recordingDeletion";
-import { releaseStorageUsage } from "../usageHelper";
-import { stopEgress } from "../services/livekitEgress";
-import { setHlsIdleIfRun } from "../services/rooms";
-import { onHlsIdle } from "../lib/viewerStats";
-import { advanceablePrefixLength, hlsLastSeenMs, isHlsSessionStale } from "../lib/mediaPure";
-import { closeOutputIntervals, sweepStreamingMeter } from "../lib/streamingMeter";
-import { releaseRecordingStorageOnce } from "../lib/recordingUsage";
+import {
+  expireEmergencyRecordings,
+  purgeExpiredRecordings,
+  purgeOldRecordings,
+  runDueJobs,
+  runJob,
+  type RunOutcome,
+} from "../lib/jobs";
+
+// Re-exported for older imports; the implementation lives in lib/jobs/mediaPurge.ts.
+export { purgeOldRecordings, RECORDING_RETENTION_HOURS } from "../lib/jobs";
 
 const router = Router();
-
-type EmergencyCurrentDoc = {
-  recordingId?: string;
-  createdAt?: any;
-  expiresAt?: any;
-  status?: string;
-  r2Keys?: string[];
-  r2Prefix?: string;
-  deletedAt?: any;
-};
-
-function getUidFromEmergencyCurrentPath(path: string): string | null {
-  // Expected: users/{uid}/emergencyRecording/current
-  const parts = String(path || "").split("/").filter(Boolean);
-  if (parts.length !== 4) return null;
-  if (parts[0] !== "users") return null;
-  if (parts[2] !== "emergencyRecording") return null;
-  return parts[1] || null;
-}
-
-function toDate(value: any): Date | null {
-  if (!value) return null;
-  if (value instanceof Date) return value;
-  if (typeof value?.toDate === "function") return value.toDate();
-  return null;
-}
 
 // Admin-only maintenance endpoints (Render cron-friendly)
 //
@@ -81,662 +55,134 @@ router.use((req, res, next) => {
   return requireAdmin(req, res, next);
 });
 
-async function expireEmergencyRecordings(now: Date): Promise<{ deletedCount: number }> {
-  const snap = await firestore
-    .collectionGroup("emergencyRecording")
-    .where("expiresAt", "<", now)
-    .limit(500)
-    .get();
 
-  let deletedCount = 0;
 
-  for (const doc of snap.docs) {
-    if (doc.id !== "current") continue;
+// ---------------------------------------------------------------------------
+// Scheduled jobs (lib/jobs). Every endpoint below runs through the same job
+// functions as the in-process scheduler, so cron, admin and timer runs share
+// one lease (jobLocks/{name}), status (jobStatus/{name}) and history (jobRuns).
+// ---------------------------------------------------------------------------
 
-    const data = (doc.data() || {}) as EmergencyCurrentDoc;
-    const status = String(data.status || "").toLowerCase();
-    if (status === "deleted") continue;
-
-    const expiresAt = toDate(data.expiresAt);
-    if (!expiresAt || expiresAt.getTime() >= now.getTime()) continue;
-
-    const uid = getUidFromEmergencyCurrentPath(doc.ref.path);
-    const recordingId = data.recordingId ? String(data.recordingId) : null;
-
-    try {
-      // Delete R2 assets (idempotent)
-      const keys = Array.isArray(data.r2Keys) ? data.r2Keys.map(String).map((s) => s.trim()).filter(Boolean) : [];
-      const prefix = data.r2Prefix ? String(data.r2Prefix).trim() : "";
-
-      if (keys.length > 0) {
-        await deleteFiles(keys);
-      } else if (prefix) {
-        await deletePrefix(prefix);
-      }
-
-      // Release storage quota for the deleted recording (billing uid, once)
-      if (uid && recordingId) {
-        try {
-          await releaseRecordingStorageOnce(firestore.collection("recordings").doc(recordingId), {
-            caller: "maintenance.expireEmergencyRecordings",
-          });
-        } catch (e: any) {
-          console.warn("[maintenance/expire-emergency-recordings] storage release failed", {
-            uid, recordingId, error: e?.message || e,
-          });
-        }
-      }
-
-      // Mark pointer deleted
-      await doc.ref.set(
-        {
-          status: "deleted",
-          deletedAt: now,
-        },
-        { merge: true }
-      );
-
-      // Best-effort: mark recording doc deleted as well
-      if (recordingId) {
-        await firestore
-          .collection("recordings")
-          .doc(recordingId)
-          .set({ status: "deleted", deletedAt: now, updatedAt: now, storageReleased: true }, { merge: true });
-      }
-
-      // Best-effort: annotate user doc so we can audit deletions later
-      if (uid) {
-        await firestore
-          .collection("users")
-          .doc(uid)
-          .set({ lastEmergencyRecordingExpiredAt: now }, { merge: true });
-      }
-
-      deletedCount += 1;
-    } catch (e: any) {
-      console.warn("[maintenance/expire-emergency-recordings] failed for", doc.ref.path, e?.message || e);
-    }
-  }
-
-  return { deletedCount };
+function qNum(v: unknown): number | undefined {
+  if (v === undefined || v === null || v === "") return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : undefined;
 }
 
-async function deleteCollection(ref: FirebaseFirestore.CollectionReference, limit: number = 200) {
-  const snap = await ref.limit(limit).get();
-  if (snap.empty) return 0;
-  const batch = firestore.batch();
-  for (const doc of snap.docs) batch.delete(doc.ref);
-  await batch.commit();
-  return snap.size;
+/** Run a job (forced: ignores "not due", still respects another instance's lease). */
+async function runForced(name: string, params: Record<string, any> = {}): Promise<RunOutcome> {
+  return runJob(name, { trigger: "maintenance", force: true, params });
 }
 
-async function purgeDeletedAccounts(now: Date): Promise<{ purgedCount: number }> {
-  const nowMs = now.getTime();
-  const snap = await firestore
-    .collection("users")
-    .where("deleteAfterMs", "<=", nowMs)
-    .limit(50)
-    .get();
-
-  let purgedCount = 0;
-
-  for (const doc of snap.docs) {
-    const uid = doc.id;
-    const data = (doc.data() as any) || {};
-    const deletedAtMs = typeof data.deletedAtMs === "number" ? data.deletedAtMs : null;
-    const deleteAfterMs = typeof data.deleteAfterMs === "number" ? data.deleteAfterMs : null;
-
-    if (!deletedAtMs || !deleteAfterMs || deleteAfterMs > nowMs) continue;
-
-    try {
-      // Best-effort cleanup of known user-owned data.
-      // Note: Firestore does not automatically delete subcollections.
-
-      // Release storage for user's recordings before deleting user doc
-      try {
-        const recSnap = await firestore
-          .collection("recordings")
-          .where("userId", "==", uid)
-          .limit(500)
-          .get();
-        for (const recDoc of recSnap.docs) {
-          const recData = (recDoc.data() || {}) as any;
-          try {
-            await deleteRecordingStorage(recData);
-            // Release from the recording's billing uid (room owner) exactly once.
-            await releaseRecordingStorageOnce(recDoc.ref, { caller: "maintenance.purgeDeletedAccounts" });
-            await recDoc.ref.set({ status: "deleted", storageReleased: true, deletedAt: now, updatedAt: now }, { merge: true });
-          } catch (e: any) {
-            console.warn("[maintenance/purge-deleted-accounts] recording cleanup failed", { uid, recordingId: recDoc.id, error: e?.message || e });
-          }
-        }
-      } catch (e: any) {
-        console.warn("[maintenance/purge-deleted-accounts] failed to clean recordings", { uid, error: e?.message || e });
-      }
-
-      // Release storage for user's saved_videos (uploaded ones with storagePath)
-      try {
-        const svSnap = await firestore
-          .collection("saved_videos")
-          .where("userId", "==", uid)
-          .limit(500)
-          .get();
-        let totalBytes = 0;
-        for (const svDoc of svSnap.docs) {
-          const svData = (svDoc.data() || {}) as any;
-          const storagePath = typeof svData.storagePath === "string" ? svData.storagePath : null;
-          const sizeBytes = typeof svData.sizeBytes === "number" ? svData.sizeBytes : 0;
-          if (storagePath) {
-            try {
-              await deleteFile(storagePath);
-              if (sizeBytes > 0) totalBytes += sizeBytes;
-            } catch (e: any) {
-              console.warn("[maintenance/purge-deleted-accounts] saved_video file delete failed", { uid, storagePath, error: e?.message || e });
-            }
-          }
-          try { await svDoc.ref.delete(); } catch (e: any) {
-            console.warn("[maintenance/purge-deleted-accounts] saved_video doc delete failed", { uid, docId: svDoc.id, error: e?.message || e });
-          }
-        }
-        // Note: storage release for deleted user is best-effort since user doc is being deleted
-        if (totalBytes > 0) {
-          try {
-            await releaseStorageUsage(uid, totalBytes, { caller: "maintenance.purgeDeletedAccounts.savedVideos" });
-          } catch (e: any) {
-            console.warn("[maintenance/purge-deleted-accounts] saved_videos storage release failed", { uid, totalBytes, error: e?.message || e });
-          }
-        }
-      } catch (e: any) {
-        console.warn("[maintenance/purge-deleted-accounts] failed to clean saved_videos", { uid, error: e?.message || e });
-      }
-
-      // users/{uid}/rolePresets
-      try {
-        let removed = 0;
-        // Loop in case there are >limit docs
-        for (let i = 0; i < 5; i++) {
-          const n = await deleteCollection(doc.ref.collection("rolePresets"), 200);
-          removed += n;
-          if (n === 0) break;
-        }
-        if (removed) {
-          console.log("[maintenance] purged rolePresets", { uid, removed });
-        }
-      } catch {}
-
-      // users/{uid}/emergencyRecording
-      try {
-        let removed = 0;
-        for (let i = 0; i < 5; i++) {
-          const n = await deleteCollection(doc.ref.collection("emergencyRecording"), 200);
-          removed += n;
-          if (n === 0) break;
-        }
-        if (removed) {
-          console.log("[maintenance] purged emergencyRecording", { uid, removed });
-        }
-      } catch {}
-
-      // accounts/{uid}
-      try {
-        await firestore.collection("accounts").doc(uid).delete();
-      } catch {}
-
-      // billingAudit where uid == uid (best-effort, small batches)
-      try {
-        for (let i = 0; i < 5; i++) {
-          const auditSnap = await firestore
-            .collection("billingAudit")
-            .where("uid", "==", uid)
-            .limit(200)
-            .get();
-          if (auditSnap.empty) break;
-          const batch = firestore.batch();
-          for (const a of auditSnap.docs) batch.delete(a.ref);
-          await batch.commit();
-        }
-      } catch {}
-
-      // Finally: delete the primary user doc.
-      await doc.ref.delete();
-      purgedCount += 1;
-    } catch (e: any) {
-      console.warn("[maintenance/purge-deleted-accounts] failed for", uid, e?.message || e);
-    }
-  }
-
-  return { purgedCount };
+function sendOutcome(res: any, out: RunOutcome, legacy: (details: Record<string, any>) => Record<string, any>) {
+  if (out.status === "skipped") return res.status(409).json({ ok: false, skipped: true, reason: out.reason });
+  if (!out.ran) return res.status(500).json({ ok: false, error: out.error || out.status });
+  const details = (out.details || {}) as Record<string, any>;
+  // A run that threw has no details (500); a partial failure still reports its counts.
+  const threw = out.status === "error" && Object.keys(details).length === 0;
+  return res.status(threw ? 500 : 200).json({
+    ok: !threw,
+    ...legacy(details),
+    job: { name: out.job, status: out.status, processed: out.processed, durationMs: out.durationMs, error: out.error ?? null, runId: out.runId ?? null },
+  });
 }
 
-async function purgeExpiredRecordings(now: Date, opts?: { limit?: number }): Promise<{ deletedCount: number }> {
-  const nowMs = now.getTime();
-  const limit = typeof opts?.limit === "number" && Number.isFinite(opts.limit)
-    ? Math.max(1, Math.min(500, opts.limit))
-    : 200;
+// POST /api/maintenance/jobs/run-due  (Render cron backstop)
+// Runs every job whose interval has elapsed (across all instances). Wakes a
+// sleeping free-plan web instance and catches up on its schedule.
+router.post("/jobs/run-due", async (_req, res) => {
+  const outcomes = await runDueJobs("cron");
+  const ran = outcomes.filter((o) => o.ran);
+  return res.json({
+    ok: ran.every((o) => o.status === "success"),
+    ran: ran.length,
+    jobs: outcomes.map((o) => ({
+      job: o.job,
+      status: o.status,
+      reason: o.reason,
+      processed: o.processed ?? 0,
+      durationMs: o.durationMs,
+      error: o.error ?? null,
+      nextRunAt: o.nextRunAtMs ? new Date(o.nextRunAtMs).toISOString() : null,
+    })),
+  });
+});
 
-  // Only recordings with a deleteAfterMs field are eligible.
-  // This is intended for emergency recordings (1-hour retention).
-  const snap = await firestore
-    .collection("recordings")
-    .where("deleteAfterMs", "<=", nowMs)
-    .limit(limit)
-    .get();
+// POST /api/maintenance/jobs/:name/run  (force one job now)
+router.post("/jobs/:name/run", async (req, res) => {
+  const out = await runForced(String(req.params.name || ""), {});
+  if (out.status === "unknown_job") return res.status(404).json({ ok: false, error: "unknown_job" });
+  return sendOutcome(res, out, (d) => ({ details: d }));
+});
 
-  let deletedCount = 0;
-
-  for (const doc of snap.docs) {
-    const data = (doc.data() || {}) as any;
-    const status = String(data.status || "").toLowerCase();
-    if (status === "deleted") {
-      // Older soft-deleted docs kept deleteAfterMs, so they matched this query
-      // forever and could fill every page (purge stalls). Drop the field.
-      try {
-        await doc.ref.update({ deleteAfterMs: FieldValue.delete() });
-      } catch {}
-      continue;
-    }
-
-    try {
-      await deleteRecordingStorage(data);
-    } catch (e: any) {
-      console.warn("[maintenance/purge-expired-recordings] deleteRecordingStorage failed", { recordingId: doc.id, error: e?.message || e });
-    }
-
-    // Release counted storage from the billing uid exactly once (transactional).
-    try {
-      await releaseRecordingStorageOnce(doc.ref, { caller: "maintenance.purgeExpiredRecordings" });
-    } catch (e: any) {
-      console.warn("[maintenance/purge-expired-recordings] storage release failed", {
-        recordingId: doc.id, error: e?.message || e,
-      });
-    }
-
-    try {
-      await doc.ref.set(
-        {
-          status: "deleted",
-          deleteReason: "expired_retention",
-          deletedAt: now,
-          updatedAt: now,
-          storageReleased: true,
-          // Leave the deleteAfterMs index so this doc stops matching the query.
-          deleteAfterMs: FieldValue.delete(),
-        },
-        { merge: true }
-      );
-      deletedCount += 1;
-    } catch (e: any) {
-      console.warn("[maintenance/purge-expired-recordings] failed to update recording", { recordingId: doc.id, error: e?.message || e });
-    }
-  }
-
-  return { deletedCount };
-}
-
-async function purgeStaleHls(now: Date, opts?: { ttlMinutes?: number; limit?: number }) {
-  // Staleness is measured from the last heartbeat (refreshed by host /status
-  // polling while live), so a long but attended stream is never purged.
-  const ttlMinutes = typeof opts?.ttlMinutes === "number" && Number.isFinite(opts.ttlMinutes) && opts.ttlMinutes > 0 ? opts.ttlMinutes : 180;
-  const limit = typeof opts?.limit === "number" && Number.isFinite(opts.limit) ? Math.max(1, Math.min(500, opts.limit)) : 100;
-  const ttlMs = ttlMinutes * 60 * 1000;
-  const nowMs = now.getTime();
-
-  let purgedCount = 0;
-  let considered = 0;
-  let billedMinutesTotal = 0;
-
-  // Prefer a targeted query; if Firestore complains about indexes, fall back to a bounded scan.
-  let docs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
-  try {
-    const snap = await firestore
-      .collection("rooms")
-      .where("hls.status", "in", ["starting", "live", "error"])
-      .limit(limit)
-      .get();
-    docs = snap.docs;
-  } catch (e) {
-    const snap = await firestore
-      .collection("rooms")
-      .orderBy("updatedAt", "desc")
-      .limit(Math.max(limit, 200))
-      .get();
-    docs = snap.docs;
-  }
-
-  for (const doc of docs) {
-    const data = (doc.data() || {}) as any;
-    const hls = data.hls || {};
-    const status = String(hls.status || "idle").toLowerCase();
-    if (status !== "starting" && status !== "live" && status !== "error") continue;
-
-    considered += 1;
-    if (!isHlsSessionStale(hls, nowMs, ttlMs)) continue;
-
-    const roomId = doc.id;
-    const prefix = String(hls.prefix || `hls/${roomId}/`).trim();
-    const egressId = typeof hls.egressId === "string" ? hls.egressId : null;
-    const runId = typeof hls.runId === "string" ? hls.runId : null;
-
-    try {
-      if (egressId) {
-        try {
-          await stopEgress(egressId);
-        } catch (e: any) {
-          console.warn("[maintenance/purge-stale-hls] stopEgress failed", { roomId, egressId, error: e?.message || e });
-        }
-      }
-
-      try {
-        await deletePrefix(prefix);
-      } catch (e: any) {
-        console.warn("[maintenance/purge-stale-hls] deletePrefix failed", { roomId, prefix, error: e?.message || e });
-      }
-
-      // Transition idle only if the same run still owns the room; exactly one
-      // of (stop, auto-stop, purge) bills for a run that we flip here.
-      let flipped = false;
-      try {
-        flipped = await setHlsIdleIfRun(doc.ref, runId);
-      } catch (e: any) {
-        console.warn("[maintenance/purge-stale-hls] setHlsIdle failed", { roomId, error: e?.message || e });
-      }
-
-      // Close + bill the HLS meter interval (idempotent: exactly once no
-      // matter which of stop / auto-stop / webhook / purge / sweep runs first).
-      if (egressId) {
-        const billed = await closeOutputIntervals([egressId], { endedAt: now, reason: "stale_hls_purge", now });
-        billedMinutesTotal += billed.reduce((sum, r) => sum + r.streamingMinutesDelta, 0);
-      }
-
-      if (flipped) {
-        // Viewer counting: end the live session if the room is empty (best-effort).
-        await onHlsIdle(roomId, data);
-        purgedCount += 1;
-        console.warn("[maintenance/purge-stale-hls] purged stale session", {
-          roomId,
-          status,
-          egressId,
-          lastSeenAt: (() => {
-            const ms = hlsLastSeenMs(hls);
-            return ms ? new Date(ms).toISOString() : null;
-          })(),
-        });
-      }
-    } catch (e: any) {
-      console.warn("[maintenance/purge-stale-hls] failed", { roomId, error: e?.message || e });
-    }
-  }
-
-  return { ok: true, purgedCount, considered, ttlMinutes, limit, billedMinutes: billedMinutesTotal };
-}
-
-router.get("/expire-emergency-recordings", async (_req, res) => {
+// Legacy: emergency expiry + deleteAfterMs purge only (subset of media-purge;
+// shares the same functions, not the media-purge lease/status).
+async function handleExpireEmergency(_req: any, res: any) {
   const now = new Date();
   const [{ deletedCount }, { deletedCount: purgedRecordingsCount }] = await Promise.all([
     expireEmergencyRecordings(now),
     purgeExpiredRecordings(now),
   ]);
   return res.json({ ok: true, deletedCount, purgedRecordingsCount });
-});
-
-router.post("/expire-emergency-recordings", async (_req, res) => {
-  const now = new Date();
-  const [{ deletedCount }, { deletedCount: purgedRecordingsCount }] = await Promise.all([
-    expireEmergencyRecordings(now),
-    purgeExpiredRecordings(now),
-  ]);
-  return res.json({ ok: true, deletedCount, purgedRecordingsCount });
-});
+}
+router.get("/expire-emergency-recordings", handleExpireEmergency);
+router.post("/expire-emergency-recordings", handleExpireEmergency);
 
 // Deletes expired recording objects whose deleteAfterMs has passed.
 // POST/GET /api/maintenance/purge-expired-recordings?limit=200
-router.get("/purge-expired-recordings", async (req, res) => {
-  const now = new Date();
-  const limit = req.query.limit ? Number(req.query.limit) : undefined;
-  const { deletedCount } = await purgeExpiredRecordings(now, { limit });
+async function handlePurgeExpired(req: any, res: any) {
+  const { deletedCount } = await purgeExpiredRecordings(new Date(), { limit: qNum(req.query.limit) });
   return res.json({ ok: true, deletedCount });
-});
+}
+router.get("/purge-expired-recordings", handlePurgeExpired);
+router.post("/purge-expired-recordings", handlePurgeExpired);
 
-router.post("/purge-expired-recordings", async (req, res) => {
-  const now = new Date();
-  const limit = req.query.limit ? Number(req.query.limit) : undefined;
-  const { deletedCount } = await purgeExpiredRecordings(now, { limit });
-  return res.json({ ok: true, deletedCount });
-});
+// Job: account-purge
+async function handlePurgeDeletedAccounts(_req: any, res: any) {
+  const out = await runForced("account-purge");
+  return sendOutcome(res, out, (d) => ({ purgedCount: Number(d.purged || 0) }));
+}
+router.get("/purge-deleted-accounts", handlePurgeDeletedAccounts);
+router.post("/purge-deleted-accounts", handlePurgeDeletedAccounts);
 
-router.get("/purge-deleted-accounts", async (_req, res) => {
-  const now = new Date();
-  const { purgedCount } = await purgeDeletedAccounts(now);
-  return res.json({ ok: true, purgedCount });
-});
+// Job: stale-hls. POST/GET /api/maintenance/purge-stale-hls?ttlMinutes=180&limit=100
+async function handlePurgeStaleHls(req: any, res: any) {
+  const out = await runForced("stale-hls", { ttlMinutes: qNum(req.query.ttlMinutes), limit: qNum(req.query.limit) });
+  return sendOutcome(res, out, (d) => ({
+    purgedCount: Number(d.purged || 0),
+    considered: d.considered,
+    ttlMinutes: d.ttlMinutes,
+    billedMinutes: d.billedMinutes,
+  }));
+}
+router.get("/purge-stale-hls", handlePurgeStaleHls);
+router.post("/purge-stale-hls", handlePurgeStaleHls);
 
-router.post("/purge-deleted-accounts", async (_req, res) => {
-  const now = new Date();
-  const { purgedCount } = await purgeDeletedAccounts(now);
-  return res.json({ ok: true, purgedCount });
-});
-
-// Best-effort safety net for orphaned HLS sessions.
-// POST/GET /api/maintenance/purge-stale-hls?ttlMinutes=180&limit=100
-router.get("/purge-stale-hls", async (req, res) => {
-  const now = new Date();
-  const ttlMinutes = req.query.ttlMinutes ? Number(req.query.ttlMinutes) : undefined;
-  const limit = req.query.limit ? Number(req.query.limit) : undefined;
-  const result = await purgeStaleHls(now, { ttlMinutes, limit });
-  return res.json(result);
-});
-
-router.post("/purge-stale-hls", async (req, res) => {
-  const now = new Date();
-  const ttlMinutes = req.query.ttlMinutes ? Number(req.query.ttlMinutes) : undefined;
-  const limit = req.query.limit ? Number(req.query.limit) : undefined;
-  const result = await purgeStaleHls(now, { ttlMinutes, limit });
-  return res.json(result);
-});
-
-// Streaming meter sweep (cron-friendly; also runs in-process every few
-// minutes). Bills running outputs, closes/bills outputs that ended without
-// being billed (egress no longer active per LiveKit, or older than 24h) and
-// stops outputs over the monthly limit / plan maxSessionMinutes.
-// POST/GET /api/maintenance/streaming-meter-sweep?limit=500
+// Job: streaming-meter-sweep. POST/GET /api/maintenance/streaming-meter-sweep?limit=500
 async function handleStreamingMeterSweep(req: any, res: any) {
-  try {
-    const limit = req.query.limit ? Number(req.query.limit) : undefined;
-    const result = await sweepStreamingMeter({ now: new Date(), limit });
-    return res.json(result);
-  } catch (e: any) {
-    console.error("[maintenance/streaming-meter-sweep] failed", e?.message || e);
-    return res.status(500).json({ ok: false, error: "streaming_meter_sweep_failed" });
-  }
+  const out = await runForced("streaming-meter-sweep", { limit: qNum(req.query.limit) });
+  // Legacy SweepResult shape (stopped = list of stopped outputs).
+  return sendOutcome(res, out, (d) => ({
+    considered: d.considered,
+    billed: d.billed,
+    closed: d.closed,
+    streamingMinutesBilled: d.streamingMinutesBilled,
+    stopped: d.stoppedOutputs ?? [],
+    errors: d.errors,
+  }));
 }
 router.get("/streaming-meter-sweep", handleStreamingMeterSweep);
 router.post("/streaming-meter-sweep", handleStreamingMeterSweep);
 
-// ---------------------------------------------------------------------------
-// 24-hour recording retention
-// Deletes ready/stopped/processing recordings whose createdAt is older than
-// retentionHours (default: 24).  Active recordings (status "recording" or
-// "starting") and already-deleted recordings are skipped.
-// Supports dryRun mode: set query param dryRun=1 or env RECORDING_CLEANUP_DRY_RUN=1.
-// ---------------------------------------------------------------------------
-
-export const RECORDING_RETENTION_HOURS = 24;
-
-const ACTIVE_STATUSES = new Set(["recording", "starting"]);
-
-export async function purgeOldRecordings(
-  now: Date,
-  opts?: { limit?: number; dryRun?: boolean; retentionHours?: number }
-): Promise<{ deletedCount: number; skippedCount: number; dryRun: boolean }> {
-  const retentionHours =
-    typeof opts?.retentionHours === "number" && Number.isFinite(opts.retentionHours)
-      ? Math.max(1, opts.retentionHours)
-      : RECORDING_RETENTION_HOURS;
-  const cutoff = new Date(now.getTime() - retentionHours * 60 * 60 * 1000);
-  const limit =
-    typeof opts?.limit === "number" && Number.isFinite(opts.limit)
-      ? Math.max(1, Math.min(500, opts.limit))
-      : 200;
-  const dryRun = opts?.dryRun === true;
-
-  // Page through old recordings in createdAt order. Docs that can never be
-  // purged (already deleted) used to fill every 200-doc page forever and stall
-  // the purge; now we page with startAfter, and persist a cursor past the
-  // leading run of finished docs so each run starts where work remains.
-  // Single-field range + orderBy on createdAt: no composite index needed.
-  const cursorRef = firestore.collection("maintenanceState").doc("purgeOldRecordings");
-  let cursorMs: number | null = null;
-  if (!dryRun) {
-    try {
-      const cursorSnap = await cursorRef.get();
-      const raw = cursorSnap.exists ? (cursorSnap.data() as any)?.createdAtCursorMs : null;
-      cursorMs = typeof raw === "number" && Number.isFinite(raw) ? raw : null;
-    } catch (e: any) {
-      console.warn("[maintenance/purge-old-recordings] failed to read cursor", e?.message || e);
-    }
-  }
-
-  const PAGE_SIZE = 200;
-  const MAX_SCANNED = 5000;
-
-  let deletedCount = 0;
-  let skippedCount = 0;
-  let scanned = 0;
-  // Leading run of "permanently done" docs (for cursor advance).
-  const doneFlags: boolean[] = [];
-  const createdAtMsList: (number | null)[] = [];
-  let lastDoc: FirebaseFirestore.QueryDocumentSnapshot | null = null;
-
-  const docCreatedMs = (d: any): number | null => {
-    const v = d?.createdAt;
-    if (!v) return null;
-    if (v instanceof Date) return v.getTime();
-    if (typeof v?.toDate === "function") return v.toDate().getTime();
-    if (typeof v === "number") return v;
-    return null;
-  };
-
-  while (deletedCount < limit && scanned < MAX_SCANNED) {
-    let query: FirebaseFirestore.Query = firestore
-      .collection("recordings")
-      .where("createdAt", "<", cutoff)
-      .orderBy("createdAt", "asc");
-    if (lastDoc) {
-      query = query.startAfter(lastDoc);
-    } else if (cursorMs !== null) {
-      // startAt (not After): re-check docs sharing the cursor timestamp.
-      query = query.where("createdAt", ">=", new Date(cursorMs));
-    }
-
-    let snap: FirebaseFirestore.QuerySnapshot;
-    try {
-      snap = await query.limit(PAGE_SIZE).get();
-    } catch (e: any) {
-      console.warn("[maintenance/purge-old-recordings] query failed", e?.message || e);
-      break;
-    }
-    if (snap.empty) break;
-
-    for (const doc of snap.docs) {
-      scanned += 1;
-      lastDoc = doc;
-      const data = (doc.data() || {}) as any;
-      const status = String(data.status || "").toLowerCase();
-      createdAtMsList.push(docCreatedMs(data));
-
-      // Never delete active or already-deleted recordings.
-      if (status === "deleted" || ACTIVE_STATUSES.has(status)) {
-        skippedCount += 1;
-        doneFlags.push(status === "deleted");
-        continue;
-      }
-
-      if (deletedCount >= limit) {
-        doneFlags.push(false);
-        continue;
-      }
-
-      if (dryRun) {
-        console.log(`[maintenance/purge-old-recordings] DRY RUN — would delete recording: ${doc.id}`);
-        deletedCount += 1;
-        doneFlags.push(false);
-        continue;
-      }
-
-      const storageReleased = data.storageReleased === true;
-
-      let storageDeleted = false;
-      try {
-        await deleteRecordingStorage(data);
-        storageDeleted = true;
-      } catch (e: any) {
-        console.warn(`[maintenance/purge-old-recordings] Failed to delete recording: ${doc.id}`, e?.message || e);
-      }
-
-      if (storageDeleted) {
-        try {
-          await releaseRecordingStorageOnce(doc.ref, { caller: "maintenance.purgeOldRecordings" });
-        } catch (e: any) {
-          console.warn("[maintenance/purge-old-recordings] storage release failed", {
-            recordingId: doc.id, error: e?.message || e,
-          });
-        }
-      }
-
-      try {
-        await doc.ref.set(
-          { status: "deleted", deleteReason: "expired_24h_retention", deletedAt: now, updatedAt: now, storageReleased: storageDeleted || storageReleased },
-          { merge: true }
-        );
-        deletedCount += 1;
-        doneFlags.push(true);
-        if (storageDeleted) {
-          console.log(`[maintenance/purge-old-recordings] Deleted expired recording: ${doc.id}`);
-        } else {
-          console.warn(`[maintenance/purge-old-recordings] Marked deleted in Firestore (R2 deletion had failed): ${doc.id}`);
-        }
-      } catch (e: any) {
-        doneFlags.push(false);
-        console.warn("[maintenance/purge-old-recordings] failed to update Firestore", { recordingId: doc.id, error: e?.message || e });
-      }
-    }
-
-    if (snap.size < PAGE_SIZE) break;
-  }
-
-  // Advance the persisted cursor past the leading run of finished docs.
-  if (!dryRun) {
-    const n = advanceablePrefixLength(doneFlags);
-    const advanceTo = n > 0 ? createdAtMsList[n - 1] : null;
-    if (typeof advanceTo === "number" && (cursorMs === null || advanceTo > cursorMs)) {
-      try {
-        await cursorRef.set({ createdAtCursorMs: advanceTo, updatedAt: now }, { merge: true });
-      } catch (e: any) {
-        console.warn("[maintenance/purge-old-recordings] failed to persist cursor", e?.message || e);
-      }
-    }
-  }
-
-  return { deletedCount, skippedCount, dryRun };
+// 24-hour recording retention (part of media-purge). Supports dryRun
+// (query dryRun=1 or env RECORDING_CLEANUP_DRY_RUN=1), so it calls the
+// function directly. POST/GET /api/maintenance/purge-old-recordings?limit=200&dryRun=1
+async function handlePurgeOldRecordings(req: any, res: any) {
+  const dryRun = req.query.dryRun === "1" || req.query.dryRun === "true" || process.env.RECORDING_CLEANUP_DRY_RUN === "1";
+  const result = await purgeOldRecordings(new Date(), { limit: qNum(req.query.limit), dryRun });
+  return res.json({ ok: true, ...result });
 }
-
-// POST/GET /api/maintenance/purge-old-recordings?limit=200&dryRun=1
-router.get("/purge-old-recordings", async (req, res) => {
-  const now = new Date();
-  const limit = req.query.limit ? Number(req.query.limit) : undefined;
-  const dryRun = req.query.dryRun === "1" || req.query.dryRun === "true" ||
-    process.env.RECORDING_CLEANUP_DRY_RUN === "1";
-  const result = await purgeOldRecordings(now, { limit, dryRun });
-  return res.json({ ok: true, ...result });
-});
-
-router.post("/purge-old-recordings", async (req, res) => {
-  const now = new Date();
-  const limit = req.query.limit ? Number(req.query.limit) : undefined;
-  const dryRun = req.query.dryRun === "1" || req.query.dryRun === "true" ||
-    process.env.RECORDING_CLEANUP_DRY_RUN === "1";
-  const result = await purgeOldRecordings(now, { limit, dryRun });
-  return res.json({ ok: true, ...result });
-});
+router.get("/purge-old-recordings", handlePurgeOldRecordings);
+router.post("/purge-old-recordings", handlePurgeOldRecordings);
 
 export default router;

@@ -57,6 +57,18 @@ services:
       - key: STREAMING_METER_SWEEP_MS
         sync: false
 
+      # Scheduled jobs (lib/jobs; admin view: Admin Dashboard > System Jobs).
+      # JOBS_ENABLED=0 turns off the in-process scheduler (cron + admin
+      # "Run now" still work). JOB_<NAME>_MS overrides one job's interval,
+      # e.g. JOB_MEDIA_PURGE_MS=1800000 ("0" disables its timer).
+      # EXPORT_RETENTION_DAYS (default 30, "0" = keep forever) expires rendered
+      # export files; JOB_HISTORY_RETENTION_DAYS / STRIPE_EVENT_RETENTION_DAYS
+      # (default 30) bound jobRuns / stripeEvents.
+      - key: JOBS_ENABLED
+        sync: false
+      - key: EXPORT_RETENTION_DAYS
+        sync: false
+
       # Firebase (if you use it server-side)
       - key: GOOGLE_APPLICATION_CREDENTIALS
         sync: false
@@ -115,6 +127,13 @@ services:
 
   # -------------------------
   # MAINTENANCE CRON (TEST)
+  # Backstop for the scheduled jobs (lib/jobs): POSTs
+  # /api/maintenance/jobs/run-due, which runs every job whose interval has
+  # elapsed (media purge, account purge, recording enforcement, meter sweep,
+  # stale HLS, expired sessions, temp uploads, expired exports). The web
+  # service also runs them in-process; Firestore leases prevent double runs.
+  # Needed because the free web plan sleeps when idle. (Service name kept so
+  # the existing Render cron is updated in place.)
   # -------------------------
   - type: cron
     name: streamline-expire-emergency-recordings
@@ -125,12 +144,13 @@ services:
     rootDir: streamline-server
     buildCommand: npm ci --include=dev && npm run build
     schedule: "*/10 * * * *"
-    command: npm run cron:expire-emergency
+    command: npm run cron:run-jobs
     envVars:
-      - key: MAINTENANCE_EXPIRE_URL
+      # https://<backend>/api/maintenance/jobs/run-due. Optional if
+      # MAINTENANCE_EXPIRE_URL (legacy) is set: its origin is reused.
+      - key: MAINTENANCE_JOBS_URL
         sync: false
-      # Optional: https://<backend>/api/maintenance/streaming-meter-sweep
-      - key: MAINTENANCE_METER_URL
+      - key: MAINTENANCE_EXPIRE_URL
         sync: false
       - key: MAINTENANCE_KEY
         sync: false

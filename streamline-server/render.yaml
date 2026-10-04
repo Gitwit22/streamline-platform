@@ -68,8 +68,11 @@ projects:
       rootDir: streamline-server
       buildCommand: npm ci --include=dev && npm run build
       schedule: "*/10 * * * *"
-      command: npm run cron:expire-emergency
+      # Scheduled-jobs backstop: POST /api/maintenance/jobs/run-due
+      command: npm run cron:run-jobs
       envVars:
+      - key: MAINTENANCE_JOBS_URL
+        sync: false
       - key: MAINTENANCE_EXPIRE_URL
         sync: false
       - key: MAINTENANCE_KEY

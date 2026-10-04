@@ -48,6 +48,7 @@ import { logAuthSecurityEvent } from "../lib/authAudit";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import adminMonitoringRoutes from "./adminMonitoring";
+import adminJobsRoutes from "./adminJobs";
 
 // Admin responses must never include credential material. Strip hashes and
 // replace reset/recovery state with their public views.
@@ -1616,6 +1617,8 @@ router.get("/features", async (req, res) => {
 // Mount admin monitoring & operational awareness sub-routes
 // (monitoring/overview, monitoring/services, monitoring/webhooks, alerts, rooms/active, support/tickets)
 router.use(adminMonitoringRoutes);
+// System Jobs: GET /jobs, POST /jobs/:name/run (lib/jobs)
+router.use(adminJobsRoutes);
 
 
 

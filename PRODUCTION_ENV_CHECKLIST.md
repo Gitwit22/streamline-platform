@@ -141,6 +141,35 @@ NODE_ENV=production
 
 ---
 
+### 8. Scheduled Jobs (storage cleanup, recording limits)
+
+The web service runs the jobs in `streamline-server/lib/jobs` in-process;
+the Render cron (`npm run cron:run-jobs`, every 10 min) POSTs
+`/api/maintenance/jobs/run-due` as a backstop while the free web instance
+sleeps. Firestore leases (`jobLocks/{name}`) stop instances double-running a
+job. Status/history: Admin Dashboard > System Jobs (`jobStatus`, `jobRuns`).
+
+```bash
+# Web service
+JOBS_ENABLED=1                # "0" = no in-process timer (cron/admin still run jobs)
+JOBS_TICK_MS=15000            # scheduler tick (optional)
+JOB_<NAME>_MS=...             # per-job interval override, e.g. JOB_MEDIA_PURGE_MS=1800000; "0" disables its timer
+STREAMING_METER_SWEEP_MS=120000   # streaming-meter-sweep interval ("0" disables its timer)
+RECORDING_CLEANUP_DRY_RUN=0   # "1" = media-purge only previews the 24h retention purge
+EXPORT_RETENTION_DAYS=30      # rendered export files kept N days ("0" = keep forever)
+TEMP_UPLOAD_MAX_AGE_MS=7200000        # leftover sl_upload_* temp files
+TEMP_EXPORT_DIR_MAX_AGE_MS=43200000   # leftover sl_export_* render dirs
+JOB_HISTORY_RETENTION_DAYS=30 # jobRuns kept
+STRIPE_EVENT_RETENTION_DAYS=30 # stripeEvents de-dup markers kept
+
+# Cron service
+MAINTENANCE_KEY=<same as web>
+MAINTENANCE_JOBS_URL=https://<backend>/api/maintenance/jobs/run-due
+# (or MAINTENANCE_BASE_URL=https://<backend>; the legacy MAINTENANCE_EXPIRE_URL's origin is also accepted)
+```
+
+---
+
 ## 🚨 Common Mistakes
 
 ### Mistake #1: Test Stripe Keys in Production
