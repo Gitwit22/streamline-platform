@@ -137,6 +137,12 @@ router.post("/:relationshipId/accept", requireAuth as any, async (req: any, res)
   const relationship = await getRelationshipById(relationshipId);
   if (!relationship) return res.status(404).json({ error: "not_found" });
   if (relationship.data.collaboratorUid !== uid) return res.status(403).json({ error: "forbidden" });
+  // Only a pending invite can be accepted: a revoked (or declined) relationship
+  // must be re-invited by the owner, otherwise a revoked producer could
+  // restore their own access.
+  if (String(relationship.data.status || "") !== "pending") {
+    return res.status(409).json({ error: "invalid_status", status: relationship.data.status || null });
+  }
 
   await firestore.collection("collaboratorRelationships").doc(relationshipId).set({
     status: "accepted",
@@ -159,6 +165,12 @@ router.post("/:relationshipId/decline", requireAuth as any, async (req: any, res
   const relationship = await getRelationshipById(relationshipId);
   if (!relationship) return res.status(404).json({ error: "not_found" });
   if (relationship.data.collaboratorUid !== uid) return res.status(403).json({ error: "forbidden" });
+  // Decline a pending invite, or leave an accepted relationship. A revoked
+  // relationship stays revoked.
+  const currentStatus = String(relationship.data.status || "");
+  if (currentStatus !== "pending" && currentStatus !== "accepted") {
+    return res.status(409).json({ error: "invalid_status", status: relationship.data.status || null });
+  }
 
   await firestore.collection("collaboratorRelationships").doc(relationshipId).set({
     status: "declined",
