@@ -53,7 +53,10 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
   const streamingUsed = decision.usedMinutes;
   const streamingLimit = decision.limitMinutes; // null = unlimited (includes bonus minutes)
   const includedMinutes = limits.monthlyStreamingMinutes; // null = unlimited
-  const bonusMinutes = Math.max(0, toNumber(userData.bonusMinutes));
+  // One-time usage credits: allowance = plan + (credit consumed this month + remaining).
+  const credits = status.credits;
+  const bonusMinutes = credits.allowanceMinutes; // legacy field name (credit minutes in this month's allowance)
+  const planUsedMinutes = includedMinutes === null ? streamingUsed : Math.min(streamingUsed, Math.max(0, includedMinutes));
 
   const byOutput = {
     multistream: toNumber(outputMinutes.multistream),
@@ -92,6 +95,15 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
         usedMinutes: streamingUsed,
         includedMinutes,
         bonusMinutes,
+        // Plan allowance vs one-time credits (credits carry over month to month).
+        planAllowanceMinutes: includedMinutes,
+        planUsedMinutes,
+        credits: {
+          remainingMinutes: credits.remainingMinutes,
+          consumedThisMonth: credits.consumedThisMonth,
+          allowanceMinutes: credits.allowanceMinutes,
+          activeCount: credits.activeCount,
+        },
         limitMinutes: streamingLimit,
         unlimited: decision.unlimited,
         remainingMinutes: decision.remainingMinutes,

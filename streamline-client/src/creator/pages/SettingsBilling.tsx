@@ -18,8 +18,10 @@ import { clearPlatformFlagsCache } from "../../lib/platformFlagsCache";
 import { isFeatureAvailable, isPlatformEnabled } from "../../lib/featureAvailability";
 import { usageLabels, usageTooltips } from "../../lib/usageLabels";
 import {
+  formatCreditLine,
   formatMinutesOfLimit,
   formatUsageResetDate,
+  canShowOveragesToggleFor,
   parseUsageSummary,
   usagePercent,
   type UsageSummaryModel,
@@ -1568,7 +1570,8 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
       setToast("Account deletion requested");
       nav("/login", { replace: true, state: { accountDeleted: true } });
     } catch (err: any) {
-      setError(err?.body?.error || err?.message || "Failed to delete account");
+      // e.g. cancel_subscription_failed: the account was NOT deleted (billing still active).
+      setError(err?.body?.message || err?.body?.error || err?.message || "Failed to delete account");
     } finally {
       setCloseDeleteLoading(false);
     }
@@ -3411,9 +3414,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
               </div>
               {!usage.streaming.unlimited && (
                 <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 8 }}>
-                  {usage.streaming.bonus > 0
-                    ? `Includes ${usage.streaming.bonus.toLocaleString("en-US")} bonus min. `
-                    : ""}
+                  {formatCreditLine(usage.streaming.credits)}
                   {usage.streaming.overLimit
                     ? usage.streaming.overagesActive
                       ? "Over your monthly minutes - overage billing applies."
@@ -3455,13 +3456,12 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
             </div>
 
             {(() => {
-              const eff = (user as any)?.effectiveEntitlements;
-              const planId = String(eff?.planId || "").trim();
-              const overagesAllowed = eff?.features?.overagesAllowed === true;
-              const canShowOveragesToggle = planId === "pro" || overagesAllowed;
-              if (!canShowOveragesToggle) return null;
-
+              // Any EFFECTIVE plan with overages allowed (server engine; not a
+              // hard-coded plan id). Also shown while enabled so a user whose
+              // plan lost overages can still turn them off.
               const enabled = Boolean((user as any)?.billingSettings?.overagesEnabled);
+              const canShowOveragesToggle = canShowOveragesToggleFor(user) || enabled;
+              if (!canShowOveragesToggle) return null;
 
               return (
                 <div style={{

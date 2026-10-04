@@ -10,8 +10,9 @@ import { releaseRecordingStorageOnce } from "../lib/recordingUsage";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
+import { decideProjectCreate, projectCountNeeded } from "../lib/projectCreateGate";
 import { canAccessFeature } from "./featureAccess";
-import { getEffectiveEntitlements, getPlatformFlags, hasRoomFor } from "../lib/entitlements";
+import { getEffectiveEntitlements, getPlatformFlags } from "../lib/entitlements";
 import { logger } from "../lib/logger";
 import { copyViewerStatsToRecording } from "../lib/viewerStats";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
@@ -172,16 +173,15 @@ export async function assertCanCreateProject(req: Request, res: Response): Promi
   const access = await assertEditingAccess(req, res, "projects");
   if (!access) return false;
   const limit = access.plan.maxProjects;
-  if (limit !== null) {
-    const totalCount = limit === 0 ? 0 : await countUserProjects(access.uid);
-    if (!hasRoomFor(totalCount, limit)) {
-      res.status(409).json({
-        error: LIMIT_ERRORS.LIMIT_EXCEEDED,
-        reason: limit === 0 ? "Projects are not included in your plan" : "Max projects limit reached",
-        limit,
-      });
-      return false;
-    }
+  const decision = decideProjectCreate({
+    planHasProjects: true, // checked by assertEditingAccess above
+    planId: access.plan.planId,
+    limit,
+    existingCount: projectCountNeeded(limit) ? await countUserProjects(access.uid) : 0,
+  });
+  if (!decision.allowed) {
+    res.status(decision.status).json(decision.body);
+    return false;
   }
   return true;
 }

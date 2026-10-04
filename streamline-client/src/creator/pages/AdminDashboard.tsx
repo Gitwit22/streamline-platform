@@ -13,6 +13,8 @@ import { clearPlatformFlagsCache } from "../../lib/platformFlagsCache";
 import { ResetCodeDialog, type IssuedResetCode } from "../components/ResetCodeDialog";
 import { PlanOverridePanel, type AdminPlanOverrideView } from "../components/admin/PlanOverridePanel";
 import { SystemJobsPanel } from "../components/admin/SystemJobsPanel";
+import { DeleteAccountDialog, type DeleteTarget } from "../components/admin/DeleteAccountDialog";
+import { UsageCreditsPanel } from "../components/admin/UsageCreditsPanel";
 
 // Normalize base so if you set VITE_API_BASE to ".../api" it won't double up.
 const API_BASE = (import.meta.env.VITE_API_BASE || "")
@@ -68,9 +70,17 @@ interface User {
   passwordReset?: {
     active?: boolean;
   };
+  /** Tri-state in Firestore; missing => ON (server normalizes to a boolean). */
   billingEnabled?: boolean;
   minutesUsed?: number;
+  /** LEGACY monthly bonus (migrated to one-time credits). */
   bonusMinutes?: number;
+  /** Remaining one-time usage credit minutes (carry over month to month). */
+  creditRemainingMinutes?: number;
+  accountStatus?: string;
+  deletedAtMs?: number;
+  deleteAfterMs?: number | null;
+  purgeInDays?: number | null;
   // Stripe/base plan vs admin override vs EFFECTIVE plan (server engine).
   basePlanId?: string;
   effectivePlanId?: string;
@@ -458,6 +468,9 @@ export default function AdminDashboard() {
   // Add state for selected users (multi-select)
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [deleteLoading, setDeleteLoading] = useState(false);
+  // Accounts in the open "Delete Account" dialog (one or many).
+  const [deleteTargets, setDeleteTargets] = useState<DeleteTarget[] | null>(null);
+  const [showDeletedUsers, setShowDeletedUsers] = useState(false);
 
   const showToast = (msg: string) => {
     setToast(msg);
@@ -535,8 +548,8 @@ export default function AdminDashboard() {
     if (res.ok) setStats(await res.json());
   };
 
-  const loadUsers = async () => {
-    const res = await apiFetch("/api/admin/users?limit=100");
+  const loadUsers = async (includeDeleted: boolean = showDeletedUsers) => {
+    const res = await apiFetch(`/api/admin/users?limit=100${includeDeleted ? "&includeDeleted=1" : ""}`);
     if (res.ok) {
       const data = await res.json();
       setUsers(data.users || []);
@@ -661,21 +674,6 @@ export default function AdminDashboard() {
       await loadUsers();
     } else {
       showToast(`Plan change failed: ${await describeNonOkResponse(res)}`);
-    }
-  };
-
-  const grantMinutes = async (userId: string, minutes: number) => {
-    const res = await apiFetch(`/api/admin/users/${userId}/grant-minutes`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ minutes }),
-    });
-    if (res.ok) {
-      showToast(`+${minutes} minutes granted!`);
-      setSelectedUser(null);
-      await loadUsers();
-    } else {
-      showToast(`Grant failed: ${await describeNonOkResponse(res)}`);
     }
   };
 
@@ -835,36 +833,50 @@ export default function AdminDashboard() {
     }
   };
 
-  // Delete a single user
-  const deleteUser = async (userId: string) => {
-    if (!window.confirm("Are you sure you want to delete this user? This cannot be undone.")) return;
-    setDeleteLoading(true);
-    try {
-      const res = await apiFetch(`/api/admin/users/${userId}`, { method: "DELETE" });
-      if (res.ok) {
-        showToast("User deleted");
-        await loadUsers();
-        setSelectedUserIds((ids) => ids.filter((id) => id !== userId));
-      } else {
-        showToast(`Delete failed: ${await describeNonOkResponse(res)}`);
-      }
-    } finally {
-      setDeleteLoading(false);
-    }
+  // Delete (soft delete, restorable for 7 days) through the impact dialog.
+  // Single and bulk use the same dialog: per-user DELETE with the same
+  // options, every response checked, failures listed.
+  const toDeleteTarget = (u: User): DeleteTarget => ({ uid: u.uid, email: u.email, displayName: u.displayName });
+
+  const deleteUser = (userId: string) => {
+    const u = users.find((x) => x.uid === userId);
+    setDeleteTargets([u ? toDeleteTarget(u) : { uid: userId }]);
   };
 
-  // Bulk delete
-  const deleteSelectedUsers = async () => {
+  const deleteSelectedUsers = () => {
     if (selectedUserIds.length === 0) return;
-    if (!window.confirm(`Delete ${selectedUserIds.length} users? This cannot be undone.`)) return;
+    setDeleteTargets(
+      selectedUserIds.map((id) => {
+        const u = users.find((x) => x.uid === id);
+        return u ? toDeleteTarget(u) : { uid: id };
+      })
+    );
+  };
+
+  const restoreUser = async (u: User) => {
+    if (
+      !window.confirm(
+        `Restore ${u.email || u.uid}?\n\nThis re-enables the account and cancels the scheduled purge. A Stripe subscription canceled by the deletion is NOT restored; the user must subscribe again.`
+      )
+    ) {
+      return;
+    }
     setDeleteLoading(true);
     try {
-      for (const userId of selectedUserIds) {
-        await apiFetch(`/api/admin/users/${userId}`, { method: "DELETE" });
+      const res = await apiFetch(`/api/admin/users/${u.uid}/restore`, { method: "POST" });
+      if (res.ok) {
+        const body: any = await res.json().catch(() => ({}));
+        showToast(
+          body?.stripeWasCanceled
+            ? "Account restored (Stripe subscription stays canceled)"
+            : body?.firebaseReenabled === false
+              ? "Account restored, but sign-in could not be re-enabled"
+              : "Account restored"
+        );
+        await loadUsers();
+      } else {
+        showToast(`Restore failed: ${await describeNonOkResponse(res)}`);
       }
-      showToast("Selected users deleted");
-      await loadUsers();
-      setSelectedUserIds([]);
     } finally {
       setDeleteLoading(false);
     }
@@ -1017,10 +1029,21 @@ export default function AdminDashboard() {
                   onChange={(e) => setSearchQuery(e.target.value)}
                   style={S.input}
                 />
-                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 12, flexWrap: "wrap" }}>
                   <button onClick={deleteSelectedUsers} style={{ ...S.redBtn, opacity: selectedUserIds.length === 0 ? 0.7 : 1 }} disabled={selectedUserIds.length === 0 || deleteLoading}>
                     {deleteLoading ? "⏳" : "🗑️ Delete Selected"}
                   </button>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "#9ca3af" }}>
+                    <input
+                      type="checkbox"
+                      checked={showDeletedUsers}
+                      onChange={(e) => {
+                        setShowDeletedUsers(e.target.checked);
+                        void loadUsers(e.target.checked);
+                      }}
+                    />
+                    Show deleted (restorable for 7 days)
+                  </label>
                 </div>
                 <div style={S.card}>
                   <table style={{ width: "100%", borderCollapse: "collapse" }}>
@@ -1037,7 +1060,7 @@ export default function AdminDashboard() {
                             style={{ transform: "scale(1.5)", cursor: "pointer" }}
                           />
                         </th>
-                        {["User", "Plan", "Minutes", "Bonus", "Billing", "Actions"].map((h) => (
+                        {["User", "Plan", "Minutes", "Credits", "Billing", "Actions"].map((h) => (
                           <th key={h} style={S.th}>
                             {h}
                           </th>
@@ -1103,20 +1126,28 @@ export default function AdminDashboard() {
                             <span style={S.blueBadge}>{u.minutesUsed || 0}m</span>
                           </td>
                           <td style={S.td}>
-                            <span style={S.greenBadge}>+{u.bonusMinutes || 0}m</span>
+                            <span style={S.greenBadge} title="Remaining one-time usage credit (carries over month to month)">
+                              {u.creditRemainingMinutes ?? u.bonusMinutes ?? 0}m
+                            </span>
                           </td>
 
                           <td style={S.td}>
-                            <button
-                              onClick={() => toggleBilling(u.uid, !u.billingEnabled)}
-                              style={{
-                                ...S.billingBtn,
-                                background: u.billingEnabled ? "rgba(34,197,94,0.2)" : "rgba(107,114,128,0.2)",
-                                color: u.billingEnabled ? "#4ade80" : "#9ca3af",
-                              }}
-                            >
-                              {u.billingEnabled ? "✓ On" : "○ Off"}
-                            </button>
+                            {(() => {
+                              // billingEnabled is tri-state in Firestore; missing => ON (same as AdminUsage).
+                              const billingOn = u.billingEnabled !== false;
+                              return (
+                                <button
+                                  onClick={() => toggleBilling(u.uid, !billingOn)}
+                                  style={{
+                                    ...S.billingBtn,
+                                    background: billingOn ? "rgba(34,197,94,0.2)" : "rgba(107,114,128,0.2)",
+                                    color: billingOn ? "#4ade80" : "#9ca3af",
+                                  }}
+                                >
+                                  {billingOn ? "✓ On" : "○ Off"}
+                                </button>
+                              );
+                            })()}
                           </td>
 
                           <td style={S.td}>
@@ -1155,7 +1186,26 @@ export default function AdminDashboard() {
                               >
                                 {resetLoadingUserId === u.uid ? "⏳" : u.passwordReset?.active ? "✅" : "🔐"}
                               </button>
-                              <button onClick={() => deleteUser(u.uid)} style={{ ...S.actionBtn, opacity: deleteLoading ? 0.7 : 1 }} disabled={deleteLoading}>
+                              {u.accountStatus === "deleted" || (u.deletedAtMs ?? 0) > 0 ? (
+                                <button
+                                  onClick={() => restoreUser(u)}
+                                  style={{ ...S.actionBtn, opacity: deleteLoading ? 0.7 : 1 }}
+                                  disabled={deleteLoading}
+                                  title={
+                                    u.purgeInDays !== null && u.purgeInDays !== undefined
+                                      ? `Deleted - purge in ${u.purgeInDays} day(s). Restore (does not restore a canceled Stripe subscription)`
+                                      : "Deleted - restore (does not restore a canceled Stripe subscription)"
+                                  }
+                                >
+                                  ♻️
+                                </button>
+                              ) : null}
+                              <button
+                                onClick={() => deleteUser(u.uid)}
+                                style={{ ...S.actionBtn, opacity: deleteLoading ? 0.7 : 1 }}
+                                disabled={deleteLoading}
+                                title="Delete account (shows billing impact first)"
+                              >
                                 🗑️
                               </button>
                             </div>
@@ -1688,14 +1738,8 @@ export default function AdminDashboard() {
               </button>
             </div>
             <div style={{ padding: 20 }}>
-              <label style={S.label}>Quick Grant Minutes</label>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
-                {[30, 60, 120, 300, 600].map((m) => (
-                  <button key={m} onClick={() => grantMinutes(selectedUser.uid, m)} style={S.grantBtn}>
-                    +{m}m
-                  </button>
-                ))}
-              </div>
+              <label style={S.label}>One-time usage credits</label>
+              <UsageCreditsPanel userId={selectedUser.uid} onMessage={showToast} onChanged={() => loadUsers()} />
               <label style={{ ...S.label, marginTop: 20, display: "block" }}>Admin Override</label>
               <PlanOverridePanel
                 userId={selectedUser.uid}
@@ -1718,6 +1762,19 @@ export default function AdminDashboard() {
             </div>
           </div>
         </div>
+      )}
+
+      {deleteTargets && (
+        <DeleteAccountDialog
+          targets={deleteTargets}
+          onClose={() => setDeleteTargets(null)}
+          onFinished={async (summary) => {
+            showToast(summary.message);
+            const done = new Set([...summary.completed, ...summary.partial].map((r) => r.uid));
+            setSelectedUserIds((ids) => ids.filter((id) => !done.has(id)));
+            await loadUsers();
+          }}
+        />
       )}
 
       <style>{CSS}</style>
@@ -1916,7 +1973,7 @@ const S: Record<string, React.CSSProperties> = {
   toggleKnob: { width: 22, height: 22, borderRadius: 999, background: "#fff", position: "absolute", top: 2, transition: "left 140ms ease" },
 
   modalBg: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 200 },
-  modal: { width: 520, maxWidth: "90vw", background: "rgba(15,15,15,0.96)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 14, overflow: "hidden" },
+  modal: { width: 720, maxWidth: "95vw", maxHeight: "90vh", overflowY: "auto", background: "rgba(15,15,15,0.96)", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 14 },
   modalHead: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 16px", borderBottom: "1px solid rgba(255,255,255,0.10)" },
   closeBtn: { border: "none", background: "transparent", color: "#fff", fontSize: 22, cursor: "pointer" },
   label: { display: "block", marginBottom: 10, color: "#9ca3af", fontSize: 12, textTransform: "uppercase", letterSpacing: 0.6 },

@@ -126,6 +126,19 @@ export async function purgeDeletedAccounts(now: Date): Promise<{ purgedCount: nu
         }
       } catch {}
 
+      // users/{uid}/usageCredits (one-time usage credits, lib/usageCredits.ts)
+      try {
+        let removed = 0;
+        for (let i = 0; i < 5; i++) {
+          const n = await deleteCollection(doc.ref.collection("usageCredits"), 200);
+          removed += n;
+          if (n === 0) break;
+        }
+        if (removed) {
+          console.log("[maintenance] purged usageCredits", { uid, removed });
+        }
+      } catch {}
+
       // accounts/{uid}
       try {
         await firestore.collection("accounts").doc(uid).delete();

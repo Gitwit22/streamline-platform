@@ -49,6 +49,18 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import adminMonitoringRoutes from "./adminMonitoring";
 import adminJobsRoutes from "./adminJobs";
+import { deleteAccount, loadDeletionImpact, restoreAccount } from "../lib/accountDeletion";
+import { parseDeletionRequest } from "../lib/accountDeletionCore";
+import {
+  grantCredit,
+  loadAllCredits,
+  loadCreditsWithRemaining,
+  migrateLegacyBonusMinutes,
+  revokeCredit,
+  serializeCredit,
+  summarizeCredits,
+} from "../lib/usageCredits";
+import { activeCreditRemaining, validateCreditGrant } from "../lib/usageCreditsPure";
 
 // Admin responses must never include credential material. Strip hashes and
 // replace reset/recovery state with their public views.
@@ -566,22 +578,28 @@ router.get("/users", async (req, res) => {
     const now = Date.now();
     const planCtx = await loadAdminPlanContext();
 
-    const users = snapshot.docs.map((doc) => {
+    const users = await Promise.all(snapshot.docs.map(async (doc) => {
       const raw = doc.data() || {};
       const planId = typeof (raw as any).planId === "string" && String((raw as any).planId).trim() ? (raw as any).planId : "free";
       const billingTruth = normalizeBillingTruthFromUser({ ...raw, planId }, now);
       const { view } = buildAdminPlanView(doc.id, raw, planCtx);
+      // One-time usage credit balance (legacy un-migrated bonusMinutes counted as a credit).
+      const credits = await loadCreditsWithRemaining(doc.id).catch(() => []);
+      const creditSummary = summarizeCredits({ credits, userDoc: raw, usageDoc: {}, usedMinutes: 0, includedMinutes: null, nowMs: now });
       return {
         uid: doc.id,
         ...toAdminSafeUser(raw),
         planId,
+        creditRemainingMinutes: creditSummary.remainingMinutes,
+        // billingEnabled is tri-state in Firestore; missing => ON.
+        billingEnabled: (raw as any).billingEnabled !== false,
         // Stripe/base plan vs admin override vs EFFECTIVE plan.
         ...view,
         billingTruth,
         billingReady: true,
         stripeConnected: Boolean(billingTruth.stripeCustomerId),
       };
-    });
+    }));
 
     const filteredUsers = includeDeleted
       ? users.map((u: any) => {
@@ -590,7 +608,7 @@ router.get("/users", async (req, res) => {
             return {
               ...u,
               deletedAt: new Date(u.deletedAtMs).toISOString(),
-              deleteAfter: new Date(u.deleteAfterMs || 0).toISOString(),
+              deleteAfter: u.deleteAfterMs ? new Date(u.deleteAfterMs).toISOString() : null,
               purgeInDays: u.deleteAfterMs ? Math.max(0, Math.ceil((u.deleteAfterMs - Date.now()) / (1000 * 60 * 60 * 24))) : null,
             };
           }
@@ -609,15 +627,31 @@ router.get("/users", async (req, res) => {
     res.status(500).json({ error: "Failed to fetch users" });
   }
 });
-//delete user
+/**
+ * GET /api/admin/users/:userId/deletion-impact
+ * What deleting this account affects: Stripe subscription (plan, amount,
+ * next billing date via Stripe), rooms, recordings, storage.
+ */
+router.get("/users/:userId/deletion-impact", async (req, res) => {
+  try {
+    const impact = await loadDeletionImpact(req.params.userId);
+    if (!impact) return res.status(404).json({ error: "User not found" });
+    res.json({ success: true, impact });
+  } catch (error: any) {
+    console.error("Failed to load deletion impact:", error);
+    res.status(500).json({ error: "Failed to load deletion impact" });
+  }
+});
+
 /**
  * DELETE /api/admin/users/:userId
- * Soft-deletes a user: marks the doc deleted (purged later by the maintenance
- * job via deleteAfterMs, same as a self-service close), revokes all sessions,
- * and disables the Firebase Auth user. The doc is kept so requireAuth, /me and
- * login all see "deleted" and refuse the account instead of recreating it.
+ * Body: { cancelStripe, revokeSessions, scheduleMediaDeletion, confirm: "DELETE" }
+ * (checkboxes default to true). Shared workflow (lib/accountDeletion.ts):
+ * cancel Stripe -> revoke sessions -> disable (soft delete) -> queue cleanup
+ * (purge after 7 days) -> audit. If Stripe cancellation was requested and
+ * fails, NOTHING else happens and the response is 502 outcome "failed".
+ * Partial results (e.g. Firebase revoke failed) return 207 outcome "partial".
  */
-const ADMIN_DELETE_PURGE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 router.delete("/users/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -625,44 +659,63 @@ router.delete("/users/:userId", async (req, res) => {
     if (userId === adminUid) {
       return res.status(400).json({ error: "You cannot delete your own account here" });
     }
-    const userRef = firestore.collection("users").doc(userId);
-    const userDoc = await userRef.get();
-    if (!userDoc.exists) {
-      return res.status(404).json({ error: "User not found" });
+    const parsed = parseDeletionRequest(req.body);
+    if (!parsed.ok) {
+      return res.status(400).json({ error: parsed.error, details: parsed.details });
     }
-
-    const now = Date.now();
-    await userRef.set(
-      {
-        accountStatus: "deleted",
-        deletedAtMs: now,
-        deleteAfterMs: now + ADMIN_DELETE_PURGE_AFTER_MS,
-        authRevokedAtMs: now,
-        deletionRequestedAtMs: now,
-        deletionReason: "admin_deleted",
-        deletedBy: adminUid,
-        updatedAt: now,
-      },
-      { merge: true }
-    );
-
-    // Lock the Firebase identity too, so ID tokens and custom-token sign-in stop working.
-    let firebaseAuthLocked = true;
-    try {
-      await firebaseAuth.updateUser(userId, { disabled: true });
-      await firebaseAuth.revokeRefreshTokens(userId);
-    } catch (err: any) {
-      if (String(err?.code || "") !== "auth/user-not-found") {
-        firebaseAuthLocked = false;
-        console.warn("[admin] Failed to disable Firebase Auth user on delete:", err?.code || err?.message || err);
-      }
-    }
-
-    await logAdminAction(adminUid, "delete_user", { userId, mode: "soft", firebaseAuthLocked });
-    res.json({ success: true, userId, deletedAtMs: now, deleteAfterMs: now + ADMIN_DELETE_PURGE_AFTER_MS });
+    const result = await deleteAccount({
+      uid: userId,
+      actor: { type: "admin", uid: adminUid },
+      options: parsed.options,
+      reason: "admin_deleted",
+      extraAudit: (event) =>
+        logAdminAction(adminUid, "delete_user", {
+          userId,
+          mode: "soft",
+          options: parsed.options,
+          outcome: event.outcome,
+          stripe: event.steps?.stripe,
+          sessions: event.steps?.sessions?.status,
+          disable: event.steps?.disable?.status,
+          cleanup: event.steps?.cleanup?.status,
+        }),
+    });
+    res.status(result.httpStatus).json({
+      success: result.outcome !== "failed",
+      userId,
+      ...result,
+    });
   } catch (error) {
     console.error("Failed to delete user:", error);
     res.status(500).json({ error: "Failed to delete user" });
+  }
+});
+
+/**
+ * POST /api/admin/users/:userId/restore
+ * Undo a soft delete within the purge window (clears the deletion fields,
+ * re-enables the Firebase user). A Stripe subscription canceled by the
+ * deletion is NOT restored; the user must subscribe again.
+ */
+router.post("/users/:userId/restore", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const adminUid = req.adminUser!.uid;
+    const result = await restoreAccount(userId, adminUid);
+    if (!result.ok) {
+      return res.status(result.status).json({ error: result.error, details: result.details });
+    }
+    await logAdminAction(adminUid, "restore_user", { userId, ...result });
+    res.json({
+      success: true,
+      userId,
+      firebaseReenabled: result.firebaseReenabled,
+      stripeWasCanceled: result.stripeWasCanceled,
+      note: "Canceled Stripe subscriptions are not restored; the user must subscribe again.",
+    });
+  } catch (error) {
+    console.error("Failed to restore user:", error);
+    res.status(500).json({ error: "Failed to restore user" });
   }
 });
 /**
@@ -681,7 +734,7 @@ router.get("/users/:userId", async (req, res) => {
 
     const userData = userDoc.data();
 
-    // Current month streaming minutes vs the effective plan (+ bonus),
+    // Current month streaming minutes vs the effective plan (+ one-time usage credits),
     // evaluated exactly like the start gate.
     const status = await getStreamingUsageStatus(userId);
     const currentMonthUsage = status.decision.usedMinutes;
@@ -707,6 +760,11 @@ router.get("/users/:userId", async (req, res) => {
     res.json({
       ...userSummary,
       planLimitMinutes: planLimitOrNull,
+      // Plan allowance vs one-time usage credits.
+      planAllowanceMinutes: status.entitlements.limits.monthlyStreamingMinutes,
+      creditRemainingMinutes: status.credits.remainingMinutes,
+      creditConsumedThisMonth: status.credits.consumedThisMonth,
+      creditAllowanceMinutes: status.credits.allowanceMinutes,
       basePlanId: ent.source.basePlan,
       effectivePlanId: ent.planId,
       planOverride: storedOverride
@@ -723,56 +781,119 @@ router.get("/users/:userId", async (req, res) => {
 });
 
 /**
- * POST /api/admin/users/:userId/grant-minutes
- * Grant bonus minutes to a user
+ * POST /api/admin/users/:userId/grant-minutes   (alias: POST /users/:userId/credits)
+ * Body: { minutes (positive integer), reason (required), expiresAt? (ISO / epoch ms) }
+ * Grants a ONE-TIME usage credit (users/{uid}/usageCredits/{id}): consumed
+ * only by minutes beyond the plan allowance, remaining carries over month to
+ * month. It is not a monthly top-up. type "recurring" is rejected (not
+ * implemented yet).
  */
-router.post("/users/:userId/grant-minutes", async (req, res) => {
+async function handleGrantCredit(req: any, res: any) {
   try {
     const { userId } = req.params;
-    const { minutes, reason } = req.body;
-
-    if (!minutes || minutes <= 0) {
-      return res.status(400).json({ error: "Invalid minutes amount" });
+    const adminUid = req.adminUser!.uid;
+    const nowMs = Date.now();
+    const parsed = validateCreditGrant(req.body, nowMs);
+    if (!parsed.ok) {
+      return res.status(400).json({ error: parsed.error, details: parsed.details });
     }
 
-    const userRef = firestore.collection("users").doc(userId);
-    const userDoc = await userRef.get();
-
+    const userDoc = await firestore.collection("users").doc(userId).get();
     if (!userDoc.exists) {
       return res.status(404).json({ error: "User not found" });
     }
 
-    const currentBonusMinutes = userDoc.data()?.bonusMinutes || 0;
-    const newBonusMinutes = currentBonusMinutes + minutes;
-
-    await userRef.update({
-      bonusMinutes: newBonusMinutes,
-      updatedAt: new Date(),
-    });
-
-    // Log the action
-    await logAdminAction(req.adminUser!.uid, "grant_minutes", {
-      userId,
-      minutes,
-      reason,
-      previousBonus: currentBonusMinutes,
-      newBonus: newBonusMinutes,
-    });
-
-    console.log(
-      `Admin ${req.adminUser!.email} granted ${minutes} bonus minutes to user ${userId}`
+    // Fold any legacy users.bonusMinutes into a credit first so the two never double count.
+    await migrateLegacyBonusMinutes(userId, nowMs).catch((e: any) =>
+      console.error("[admin] legacy bonus migration before grant failed", { userId, error: e?.message || e })
     );
 
+    const credit = await grantCredit(userId, parsed.value, adminUid, nowMs);
+    await logAdminAction(adminUid, "grant_usage_credit", {
+      userId,
+      creditId: credit.id,
+      minutes: credit.amount,
+      type: credit.type,
+      source: credit.source,
+      reason: credit.reason,
+      expiresAt: credit.expiresAt,
+    });
+    invalidateEntitlements(userId);
+
+    const credits = await loadCreditsWithRemaining(userId);
+    const remainingMinutes = activeCreditRemaining(credits, Date.now());
     res.json({
       success: true,
       userId,
-      minutesGranted: minutes,
-      totalBonusMinutes: newBonusMinutes,
-      reason,
+      credit: serializeCredit(credit, nowMs),
+      minutesGranted: credit.amount,
+      creditRemainingMinutes: remainingMinutes,
+      // Legacy response field (older admin UIs): remaining one-time credit minutes.
+      totalBonusMinutes: remainingMinutes,
+      reason: credit.reason,
     });
   } catch (error: any) {
-    console.error("Failed to grant minutes:", error);
+    console.error("Failed to grant usage credit:", error);
     res.status(500).json({ error: "Failed to grant minutes" });
+  }
+}
+router.post("/users/:userId/grant-minutes", handleGrantCredit);
+router.post("/users/:userId/credits", handleGrantCredit);
+
+/**
+ * GET /api/admin/users/:userId/credits
+ * All usage credits (active, depleted, expired, revoked) + this month's summary.
+ */
+router.get("/users/:userId/credits", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const userDoc = await firestore.collection("users").doc(userId).get();
+    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
+    // Migrates legacy bonusMinutes and returns plan / credit allowance for this month.
+    const status = await getStreamingUsageStatus(userId);
+    const credits = await loadAllCredits(userId);
+    const nowMs = Date.now();
+    res.json({
+      success: true,
+      userId,
+      monthKey: status.monthKey,
+      planAllowanceMinutes: status.entitlements.limits.monthlyStreamingMinutes,
+      usedMinutes: status.decision.usedMinutes,
+      limitMinutes: status.decision.limitMinutes,
+      creditRemainingMinutes: status.credits.remainingMinutes,
+      creditConsumedThisMonth: status.credits.consumedThisMonth,
+      creditAllowanceMinutes: status.credits.allowanceMinutes,
+      credits: credits.map((c) => serializeCredit(c, nowMs)),
+    });
+  } catch (error: any) {
+    console.error("Failed to list usage credits:", error);
+    res.status(500).json({ error: "Failed to list usage credits" });
+  }
+});
+
+/**
+ * POST /api/admin/users/:userId/credits/:creditId/revoke
+ * Body: { reason? }. Sets remaining to 0 (already-consumed minutes stay billed).
+ */
+router.post("/users/:userId/credits/:creditId/revoke", async (req, res) => {
+  try {
+    const { userId, creditId } = req.params;
+    const adminUid = req.adminUser!.uid;
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim().slice(0, 500) : "";
+    const result = await revokeCredit(userId, creditId, adminUid, reason);
+    if (!result) return res.status(404).json({ error: "Credit not found" });
+    await logAdminAction(adminUid, "revoke_usage_credit", {
+      userId,
+      creditId,
+      reason: reason || undefined,
+      remainingBefore: result.before.remaining,
+      alreadyRevoked: Boolean(result.before.revokedAt),
+    });
+    invalidateEntitlements(userId);
+    res.json({ success: true, userId, credit: serializeCredit(result.after, Date.now()), revokedMinutes: result.before.remaining });
+  } catch (error: any) {
+    console.error("Failed to revoke usage credit:", error);
+    res.status(500).json({ error: "Failed to revoke usage credit" });
   }
 });
 
@@ -1188,7 +1309,18 @@ router.get("/usage", async (req, res) => {
         const { ent, view } = buildAdminPlanView(userId, userData, planCtx);
         const effectivePlanId = ent.planId;
         const planLimit = ent.limits.monthlyStreamingMinutes; // null = unlimited
-        const bonusMinutes = Math.max(0, Number(userData.bonusMinutes || 0));
+        // One-time usage credits (read-only here; legacy bonusMinutes counted until migrated).
+        const credits = await loadCreditsWithRemaining(userId).catch(() => []);
+        const creditSummary = summarizeCredits({
+          credits,
+          userDoc: userData,
+          usageDoc: usageData,
+          usedMinutes: minutesUsed,
+          includedMinutes: planLimit,
+          nowMs: Date.now(),
+        });
+        // Legacy field name: credit minutes in this month's allowance.
+        const bonusMinutes = creditSummary.allowanceMinutes;
         const gate = evaluateStreamingGate({
           usedMinutes: minutesUsed,
           includedMinutes: planLimit,
@@ -1236,6 +1368,9 @@ router.get("/usage", async (req, res) => {
           overageTranscodeMinutes,
           overageMinutesTotal,
           bonusMinutes,
+          creditRemainingMinutes: creditSummary.remainingMinutes,
+          creditConsumedThisMonth: creditSummary.consumedThisMonth,
+          planUsedMinutes: planLimit === null ? minutesUsed : Math.min(minutesUsed, planLimit),
           planLimit,
           effectiveLimit,
           percentUsed: effectiveLimit !== null && effectiveLimit > 0 ? (minutesUsed / effectiveLimit) * 100 : effectiveLimit === 0 && minutesUsed > 0 ? 100 : 0,

@@ -13,7 +13,12 @@ export type UsageSummaryModel = {
     /** included + bonus; null = unlimited */
     limit: number | null;
     included: number | null;
+    /** Credit minutes in this month's allowance (consumed this month + remaining). */
     bonus: number;
+    /** One-time usage credits: remaining carries over month to month. */
+    credits: { remaining: number; consumedThisMonth: number };
+    /** Minutes of this month covered by the plan allowance. */
+    planUsed: number;
     unlimited: boolean;
     remaining: number | null;
     overLimit: boolean;
@@ -75,6 +80,15 @@ export function parseUsageSummary(data: any): UsageSummaryModel {
       limit,
       included: numOrNull(s.includedMinutes),
       bonus: num(s.bonusMinutes),
+      credits: {
+        remaining: num(s.credits?.remainingMinutes),
+        consumedThisMonth: num(s.credits?.consumedThisMonth),
+      },
+      planUsed: (() => {
+        if (s.planUsedMinutes !== undefined && s.planUsedMinutes !== null) return num(s.planUsedMinutes);
+        const included = numOrNull(s.includedMinutes);
+        return included === null ? used : Math.min(used, Math.max(0, included));
+      })(),
       unlimited,
       remaining: unlimited ? null : Math.max(0, (limit as number) - used),
       overLimit: !unlimited && used >= (limit as number),
@@ -108,6 +122,32 @@ export function formatUsageResetDate(iso: string | null): string {
   if (Number.isNaN(d.getTime())) return "Resets on the 1st (UTC)";
   const label = d.toLocaleDateString("en-US", { month: "short", day: "numeric", timeZone: "UTC" });
   return `Resets ${label} (UTC)`;
+}
+
+/**
+ * Show the Settings overage toggle for ANY effective plan that allows
+ * overages (server engine via /api/account/me), not a hard-coded plan id.
+ * Reads, in order: entitlements.features.overages (canonical),
+ * overagesAllowed (top-level), effectiveEntitlements.features.{overagesAllowed,allowsOverages}.
+ */
+export function canShowOveragesToggleFor(me: any): boolean {
+  if (!me || typeof me !== "object") return false;
+  const canonical = me?.entitlements?.features?.overages;
+  if (typeof canonical === "boolean") return canonical;
+  if (typeof me.overagesAllowed === "boolean") return me.overagesAllowed;
+  const legacy = me?.effectiveEntitlements?.features || {};
+  return legacy.overagesAllowed === true || legacy.allowsOverages === true;
+}
+
+/** "200 min from one-time credits this month · 300 credit min left (carries over). " ("" when no credits). */
+export function formatCreditLine(credits: { remaining: number; consumedThisMonth: number } | null | undefined): string {
+  const used = Math.max(0, Math.round(num(credits?.consumedThisMonth)));
+  const left = Math.max(0, Math.round(num(credits?.remaining)));
+  if (used === 0 && left === 0) return "";
+  const parts: string[] = [];
+  if (used > 0) parts.push(`${used.toLocaleString("en-US")} min from one-time credits this month`);
+  if (left > 0) parts.push(`${left.toLocaleString("en-US")} credit min left (carries over)`);
+  return parts.join(" · ") + ". ";
 }
 
 /** Percent for a usage bar; 0 when unlimited, 100 when the limit is 0 (none). */

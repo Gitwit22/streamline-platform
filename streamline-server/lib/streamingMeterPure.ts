@@ -345,7 +345,11 @@ export type StreamingGateInput = {
    * null = unlimited, 0 = none included (bonus minutes still apply).
    */
   includedMinutes: number | null;
-  /** users.bonusMinutes, added on top of the plan allowance every month. */
+  /**
+   * Credit minutes in this month's allowance: one-time usage credits consumed
+   * this month + remaining of active credits (see lib/usageCreditsPure.ts).
+   * Not a monthly top-up: remaining carries over, consumed credit is gone.
+   */
   bonusMinutes?: number;
   planAllowsOverages: boolean;
   /** billingSettings.overagesEnabled (user opt-in). */

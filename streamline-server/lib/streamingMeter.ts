@@ -65,6 +65,24 @@ import {
   type OutputKind,
   type StreamingGateDecision,
 } from "./streamingMeterPure";
+import {
+  LEGACY_BONUS_CREDIT_ID,
+  buildLegacyBonusCredit,
+  needsLegacyBonusMigration,
+  normalizeCredit,
+  planCreditConsumption,
+  readCreditMinutesConsumed,
+  type CreditConsumptionPlan,
+  type UsageCredit,
+} from "./usageCreditsPure";
+import {
+  applyLegacyBonusMigrationInTx,
+  creditsCollection,
+  loadCreditsWithRemaining,
+  migrateLegacyBonusMinutes,
+  summarizeCredits,
+  type CreditSummary,
+} from "./usageCredits";
 
 export const EGRESS_SESSIONS = "egressSessions";
 export const STREAMING_METERS = "streamingMeters";
@@ -146,9 +164,102 @@ export type BillResult = {
   streamingMinutesDelta: number;
   destinationMinutesDelta: number;
   ownMinutesDelta: number;
+  /** Minutes of this bill paid from one-time usage credits. */
+  creditMinutesConsumed?: number;
   closed: boolean;
   skipped?: string;
 };
+
+type BillCreditPlan = {
+  consumption: CreditConsumptionPlan;
+  /** Refs of the credits read in this transaction, by id. */
+  refs: Map<string, FirebaseFirestore.DocumentReference>;
+  legacy: {
+    userRef: FirebaseFirestore.DocumentReference;
+    userDoc: any;
+    legacyRef: FirebaseFirestore.DocumentReference;
+    legacyExists: boolean;
+  } | null;
+};
+
+const NO_CONSUMPTION: CreditConsumptionPlan = { excessOverPlan: 0, needed: 0, consumed: 0, uncovered: 0, allocations: [] };
+
+/**
+ * Transaction READS for credit consumption (+ legacy bonus migration).
+ * Returns null when no credit work is needed. Never throws: an entitlement /
+ * credit read failure skips consumption for this bill, and the next bill
+ * catches up (each bill takes max(0, excessOverPlan - consumedThisMonth)).
+ */
+async function planCreditsForBill(
+  tx: FirebaseFirestore.Transaction,
+  p: {
+    ownerUid: string;
+    userRef: FirebaseFirestore.DocumentReference;
+    userDoc: any;
+    usageDoc: any;
+    streamingMinutesDelta: number;
+    nowMs: number;
+  }
+): Promise<BillCreditPlan | null> {
+  try {
+    const legacyNeeded = needsLegacyBonusMigration(p.userDoc);
+    const ent = await getEffectiveEntitlements(p.ownerUid);
+    const included = ent.limits.monthlyStreamingMinutes; // null = unlimited
+    const usedAfter = readStreamingMinutes(p.usageDoc || {}) + p.streamingMinutesDelta;
+    const consumedThisMonth = readCreditMinutesConsumed(p.usageDoc);
+    const overPlan = included !== null && usedAfter - Math.max(0, included) - consumedThisMonth > 0;
+    if (!overPlan && !legacyNeeded) return null;
+
+    const legacyRef = creditsCollection(p.ownerUid).doc(LEGACY_BONUS_CREDIT_ID);
+    const legacyExists = legacyNeeded ? (await tx.get(legacyRef)).exists : false;
+    const refs = new Map<string, FirebaseFirestore.DocumentReference>();
+    let credits: UsageCredit[] = [];
+    if (overPlan) {
+      const snap = await tx.get(creditsCollection(p.ownerUid).where("remaining", ">", 0));
+      for (const d of snap.docs) {
+        refs.set(d.id, d.ref);
+        credits.push(normalizeCredit(d.id, d.data()));
+      }
+    }
+    if (legacyNeeded && !legacyExists) {
+      const legacyCredit = buildLegacyBonusCredit(p.userDoc, p.nowMs);
+      if (legacyCredit) {
+        credits = credits.filter((c) => c.id !== LEGACY_BONUS_CREDIT_ID).concat(legacyCredit);
+        refs.set(LEGACY_BONUS_CREDIT_ID, legacyRef);
+      }
+    }
+    const consumption = overPlan
+      ? planCreditConsumption({ usedAfter, includedMinutes: included, consumedThisMonth, credits, nowMs: p.nowMs })
+      : NO_CONSUMPTION;
+    return {
+      consumption,
+      refs,
+      legacy: legacyNeeded ? { userRef: p.userRef, userDoc: p.userDoc, legacyRef, legacyExists } : null,
+    };
+  } catch (e: any) {
+    console.error("[streaming-meter] credit planning failed; skipping credit consumption for this bill", {
+      ownerUid: p.ownerUid,
+      error: e?.message || e,
+    });
+    return null;
+  }
+}
+
+/** Transaction WRITES for credit consumption + legacy bonus migration. */
+function applyCreditWrites(tx: FirebaseFirestore.Transaction, plan: BillCreditPlan, nowMs: number): void {
+  if (plan.legacy) {
+    applyLegacyBonusMigrationInTx(tx, { ...plan.legacy, nowMs });
+  }
+  for (const a of plan.consumption.allocations) {
+    const ref = plan.refs.get(a.creditId);
+    if (!ref || a.minutes <= 0) continue;
+    tx.set(
+      ref,
+      { remaining: a.remainingAfter, consumedMinutes: FieldValue.increment(a.minutes), lastConsumedAt: nowMs },
+      { merge: true }
+    );
+  }
+}
 
 /**
  * Bill the not-yet-billed part of one output interval (and close it when
@@ -235,6 +346,21 @@ export async function billOutputInterval(
       { untilMs, nowMs, cutoverMs: getMeterCutoverMs(), maxIntervalMs: MAX_INTERVAL_MS }
     );
 
+    // ---- Usage credits (reads; must happen before any tx write) -----------
+    // When this bill pushes the month past the plan allowance, the excess is
+    // paid from one-time credits (FIFO) in this same transaction.
+    const credit =
+      plan.streamingMinutesDelta > 0 && userSnap.exists
+        ? await planCreditsForBill(tx, {
+            ownerUid,
+            userRef,
+            userDoc: (userSnap.data() || {}) as any,
+            usageDoc,
+            streamingMinutesDelta: plan.streamingMinutesDelta,
+            nowMs,
+          })
+        : null;
+
     // A running interval past the hard cap is closed at the cap.
     const mustClose = close || plan.clamped;
     const sessionPatch: Record<string, any> = {
@@ -306,7 +432,18 @@ export async function billOutputInterval(
         updatedAt: now,
       };
       if (!usageDoc || !usageDoc.createdAt) usageWrite.createdAt = now;
+      if (credit && credit.consumption.consumed > 0) {
+        usageWrite.usage.creditMinutesConsumed = FieldValue.increment(credit.consumption.consumed);
+        usageWrite.lastCreditConsumption = {
+          minutes: credit.consumption.consumed,
+          allocations: credit.consumption.allocations,
+          egressId,
+          at: now,
+        };
+      }
       tx.set(usageRef, usageWrite, { merge: true });
+
+      if (credit) applyCreditWrites(tx, credit, nowMs);
 
       if (userSnap.exists) {
         tx.set(
@@ -332,6 +469,7 @@ export async function billOutputInterval(
       streamingMinutesDelta: sDelta,
       destinationMinutesDelta: dDelta,
       ownMinutesDelta: oDelta,
+      creditMinutesConsumed: credit?.consumption.consumed ?? 0,
       closed: mustClose,
       skipped: plan.skippedReason,
     };
@@ -397,26 +535,48 @@ export type StreamingUsageStatus = {
   usageDoc: any;
   userDoc: any;
   entitlements: Awaited<ReturnType<typeof getEffectiveEntitlements>>;
+  /** One-time usage credits (allowance = plan + credits.allowanceMinutes). */
+  credits: CreditSummary;
 };
 
-/** Current month's streaming usage vs the effective plan (adminOverridePlanId respected) + bonus minutes. */
+/**
+ * Current month's streaming usage vs the effective plan (adminOverridePlanId
+ * respected) + one-time usage credits. Migrates legacy users.bonusMinutes to a
+ * credit the first time it is seen (idempotent, own transaction); if that
+ * migration fails the legacy minutes still count for this read.
+ */
 export async function getStreamingUsageStatus(uid: string, now: Date = new Date()): Promise<StreamingUsageStatus> {
   const monthKey = monthKeyUTC(now);
-  const [entitlements, userSnap, usageSnap] = await Promise.all([
+  const nowMs = now.getTime();
+  const userRef = firestore.collection("users").doc(uid);
+  let userSnap = await userRef.get();
+  if (userSnap.exists && needsLegacyBonusMigration(userSnap.data())) {
+    try {
+      await migrateLegacyBonusMinutes(uid, nowMs);
+      userSnap = await userRef.get();
+    } catch (e: any) {
+      console.error("[usage-credits] legacy bonus migration failed", { uid, error: e?.message || e });
+    }
+  }
+  const [entitlements, usageSnap, credits] = await Promise.all([
     getEffectiveEntitlements(uid),
-    firestore.collection("users").doc(uid).get(),
     firestore.collection("usageMonthly").doc(`${uid}_${monthKey}`).get(),
+    loadCreditsWithRemaining(uid),
   ]);
   const userDoc = userSnap.exists ? ((userSnap.data() || {}) as any) : {};
   const usageDoc = usageSnap.exists ? ((usageSnap.data() || {}) as any) : {};
+  const usedMinutes = readStreamingMinutes(usageDoc);
+  const includedMinutes = entitlements.limits.monthlyStreamingMinutes; // null = unlimited
+  const creditSummary = summarizeCredits({ credits, userDoc, usageDoc, usedMinutes, includedMinutes, nowMs });
   const decision = evaluateStreamingGate({
-    usedMinutes: readStreamingMinutes(usageDoc),
-    includedMinutes: entitlements.limits.monthlyStreamingMinutes, // null = unlimited
-    bonusMinutes: num(userDoc.bonusMinutes),
+    usedMinutes,
+    includedMinutes,
+    // Credit minutes in this month's allowance (consumed this month + remaining).
+    bonusMinutes: creditSummary.allowanceMinutes,
     planAllowsOverages: !!entitlements.features.overages,
     overagesEnabled: readOveragesEnabled(userDoc),
   });
-  return { uid, monthKey, decision, usageDoc, userDoc, entitlements };
+  return { uid, monthKey, decision, usageDoc, userDoc, entitlements, credits: creditSummary };
 }
 
 /**

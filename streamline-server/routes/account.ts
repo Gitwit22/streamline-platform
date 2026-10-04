@@ -24,6 +24,7 @@ import {
   type RolePermissionMap,
 } from "../lib/permissions/defaultRoleProfiles";
 import { stripe } from "../lib/stripe";
+import { deleteAccount } from "../lib/accountDeletion";
 import { computeAccountMeBillingFields } from "../lib/billingTruth";
 import { normalizeRoomLayout } from "../lib/roomLayout";
 import {
@@ -553,7 +554,6 @@ router.post("/close", async (req, res) => {
     const subscriptionId: string | undefined = user?.billing?.subscriptionId || user?.stripeSubscriptionId;
 
     const now = Date.now();
-    const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
     if (mode === "cancel_only") {
       if (subscriptionId) {
@@ -586,30 +586,34 @@ router.post("/close", async (req, res) => {
       return res.json({ ok: true, mode: "cancel_only" });
     }
 
-    // mode === "delete"
-    if (subscriptionId) {
-      try {
-        await stripe.subscriptions.cancel(subscriptionId);
-      } catch (err: any) {
-        console.error("[account/close] delete failed to cancel Stripe subscription", err?.message || err);
-        // Continue: user requested deletion should still lock out immediately.
-      }
+    // mode === "delete": shared workflow with admin deletion (lib/accountDeletion.ts):
+    // cancel Stripe -> revoke sessions -> disable -> queue cleanup (7 days) -> audit.
+    // If the subscription cannot be canceled the account is NOT deleted, so
+    // billing never outlives a deleted account.
+    const result = await deleteAccount({
+      uid,
+      actor: { type: "self", uid },
+      options: { cancelStripe: true, revokeSessions: true, scheduleMediaDeletion: true },
+      reason: "user_requested",
+    });
+    if (result.outcome === "failed") {
+      const stripeFailed = result.steps.stripe.status === "failed";
+      return res.status(stripeFailed ? 502 : 500).json({
+        error: stripeFailed ? "cancel_subscription_failed" : "close_account_failed",
+        message: stripeFailed
+          ? "We could not cancel your subscription, so your account was not deleted. Please try again or contact support."
+          : "Your account could not be deleted. Please try again.",
+      });
     }
 
-    await userRef.set(
-      {
-        accountStatus: "deleted",
-        deletedAtMs: now,
-        deleteAfterMs: now + SEVEN_DAYS_MS,
-        authRevokedAtMs: now,
-        deletionRequestedAtMs: now,
-        deletionReason: "user_requested",
-        updatedAt: now,
-      },
-      { merge: true }
-    );
-
-    return res.json({ ok: true, mode: "delete", deletedAtMs: now, deleteAfterMs: now + SEVEN_DAYS_MS });
+    return res.json({
+      ok: true,
+      mode: "delete",
+      deletedAtMs: result.deletedAtMs,
+      deleteAfterMs: result.deleteAfterMs,
+      subscription: result.steps.stripe.status,
+      ...(result.outcome === "partial" ? { partial: true } : {}),
+    });
   } catch (err: any) {
     console.error("POST /api/account/close failed", err?.message || err);
     return res.status(500).json({ error: "close_account_failed" });

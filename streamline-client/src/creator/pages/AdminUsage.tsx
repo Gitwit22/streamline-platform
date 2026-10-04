@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { apiFetchAuth } from "../../lib/api";
 import { ResetCodeDialog, type IssuedResetCode } from "../components/ResetCodeDialog";
 import { PlanOverridePanel, type AdminPlanOverrideView } from "../components/admin/PlanOverridePanel";
+import { UsageCreditsPanel } from "../components/admin/UsageCreditsPanel";
 
 interface UsageData {
   userId: string;
@@ -45,10 +46,15 @@ interface UsageData {
   overageParticipantMinutes?: number;
   overageTranscodeMinutes?: number;
   overageMinutesTotal?: number;
+  /** Credit minutes in this month's allowance (consumed this month + remaining). */
   bonusMinutes: number;
+  /** Remaining one-time usage credit minutes (carry over month to month). */
+  creditRemainingMinutes?: number;
+  /** Minutes of this month's usage paid by credits. */
+  creditConsumedThisMonth?: number;
   /** Plan monthly streaming minutes; null = unlimited, 0 = none. */
   planLimit: number | null;
-  /** plan + bonus; null = unlimited, 0 = none */
+  /** plan + credit allowance; null = unlimited, 0 = none */
   effectiveLimit: number | null;
   percentUsed: number;
   isBlocked: boolean;
@@ -83,8 +89,6 @@ export default function AdminUsage() {
   const [selectedUser, setSelectedUser] = useState<UsageData | null>(null);
   
   // Form states
-  const [minutesToGrant, setMinutesToGrant] = useState("");
-  const [grantReason, setGrantReason] = useState("");
   const [newPlan, setNewPlan] = useState<string>("free");
   const [planChangeReason, setPlanChangeReason] = useState("");
   const [resetLoadingUserId, setResetLoadingUserId] = useState<string | null>(null);
@@ -140,34 +144,6 @@ export default function AdminUsage() {
       console.error("Failed to fetch admin data:", err);
       setError(err.message || "Failed to fetch data");
       setLoading(false);
-    }
-  };
-
-  const handleGrantMinutes = async () => {
-    if (!selectedUser || !minutesToGrant) return;
-
-    try {
-      const res = await apiFetchAuth(`${API_BASE}/api/admin/users/${selectedUser.userId}/grant-minutes`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          adminUserId,
-          minutes: parseInt(minutesToGrant),
-          reason: grantReason,
-        }),
-      });
-
-      if (!res.ok) {
-        throw new Error("Failed to grant minutes");
-      }
-
-      alert(`Successfully granted ${minutesToGrant} minutes to ${selectedUser.email}`);
-      setShowGrantModal(false);
-      setMinutesToGrant("");
-      setGrantReason("");
-      fetchData(); // Refresh data
-    } catch (err: any) {
-      alert(`Error: ${err.message}`);
     }
   };
 
@@ -420,8 +396,14 @@ export default function AdminUsage() {
                       Billable minutes beyond limit (overages opted in).
                     </div>
                   </th>
-                  <th className="px-4 py-3 text-right text-sm font-semibold">Limit (incl. bonus)</th>
-                  <th className="px-4 py-3 text-right text-sm font-semibold">Bonus</th>
+                  <th className="px-4 py-3 text-right text-sm font-semibold">
+                    <div>Limit this month</div>
+                    <div className="text-xs font-normal text-gray-400">Plan + one-time credits</div>
+                  </th>
+                  <th className="px-4 py-3 text-right text-sm font-semibold">
+                    <div>Credits</div>
+                    <div className="text-xs font-normal text-gray-400">Remaining (carries over)</div>
+                  </th>
                   <th className="px-4 py-3 text-center text-sm font-semibold">Status</th>
                   <th className="px-4 py-3 text-center text-sm font-semibold">Actions</th>
                 </tr>
@@ -475,9 +457,15 @@ export default function AdminUsage() {
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
                       {user.unlimited || user.effectiveLimit === null ? "Unlimited" : `${user.effectiveLimit} min`}
+                      {!user.unlimited && user.planLimit !== null && user.effectiveLimit !== null && user.effectiveLimit !== user.planLimit && (
+                        <div className="text-[11px] text-gray-400">plan {user.planLimit}</div>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-green-400">
-                      +{user.bonusMinutes}
+                      {user.creditRemainingMinutes ?? 0} min
+                      {(user.creditConsumedThisMonth ?? 0) > 0 && (
+                        <div className="text-[11px] text-gray-400">used {user.creditConsumedThisMonth} this month</div>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-center">
                       <div className="flex flex-col items-center gap-2">
@@ -512,9 +500,9 @@ export default function AdminUsage() {
                             setShowGrantModal(true);
                           }}
                           className="px-3 py-1 bg-green-600 hover:bg-green-500 rounded text-xs transition"
-                          title="Grant minutes"
+                          title="Grant / view one-time usage credits"
                         >
-                          + Minutes
+                          + Credits
                         </button>
                         <button
                           onClick={() => {
@@ -582,39 +570,26 @@ export default function AdminUsage() {
         </div>
       </div>
 
-      {/* Grant Minutes Modal */}
+      {/* One-time usage credits (grant / list / revoke) */}
       {showGrantModal && selectedUser && (
         <Modal
-          title="Grant Bonus Minutes"
-          onClose={() => setShowGrantModal(false)}
-          onConfirm={handleGrantMinutes}
+          title="One-time usage credits"
+          onClose={() => {
+            setShowGrantModal(false);
+            fetchData();
+          }}
+          onConfirm={() => {
+            setShowGrantModal(false);
+            fetchData();
+          }}
+          confirmLabel="Done"
         >
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium mb-2">User</label>
               <div className="text-gray-400">{selectedUser.email}</div>
             </div>
-            <div>
-              <label className="block text-sm font-medium mb-2">Minutes to Grant</label>
-              <input
-                type="number"
-                value={minutesToGrant}
-                onChange={(e) => setMinutesToGrant(e.target.value)}
-                className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded text-white"
-                placeholder="e.g., 120"
-                min="1"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-2">Reason (optional)</label>
-              <textarea
-                value={grantReason}
-                onChange={(e) => setGrantReason(e.target.value)}
-                className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded text-white"
-                placeholder="e.g., Compensation for service issue"
-                rows={3}
-              />
-            </div>
+            <UsageCreditsPanel userId={selectedUser.userId} onMessage={(m) => alert(m)} />
           </div>
         </Modal>
       )}
