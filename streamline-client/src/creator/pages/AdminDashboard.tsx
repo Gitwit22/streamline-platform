@@ -1299,7 +1299,7 @@ export default function AdminDashboard() {
                       : platformBillingEnabled
                       ? "Enabled (Stripe live)"
                       : "Disabled (Test Mode only)"}
-                    {"  b7 "}
+                    {" · "}
                     May take up to ~30s to propagate to all sessions.
                   </div>
                 </div>
