@@ -1,9 +1,18 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 type HlsReadiness = "offline" | "starting" | "ready";
 
-export function useHlsReadiness(manifestUrl: string | null, resetKey?: unknown) {
+export function useHlsReadiness(
+  manifestUrl: string | null,
+  resetKey?: unknown,
+  opts?: {
+    /** Applied to the URL at each probe (e.g. swap in a renewed playback token) without re-triggering. */
+    transformUrl?: (url: string) => string;
+  }
+) {
   const [status, setStatus] = useState<HlsReadiness>("offline");
+  const transformRef = useRef(opts?.transformUrl);
+  transformRef.current = opts?.transformUrl;
 
   useEffect(() => {
     if (!manifestUrl) {
@@ -21,7 +30,8 @@ export function useHlsReadiness(manifestUrl: string | null, resetKey?: unknown) 
     async function tick() {
       if (cancelled) return;
 
-      const url = `${manifestUrl}${manifestUrl!.includes("?") ? "&" : "?"}t=${Date.now()}`;
+      const base = transformRef.current ? transformRef.current(manifestUrl!) : manifestUrl!;
+      const url = `${base}${base.includes("?") ? "&" : "?"}t=${Date.now()}`;
 
       let ready = false;
       try {

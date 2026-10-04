@@ -2,7 +2,8 @@ import { Router } from "express";
 import { getRoom } from "../services/rooms";
 import { getCurrentViewers } from "../lib/viewerStats";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
-import { roomHasActivePaidEvent } from "../lib/monetization";
+import { resolveRoomViewerAccess } from "../lib/viewerAccessStore";
+import { hlsProxyAll } from "../lib/hlsPlayback";
 
 const router = Router();
 
@@ -28,23 +29,25 @@ router.get("/:roomId", async (req: any, res) => {
       }
     }
 
-    // Paywalled rooms: never expose the playlist publicly. Viewers get it from
-    // POST /api/monetization/enter once their device has a claimed code.
-    // Fail closed if the lookup errors.
-    let paywalled = false;
-    if (isLive) {
-      try {
-        paywalled = await roomHasActivePaidEvent(roomId);
-      } catch (err: any) {
-        console.warn("[publicHls] paywall lookup failed", err?.message || err);
-        paywalled = true;
-      }
+    // Non-public channels (registered / subscriber / pay-per-view / private):
+    // never expose the playlist publicly. Authorized viewers get a signed
+    // playback URL from POST /api/public/{channels|rooms}/:id/playback.
+    // The mode is reported even while offline so viewer pages can show the
+    // paywall / sign-in prompt ahead of the stream. Fail closed on errors.
+    let accessMode: string = "public";
+    try {
+      accessMode = (await resolveRoomViewerAccess(roomId, { room })).access.mode;
+    } catch (err: any) {
+      console.warn("[publicHls] access lookup failed", err?.message || err);
+      accessMode = "private";
     }
+    const paywalled = accessMode !== "public" || (isLive && hlsProxyAll());
 
     return res.json({
       status: isLive ? "live" : "idle",
       playlistUrl: isLive && !paywalled ? hls.playlistUrl : null,
       paywalled: paywalled || undefined,
+      accessMode,
       viewerCount: viewerCount ?? undefined,
     });
   } catch (e: any) {

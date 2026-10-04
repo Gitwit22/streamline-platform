@@ -11,9 +11,20 @@
  */
 
 import { Router, type Request, type Response } from "express";
-import crypto from "crypto";
 import { stripe } from "../lib/stripe";
-import { requireAuth } from "../middleware/requireAuth";
+import { requireAuth, tryGetAuthUserAny } from "../middleware/requireAuth";
+import { getDeviceId } from "../lib/viewerDevice";
+import { deviceKeyFor, safeReturnPath } from "../lib/viewerEntitlementsPure";
+import {
+  findActivePpvEntitlement,
+  grantPpvEntitlement,
+  revokeOtherDeviceEntitlements,
+} from "../lib/viewerEntitlements";
+import { issuePlayback } from "../lib/hlsPlayback";
+import { resolveRoomViewerAccess } from "../lib/viewerAccessStore";
+import { listLedgerForCreator } from "../lib/revenueLedger";
+import { getPlatformFeeBps, summarizeEarnings } from "../lib/revenueLedgerPure";
+import { getPurchase } from "../lib/monetization";
 import { canAccessFeature } from "./featureAccess";
 import { checkFeature, getEffectiveEntitlements } from "../lib/entitlements";
 import { firestore as db } from "../firebaseAdmin";
@@ -40,21 +51,8 @@ const CLIENT_URL =
 // helpers
 // ---------------------------------------------------------------------------
 
-function getDeviceId(req: Request, res: Response): string {
-  let deviceId = req.cookies?.sl_device_id;
-  if (!deviceId || typeof deviceId !== "string") {
-    deviceId = crypto.randomUUID();
-    res.cookie("sl_device_id", deviceId, {
-      httpOnly: true,
-      sameSite: "lax",
-      maxAge: 365 * 24 * 60 * 60 * 1000,
-      secure: process.env.NODE_ENV === "production",
-    });
-  }
-  return deviceId;
-}
-
 const VALID_MODES: MonetizationMode[] = ["off", "fixed", "pwyw", "donation"];
+
 
 // ---------------------------------------------------------------------------
 // POST /events – create or update monetized event (host, auth required)
@@ -312,6 +310,17 @@ router.post("/checkout", async (req: Request, res: Response) => {
         ? `Access: ${event.name}`
         : `Donation: ${event.name}`;
 
+    // Bind the purchase to this viewer so access is granted automatically on
+    // return (no code entry needed on the buying device): hashed device
+    // cookie + account uid when signed in. The access code still works on
+    // other devices.
+    const viewerDevice = deviceKeyFor(getDeviceId(req, res));
+    const viewer = await tryGetAuthUserAny(req).catch(() => null);
+
+    // Return to the page the viewer bought from (channel or PPV page).
+    const returnPath = safeReturnPath(req.body?.returnPath) || `/ppv/${encodeURIComponent(event.id)}`;
+    const sep = returnPath.includes("?") ? "&" : "?";
+
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       line_items: [
@@ -328,9 +337,11 @@ router.post("/checkout", async (req: Request, res: Response) => {
         eventId: event.id,
         type,
         source: "streamline_monetization",
+        viewerDevice,
+        ...(viewer?.uid ? { viewerUid: viewer.uid } : {}),
       },
-      success_url: `${CLIENT_URL}/ppv/${event.id}?success=1&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${CLIENT_URL}/ppv/${event.id}?canceled=1`,
+      success_url: `${CLIENT_URL}${returnPath}${sep}success=1&session_id={CHECKOUT_SESSION_ID}`,
+      cancel_url: `${CLIENT_URL}${returnPath}${sep}canceled=1`,
     });
 
     return res.json({ ok: true, url: session.url });
@@ -364,6 +375,10 @@ router.get("/code", async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 // POST /redeem – redeem an access code
 // ---------------------------------------------------------------------------
+// The access code is how a buyer claims their ticket on another device: a
+// successful claim attaches a ViewerEntitlement to this device (and to the
+// signed-in account, if any). Single-person tickets move device access to
+// the redeeming device.
 router.post("/redeem", async (req: Request, res: Response) => {
   try {
     const { eventId, code } = req.body;
@@ -385,6 +400,11 @@ router.post("/redeem", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "code_revoked" });
     }
 
+    const purchase = await getPurchase(eventId, accessCode.purchaseId).catch(() => null);
+    if (purchase && purchase.status !== "paid") {
+      return res.status(400).json({ error: "code_revoked" });
+    }
+
     const deviceId = getDeviceId(req, res);
 
     // Transaction-based claim to prevent race conditions
@@ -396,31 +416,43 @@ router.post("/redeem", async (req: Request, res: Response) => {
       return res.status(400).json({ error: result.reason || "claim_failed" });
     }
 
-    return res.json({ ok: true });
+    const viewer = await tryGetAuthUserAny(req).catch(() => null);
+    let channelId: string | null = null;
+    try {
+      channelId = (await resolveRoomViewerAccess(event.roomId)).channelId;
+    } catch {
+      channelId = null;
+    }
+    const ids = await grantPpvEntitlement({
+      eventId,
+      roomId: event.roomId || null,
+      channelId,
+      purchaseId: accessCode.purchaseId,
+      deviceKey: deviceKeyFor(deviceId),
+      viewerUid: viewer?.uid || null,
+      source: "access_code",
+    });
+    if (event.singlePersonOnly && ids[0]) {
+      await revokeOtherDeviceEntitlements(accessCode.purchaseId, ids[0]).catch((e: any) =>
+        console.warn("[monetization] single-person device transfer failed", e?.message)
+      );
+    }
+
+    return res.json({ ok: true, entitled: true });
   } catch (err: any) {
     console.error("[monetization] redeem error:", err?.message);
     return res.status(500).json({ error: "internal_error" });
   }
 });
 
-// Playlist URL for a live HLS room, or null. Only returned to viewers who
-// passed the access gate below (the public HLS endpoint withholds it for
-// paywalled rooms).
-async function livePlaylistUrl(roomId: string | null | undefined): Promise<string | null> {
-  if (!roomId) return null;
-  try {
-    const snap = await db.collection("rooms").doc(roomId).get();
-    const hls = (snap.data() as any)?.hls || {};
-    const url = String(hls.playlistUrl || "").trim();
-    return hls.status === "live" && url ? url : null;
-  } catch {
-    return null;
-  }
-}
-
 // ---------------------------------------------------------------------------
-// POST /enter – gate check: can viewer watch?
+// POST /enter – gate check: can viewer watch? (PPV event page)
 // ---------------------------------------------------------------------------
+// Access = a live ViewerEntitlement for this event (device or account; legacy
+// claimed codes count too). The playlist is never the raw public URL for a
+// protected room: authorized viewers get a signed playback URL. New clients
+// use POST /api/public/rooms/:roomId/playback, which also covers
+// registered/private channels.
 router.post("/enter", async (req: Request, res: Response) => {
   try {
     const { eventId } = req.body;
@@ -429,21 +461,83 @@ router.post("/enter", async (req: Request, res: Response) => {
     const event = await getMonetizedEvent(eventId);
     if (!event) return res.status(404).json({ error: "event_not_found" });
 
-    // Donation mode: always ok
-    if (event.monetizationMode === "donation" || event.monetizationMode === "off") {
-      return res.json({ ok: true, access: true, playlistUrl: await livePlaylistUrl(event.roomId) });
+    const resolved = await resolveRoomViewerAccess(event.roomId).catch(() => null);
+    const mode = resolved?.access.mode || "private";
+    const hls = resolved?.room?.hls || {};
+    const live = hls.status === "live" && !!String(hls.playlistUrl || "").trim();
+
+    const playbackFor = (entitlementId: string | null) => {
+      if (!live) return null;
+      // Only modes this page can authorize (public / PPV entitlement).
+      if (mode !== "public" && mode !== "pay_per_view") return null;
+      const issued = issuePlayback({ roomId: event.roomId, hls, mode, entitlementId });
+      return issued.ok ? issued.playbackUrl : null;
+    };
+
+    const isPaid = event.monetizationMode === "fixed" || event.monetizationMode === "pwyw";
+    if (!isPaid && mode !== "pay_per_view") {
+      return res.json({ ok: true, access: true, mode, playlistUrl: playbackFor(null) });
     }
 
-    // Paid modes: check device cookie
     const deviceId = getDeviceId(req, res);
-    const claimed = await findClaimedCodeForDevice(eventId, deviceId);
-    if (!claimed) {
-      return res.json({ ok: true, access: false, reason: "no_claimed_code" });
+    const viewer = await tryGetAuthUserAny(req).catch(() => null);
+    let ent = await findActivePpvEntitlement(eventId, { deviceKey: deviceKeyFor(deviceId), uid: viewer?.uid || null });
+    if (!ent) {
+      // Pre-Stage-7 claimed codes: migrate into a device entitlement.
+      const claimed = await findClaimedCodeForDevice(eventId, deviceId);
+      const purchase = claimed ? await getPurchase(eventId, claimed.purchaseId).catch(() => null) : null;
+      if (claimed && (!purchase || purchase.status === "paid")) {
+        await grantPpvEntitlement({
+          eventId,
+          roomId: event.roomId || null,
+          channelId: resolved?.channelId ?? null,
+          purchaseId: claimed.purchaseId,
+          deviceKey: deviceKeyFor(deviceId),
+          source: "legacy_code",
+        });
+        ent = await findActivePpvEntitlement(eventId, { deviceKey: deviceKeyFor(deviceId) });
+      }
+    }
+    if (!ent) {
+      return res.json({ ok: true, access: false, mode, reason: "no_entitlement" });
     }
 
-    return res.json({ ok: true, access: true, playlistUrl: await livePlaylistUrl(event.roomId) });
+    return res.json({ ok: true, access: true, mode, playlistUrl: playbackFor(ent.id) });
   } catch (err: any) {
     console.error("[monetization] enter error:", err?.message);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /earnings – creator earnings summary (data only; payouts not yet)
+// ---------------------------------------------------------------------------
+router.get("/earnings", requireAuth, async (req: Request, res: Response) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    const rows = await listLedgerForCreator(uid);
+    return res.json({
+      ok: true,
+      platformFeeBps: getPlatformFeeBps(),
+      totals: summarizeEarnings(rows),
+      recent: rows.slice(0, 20).map((r) => ({
+        id: r.id,
+        eventId: r.eventId,
+        channelId: r.channelId,
+        type: r.type,
+        grossCents: r.grossCents,
+        platformFeeCents: r.platformFeeCents,
+        netCents: r.netCents,
+        refundedCents: r.refundedCents || 0,
+        currency: r.currency,
+        status: r.status,
+        createdAt: r.createdAt,
+      })),
+      payouts: { available: false, message: "Payouts coming soon." },
+    });
+  } catch (err: any) {
+    console.error("[monetization] earnings error:", err?.message);
     return res.status(500).json({ error: "internal_error" });
   }
 });

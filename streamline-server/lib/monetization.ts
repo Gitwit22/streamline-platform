@@ -227,11 +227,7 @@ export async function listMonetizedEventsByRoom(
  */
 export async function roomHasActivePaidEvent(roomId: string): Promise<boolean> {
   const snap = await eventsCol().where("roomId", "==", roomId).get();
-  return snap.docs.some((d) => {
-    const e = d.data() as MonetizedEvent;
-    const paid = e.monetizationMode === "fixed" || e.monetizationMode === "pwyw";
-    return paid && e.status !== "ended";
-  });
+  return snap.docs.some((d) => isActivePaidEvent(d.data() as MonetizedEvent));
 }
 
 // ---------------------------------------------------------------------------
@@ -459,4 +455,56 @@ export async function retrieveAndDeleteRawCode(
 export async function peekRawCode(checkoutSessionId: string): Promise<string | null> {
   const entry = await readPendingCode(checkoutSessionId);
   return entry ? entry.code : null;
+}
+
+// ---------------------------------------------------------------------------
+// Stage 7 helpers (viewer access / refunds)
+// ---------------------------------------------------------------------------
+
+export function isActivePaidEvent(e: MonetizedEvent | null | undefined): boolean {
+  if (!e) return false;
+  const paid = e.monetizationMode === "fixed" || e.monetizationMode === "pwyw";
+  return paid && e.status !== "ended";
+}
+
+function createdAtMs(e: MonetizedEvent): number {
+  const c: any = e.createdAt;
+  if (c && typeof c.toMillis === "function") return c.toMillis();
+  return 0;
+}
+
+/**
+ * Non-ended fixed/PWYW events for a room, newest first. Single-field query
+ * (no composite index).
+ */
+export async function listActivePaidEvents(roomId: string): Promise<MonetizedEvent[]> {
+  if (!roomId) return [];
+  const snap = await eventsCol().where("roomId", "==", roomId).get();
+  return snap.docs
+    .map((d) => d.data() as MonetizedEvent)
+    .filter(isActivePaidEvent)
+    .sort((a, b) => createdAtMs(b) - createdAtMs(a));
+}
+
+export async function setPurchaseStatus(
+  eventId: string,
+  purchaseId: string,
+  status: PurchaseStatus
+): Promise<void> {
+  await purchasesCol(eventId)
+    .doc(purchaseId)
+    .set({ status, statusUpdatedAt: FieldValue.serverTimestamp() }, { merge: true });
+}
+
+export async function getPurchase(eventId: string, purchaseId: string): Promise<Purchase | null> {
+  const snap = await purchasesCol(eventId).doc(purchaseId).get();
+  return snap.exists ? (snap.data() as Purchase) : null;
+}
+
+/** Access codes are keyed by purchaseId (see createAccessCode). */
+export async function revokeAccessCodeForPurchase(eventId: string, purchaseId: string): Promise<void> {
+  const ref = accessCodesCol(eventId).doc(purchaseId);
+  const snap = await ref.get();
+  if (!snap.exists) return;
+  await ref.set({ status: "revoked", revokedAt: FieldValue.serverTimestamp() }, { merge: true });
 }

@@ -158,6 +158,9 @@ router.put("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
     const mergePayload: Record<string, any> = { hlsConfig: nextConfig };
 
     // Room-level monetization toggles (only persist when explicitly sent).
+    // LEGACY (Stage 7): these flags are no longer read for viewer access —
+    // who may watch is rooms.viewerAccess (PUT /api/rooms/:roomId/viewer-access,
+    // enforced at playback authorization). Kept for older clients.
     if (typeof monetizationEnabled === "boolean") {
       // Monetization requires HLS to be enabled on this room.
       mergePayload.monetizationEnabled = nextConfig.enabled ? monetizationEnabled : false;

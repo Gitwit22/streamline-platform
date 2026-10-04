@@ -11,6 +11,8 @@ import { useParams, useSearchParams } from "react-router-dom";
 import { apiFetch } from "../lib/api";
 import { HlsPlayer } from "./HlsPlayes";
 import type { HlsViewerCounts } from "../hooks/useHlsViewerHeartbeat";
+import { usePlaybackAuthorization } from "../hooks/usePlaybackAuthorization";
+import { getPublicHls } from "../services/hls";
 
 type MonetizationMode = "off" | "fixed" | "pwyw" | "donation";
 
@@ -68,47 +70,53 @@ export default function PpvViewer() {
   // Checkout
   const [checkingOut, setCheckingOut] = useState(false);
 
-  // HLS playlist URL. Comes from the access-gated /enter endpoint (the public
-  // HLS endpoint withholds it for paywalled rooms), so only poll once the
-  // viewer has access.
-  const [playlistUrl, setPlaylistUrl] = useState<string | null>(null);
+  // Playback: the server authorizes this viewer for the event's room
+  // (POST /api/public/rooms/:roomId/playback — PPV entitlement, registered,
+  // private…) and returns a short-lived signed URL. The public status poll
+  // only tells us when the stream is live (it never exposes the playlist for
+  // protected rooms).
+  const [roomLive, setRoomLive] = useState(false);
   const [viewerCounts, setViewerCounts] = useState<HlsViewerCounts | null>(null);
+  const [leftSuccess, setLeftSuccess] = useState(false);
   const hlsPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nativeHls = useState(() => {
+    try {
+      return document.createElement("video").canPlayType("application/vnd.apple.mpegurl") !== "";
+    } catch {
+      return false;
+    }
+  })[0];
 
   useEffect(() => {
-    if (!eventId || !event?.roomId || !hasAccess) return;
+    if (!event?.roomId || !hasAccess) return;
     let stopped = false;
-
     const poll = async () => {
       if (stopped) return;
       try {
-        const res = await apiFetch("/api/monetization/enter", {
-          method: "POST",
-          body: JSON.stringify({ eventId }),
-        }, { allowNonOk: true });
-        if (stopped) return;
-        if (res.ok) {
-          const data = await res.json();
-          if (stopped) return;
-          if (!data.access) {
-            setHasAccess(false);
-            setPlaylistUrl(null);
-            return;
-          }
-          setPlaylistUrl(data.playlistUrl || null);
-        }
+        const data = await getPublicHls(event.roomId);
+        if (!stopped) setRoomLive(data?.status === "live");
       } catch {}
-      if (!stopped) {
-        hlsPollRef.current = setTimeout(poll, 8000);
-      }
+      if (!stopped) hlsPollRef.current = setTimeout(poll, 8000);
     };
-
     poll();
     return () => {
       stopped = true;
       if (hlsPollRef.current) clearTimeout(hlsPollRef.current);
     };
-  }, [eventId, event?.roomId, hasAccess]);
+  }, [event?.roomId, hasAccess]);
+
+  const playback = usePlaybackAuthorization({
+    target: event?.roomId ? { kind: "room", id: event.roomId } : null,
+    active: hasAccess,
+    live: roomLive,
+    nativeHls,
+  });
+  const playlistUrl = playback.url;
+
+  // Entitlement revoked (refund) or never granted on this device.
+  useEffect(() => {
+    if (playback.gate.kind === "checkout") setHasAccess(false);
+  }, [playback.gate.kind]);
 
   // ── Load event ────────────────────────────────────────────────────
   useEffect(() => {
@@ -155,6 +163,19 @@ export default function PpvViewer() {
   useEffect(() => {
     if (event) checkAccess();
   }, [event, checkAccess]);
+
+  // After paying, the webhook grants this device an entitlement within a few
+  // seconds; re-check until it lands (no code entry needed on this device).
+  useEffect(() => {
+    if (!event || !isSuccess || !sessionId || hasAccess) return;
+    let n = 0;
+    const t = setInterval(() => {
+      n += 1;
+      void checkAccess();
+      if (n >= 20) clearInterval(t);
+    }, 3000);
+    return () => clearInterval(t);
+  }, [event, isSuccess, sessionId, hasAccess, checkAccess]);
 
   // ── Poll for access code after successful payment ────────────────
   useEffect(() => {
@@ -311,7 +332,9 @@ export default function PpvViewer() {
   const isPaid = event.monetizationMode === "fixed" || event.monetizationMode === "pwyw";
 
   // ── Success page: show access code ────────────────────────────────
-  if (isSuccess && sessionId && isPaid && !hasAccess) {
+  // Paying grants this device access automatically (webhook); keep the code
+  // on screen until the viewer continues so they can use it on other devices.
+  if (isSuccess && sessionId && isPaid && !leftSuccess && (!hasAccess || !!revealedCode || codePolling)) {
     return (
       <div style={container}>
         <div style={card}>
@@ -348,7 +371,7 @@ export default function PpvViewer() {
                 marginBottom: 16,
               }}>
                 <p style={{ fontSize: 13, color: "#facc15", margin: 0, fontWeight: 600 }}>
-                  ⚠️ Save this code now. This code can only be claimed once.
+                  ⚠️ Save this code now. This device is unlocked automatically; use the code to move your access to another device.
                 </p>
               </div>
 
@@ -368,6 +391,7 @@ export default function PpvViewer() {
                   onClick={async () => {
                     // Pre-fill the code and clear success URL params
                     setCodeInput(revealedCode);
+                    setLeftSuccess(true);
                     window.history.replaceState({}, "", `/ppv/${event.id}`);
                     // Redeem the code for the current device
                     setRedeeming(true);
@@ -429,6 +453,7 @@ export default function PpvViewer() {
       <>
         <HlsPlayer
           playlistUrl={playlistUrl}
+          playbackTokenRef={playback.tokenRef}
           status={event.status}
           autoPlay
           viewerRoomId={event.roomId}
@@ -452,7 +477,11 @@ export default function PpvViewer() {
         fontSize: 14,
         color: "#666",
       }}>
-        {event.status === "live" ? "🔴 Stream starting…" : "Stream not yet live"}
+        {playback.gate.kind === "login" || playback.gate.kind === "forbidden"
+          ? playback.gate.message
+          : roomLive || event.status === "live"
+            ? "🔴 Stream starting…"
+            : "Stream not yet live"}
       </div>
     );
 

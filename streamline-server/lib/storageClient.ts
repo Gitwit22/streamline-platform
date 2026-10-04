@@ -157,6 +157,32 @@ export async function getSignedDownloadUrl(
 }
 
 /**
+ * Presigned GET without logging (HLS segments: many per minute per stream).
+ */
+export async function presignGetQuiet(remotePath: string, expiresIn: number): Promise<string> {
+  const command = new GetObjectCommand({ Bucket: R2_BUCKET, Key: remotePath });
+  return getSignedUrl(s3Client, command, { expiresIn });
+}
+
+/**
+ * Small text object (HLS playlists). Returns null when missing.
+ */
+export async function getObjectText(remotePath: string): Promise<string | null> {
+  try {
+    const resp = await s3Client.send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: remotePath }));
+    const body: any = resp.Body;
+    if (!body) return null;
+    if (typeof body.transformToString === "function") return await body.transformToString("utf-8");
+    const chunks: Buffer[] = [];
+    for await (const c of body) chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
+    return Buffer.concat(chunks).toString("utf8");
+  } catch (err: any) {
+    if (err?.name === "NoSuchKey" || err?.name === "NotFound" || err?.$metadata?.httpStatusCode === 404) return null;
+    throw err;
+  }
+}
+
+/**
  * Generate a signed upload URL (for direct browser uploads)
  * @param remotePath - Path in R2 (e.g., "recordings/userId/roomName/timestamp.mp4")
  * @param contentType - MIME type of the file being uploaded

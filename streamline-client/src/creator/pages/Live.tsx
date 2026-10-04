@@ -6,6 +6,9 @@ import { resolveViewerBranding, type HlsBranding } from "../../lib/hlsBranding";
 import { getPublicHls } from "../../services/hls";
 import { useHlsReadiness } from "../../hooks/useHlsReadiness";
 import { useHlsViewerHeartbeat, useVideoPlaying } from "../../hooks/useHlsViewerHeartbeat";
+import { usePlaybackAuthorization } from "../../hooks/usePlaybackAuthorization";
+import { asAccessMode, swapPlaybackToken, type ViewerAccessMode } from "../../lib/playbackAccess";
+import PlaybackGatePanel, { gateBlocksPlayback } from "../../components/viewer/PlaybackGatePanel";
 import {
   Radio,
   RefreshCw,
@@ -22,9 +25,13 @@ const DEFAULT_LOGO_URL = "/logo.png";
 
 type PublicHlsResponse = {
   status?: "idle" | "starting" | "live" | "error";
+  /** Direct playlist URL — only for PUBLIC channels (null otherwise). */
   playlistUrl?: string | null;
   viewerCount?: number;
   error?: string | null;
+  /** Channel viewer access mode; non-public channels play via signed URLs. */
+  accessMode?: string;
+  paywalled?: boolean;
 };
 
 type StreamStatus = "loading" | "live" | "starting" | "offline" | "error";
@@ -91,6 +98,11 @@ export default function Live() {
   const savedEmbedId = (params.savedEmbedId || "").trim();
   const isIgMode = location.pathname.startsWith("/ig/");
 
+  // Stripe Checkout return (?success=1&session_id=… / ?canceled=1).
+  const searchParams = new URLSearchParams(location.search || "");
+  const checkoutSessionId = searchParams.get("success") === "1" ? searchParams.get("session_id") : null;
+  const checkoutCanceled = searchParams.get("canceled") === "1";
+
   const [roomId, setRoomId] = useState<string>("");
   const [roomName, setRoomName] = useState<string>("");
 
@@ -100,6 +112,10 @@ export default function Live() {
   const [ended, setEnded] = useState(false);
 
   const [viewerConfig, setViewerConfig] = useState<RoomHlsConfig | null>(null);
+  const [accessMode, setAccessMode] = useState<ViewerAccessMode>("public");
+  // Server withholds the direct playlist (non-public mode, or HLS_PROXY_ALL).
+  const [paywalled, setPaywalled] = useState(false);
+  const wasLiveRef = useRef(false);
 
   const [savedEmbedMeta, setSavedEmbedMeta] = useState<PublicSavedEmbedResponse | null>(null);
 
@@ -123,7 +139,37 @@ export default function Live() {
   const hlsRef = useRef<Hls | null>(null);
   const hlsRetryCountRef = useRef(0);
 
-  const manifestReadiness = useHlsReadiness(playlistUrl, playerNonce);
+  // Server-side playback authorization for non-public channels (registered /
+  // pay-per-view / private): the public status poll withholds the playlist,
+  // and the playback endpoint returns a short-lived signed URL (or 401/402/403).
+  const nativeHls = useState(() => {
+    try {
+      return canNativeHls(document.createElement("video"));
+    } catch {
+      return false;
+    }
+  })[0];
+  const protectedPlayback = accessMode !== "public" || paywalled;
+  const playbackTarget = savedEmbedId
+    ? ({ kind: "channel", id: savedEmbedId } as const)
+    : roomId
+      ? ({ kind: "room", id: roomId } as const)
+      : null;
+  const playback = usePlaybackAuthorization({
+    target: playbackTarget,
+    active: protectedPlayback,
+    live: hlsStatus === "live",
+    nativeHls,
+  });
+  const playbackTokenRef = playback.tokenRef;
+  const effectivePlaylistUrl = protectedPlayback ? playback.url : playlistUrl;
+  const gated = protectedPlayback && gateBlocksPlayback(playback.gate);
+  const returnPath = savedEmbedId ? `${isIgMode ? "/ig" : "/live"}/${savedEmbedId}` : location.pathname;
+
+  const manifestReadiness = useHlsReadiness(effectivePlaylistUrl, playerNonce, {
+    // Probe with the freshest token without re-probing on every renewal.
+    transformUrl: (u) => swapPlaybackToken(u, playbackTokenRef.current),
+  });
 
   // Viewer counting: heartbeat while the live stream is actually playing.
   // The status poll's viewerCount (server: HLS heartbeats + RTC audience) is
@@ -238,9 +284,12 @@ export default function Live() {
       const nextStatus = (data.status || "idle") as PublicHlsResponse["status"];
       setHlsStatus(nextStatus);
       setPlaylistUrl(data.playlistUrl ?? null);
+      setAccessMode(asAccessMode(data.accessMode));
+      setPaywalled(data.paywalled === true);
       setViewerCount(typeof data.viewerCount === "number" && Number.isFinite(data.viewerCount) ? data.viewerCount : 0);
 
       if (nextStatus === "live") {
+        wasLiveRef.current = true;
         setStatus("live");
         setEnded(false);
       } else if (nextStatus === "starting") {
@@ -251,7 +300,7 @@ export default function Live() {
       } else {
         // idle
         setStatus("offline");
-        if (playlistUrl) setEnded(true);
+        if (playlistUrl || wasLiveRef.current) setEnded(true);
       }
     } catch {
       // ignore
@@ -326,6 +375,7 @@ export default function Live() {
   // NOTE: This hook MUST live before any conditional returns (isIgMode, etc.)
   // so that React hook call order is consistent across all renders.
   useEffect(() => {
+    const playlistUrl = effectivePlaylistUrl;
     const video = videoEl;
     if (!playlistUrl || !video) return;
     if (manifestReadiness !== "ready") return;
@@ -384,6 +434,14 @@ export default function Live() {
         levelLoadingMaxRetry: 6,
         enableWorker: true,
         lowLatencyMode: true,
+        // Signed playback URLs are renewed while watching: swap the fresh
+        // token into every playlist request (segments are presigned R2 URLs).
+        xhrSetup: (xhr: XMLHttpRequest, url: string) => {
+          const token = playbackTokenRef.current;
+          if (token && url.includes("/api/hls/play/")) {
+            xhr.open("GET", swapPlaybackToken(url, token), true);
+          }
+        },
       });
 
       hlsRef.current = hls;
@@ -500,7 +558,8 @@ export default function Live() {
       setStatus("error");
       setError("HLS not supported in this browser.");
     }
-  }, [playlistUrl, manifestReadiness, playerNonce, videoEl]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectivePlaylistUrl, manifestReadiness, playerNonce, videoEl]);
 
   // Apply audio settings ONLY (no src/hls work here). This ensures mute/volume
   // changes never recreate the player or reload the stream.
@@ -528,7 +587,18 @@ export default function Live() {
   if (isIgMode) {
     return (
       <div className="fixed inset-0 bg-black">
-        {playlistUrl && status === "live" && manifestReadiness === "ready" ? (
+        {gated || (checkoutSessionId && !effectivePlaylistUrl) ? (
+          <div className="absolute inset-0 flex items-center justify-center px-6">
+            <PlaybackGatePanel
+              gate={playback.gate}
+              returnPath={returnPath}
+              onRetry={playback.refresh}
+              checkoutSessionId={checkoutSessionId}
+              checkoutCanceled={checkoutCanceled}
+              compact
+            />
+          </div>
+        ) : effectivePlaylistUrl && status === "live" && manifestReadiness === "ready" ? (
           <>
             <video
               key={playerNonce}
@@ -739,7 +809,17 @@ export default function Live() {
               </div>
 
               <div className="relative aspect-video bg-black/80 rounded-2xl overflow-hidden border border-neutral-800/50">
-                {playlistUrl && status === "live" && manifestReadiness === "ready" ? (
+                {gated || (checkoutSessionId && !effectivePlaylistUrl) ? (
+                  <div className="absolute inset-0 flex items-center justify-center px-6" data-testid="live-access-gate">
+                    <PlaybackGatePanel
+                      gate={playback.gate}
+                      returnPath={returnPath}
+                      onRetry={playback.refresh}
+                      checkoutSessionId={checkoutSessionId}
+                      checkoutCanceled={checkoutCanceled}
+                    />
+                  </div>
+                ) : effectivePlaylistUrl && status === "live" && manifestReadiness === "ready" ? (
                   <>
                     <video
                       key={playerNonce}
@@ -835,7 +915,7 @@ export default function Live() {
                       className="h-12 w-auto opacity-95"
                     />
 
-                    {status === "offline" || !playlistUrl ? (
+                    {status === "offline" || (!effectivePlaylistUrl && !protectedPlayback) ? (
                       <>
                         <div className="mt-4 text-xl font-semibold text-white">Stream is offline</div>
                         <div className="mt-2 text-sm text-neutral-500 max-w-md">

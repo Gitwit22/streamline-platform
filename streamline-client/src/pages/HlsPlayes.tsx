@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Hls from "hls.js";
 import { useHlsViewerHeartbeat, useVideoPlaying, type HlsViewerCounts } from "../hooks/useHlsViewerHeartbeat";
+import { swapPlaybackToken } from "../lib/playbackAccess";
 
 type Props = {
   playlistUrl: string;
@@ -12,6 +13,8 @@ type Props = {
   viewerRoomId?: string | null;
   /** Latest viewer counts from the heartbeat response. */
   onViewerCounts?: (counts: HlsViewerCounts) => void;
+  /** Fresh signed-playback token (renewed while watching); swapped into playlist requests. */
+  playbackTokenRef?: React.MutableRefObject<string | null>;
 };
 
 export function HlsPlayer({
@@ -21,6 +24,7 @@ export function HlsPlayer({
   autoPlay = true,
   viewerRoomId,
   onViewerCounts,
+  playbackTokenRef,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null);
@@ -85,6 +89,10 @@ export function HlsPlayer({
       enableWorker: true,
       lowLatencyMode: true,
       backBufferLength: 30,
+      xhrSetup: (xhr: XMLHttpRequest, url: string) => {
+        const token = playbackTokenRef?.current;
+        if (token && url.includes("/api/hls/play/")) xhr.open("GET", swapPlaybackToken(url, token), true);
+      },
     });
 
     hlsRef.current = hls;

@@ -52,6 +52,9 @@ import publicHlsRoutes from "./routes/publicHls";
 import { publicViewersRouter, roomViewersRouter } from "./routes/viewers";
 import publicRoomsHlsConfigRoutes from "./routes/publicRoomsHlsConfig";
 import monetizationRoutes from "./routes/monetization";
+import hlsPlaybackRoutes from "./routes/hlsPlayback";
+import publicPlaybackRoutes from "./routes/publicPlayback";
+import roomsViewerAccessRoutes from "./routes/roomsViewerAccess";
 import { resolveRoomIdentity } from "./lib/roomIdentity";
 import { assertRoomPerm, RoomPermissionError } from "./lib/rolePermissions";
 import { isProtectedRoomIdentity, moderationActorRole } from "./lib/roomModerationPolicy";
@@ -281,6 +284,8 @@ app.get("/api", (req, res) => {
   });
 });
 
+// Authorized HLS playlist proxy (signed playback tokens; Stage 7)
+app.use("/api/hls/play", hlsPlaybackRoutes);
 // HLS routes
 app.use("/api/hls", hlsRoutes);
 // Public viewer HLS status (no auth, tiny payload)
@@ -289,6 +294,8 @@ app.use("/api/public/hls", publicHlsRoutes);
 app.use("/api/public/viewers", publicViewersRouter);
 // Public viewer-safe HLS config (no auth)
 app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
+// Viewer playback authorization: POST /api/public/{channels|rooms}/:id/playback
+app.use("/api/public", publicPlaybackRoutes);
 
 // Monetization v1 (PPV, PWYW, Donations for HLS rooms)
 app.use("/api/monetization", monetizationRoutes);
@@ -351,6 +358,8 @@ app.use("/api/rooms", roomsProgramStateRoutes);
 app.use("/api/rooms", roomsRecordingsRoutes);
 // Room-level persistent HLS config (NOT runtime HLS state)
 app.use("/api/rooms", roomsHlsConfigRoutes);
+// Channel viewer access mode (public/registered/subscriber/pay_per_view/private)
+app.use("/api/rooms", roomsViewerAccessRoutes);
 // Room-level selection of which Saved Embed to use for HLS control
 app.use("/api/rooms", roomsActiveEmbedRoutes);
 // Host/cohost viewer counts: GET /api/rooms/:roomId/viewers

@@ -22,7 +22,8 @@ import {
 } from "../lib/streamingMeter";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { deletePrefix } from "../lib/storageClient";
-import { roomHasActivePaidEvent } from "../lib/monetization";
+import { resolveRoomViewerAccess } from "../lib/viewerAccessStore";
+import { hlsProxyAll, hlsRunPrefix } from "../lib/hlsPlayback";
 import { getCurrentViewers, onHlsIdle, onHlsLive } from "../lib/viewerStats";
 
 const router = Router();
@@ -66,11 +67,12 @@ router.get("/public/:roomId", async (req: any, res) => {
   try {
     const { data: room } = await getRoom(roomId);
     const hls = room.hls || {};
-    // Paywalled rooms only expose the playlist via /api/monetization/enter.
+    // Non-public channels only expose playback via the authorized playback
+    // endpoint (signed, short-lived URLs). Fail closed on lookup errors.
     let paywalled = false;
     if (hls.playlistUrl) {
       try {
-        paywalled = await roomHasActivePaidEvent(roomId);
+        paywalled = hlsProxyAll() || (await resolveRoomViewerAccess(roomId, { room })).access.mode !== "public";
       } catch {
         paywalled = true;
       }
@@ -184,12 +186,24 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
     }
 
     // Build stable paths
-    const prefix = `hls/${roomId}/`;
+    // Non-public channels (and HLS_PROXY_ALL) write to an unguessable
+    // per-run prefix: viewers only reach it through signed playback URLs
+    // (GET /api/hls/play/...), never a predictable public path.
+    let protectedRun = hlsProxyAll();
+    if (!protectedRun) {
+      try {
+        protectedRun = (await resolveRoomViewerAccess(roomId, { room, noCache: true })).access.mode !== "public";
+      } catch {
+        protectedRun = true;
+      }
+    }
+    const prefix = hlsRunPrefix(roomId, protectedRun);
     const playlistName = `room.m3u8`;
     const livePlaylistName = `live.m3u8`;
     const publicBase = getHlsPublicBaseUrl();
     // For best viewer UX, point clients at the live sliding playlist.
-    const playlistUrl = `${publicBase}/${roomId}/${livePlaylistName}`;
+    // (hls/<prefix-after-"hls/"> maps onto the public base, e.g. /hls/<roomId>/…)
+    const playlistUrl = `${publicBase}/${prefix.slice("hls/".length)}${livePlaylistName}`;
 
     // Cap enforcement (per-session): compute stopAt at start and persist in room.hls
     // limits.hlsMaxMinutesPerSession: null = unlimited, 0 = no HLS time.

@@ -192,6 +192,70 @@ async function retrieveFreshSubscription(payload: any): Promise<any> {
 }
 
 /**
+ * Ledger row (gross / platform fee / net) for every paid purchase, and for
+ * access purchases a ViewerEntitlement bound to the buyer's device (hashed
+ * sl_device_id passed through checkout metadata) and account (if signed in).
+ */
+async function recordMonetizationLedgerAndEntitlement(
+  session: Stripe.Checkout.Session,
+  purchaseId: string,
+  eventId: string,
+  type: "access" | "donation",
+  amountTotal: number,
+  currency: string,
+  paymentIntentId: string | null
+): Promise<void> {
+  const { getMonetizedEvent } = await import("../lib/monetization.js");
+  const { recordLedgerEntry } = await import("../lib/revenueLedger.js");
+  const { grantPpvEntitlement } = await import("../lib/viewerEntitlements.js");
+
+  const mEvent = await getMonetizedEvent(eventId);
+  if (!mEvent) {
+    console.warn("[stripe-webhook] Monetization event missing; ledger skipped", { eventId, sessionId: session.id });
+    return;
+  }
+  let channelId: string | null = null;
+  try {
+    const roomSnap = await db.collection("rooms").doc(mEvent.roomId).get();
+    const r = (roomSnap.data() || {}) as any;
+    channelId =
+      (typeof r.activeEmbedId === "string" && r.activeEmbedId) ||
+      (typeof r.savedEmbedId === "string" && r.savedEmbedId) ||
+      null;
+  } catch {
+    channelId = null;
+  }
+
+  await recordLedgerEntry({
+    creatorUid: String(mEvent.ownerUid || ""),
+    channelId,
+    roomId: mEvent.roomId || null,
+    eventId,
+    purchaseId,
+    type,
+    grossCents: amountTotal,
+    currency,
+    stripePaymentIntentId: paymentIntentId,
+    stripeCheckoutSessionId: session.id,
+  });
+
+  if (type === "access") {
+    const deviceKey = typeof session.metadata?.viewerDevice === "string" ? session.metadata.viewerDevice : null;
+    const viewerUid = typeof session.metadata?.viewerUid === "string" ? session.metadata.viewerUid : null;
+    const ids = await grantPpvEntitlement({
+      eventId,
+      roomId: mEvent.roomId || null,
+      channelId,
+      purchaseId,
+      deviceKey: deviceKey && /^[a-f0-9]{40}$/.test(deviceKey) ? deviceKey : null,
+      viewerUid: viewerUid || null,
+      source: "checkout",
+    });
+    console.log("[stripe-webhook] Viewer entitlement granted", { eventId, purchaseId, entitlements: ids.length });
+  }
+}
+
+/**
  * Monetization one-time payments (checkout.session.completed and
  * checkout.session.async_payment_succeeded). Idempotent per checkout session:
  * the purchase doc id is the session id and the access code id is the
@@ -239,6 +303,13 @@ async function handleMonetizationSession(session: Stripe.Checkout.Session): Prom
       stripePaymentIntentId: paymentIntentId,
       payerEmail,
     });
+
+    // Stage 7: revenue ledger + viewer entitlement. Both idempotent per
+    // purchase; skipped when the purchase was already refunded/disputed (a
+    // late redelivery must not restore access).
+    if (purchase.status === "paid") {
+      await recordMonetizationLedgerAndEntitlement(session, purchase.id, mEventId, mType, amountTotal, currency, paymentIntentId);
+    }
 
     if (mType === "access") {
       // Stash first: a retry after a partial failure reuses the stashed code,
@@ -571,6 +642,21 @@ router.post(
           const session = event.data.object as Stripe.Checkout.Session;
           if (session.metadata?.source === "streamline_monetization") {
             await handleMonetizationSession(session);
+          }
+          break;
+        }
+
+        // ── Monetization refunds / disputes ─────────────────────────
+        // Full refund or dispute → purchase + ledger marked, viewer
+        // entitlements and the access code revoked. Partial refunds only
+        // update the ledger. Non-monetization charges match nothing.
+        case "charge.refunded":
+        case "charge.dispute.created": {
+          const { applyChargeReversal } = await import("../lib/revenueLedgerPure.js");
+          const { reversalStores } = await import("../lib/revenueLedger.js");
+          const result = await applyChargeReversal(reversalStores, event.type, event.data.object as any);
+          if (result.targets > 0) {
+            console.log("[stripe-webhook] Monetization reversal applied", { eventType: event.type, ...result });
           }
           break;
         }
