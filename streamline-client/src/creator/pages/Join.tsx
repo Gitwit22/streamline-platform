@@ -835,7 +835,11 @@ export default function Join() {
                       ? "..."
                       : usageError
                       ? "—"
-                      : usageData?.maxInRoomMinutes ?? "—"}
+                      : usageData?.maxInRoomMinutes == null
+                      ? "—"
+                      : Number(usageData.maxInRoomMinutes) > 0
+                      ? usageData.maxInRoomMinutes
+                      : "Unlimited"}
                   </div>
                 </div>
                 <div

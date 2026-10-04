@@ -2136,6 +2136,8 @@ function RoomPage() {
   const canLayoutUi = !needsReauth && !isViewer && can("canLayout");
   // Co-hosts with moderation rights get the host dashboard (minus co-host
   // assignment and removing the owner, handled inside RoleOverlay).
+  // Co-host per the minted role (used by the viewer-count chip).
+  const isCohost = !isHost && normalizeRoomRole(userRole) === "cohost";
   const dashboardRole: "host" | "moderator" | "participant" = isHost
     ? "host"
     : canModerateUi || canMuteGuestsUi || canRemoveGuestsUi
