@@ -17,6 +17,7 @@ import { clearPlatformFlagsCache } from "../../lib/platformFlagsCache";
 import { isFeatureAvailable, isPlatformEnabled } from "../../lib/featureAvailability";
 import { getUsageGating, usageLabels, usageTooltips } from "../../lib/usageLabels";
 import { type CollaboratorsPayload } from "../../lib/producerDelegation";
+import { DEFAULT_MEDIA_PRESET_ID, mediaPresetLabel, toPresetOptions, type PresetOption } from "../../lib/mediaPresetLabels";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 
@@ -290,7 +291,7 @@ export default function SettingsBilling() {
   const [hlsRoomHlsEnabled, setHlsRoomHlsEnabled] = useState(false);
 
   const [mediaPrefs, setMediaPrefs] = useState<typeof DEFAULT_MEDIA_PREFS>(DEFAULT_MEDIA_PREFS);
-  const [presetOptions, setPresetOptions] = useState<Array<{ id: string; label: string }>>([]);
+  const [presetOptions, setPresetOptions] = useState<PresetOption[]>([]);
 
   const [advancedPermissions, setAdvancedPermissions] = useState<{
     enabled: boolean;
@@ -980,14 +981,18 @@ export default function SettingsBilling() {
         getMeCached(),
       ]);
 
-      let availablePresets: Array<{ id: string; label: string }> = [{ id: "standard_720p30", label: "Standard (720p30)" }];
+      // Server marks each preset `allowed` for the effective plan (incl. admin
+      // override + plan-doc caps); locked ones stay visible as upsell.
+      let availablePresets: PresetOption[] = [
+        { id: DEFAULT_MEDIA_PRESET_ID, label: mediaPresetLabel(DEFAULT_MEDIA_PRESET_ID), allowed: true },
+      ];
 
       if (presetsRes.ok) {
         try {
           const payload = await presetsRes.json();
           const list = Array.isArray(payload?.presets) ? payload.presets : [];
           if (list.length) {
-            availablePresets = list.map((p: any) => ({ id: p.id, label: p.label }));
+            availablePresets = toPresetOptions(list, payload?.maxPresetId ?? null);
           }
         } catch (err) {
           console.error("Failed to parse presets", err);
@@ -1011,24 +1016,7 @@ export default function SettingsBilling() {
             permissionsModeLockReason: me?.permissionsModeLockReason || null,
           });
 
-          // Filter presets client-side to the plan cap so the dropdown doesn't show locked options.
-          if (me?.planId) {
-            const order = ["standard_720p30", "hd_1080p30", "sports_1080p60", "pro_1440p30", "ultra_4k30"];
-            const planMax: Record<string, string> = {
-              free: "hd_1080p30",
-              starter: "hd_1080p30",
-              basic: "hd_1080p30",
-              pro: "sports_1080p60",
-              enterprise: "ultra_4k30",
-              internal_unlimited: "ultra_4k30",
-            };
-            const maxId = planMax[me.planId] || planMax.free;
-            const maxIdx = order.indexOf(maxId);
-            const filtered = availablePresets.filter((p) => order.indexOf(p.id) <= maxIdx || maxIdx === -1);
-            setPresetOptions(filtered.length ? filtered : availablePresets);
-          } else {
-            setPresetOptions(availablePresets);
-          }
+          setPresetOptions(availablePresets);
 
           setMediaPrefs(prefs);
           if (Array.isArray(me?.defaultRoleProfiles)) {
@@ -1047,7 +1035,9 @@ export default function SettingsBilling() {
       }
     } catch (err) {
       console.error("loadMediaPrefs failed", err);
-      setPresetOptions((prev) => prev.length ? prev : [{ id: "standard_720p30", label: "Standard (720p30)" }]);
+      setPresetOptions((prev) =>
+        prev.length ? prev : [{ id: DEFAULT_MEDIA_PRESET_ID, label: mediaPresetLabel(DEFAULT_MEDIA_PRESET_ID), allowed: true }]
+      );
       setMediaPrefs(DEFAULT_MEDIA_PREFS);
     }
   };
@@ -1243,7 +1233,11 @@ export default function SettingsBilling() {
       const data = await res.json();
       const prefs = data?.mediaPrefs ? { ...DEFAULT_MEDIA_PREFS, ...data.mediaPrefs } : mediaPrefs;
       setMediaPrefs(prefs);
-      setMediaPrefsMessage("Defaults saved");
+      setMediaPrefsMessage(
+        data?.clamped
+          ? `Saved — adjusted to ${mediaPresetLabel(data?.effectivePresetId || prefs.defaultPresetId)} for your plan`
+          : "Defaults saved"
+      );
     } catch (err: any) {
       const msg = err?.message || "Failed to save media preferences";
       setMediaPrefsError(msg);
@@ -3196,16 +3190,26 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 </div>
                 <select
                   value={mediaPrefs.defaultPresetId}
-                  onChange={(e) => setMediaPrefs((prev) => ({ ...prev, defaultPresetId: e.target.value }))}
+                  onChange={(e) => {
+                    const next = presetOptions.find((p) => p.id === e.target.value);
+                    if (next && !next.allowed) return;
+                    setMediaPrefs((prev) => ({ ...prev, defaultPresetId: e.target.value }));
+                  }}
                   style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: "#0f172a", color: "#e2e8f0" }}
                 >
-                  {presetOptions.length === 0 && <option value="standard_720p30">Standard 720p30</option>}
+                  {presetOptions.length === 0 && (
+                    <option value={DEFAULT_MEDIA_PRESET_ID}>{mediaPresetLabel(DEFAULT_MEDIA_PRESET_ID)}</option>
+                  )}
                   {presetOptions.map((p) => (
-                    <option key={p.id} value={p.id}>{p.label}</option>
+                    <option key={p.id} value={p.id} disabled={!p.allowed}>
+                      {p.label}
+                      {p.allowed ? "" : " — Upgrade to unlock"}
+                    </option>
                   ))}
                 </select>
                 <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
-                  Applies to live streaming and recordings. Plan limits may apply.
+                  Applies to live streaming, recordings and HLS in rooms you own (co-hosts use your default).
+                  HLS tops out at 1080p, and live streams are capped to what each destination accepts.
                 </div>
 
                 <div style={{ marginTop: 10, borderTop: "1px solid rgba(255,255,255,0.08)", paddingTop: 10 }}>
@@ -3218,7 +3222,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                     <span>Warn when using high-quality presets</span>
                   </label>
                   <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
-                    Shows a reminder before starting streams with higher resource usage.
+                    Asks for confirmation before starting a stream or recording at 1080p60, 1440p or 4K.
                   </div>
                 </div>
               </div>

@@ -19,7 +19,19 @@ import {
   useLocalParticipantPermissions,
   useParticipants,
 } from "@livekit/components-react";
-import { RoomEvent, Track, ConnectionState, type RoomOptions } from "livekit-client";
+import { RoomEvent, Track, ConnectionState } from "livekit-client";
+import { buildRoomOptions } from "../../lib/captureDefaults";
+import {
+  DEFAULT_MEDIA_PRESET_ID,
+  isHighQualityPreset,
+  isMediaPresetId,
+  mediaPresetLabel,
+  readCachedRoomPreset,
+  toPresetOptions,
+  writeCachedRoomPreset,
+  type PresetOption,
+} from "../../lib/mediaPresetLabels";
+import CaptureDefaultsSync from "../components/CaptureDefaultsSync";
 import {
   apiStartRecording,
   apiStopRecording,
@@ -95,14 +107,12 @@ import {
 
 const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
 
-// livekit-client has no room-level screen-share defaults (the former
-// `screenShareCaptureDefaults` key was not a RoomOptions field and was
-// silently ignored). To tune screen-share audio, pass ScreenShareCaptureOptions
-// (audio: { autoGainControl: false, echoCancellation: false,
-// noiseSuppression: false, channelCount: 2 }, systemAudio: "include", ...)
-// to localParticipant.setScreenShareEnabled(true, options) or to
-// <TrackToggle captureOptions>.
-const ROOM_OPTIONS: RoomOptions = {};
+// Room options (camera capture resolution, simulcast, screen-share encoding,
+// adaptiveStream + dynacast) come from lib/captureDefaults buildRoomOptions,
+// computed ONCE per LiveKitShell mount (useLiveKitRoom recreates the Room when
+// the options' JSON changes). livekit-client has no room-level screen-share
+// capture defaults, so CaptureDefaultsSync injects ScreenShareCaptureOptions
+// (1080p30 + system/tab audio) when screen share is enabled without options.
 
 // Telemetry tracker for measuring guest invite flow performance
 function GuestTelemetryTracker({ roomId, isViewer }: { roomId: string | null; isViewer: boolean }) {
@@ -1344,6 +1354,8 @@ type LiveKitShellProps = {
   /** Host controls currently forbid camera (canPublishVideo=false, forcedVideoOff). */
   controlsVideoBlocked?: boolean;
   onPublishPermissionChange?: (state: PublishPermissionState) => void;
+  /** Host's effective media preset: drives publisher capture defaults. */
+  capturePresetId?: string | null;
 };
 
 function LiveKitShell({
@@ -1385,8 +1397,12 @@ function LiveKitShell({
   controlsAudioBlocked = false,
   controlsVideoBlocked = false,
   onPublishPermissionChange,
+  capturePresetId = null,
 }: LiveKitShellProps) {
   const [joinPagePresence, setJoinPagePresence] = useState<JoinPagePresence | null>(null);
+  // Computed once per mount: changing options would make useLiveKitRoom
+  // recreate the Room. Later preset changes go through CaptureDefaultsSync.
+  const [roomOptions] = useState(() => buildRoomOptions(capturePresetId || readCachedRoomPreset(roomId)));
   const mediaRootRef = useRef<HTMLDivElement | null>(null);
 
   // Stable LiveKitRoom callbacks: useLiveKitRoom re-runs its connect effect
@@ -1553,7 +1569,7 @@ function LiveKitShell({
       // on themselves via the control bar once LiveKit grants publish.
       audio={!isAudience && !controlsAudioBlocked}
       video={!isAudience && !controlsVideoBlocked}
-      options={ROOM_OPTIONS}
+      options={roomOptions}
       connectOptions={undefined}
       onConnected={handleLkConnected}
       onDisconnected={handleLkDisconnected}
@@ -1584,6 +1600,7 @@ function LiveKitShell({
           onDismiss={() => setMediaPermissionError(null)}
         />
         <ReconnectCommandListener />
+        <CaptureDefaultsSync presetId={capturePresetId || readCachedRoomPreset(roomId)} isPublisher={!isAudience} />
         <HostControlsEnforcer
           audioBlocked={subjectToControls && (!controlsAllowPublishAudio || controlsAudioBlocked)}
           videoBlocked={subjectToControls && controlsVideoBlocked}
@@ -2005,10 +2022,19 @@ function RoomPage() {
   const [preflightLoading, setPreflightLoading] = useState(false);
   const [preflightResult, setPreflightResult] = useState<any>(null);
   const [canGoLive, setCanGoLive] = useState(false);
-  const [mediaPresets, setMediaPresets] = useState<Array<{ id: string; label: string }>>([]);
-  const [selectedPresetId, setSelectedPresetId] = useState<string>("standard_720p30");
+  const [mediaPresets, setMediaPresets] = useState<PresetOption[]>([]);
+  // selectedPresetId mirrors the ROOM OWNER's saved default until the user
+  // makes an explicit choice in Stream Setup (presetExplicit). Requests only
+  // send presetId for explicit choices; otherwise the server applies the
+  // owner's default (clamped to the owner's plan).
+  const [selectedPresetId, setSelectedPresetId] = useState<string>(() => readCachedRoomPreset(routeRoomId) || DEFAULT_MEDIA_PRESET_ID);
+  const [presetExplicit, setPresetExplicit] = useState(false);
+  const [ownerDefaultPresetId, setOwnerDefaultPresetId] = useState<string | null>(null);
+  const [ownerMaxPresetId, setOwnerMaxPresetId] = useState<string | null>(null);
+  const [warnOnHighQualityPref, setWarnOnHighQualityPref] = useState(true);
   const [effectivePresetId, setEffectivePresetId] = useState<string | null>(null);
   const [presetClamped, setPresetClamped] = useState(false);
+  const [presetAdjustment, setPresetAdjustment] = useState<string | null>(null);
   const [defaultRecordingModePref, setDefaultRecordingModePref] = useState<"cloud" | "dual">("cloud");
   const [firestoreRoomId, setFirestoreRoomId] = useState<string | null>(null);
   const [roomAccessToken, setRoomAccessToken] = useState<string | null>(null);
@@ -2580,16 +2606,31 @@ function RoomPage() {
     };
   }, [API_BASE, searchParams, isHost]);
 
-  const presetLabelFor = (id?: string | null) => {
-    if (!id) return "Standard 720p30";
-    const match = mediaPresets.find((p) => p.id === id);
-    return match?.label || id;
-  };
+  // Static id -> label map (never shows raw ids, no flicker while presets load).
+  const presetLabelFor = (id?: string | null) => mediaPresetLabel(id);
 
   const handlePresetChange = (id: string) => {
+    if (!isMediaPresetId(id)) return;
+    // Never change the reported preset while an egress is running.
+    if (streamStatus === "live" || streamStatus === "starting" || recordingStatus === "recording") return;
     setSelectedPresetId(id);
-    setEffectivePresetId(id);
+    setPresetExplicit(true);
+    setEffectivePresetId(null);
     setPresetClamped(false);
+    setPresetAdjustment(null);
+  };
+
+  /** Explicit setup-modal choice, or undefined to let the server use the owner's default. */
+  const explicitPresetId = presetExplicit ? selectedPresetId : undefined;
+
+  /** Confirm before starting at >=1080p60 / 1440p / 4K when the owner's pref asks for it. */
+  const confirmHighQualityStart = (what: "stream" | "recording") => {
+    if (!warnOnHighQualityPref || !isHighQualityPreset(selectedPresetId)) return true;
+    if (typeof window === "undefined" || typeof window.confirm !== "function") return true;
+    return window.confirm(
+      `Start ${what === "stream" ? "streaming" : "recording"} at ${mediaPresetLabel(selectedPresetId)}? ` +
+        "High-quality presets need a strong, stable upload connection."
+    );
   };
 
   const applyEntitlementsAndPlatform = (eff: any, platformFlags: any) => {
@@ -3386,6 +3427,61 @@ function RoomPage() {
     return () => window.removeEventListener("pagehide", onPageHide);
   }, [roomId, isHost, sendPresence]);
 
+  // Hydrate the ROOM OWNER's default preset on connect for anyone who can run
+  // streams/recordings (host, cohost, producer). One request per room/token.
+  const presetDefaultsKeyRef = useRef<string | null>(null);
+  const egressActiveRef = useRef(false);
+  const streamLiveRef = useRef(false);
+  const presetExplicitRef = useRef(false);
+  useEffect(() => {
+    egressActiveRef.current = streamStatus === "live" || streamStatus === "starting" || recordingStatus === "recording";
+    streamLiveRef.current = streamStatus === "live";
+    presetExplicitRef.current = presetExplicit;
+  }, [streamStatus, recordingStatus, presetExplicit]);
+  useEffect(() => {
+    if (!roomId || !roomAccessToken || !canManageStream || needsReauth) return;
+    const key = `${roomId}:${roomAccessToken}`;
+    if (presetDefaultsKeyRef.current === key) return;
+    presetDefaultsKeyRef.current = key;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetchAuth(
+          `${API_BASE}/api/multistream/${encodeURIComponent(roomId)}/preset-defaults`,
+          { method: "GET", headers: { "x-room-access-token": roomAccessToken } },
+          { allowNonOk: true }
+        );
+        if (!res.ok || cancelled) return;
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        const def = isMediaPresetId(data?.defaultPresetId) ? data.defaultPresetId : DEFAULT_MEDIA_PRESET_ID;
+        if (isMediaPresetId(data?.maxPresetId)) {
+          setOwnerMaxPresetId(data.maxPresetId);
+        }
+        setWarnOnHighQualityPref(data?.warnOnHighQuality !== false);
+        setOwnerDefaultPresetId(def);
+        writeCachedRoomPreset(roomId, def);
+        // Don't touch the selection after an explicit choice or while live.
+        if (!egressActiveRef.current && !presetExplicitRef.current) {
+          setSelectedPresetId(def);
+        }
+      } catch (e) {
+        console.warn("[Room] preset-defaults hydration failed", e);
+        presetDefaultsKeyRef.current = null;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [roomId, roomAccessToken, canManageStream, needsReauth]);
+
+  // Preset availability follows the ROOM OWNER's ceiling once known (clamping
+  // uses the owner's plan), else the caller's own `allowed` flags.
+  const presetOptionsForUi = useMemo(
+    () => (ownerMaxPresetId && mediaPresets.length ? toPresetOptions(mediaPresets.map((p) => ({ id: p.id })), ownerMaxPresetId) : mediaPresets),
+    [mediaPresets, ownerMaxPresetId]
+  );
+
   // Load effective entitlements + media presets only when the user explicitly opens host tools.
   // (Nuclear option 2: avoid background /me calls after connect.)
   useEffect(() => {
@@ -3411,14 +3507,7 @@ function RoomPage() {
         if (!cancelled && presetsRes.ok) {
           const payload = await presetsRes.json();
           const list = Array.isArray(payload?.presets) ? payload.presets : [];
-          if (list.length) {
-            setMediaPresets(list.map((p: any) => ({ id: p.id, label: p.label })));
-          } else {
-            setMediaPresets([
-              { id: "standard_720p30", label: "Standard 720p30" },
-              { id: "hd_1080p30", label: "HD Event 1080p30" },
-            ]);
-          }
+          setMediaPresets(toPresetOptions(list, payload?.maxPresetId ?? null));
         }
 
         if (!cancelled && (meRes.status === 401 || meRes.status === 403)) {
@@ -3434,10 +3523,8 @@ function RoomPage() {
           if (prefs.defaultRecordingMode === "cloud" || prefs.defaultRecordingMode === "dual") {
             setDefaultRecordingModePref(prefs.defaultRecordingMode);
           }
-          if (prefs.defaultPresetId) {
-            setSelectedPresetId(prefs.defaultPresetId);
-            setEffectivePresetId(prefs.defaultPresetId);
-          }
+          // Preset defaults come from the ROOM OWNER (preset-defaults effect),
+          // not the caller's own mediaPrefs.
 
           const eff = (me as any)?.effectiveEntitlements;
           const effPermMode = (me as any)?.effectivePermissionsMode;
@@ -3458,14 +3545,7 @@ function RoomPage() {
             setAuthStatus("guest");
             setNeedsReauth(true);
           }
-          setMediaPresets((prev) =>
-            prev.length
-              ? prev
-              : [
-                  { id: "standard_720p30", label: "Standard 720p30" },
-                  { id: "hd_1080p30", label: "HD Event 1080p30" },
-                ]
-          );
+          setMediaPresets((prev) => (prev.length ? prev : toPresetOptions([], null)));
         }
       }
     })();
@@ -3924,14 +4004,20 @@ function RoomPage() {
     nav('/join', { replace: true });
   };
 
-  const activePresetId = effectivePresetId || selectedPresetId;
+  // The server-reported preset only applies while an egress runs; otherwise
+  // the chip shows the selection (owner default or explicit choice).
+  const egressRunning = streamStatus !== "idle" || recordingStatus === "recording";
+  const activePresetId = (egressRunning ? effectivePresetId : null) || selectedPresetId;
+  const chipPresetClamped = egressRunning && presetClamped;
+  const chipPresetAdjustment = egressRunning ? presetAdjustment : null;
   const activePresetLabel = presetLabelFor(activePresetId);
 
   const startRecording = async ({
     layout = "grid",
     mode = "cloud",
     presetId,
-  }: { layout?: string; mode: "cloud" | "dual"; presetId?: string }) => {
+    skipQualityConfirm = false,
+  }: { layout?: string; mode: "cloud" | "dual"; presetId?: string; skipQualityConfirm?: boolean }) => {
     if (isViewer) {
       console.warn("startRecording blocked for viewer role");
       return;
@@ -3956,6 +4042,7 @@ function RoomPage() {
       console.log("⏳ Recording already in progress or countdown active, skipping startRecording call.");
       return;
     }
+    if (!skipQualityConfirm && !confirmHighQualityStart("recording")) return;
 
     const requestedMode = mode === "dual" && !dualRecordingAllowed ? "cloud" : mode;
     if (mode === "dual" && !dualRecordingAllowed) {
@@ -3983,7 +4070,14 @@ function RoomPage() {
       setRecordingCountdown("You're recording");
       try {
         console.log("📡 Calling apiStartRecording...");
-        const response = await apiStartRecording(roomId, requestedMode, presetId || selectedPresetId, roomAccessToken || undefined);
+        const requestedPresetId = presetId || explicitPresetId;
+        const response = await apiStartRecording(
+          roomId,
+          requestedMode,
+          requestedPresetId,
+          roomAccessToken || undefined,
+          { presetExplicit: !!requestedPresetId }
+        );
         console.log("📡 Got response:", response);
         const recId = response?.data?.recordingId ?? response?.recordingId;
         console.log("🎬 Extracted recordingId:", recId);
@@ -3998,10 +4092,13 @@ function RoomPage() {
         setRecordingElapsed(0);
         streamStartTimeRef.current = Date.now();
         setRecordingStatus("recording");
-        const effective = response?.effectivePresetId || response?.data?.effectivePresetId || presetId || selectedPresetId;
-        if (effective) setEffectivePresetId(effective);
-        const clamped = response?.presetClamped || response?.data?.presetClamped;
-        setPresetClamped(!!clamped && effective !== (presetId || selectedPresetId));
+        const effective = response?.effectivePresetId || response?.data?.effectivePresetId || null;
+        // While a stream is live the chip keeps the stream's preset.
+        if (effective && !streamLiveRef.current) {
+          setEffectivePresetId(effective);
+          const clamped = response?.presetClamped || response?.data?.presetClamped;
+          setPresetClamped(!!clamped);
+        }
         console.log("✅ Recording started!");
       } catch (e) {
         console.error("❌ Failed to start recording:", e);
@@ -4167,7 +4264,11 @@ function RoomPage() {
       return;
     }
     console.log("🎬 Room.tsx - handleStartMultistream called");
-    const startLivePayload = normalizeStartLivePayloadFromDestinationsKeys({ ...keys, presetId: selectedPresetId });
+    if (!confirmHighQualityStart("stream")) return;
+    const startLivePayload = {
+      ...normalizeStartLivePayloadFromDestinationsKeys({ ...keys, presetId: explicitPresetId }),
+      ...(explicitPresetId ? { presetId: explicitPresetId, presetExplicit: true } : {}),
+    };
     const destIds = Array.isArray(startLivePayload.enabledTargetIds) ? startLivePayload.enabledTargetIds : [];
     const sessionKeyMap = startLivePayload.sessionKeys ? { ...startLivePayload.sessionKeys } : {};
     const hasSessionKeys = Object.values(sessionKeyMap || {}).some((entry) => !!entry?.streamKey);
@@ -4198,6 +4299,11 @@ function RoomPage() {
       setLiveCountdown("You're live");
       try {
         setStreamStatus("starting");
+        if (recordingStatus !== "recording") {
+          setEffectivePresetId(null);
+          setPresetClamped(false);
+        }
+        setPresetAdjustment(null);
         const requestBody = {
           ...startLivePayload,
           userId: getOrCreateUid(),
@@ -4268,11 +4374,13 @@ function RoomPage() {
         setStreamStatus("live");
         streamStartTimeRef.current = Date.now();
         setDidStreamThisSession(true);
-        const effective = data?.effectivePresetId || data?.data?.effectivePresetId || selectedPresetId;
+        const effective = data?.effectivePresetId || data?.data?.effectivePresetId || data?.presetEffectiveId || null;
         if (effective) setEffectivePresetId(effective);
-        setPresetClamped(!!(data?.presetClamped || data?.data?.presetClamped) && effective !== selectedPresetId);
+        setPresetClamped(!!(data?.presetClamped || data?.data?.presetClamped));
+        const adjustment = data?.presetAdjustment || data?.data?.presetAdjustment || null;
+        setPresetAdjustment(typeof adjustment === "string" && adjustment ? adjustment : null);
         if (keys.record) {
-          await startRecording({ layout: keys.layout ?? "grid", mode: "cloud", presetId: selectedPresetId });
+          await startRecording({ layout: keys.layout ?? "grid", mode: "cloud", presetId: explicitPresetId, skipQualityConfirm: true });
         }
         console.log("✅ Stream started! Egress ID:", egressIdVal);
       } catch (err) {
@@ -4982,13 +5090,17 @@ function RoomPage() {
                 <div style={{
                   padding: '0.35rem 0.6rem',
                   borderRadius: '0.375rem',
-                  border: presetClamped ? '1px solid rgba(251,191,36,0.6)' : '1px solid rgba(148, 163, 184, 0.35)',
-                  color: presetClamped ? '#fbbf24' : '#e5e7eb',
+                  border: chipPresetClamped || chipPresetAdjustment ? '1px solid rgba(251,191,36,0.6)' : '1px solid rgba(148, 163, 184, 0.35)',
+                  color: chipPresetClamped || chipPresetAdjustment ? '#fbbf24' : '#e5e7eb',
                   fontSize: '0.7rem',
-                  background: presetClamped ? 'rgba(251,191,36,0.12)' : 'rgba(255, 255, 255, 0.04)',
+                  background: chipPresetClamped || chipPresetAdjustment ? 'rgba(251,191,36,0.12)' : 'rgba(255, 255, 255, 0.04)',
                   whiteSpace: 'nowrap'
-                }}>
-                  Preset: {activePresetLabel}{presetClamped ? " (clamped)" : ""}
+                }}
+                  data-testid="preset-chip"
+                  title={chipPresetAdjustment || (chipPresetClamped ? "Adjusted to fit the room owner's plan" : undefined)}
+                >
+                  Preset: {activePresetLabel}
+                  {chipPresetAdjustment ? ` · ${chipPresetAdjustment}` : chipPresetClamped ? " (adjusted for plan)" : ""}
                 </div>
               </>
             )}
@@ -5188,6 +5300,7 @@ function RoomPage() {
           controlsAudioBlocked={controlsAudioBlocked}
           controlsVideoBlocked={controlsVideoBlocked}
           onPublishPermissionChange={handlePublishPermissionChange}
+          capturePresetId={ownerDefaultPresetId}
         />
       )}
 
@@ -5366,6 +5479,10 @@ function RoomPage() {
           roomAccessToken={roomAccessToken || undefined}
           
           selectedPresetId={selectedPresetId}
+          presetOptions={presetOptionsForUi}
+          onPresetChange={handlePresetChange}
+          explicitPresetId={explicitPresetId}
+          presetAdjustment={chipPresetAdjustment}
           defaultRecordingMode={defaultRecordingModePref}
           streamStatus={streamStatus}
           onStartStream={handleStartMultistream}

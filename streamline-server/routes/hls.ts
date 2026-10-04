@@ -6,6 +6,7 @@ import { decideHlsStart, shouldRefreshHlsHeartbeat } from "../lib/mediaPure";
 import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "../middleware/roomAccessToken";
 import { requireAuth } from "../middleware/requireAuth";
 import { startHlsEgress, HlsPresetId, stopEgress } from "../services/livekitEgress";
+import { getPresetPlanContext, resolveHlsPreset } from "../lib/mediaPresets";
 import { firestore } from "../firebaseAdmin";
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
@@ -148,7 +149,8 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
   }
 
   const roomId = canonicalRoomId;
-  const presetId = (req.body?.presetId || "hls_720p") as HlsPresetId;
+  // Resolved below once the room owner is known (owner default + plan clamp).
+  let presetId: HlsPresetId = "hls_720p";
 
   try {
     const uid = (req as any).user?.uid;
@@ -227,6 +229,23 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
     }
 
     if (room.roomType !== "rtc") return res.status(400).json({ error: "roomType must be rtc" });
+
+    // HLS quality: explicit setup-modal choice (or the owner's own request),
+    // else the ROOM OWNER's default; clamped to the owner's plan and 1080p.
+    let hlsPresetClamped = false;
+    try {
+      const presetCtx = await getPresetPlanContext(ownerUid);
+      const explicit = req.body?.presetExplicit === true || ownerUid === uid;
+      const resolved = resolveHlsPreset({
+        bodyPresetId: explicit ? req.body?.presetId : undefined,
+        ownerDefaultPresetId: presetCtx.defaultPresetId,
+        planMaxPresetId: presetCtx.maxPresetId,
+      });
+      presetId = resolved.hlsPresetId;
+      hlsPresetClamped = resolved.clamped;
+    } catch (e: any) {
+      console.warn("[hls] preset resolution failed; using 720p", e?.message || e);
+    }
 
     // IDEMPOTENT: if already starting/live, just return what we have
     // (fast path; the transactional claim below is authoritative).
@@ -331,6 +350,8 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
         status: "live",
         egressId,
         playlistUrl,
+        presetId,
+        presetClamped: hlsPresetClamped,
       });
     } catch (e: any) {
       // Never leak an egress we started but could not record as live.

@@ -96,6 +96,14 @@ interface Props {
   roomAccessToken?: string;
   selectedPresetId?: string;
   defaultRecordingMode?: "cloud" | "dual";
+  /** Quality options (labels from the static map, `allowed` from the owner's plan). */
+  presetOptions?: Array<{ id: string; label: string; allowed: boolean }>;
+  /** Explicit quality choice; omitted => the server uses the room owner's default. */
+  onPresetChange?: (id: string) => void;
+  /** Explicit choice only (undefined => server decides); forwarded to HLS start. */
+  explicitPresetId?: string;
+  /** e.g. "Adjusted to 1080p60 for Twitch" from the last stream start. */
+  presetAdjustment?: string | null;
   
   // Stream state
   streamStatus: "idle" | "starting" | "live" | "stopping";
@@ -151,6 +159,10 @@ export default function StreamSetupModalV2({
   roomAccessToken,
   selectedPresetId,
   defaultRecordingMode = "cloud",
+  presetOptions,
+  onPresetChange,
+  explicitPresetId,
+  presetAdjustment,
   streamStatus,
   onStartStream,
   onStopStream,
@@ -714,7 +726,7 @@ export default function StreamSetupModalV2({
     setHlsError(null);
     setHlsStatus("starting");
     try {
-      const data = await startHls(effectiveHlsRoomId, roomAccessToken || undefined);
+      const data = await startHls(effectiveHlsRoomId, roomAccessToken || undefined, { presetId: explicitPresetId });
       const status = (data?.status as string) || "live";
       setHlsStatus(status === "starting" || status === "live" || status === "error" ? status : "live");
       setHlsPlaylistUrl(data?.playlistUrl ?? null);
@@ -774,7 +786,9 @@ export default function StreamSetupModalV2({
   };
 
   const handleStartRecording = async () => {
-    await onStartRecording({ mode: recordingMode, presetId: selectedPresetId });
+    // No presetId: Room sends the explicit choice (if any), else the server
+    // applies the room owner's default preset.
+    await onStartRecording({ mode: recordingMode });
   };
 
   return (
@@ -902,6 +916,46 @@ export default function StreamSetupModalV2({
                   </div>
                 ))}
               </div>
+            </div>
+          )}
+
+          {presetOptions && presetOptions.length > 0 && onPresetChange && (
+            <div style={{ marginBottom: '0.75rem' }} data-testid="stream-quality">
+              <label style={{ display: 'block', fontSize: '0.75rem', opacity: 0.8, marginBottom: '0.3rem' }}>
+                Quality
+              </label>
+              <select
+                value={selectedPresetId || ''}
+                disabled={streamIsLive || streamIsBusy || recordingIsActive}
+                onChange={(e) => {
+                  const opt = presetOptions.find((o) => o.id === e.target.value);
+                  if (opt && opt.allowed) onPresetChange(opt.id);
+                }}
+                style={{
+                  width: '100%',
+                  padding: '0.4rem 0.5rem',
+                  borderRadius: '0.4rem',
+                  background: 'rgba(255,255,255,0.06)',
+                  color: '#fff',
+                  border: '1px solid rgba(148,163,184,0.35)',
+                  fontSize: '0.8rem',
+                }}
+              >
+                {presetOptions.map((o) => (
+                  <option key={o.id} value={o.id} disabled={!o.allowed} style={{ color: '#111' }}>
+                    {o.label}
+                    {o.allowed ? '' : ' — Upgrade to unlock'}
+                  </option>
+                ))}
+              </select>
+              <div style={{ fontSize: '0.7rem', opacity: 0.7, marginTop: '0.3rem' }}>
+                Defaults to the room owner&apos;s saved preset. Streams are capped to what each destination accepts.
+              </div>
+              {presetAdjustment && (
+                <div style={{ fontSize: '0.72rem', color: '#fbbf24', marginTop: '0.25rem' }} data-testid="preset-adjustment">
+                  {presetAdjustment}
+                </div>
+              )}
             </div>
           )}
 

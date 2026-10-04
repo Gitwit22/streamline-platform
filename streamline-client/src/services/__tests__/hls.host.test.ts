@@ -26,7 +26,7 @@ function makeRes(opts: {
 }
 
 describe("services/hls (host-only)", () => {
-  it("startHls uses apiFetchAuth POST + presetId body", async () => {
+  it("startHls uses apiFetchAuth POST and lets the server pick the owner's default preset", async () => {
     apiFetchAuthMock.mockReset();
     apiFetchAuthMock.mockResolvedValueOnce(
       makeRes({ ok: true, status: 200, json: { roomId: "r1", status: "starting" } })
@@ -41,8 +41,21 @@ describe("services/hls (host-only)", () => {
     const [url, init, options] = apiFetchAuthMock.mock.calls[0];
     expect(String(url)).toBe(`${API_BASE}/api/hls/start/${encodeURIComponent("room_123")}`);
     expect(init?.method).toBe("POST");
-    expect(String(init?.body || "")).toContain("presetId");
+    expect(JSON.parse(String(init?.body || "{}"))).toEqual({});
     expect(options?.allowNonOk).toBe(true);
+  });
+
+  it("startHls sends an explicit preset choice with presetExplicit", async () => {
+    apiFetchAuthMock.mockReset();
+    apiFetchAuthMock.mockResolvedValueOnce(
+      makeRes({ ok: true, status: 200, json: { roomId: "r1", status: "starting" } })
+    );
+
+    const { startHls } = await import("../hls");
+
+    await startHls("room_123", undefined, { presetId: "hd_1080p30" });
+    const [, init] = apiFetchAuthMock.mock.calls[0];
+    expect(JSON.parse(String(init?.body || "{}"))).toEqual({ presetId: "hd_1080p30", presetExplicit: true });
   });
 
   it("startHls passes x-room-access-token when provided", async () => {

@@ -1148,11 +1148,6 @@ export default function Join() {
             >
               Welcome back, {user.displayName || user.email}! 👋
             </h2>
-            {user.defaultResolution && (
-              <p style={{ fontSize: "14px", color: "#6b7280" }}>
-                Default resolution: {user.defaultResolution}
-              </p>
-            )}
           </div>
         )}
 

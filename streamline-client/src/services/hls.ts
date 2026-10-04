@@ -25,14 +25,20 @@ function buildAuthHeaders(roomAccessToken?: string): HeadersInit {
   return headers;
 }
 
-export async function startHls(roomId: string, roomAccessToken?: string) {
+/**
+ * Start HLS. Without `presetId` the server uses the room owner's default
+ * preset (clamped to the owner's plan, max 1080p). Pass `presetId` (a media
+ * preset id or hls_720p / hls_1080p) only for an explicit setup-modal choice.
+ */
+export async function startHls(roomId: string, roomAccessToken?: string, opts?: { presetId?: string | null }) {
   const url = `${API_BASE}/api/hls/start/${encodeURIComponent(roomId)}`;
+  const explicitPresetId = opts?.presetId ? String(opts.presetId) : null;
   const res = await apiFetchAuth(
     url,
     {
       method: "POST",
       headers: buildAuthHeaders(roomAccessToken),
-      body: JSON.stringify({ presetId: "hls_720p" }),
+      body: JSON.stringify(explicitPresetId ? { presetId: explicitPresetId, presetExplicit: true } : {}),
     },
     { allowNonOk: true }
   );

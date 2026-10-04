@@ -5,7 +5,14 @@ import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "..
 import { canAccessFeature } from "./featureAccess";
 import type { ApiErrorCode } from "../types/streaming";
 import { decryptStreamKey, normalizeRtmpBase } from "../lib/crypto";
-import { clampPresetForPlan, encodingOptionsFor, getUserPlanId, toEncodingOptions } from "../lib/mediaPresets";
+import {
+  applyDestinationCaps,
+  clampPresetForPlan,
+  encodingOptionsFor,
+  getPresetPlanContext,
+  INSTAGRAM_STREAM_PROFILE,
+  resolveRequestedPresetId,
+} from "../lib/mediaPresets";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
@@ -223,7 +230,8 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
     // Load user (optional, but fine)
     const userSnap = await firestore.collection("users").doc(ownerUid).get();
     if (!userSnap.exists) return res.status(401).json({ error: "User not found" });
-    const planId = await getUserPlanId(ownerUid);
+    const presetCtx = await getPresetPlanContext(ownerUid);
+    const planId = presetCtx.planId;
 
     const featureAccess = await canAccessFeature(ownerUid, "multistream");
     if (!featureAccess.allowed) {
@@ -271,10 +279,6 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       // Do not block multistream start on bookkeeping failures.
       console.error("[multistream:start] usage gate failed", e);
     }
-
-    // Clamp preset by plan
-    const { preset, effectiveId, requestedId, clamped } = clampPresetForPlan(planId, presetId);
-    const encodingOptions = toEncodingOptions(preset, "stream");
 
     // Destination cap enforcement (plan-based)
     const maxDestinations = await getPlanLimit(ownerUid, "maxDestinations");
@@ -412,6 +416,26 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       console.log("[multistream:start] Instagram RTMP URLs (masked):", instagramLogEntries);
     }
 
+    // Preset: explicit setup-modal choice, else the ROOM OWNER's saved default;
+    // clamp to the owner's effective plan, then to the strictest destination
+    // (one egress feeds every URL in `urls`).
+    const { requestedId: resolvedRequestedId } = resolveRequestedPresetId({
+      bodyPresetId: presetId,
+      presetExplicit: rawBody.presetExplicit,
+      actorIsOwner: ownerUid === uid,
+      ownerDefaultPresetId: presetCtx.defaultPresetId,
+    });
+    const planClamp = clampPresetForPlan(planId, resolvedRequestedId, presetCtx.maxPresetId);
+    const requestedId = planClamp.requestedId;
+    const streamProfile = applyDestinationCaps(
+      planClamp.effectiveId,
+      logEntries.map((e) => e.platform),
+      presetCtx.maxPresetId
+    );
+    const effectiveId = streamProfile.effectiveId;
+    const clamped = planClamp.clamped || streamProfile.adjusted;
+    const encodingOptions = encodingOptionsFor(streamProfile.profile);
+
     // Refuse to start a second set of egresses for the same room. A doc that
     // claims running egress is verified against LiveKit so a stale doc (e.g.
     // egress ended without /stop) doesn't block forever.
@@ -465,6 +489,8 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
           updatedAt: claimedAt,
           presetRequestedId: requestedId,
           presetEffectiveId: effectiveId,
+          effectivePresetId: effectiveId,
+          presetAdjustment: streamProfile.adjustmentReason,
           usageType: "live",
         },
         { merge: true }
@@ -533,15 +559,13 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         const instagramStreamOutput = new StreamOutput({ protocol: StreamProtocol.RTMP, urls: instagramUrls });
 
         const igDims = OUTPUT_FORMAT_DIMENSIONS["vertical_9x16"];
-        // 1080×1920 @30fps, 3000 kbps video / 128 kbps audio.  (Proto field
-        // names; the previous videoWidth/videoHeight keys were dropped by the
-        // SDK, so Instagram egress silently ran at the 1920×1080 default.)
+        // 1080×1920 @30fps, 3500 kbps video / 128 kbps audio, 2s keyframes.
+        // (Proto field names; the previous videoWidth/videoHeight keys were
+        // dropped by the SDK, so Instagram egress silently ran at 1920×1080.)
         const instagramEncodingOptions = encodingOptionsFor({
+          ...INSTAGRAM_STREAM_PROFILE,
           width: igDims.width,
           height: igDims.height,
-          fps: 30,
-          videoKbps: 3000,
-          audioKbps: 128,
         });
 
         // Instagram is vertical: the program compositor renders the host's
@@ -612,6 +636,8 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
           updatedAt: startedAt,
           presetRequestedId: requestedId,
           presetEffectiveId: effectiveId,
+          effectivePresetId: effectiveId,
+          presetAdjustment: streamProfile.adjustmentReason,
           usageType: "live",
           warmupMs,
           warmupPlatforms: platforms,
@@ -679,8 +705,13 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         egressIds,
         status: "started",
         effectivePresetId: effectiveId,
+        presetEffectiveId: effectiveId,
         requestedPresetId: requestedId,
         presetClamped: clamped,
+        presetClampedToPlan: planClamp.clamped,
+        presetAdjustment: streamProfile.adjustmentReason,
+        presetBitrateCapped: streamProfile.bitrateCapped,
+        streamVideoKbps: streamProfile.profile.videoKbps,
       });
     } catch (err) {
       console.error("[multistream:start] error:", (err as any)?.message || err);
@@ -692,6 +723,38 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
   }
 });
 
+
+// The room OWNER's effective default preset (clamped to the owner's plan) so
+// hosts/cohosts/producers can show the right quality before going live.
+router.get("/:roomId/preset-defaults", requireAuth, requireRoomAccessToken as any, async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    const { roomId: canonicalRoomId } = getRoomAccess(req as any);
+    const requestedRoomId = String((req.params as any).roomId || "").trim();
+    if (!canonicalRoomId || (requestedRoomId && requestedRoomId !== canonicalRoomId)) {
+      return res.status(400).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
+    }
+    const roomSnap = await firestore.collection("rooms").doc(canonicalRoomId).get();
+    const roomDoc = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+    const ownerUid = String(roomDoc.ownerId || uid).trim() || uid;
+    const ctx = await getPresetPlanContext(ownerUid);
+    const ownerSnap = await firestore.collection("users").doc(ownerUid).get();
+    const warnOnHighQuality = ownerSnap.exists
+      ? (ownerSnap.data() as any)?.mediaPrefs?.warnOnHighQuality !== false
+      : true;
+    const defaultPresetId = ctx.defaultPresetId || clampPresetForPlan(ctx.planId, null, ctx.maxPresetId).effectiveId;
+    return res.json({
+      defaultPresetId,
+      maxPresetId: ctx.maxPresetId,
+      warnOnHighQuality,
+      isOwner: ownerUid === uid,
+    });
+  } catch (err: any) {
+    console.error("[multistream:preset-defaults] error", err?.message || err);
+    return res.status(500).json({ error: "preset_defaults_failed" });
+  }
+});
 
 router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as any, async (req, res) => {
   try {

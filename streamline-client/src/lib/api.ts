@@ -321,11 +321,17 @@ export async function apiStartRecording(
   roomId: string,
   mode: "cloud" | "dual" = "cloud",
   presetId?: string,
-  roomAccessToken?: string | null
+  roomAccessToken?: string | null,
+  opts?: { presetExplicit?: boolean }
 ) {
+  // Omit presetId to let the server use the ROOM OWNER's default preset.
   const res = await apiFetchAuth("/api/recordings/start", {
     method: "POST",
-    body: JSON.stringify({ roomId, mode, presetId }),
+    body: JSON.stringify({
+      roomId,
+      mode,
+      ...(presetId ? { presetId, presetExplicit: opts?.presetExplicit ?? true } : {}),
+    }),
     headers: roomAccessToken
       ? {
           "x-room-access-token": roomAccessToken,

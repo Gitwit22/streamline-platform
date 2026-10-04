@@ -23,7 +23,7 @@ import { firestore } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "../middleware/roomAccessToken";
 import { canAccessFeature } from "./featureAccess";
-import { clampRecordingPreset, getUserPlanId, toEncodingOptions } from "../lib/mediaPresets";
+import { clampRecordingPreset, getPresetPlanContext, resolveRequestedPresetId, toEncodingOptions } from "../lib/mediaPresets";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { Timestamp } from "firebase-admin/firestore";
@@ -918,8 +918,23 @@ router.post(
         : null;
     const usageType = requestedUsageType || (hasActiveStream ? "live+recording" : "recording_only");
 
-    // Clamp preset to plan and (optionally) active stream preset
-    const clamp = clampRecordingPreset(planId, presetId, activeStreamPresetId, allowHigherRecordingThanStream);
+    // Preset: explicit setup-modal choice, else the ROOM OWNER's saved default;
+    // then clamp to the owner's effective plan (incl. admin override, plan-doc
+    // caps) and (optionally) the active stream preset.
+    const presetCtx = await getPresetPlanContext(ownerUid);
+    const { requestedId: resolvedRequestedId } = resolveRequestedPresetId({
+      bodyPresetId: presetId,
+      presetExplicit: (req.body as any)?.presetExplicit,
+      actorIsOwner: ownerUid === uid,
+      ownerDefaultPresetId: presetCtx.defaultPresetId,
+    });
+    const clamp = clampRecordingPreset(
+      planId,
+      resolvedRequestedId,
+      activeStreamPresetId,
+      allowHigherRecordingThanStream,
+      presetCtx.maxPresetId
+    );
     const { preset, effectiveId, requestedId, clamped, clampedToStream } = clamp;
     const encodingOptions = toEncodingOptions(preset, "record");
 

@@ -19,7 +19,8 @@ export type HlsPresetId = "hls_720p" | "hls_1080p";
 /**
  * HLS preset → advanced encoding options, using the same media-preset table
  * (lib/mediaPresets.ts, "stream" profile) as multistream.  Landscape 16:9.
- * Unknown ids fall back to 720p.
+ * Unknown ids fall back to 720p. Includes 2s keyframes (keyFrameInterval).
+ * Callers resolve/clamp the id first (lib/mediaPresets resolveHlsPreset).
  */
 export function mapPreset(presetId: HlsPresetId | string | null | undefined) {
   const mediaPresetId = presetId === "hls_1080p" ? "hd_1080p30" : "standard_720p30";

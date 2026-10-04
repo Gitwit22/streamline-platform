@@ -2,7 +2,15 @@ import { Router } from "express";
 import { firestore } from "../firebaseAdmin";
 import admin from "firebase-admin";
 import { requireAuth } from "../middleware/requireAuth";
-import { clampPresetForPlan, getPresetById, getUserPlanId, MEDIA_PRESETS, MediaPresetId } from "../lib/mediaPresets";
+import {
+  clampPresetForPlan,
+  getPresetById,
+  getPresetPlanContext,
+  getUserPlanId,
+  MEDIA_PRESET_LABELS,
+  MediaPresetId,
+  presetsWithAvailability,
+} from "../lib/mediaPresets";
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
@@ -194,9 +202,9 @@ export const SIMPLE_ROLE_DEFAULTS: Record<"participant" | "moderator" | "cohost"
   },
 };
 
-function normalizeMediaPrefs(raw: any, planId: string) {
+function normalizeMediaPrefs(raw: any, planId: string, maxPresetId?: MediaPresetId) {
   const prefs = { ...DEFAULT_MEDIA_PREFS, ...(raw || {}) };
-  const { preset } = clampPresetForPlan(planId, prefs.defaultPresetId);
+  const { preset } = clampPresetForPlan(planId, prefs.defaultPresetId, maxPresetId);
 
   const defaultRoomLayout =
     normalizeRoomLayout((prefs as any).defaultRoomLayout) ||
@@ -220,10 +228,10 @@ function normalizeMediaPrefs(raw: any, planId: string) {
 }
 
 async function getNormalizedMediaPrefs(uid: string) {
-  const planId = await getUserPlanId(uid);
+  const { planId, maxPresetId } = await getPresetPlanContext(uid);
   const snap = await firestore.collection("users").doc(uid).get();
   const data = snap.exists ? snap.data() || {} : {};
-  return { mediaPrefs: normalizeMediaPrefs((data as any).mediaPrefs, planId), planId };
+  return { mediaPrefs: normalizeMediaPrefs((data as any).mediaPrefs, planId, maxPresetId), planId, maxPresetId };
 }
 
 async function getSegmentedUiFlags() {
@@ -927,17 +935,28 @@ router.post("/close", async (req, res) => {
   }
 });
 
-router.get("/presets", (_req, res) => {
-  return res.json({ presets: MEDIA_PRESETS });
+// Presets with per-preset `allowed` for the caller's EFFECTIVE plan
+// (adminOverridePlanId + plans/{id} caps, built-in fallback).
+router.get("/presets", async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    const { planId, maxPresetId } = await getPresetPlanContext(uid);
+    return res.json({ presets: presetsWithAvailability(maxPresetId), maxPresetId, planId });
+  } catch (err: any) {
+    console.error("[account/presets] error", err?.message || err);
+    return res.status(500).json({ error: "failed_to_load_presets" });
+  }
 });
 
 router.patch("/media-prefs", async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    const planId = await getUserPlanId(uid);
+    const { planId, maxPresetId } = await getPresetPlanContext(uid);
     const body = req.body || {};
     const updates: any = {};
+    let presetClampInfo: { requestedId: string; effectiveId: string; clamped: boolean } | null = null;
 
     if (body.defaultRoomLayout && typeof body.defaultRoomLayout === "object") {
       const normalized = normalizeRoomLayout(body.defaultRoomLayout);
@@ -955,8 +974,9 @@ router.patch("/media-prefs", async (req, res) => {
     // Always reuse last used selection for a single cohesive behavior.
     if (body.defaultPresetId) {
       const preset = getPresetById(String(body.defaultPresetId));
-      const { preset: effective, clamped } = clampPresetForPlan(planId, preset.id);
+      const { preset: effective, clamped } = clampPresetForPlan(planId, preset.id, maxPresetId);
       updates.defaultPresetId = clamped ? effective.id : preset.id;
+      presetClampInfo = { requestedId: preset.id, effectiveId: effective.id, clamped };
     }
     if (body.permissionsMode === "simple" || body.permissionsMode === "advanced") {
       updates.permissionsMode = body.permissionsMode;
@@ -964,8 +984,8 @@ router.patch("/media-prefs", async (req, res) => {
 
     const snap = await firestore.collection("users").doc(uid).get();
     const existingPrefs = snap.exists ? (snap.data() as any)?.mediaPrefs : undefined;
-    const normalizedExisting = normalizeMediaPrefs(existingPrefs, planId);
-    const mergedCandidate = normalizeMediaPrefs({ ...normalizedExisting, ...updates }, planId);
+    const normalizedExisting = normalizeMediaPrefs(existingPrefs, planId, maxPresetId);
+    const mergedCandidate = normalizeMediaPrefs({ ...normalizedExisting, ...updates }, planId, maxPresetId);
     const adv = await getAdvancedPermissionsEnabled(uid);
     const merged = adv.enabled ? mergedCandidate : { ...mergedCandidate, permissionsMode: "simple" as const };
     if (!adv.enabled && mergedCandidate.permissionsMode === "advanced") {
@@ -973,7 +993,15 @@ router.patch("/media-prefs", async (req, res) => {
     }
     await firestore.collection("users").doc(uid).set({ mediaPrefs: merged }, { merge: true });
 
-    return res.json({ mediaPrefs: merged, lockReason: adv.lockReason || null });
+    return res.json({
+      mediaPrefs: merged,
+      lockReason: adv.lockReason || null,
+      maxPresetId,
+      clamped: !!presetClampInfo?.clamped,
+      requestedPresetId: presetClampInfo?.requestedId ?? null,
+      effectivePresetId: merged.defaultPresetId,
+      effectivePresetLabel: MEDIA_PRESET_LABELS[merged.defaultPresetId as MediaPresetId] || null,
+    });
   } catch (err: any) {
     console.error("[account/media-prefs] error", err);
     return res.status(500).json({ error: "failed_to_update_media_prefs" });
