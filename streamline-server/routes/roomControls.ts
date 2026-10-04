@@ -13,6 +13,14 @@ import {
   type LiveKitParticipantPermissionInit,
 } from "../lib/livekitPermissions";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { tryGetAuthUserAny } from "../middleware/requireAuth";
+import {
+  actorMay,
+  canAssignRolePreset,
+  isProtectedRoomIdentity,
+  missingPermForControlsPatch,
+  moderationActorRole,
+} from "../lib/roomModerationPolicy";
 
 const router = Router();
 
@@ -76,12 +84,7 @@ async function getRoomOwnerUid(roomId: string): Promise<string | null> {
 }
 
 /** Identities that room controls must never restrict (the host/producers). */
-function isProtectedIdentity(identity: string, ownerUid: string | null, extra: Array<string | null | undefined> = []): boolean {
-  if (!identity) return true;
-  if (ownerUid && identity === ownerUid) return true;
-  if (identity.startsWith("producer:")) return true;
-  return extra.some((x) => !!x && x === identity);
-}
+const isProtectedIdentity = isProtectedRoomIdentity;
 
 const ENFORCED_CONTROL_KEYS = [
   "canPublishAudio",
@@ -482,9 +485,23 @@ function pickOutputFormat(v: any): string | undefined {
 }
 
 function isHostOrCohost(role?: string): boolean {
-  const r = String(role || "").toLowerCase();
-  // Updated policy: only hosts can modify room controls or presets.
-  return r === "host";
+  // Hosts can do everything; cohosts are further limited per endpoint by
+  // their roomAccessToken permissions (see lib/roomModerationPolicy).
+  return moderationActorRole(role) !== "other";
+}
+
+function isHostRole(role?: string): boolean {
+  return moderationActorRole(role) === "host";
+}
+
+/**
+ * Whose saved role presets apply: the acting user for hosts (owner or
+ * delegated producer), the room owner for cohosts (so a cohost can't apply
+ * presets they authored themselves).
+ */
+async function presetOwnerUidFor(roomId: string, access: RoomAccessClaims, uid: string | undefined): Promise<string | null> {
+  if (isHostRole(access.role) && uid) return uid;
+  return (await getRoomOwnerUid(roomId)) || uid || null;
 }
 
 function mapPresetToLivekitPermission(role: PresetId) {
@@ -499,8 +516,13 @@ function mapPresetToLivekitPermission(role: PresetId) {
 
 // Host/cohost updates controls for the whole room.
 // PATCH /api/rooms/:roomId/controls
-// Auth: Firebase session cookie + Authorization: Bearer <roomAccessToken>
-router.patch("/:roomId/controls", requireAuth as any, requireRoomAccessToken as any, async (req: any, res) => {
+// Auth: host/cohost roomAccessToken (x-room-access-token). User auth
+// (Authorization or session cookie) is optional: the roomAccessToken alone
+// proves the host/cohost role, so cookie-only host sessions work too.
+// Cohosts may only change keys their permissions cover (layout keys need
+// canLayout, mute keys canMuteGuests, other restrictions canModerate;
+// capability scopes are host-only).
+router.patch("/:roomId/controls", requireRoomAccessToken as any, async (req: any, res) => {
   const roomId = String(req.params.roomId || "").trim();
   if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
@@ -512,8 +534,9 @@ router.patch("/:roomId/controls", requireAuth as any, requireRoomAccessToken as 
     return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
   }
 
-  const uid = (req as any).user?.uid as string | undefined;
-  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+  const authedUser = (req as any).user || (await tryGetAuthUserAny(req).catch(() => null));
+  const uid = (authedUser?.uid as string | undefined) || undefined;
+  const updatedBy = uid || `identity:${String(access.identity || "").slice(0, 128)}`;
 
   const body = (req.body || {}) as any;
   const patch: RoomControls = {
@@ -546,12 +569,17 @@ router.patch("/:roomId/controls", requireAuth as any, requireRoomAccessToken as 
     return res.status(400).json({ error: "no_valid_fields" });
   }
 
+  const missingRoomPerm = missingPermForControlsPatch(access.role, access.permissions, Object.keys(cleaned));
+  if (missingRoomPerm) {
+    return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS, required: missingRoomPerm });
+  }
+
   const ref = controlsDocRef(roomId, "default");
   await ref.set(
     {
       ...cleaned,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedByUid: uid,
+      updatedByUid: updatedBy,
     },
     { merge: true },
   );
@@ -595,6 +623,12 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
   const rawIdentity = String(req.params.identity || "").trim();
   if (!rawIdentity) return res.status(400).json({ error: "identity_required" });
 
+  // Cohosts never act on the room owner / producers.
+  const actorIsHost = isHostRole(access.role);
+  if (!actorIsHost && isProtectedIdentity(rawIdentity, await getRoomOwnerUid(roomId))) {
+    return res.status(403).json({ error: "cannot_moderate_host" });
+  }
+
   const identityDocId = normalizeControlsDocId(rawIdentity);
   const body = (req.body || {}) as any;
 
@@ -603,7 +637,11 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
   const parsedRolePresetId = parsePresetId(body.role);
   if (parsedRolePresetId) {
     const rolePresetId: PresetId = coercePresetIdForApply(parsedRolePresetId);
-    const loadedPreset = await loadPresetForUser(uid, rolePresetId);
+    // Cohosts need canModerate and may only assign participant.
+    if (!actorMay(access.role, access.permissions, "canModerate") || !canAssignRolePreset(access.role, rolePresetId)) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+    const loadedPreset = await loadPresetForUser((await presetOwnerUidFor(roomId, access, uid)) || uid, rolePresetId);
     const presetPatch = normalizePresetForApply(rolePresetId, loadedPreset);
 
     // Strip out any undefined booleans so Firestore never sees undefined fields.
@@ -715,6 +753,11 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
     return res.status(400).json({ error: "no_valid_fields" });
   }
 
+  const missingPerm = missingPermForControlsPatch(access.role, access.permissions, Object.keys(cleaned));
+  if (missingPerm) {
+    return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS, required: missingPerm });
+  }
+
   const ref = controlsDocRef(roomId, identityDocId);
   await ref.set(
     {
@@ -759,8 +802,9 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
   if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
   if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
 
-  // Host-only moderation: only a host can change participant roles/permissions.
-  if (String(access.role || "").toLowerCase() !== "host") {
+  // Hosts, or cohosts with canModerate (who may only assign participant and
+  // never act on the owner/producers).
+  if (!actorMay(access.role, access.permissions, "canModerate")) {
     return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
   }
 
@@ -778,10 +822,19 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
 
   const presetId: PresetId = coercePresetIdForApply(parsedPresetId);
 
+  if (!isHostRole(access.role)) {
+    if (!canAssignRolePreset(access.role, presetId)) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+    if (isProtectedIdentity(rawIdentity, await getRoomOwnerUid(roomId))) {
+      return res.status(403).json({ error: "cannot_moderate_host" });
+    }
+  }
+
   const identityDocId = normalizeControlsDocId(rawIdentity);
 
   try {
-    const loadedPreset = await loadPresetForUser(uid, presetId);
+    const loadedPreset = await loadPresetForUser((await presetOwnerUidFor(roomId, access, uid)) || uid, presetId);
     const presetPatch = normalizePresetForApply(presetId, loadedPreset);
 
     const cleanedFromPreset: RoomControls = {};
@@ -961,8 +1014,17 @@ router.post("/:roomId/controls/:identity/apply-preset", requireAuth as any, requ
 
   const presetId: PresetId = coercePresetIdForApply(parsedPresetId);
 
+  if (!isHostRole(access.role)) {
+    if (!actorMay(access.role, access.permissions, "canModerate") || !canAssignRolePreset(access.role, presetId)) {
+      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+    if (isProtectedIdentity(String(req.params.identity || "").trim(), await getRoomOwnerUid(roomId))) {
+      return res.status(403).json({ error: "cannot_moderate_host" });
+    }
+  }
+
   const identityDocId = normalizeControlsDocId(req.params.identity);
-  const loadedPreset = await loadPresetForUser(uid, presetId);
+  const loadedPreset = await loadPresetForUser((await presetOwnerUidFor(roomId, access, uid)) || uid, presetId);
   const cleaned = normalizePresetForApply(presetId, loadedPreset);
 
   const ref = controlsDocRef(roomId, identityDocId);
@@ -1150,8 +1212,8 @@ function stageChangeHandler(direction: "promote" | "demote") {
       return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
     }
 
-    // Only hosts can move people on/off stage.
-    if (!isHostOrCohost(access.role)) {
+    // Hosts, or cohosts with canModerate, can move people on/off stage.
+    if (!actorMay(access.role, access.permissions, "canModerate")) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -1162,6 +1224,11 @@ function stageChangeHandler(direction: "promote" | "demote") {
       const ownerUid = await getRoomOwnerUid(roomId);
       if (isProtectedIdentity(targetIdentity, ownerUid, [access.identity])) {
         return res.status(400).json({ error: "cannot_demote_host" });
+      }
+    } else if (!isHostRole(access.role)) {
+      // Promoting the owner would rewrite their controls doc; cohosts can't.
+      if (isProtectedIdentity(targetIdentity, await getRoomOwnerUid(roomId))) {
+        return res.status(403).json({ error: "cannot_moderate_host" });
       }
     }
 

@@ -4,14 +4,10 @@ import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { requireRoomAccessToken, type RoomAccessClaims } from "../middleware/roomAccessToken";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { actorMay } from "../lib/roomModerationPolicy";
 import { normalizeStudioLayout } from "../lib/studioLayout";
 
 const router = Router();
-
-function isHostOrCohost(role?: string): boolean {
-  const r = String(role || "").toLowerCase();
-  return r === "host" || r === "cohost";
-}
 
 // ---------------------------------------------------------------------------
 // GET /api/rooms/:roomId/studio-layout
@@ -49,7 +45,7 @@ router.patch("/:roomId/studio-layout", requireAuth as any, requireRoomAccessToke
   const access = (req as any).roomAccess as RoomAccessClaims | undefined;
   if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.ROOM_TOKEN_REQUIRED });
   if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
-  if (!isHostOrCohost(access.role)) {
+  if (!actorMay(access.role, access.permissions, "canLayout")) {
     return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
   }
 

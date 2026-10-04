@@ -14,6 +14,14 @@ import { resolveRoomIdentity } from "../lib/roomIdentity";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { recordInviteAcceptance, jwtInviteAcceptanceId, isInviteShapedClaims } from "../lib/inviteAcceptance";
+import { verifyRoomAccessToken } from "../middleware/roomAccessToken";
+import { isAdmin } from "../middleware/adminAuth";
+import {
+  ENTERED_ROOM_SIGNAL_TTL_MS,
+  hasRecentEnteredRoom,
+  summarizeJoinPagePresence,
+  type JoinPagePresenceEntry,
+} from "../lib/joinPagePresence";
 
 type InviteRole = "guest" | "cohost";
 
@@ -500,25 +508,83 @@ router.post("/track-landing", async (req, res) => {
 });
 
 /**
+ * Host-side access check for room-status: a host/cohost roomAccessToken for
+ * this room (x-room-access-token), or signed-in user auth (Authorization or
+ * the session cookie) belonging to the owner, a platform admin, or a cohost.
+ * Returns an HTTP status on failure, null when allowed.
+ */
+async function checkRoomHostAccess(req: any, roomId: string, room: any): Promise<number | null> {
+  const hdr = (req?.headers as any) || {};
+  const rawAccess = hdr["x-room-access-token"] ?? hdr["X-Room-Access-Token"];
+  if (typeof rawAccess === "string" && rawAccess.trim()) {
+    try {
+      const claims = verifyRoomAccessToken(rawAccess.trim());
+      const role = String(claims?.role || "").toLowerCase();
+      if (String(claims?.roomId || "").trim() === roomId && (role === "host" || role === "cohost")) {
+        return null;
+      }
+    } catch {
+      // fall through to user auth
+    }
+  }
+
+  const user = await tryGetAuthUserAny(req);
+  if (!user) return 401;
+  const ownerId = String(room?.ownerId || "").trim();
+  if (ownerId && ownerId === user.uid) return null;
+  if (await isAdmin(user.uid)) return null;
+  try {
+    (req as any).user = user;
+    const ctx = await assertRoomPerm(req, roomId, "canInvite");
+    if (ctx.role === "owner" || ctx.role === "admin" || ctx.role === "cohost") return null;
+  } catch {
+    // not a host/cohost
+  }
+  return 403;
+}
+
+/**
  * GET /api/invites/room-status?roomId=...
- * Returns a coarse signal for hosts about recent invite activity.
- * Response: { roomId, hasJoinPageView, hasEnteredRoom }
+ * Auth: host/cohost (user auth, or a host/cohost x-room-access-token).
+ * Returns recent guest activity for the host UI.
+ * Response: {
+ *   roomId, hasJoinPageView, hasEnteredRoom,
+ *   joinPage: { count, names[], lastSeenAt (epoch ms | null) }
+ * }
+ * joinPage only counts guests heartbeating POST /api/telemetry/guest
+ * { stage: "join_page" } within the last JOIN_PAGE_PRESENCE_TTL_MS (60s).
  */
 router.get("/room-status", async (req, res) => {
   try {
     const roomId = normalizeRoomId((req.query as any)?.roomId);
-    if (!roomId) return res.status(400).json({ error: "roomId_required" });
+    if (!roomId || roomId.includes("/")) return res.status(400).json({ error: "roomId_required" });
 
-    const snap = await firestore
-      .collection("inviteLandings")
-      .where("roomId", "==", roomId)
-      .get();
+    const roomSnap = await firestore.collection("rooms").doc(roomId).get();
+    if (!roomSnap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
-    const cutoff = Date.now() - 15 * 60 * 1000; // last 15 minutes
+    const denied = await checkRoomHostAccess(req, roomId, roomSnap.data() || {});
+    if (denied) {
+      return res
+        .status(denied)
+        .json({ error: denied === 401 ? PERMISSION_ERRORS.UNAUTHORIZED : PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    }
+
+    const now = Date.now();
+    const [landingsSnap, presenceSnap] = await Promise.all([
+      firestore.collection("inviteLandings").where("roomId", "==", roomId).get(),
+      firestore
+        .collection("rooms")
+        .doc(roomId)
+        .collection("joinPagePresence")
+        .where("lastSeenAtMs", ">=", now - ENTERED_ROOM_SIGNAL_TTL_MS)
+        .get(),
+    ]);
+
+    const cutoff = now - 15 * 60 * 1000; // last 15 minutes
     let hasJoinPageView = false;
     let hasEnteredRoom = false;
 
-    snap.forEach((doc) => {
+    landingsSnap.forEach((doc) => {
       const data = doc.data() as any;
       const ts = (data?.lastSeenAt as any)?.toMillis?.() ?? (data?.lastSeenAt instanceof Date ? data.lastSeenAt.getTime() : 0);
       if (!ts || ts < cutoff) return;
@@ -526,7 +592,19 @@ router.get("/room-status", async (req, res) => {
       if (data?.stage === "entered_room") hasEnteredRoom = true;
     });
 
-    return res.json({ roomId, hasJoinPageView, hasEnteredRoom });
+    const presenceEntries: JoinPagePresenceEntry[] = presenceSnap.docs.map((d) => {
+      const data = (d.data() || {}) as any;
+      return {
+        stage: typeof data.stage === "string" ? data.stage : null,
+        displayName: typeof data.displayName === "string" ? data.displayName : null,
+        lastSeenAtMs: typeof data.lastSeenAtMs === "number" ? data.lastSeenAtMs : null,
+      };
+    });
+    const joinPage = summarizeJoinPagePresence(presenceEntries, now);
+    if (joinPage.count > 0) hasJoinPageView = true;
+    if (hasRecentEnteredRoom(presenceEntries, now)) hasEnteredRoom = true;
+
+    return res.json({ roomId, hasJoinPageView, hasEnteredRoom, joinPage });
   } catch (err: any) {
     console.error("/api/invites/room-status error", err?.message || err);
     return res.status(500).json({ error: "internal_error" });

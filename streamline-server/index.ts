@@ -57,6 +57,7 @@ import publicRoomsHlsConfigRoutes from "./routes/publicRoomsHlsConfig";
 import monetizationRoutes from "./routes/monetization";
 import { resolveRoomIdentity } from "./lib/roomIdentity";
 import { assertRoomPerm, RoomPermissionError } from "./lib/rolePermissions";
+import { isProtectedRoomIdentity, moderationActorRole } from "./lib/roomModerationPolicy";
 import { PERMISSION_ERRORS } from "./lib/permissionErrors";
 import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "./middleware/roomAccessToken";
 
@@ -441,7 +442,7 @@ async function assertEffectiveRoomControl(
   req: express.Request,
   roomId: string,
   perm: "canMuteGuests" | "canRemoveGuests",
-): Promise<void> {
+): Promise<{ access: RoomAccessClaims; ownerUid: string | null; isHost: boolean }> {
   const trimmedRoomId = String(roomId || "").trim();
   if (!trimmedRoomId) {
     throw new RoomPermissionError(400, PERMISSION_ERRORS.INVALID_ROOM, "roomId is required");
@@ -467,6 +468,10 @@ async function assertEffectiveRoomControl(
     }
     throw new RoomPermissionError(403, PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS);
   }
+
+  const ownerRaw = (ctx.room as any)?.ownerId;
+  const ownerUid = typeof ownerRaw === "string" && ownerRaw.trim() ? ownerRaw.trim() : null;
+  return { access, ownerUid, isHost: moderationActorRole(role) === "host" };
 }
 
 // Mute/unmute a single participant's audio (host tools, not platform admin)
@@ -483,13 +488,19 @@ app.post("/api/roomModeration/mute", requireAuth, requireRoomAccessToken as any,
 
     const { roomId, livekitRoomName } = getRoomAccess(req as any);
 
+    let control: Awaited<ReturnType<typeof assertEffectiveRoomControl>>;
     try {
-      await assertEffectiveRoomControl(req as any, roomId, "canMuteGuests");
+      control = await assertEffectiveRoomControl(req as any, roomId, "canMuteGuests");
     } catch (err) {
       if (err instanceof RoomPermissionError) {
         return res.status(err.status).json({ error: err.code });
       }
       throw err;
+    }
+
+    // Cohosts can't mute the owner / producers.
+    if (!control.isHost && isProtectedRoomIdentity(String(identity), control.ownerUid)) {
+      return res.status(403).json({ error: "cannot_moderate_host" });
     }
 
     console.log("ADMIN MUTE", { roomId, livekitRoomName, identity, muted });
@@ -542,22 +553,31 @@ app.post("/api/roomModeration/mute", requireAuth, requireRoomAccessToken as any,
 // Mute/unmute ALL participants' audio (host tools)
 app.post("/api/roomModeration/mute-all", requireAuth, requireRoomAccessToken as any, async (req, res) => {
   try {
-    const { muted } = req.body as { room?: string; muted?: boolean };
+    const { muted, hostIdentity } = req.body as { room?: string; muted?: boolean; hostIdentity?: string };
 
     if (typeof muted !== "boolean") {
       return res.status(400).json({ error: "muted is required" });
     }
 
-    const { roomId, livekitRoomName } = getRoomAccess(req as any);
+    const { access, roomId, livekitRoomName } = getRoomAccess(req as any);
 
+    let control: Awaited<ReturnType<typeof assertEffectiveRoomControl>>;
     try {
-      await assertEffectiveRoomControl(req as any, roomId, "canMuteGuests");
+      control = await assertEffectiveRoomControl(req as any, roomId, "canMuteGuests");
     } catch (err) {
       if (err instanceof RoomPermissionError) {
         return res.status(err.status).json({ error: err.code });
       }
       throw err;
     }
+
+    // Like mute-lock: never mute the caller, the room owner or producers.
+    // hostIdentity from the body is honored only for hosts (a cohost can't use
+    // it to exempt someone else).
+    const skipIdentities: Array<string | null | undefined> = [
+      access.identity,
+      control.isHost && typeof hostIdentity === "string" ? hostIdentity : null,
+    ];
 
     console.log("ADMIN MUTE-ALL", { roomId, livekitRoomName, muted });
 
@@ -571,9 +591,13 @@ app.post("/api/roomModeration/mute-all", requireAuth, requireRoomAccessToken as 
     }
 
     const participants = await roomService.listParticipants(livekitRoomName);
-    const results: Array<{ identity: string; trackSid: string | null; changed: boolean }> = [];
+    const results: Array<{ identity: string; trackSid: string | null; changed: boolean; skipped?: "protected" }> = [];
 
     for (const p of participants) {
+      if (isProtectedRoomIdentity(String(p.identity || ""), control.ownerUid, skipIdentities)) {
+        results.push({ identity: p.identity, trackSid: null, changed: false, skipped: "protected" });
+        continue;
+      }
       const tracks: any[] = Array.isArray((p as any)?.tracks) ? (p as any).tracks : [];
       const audioTrack =
         tracks.find((t: any) => t?.source === TrackSource.MICROPHONE) ||
@@ -720,13 +744,19 @@ app.post("/api/roomModeration/remove", requireAuth, requireRoomAccessToken as an
 
     const { roomId, livekitRoomName } = getRoomAccess(req as any);
 
+    let control: Awaited<ReturnType<typeof assertEffectiveRoomControl>>;
     try {
-      await assertEffectiveRoomControl(req as any, roomId, "canRemoveGuests");
+      control = await assertEffectiveRoomControl(req as any, roomId, "canRemoveGuests");
     } catch (err) {
       if (err instanceof RoomPermissionError) {
         return res.status(err.status).json({ ok: false, error: err.code });
       }
       throw err;
+    }
+
+    // Cohosts can't remove the owner / producers.
+    if (!control.isHost && isProtectedRoomIdentity(String(identity), control.ownerUid)) {
+      return res.status(403).json({ ok: false, error: "cannot_moderate_host" });
     }
 
     const roomService = await getRoomService();
@@ -753,7 +783,11 @@ app.post("/api/roomModeration/remove-all", requireAuth, requireRoomAccessToken a
     const { roomId, livekitRoomName } = getRoomAccess(req as any);
 
     try {
-      await assertEffectiveRoomControl(req as any, roomId, "canRemoveGuests");
+      const control = await assertEffectiveRoomControl(req as any, roomId, "canRemoveGuests");
+      // Remove-all kicks the owner too and ends the room: host only.
+      if (!control.isHost) {
+        throw new RoomPermissionError(403, PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS);
+      }
     } catch (err) {
       if (err instanceof RoomPermissionError) {
         return res.status(err.status).json({ ok: false, error: err.code });

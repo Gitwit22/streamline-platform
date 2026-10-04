@@ -4,14 +4,11 @@ import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { requireRoomAccessToken, type RoomAccessClaims } from "../middleware/roomAccessToken";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { actorMay } from "../lib/roomModerationPolicy";
 import { normalizeRoomLayout, normalizeOutputFormat, resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
 import { getPresetsForFormat } from "../lib/verticalLayouts";
 
 const router = Router();
-
-function isHost(role?: string): boolean {
-  return String(role || "").toLowerCase() === "host";
-}
 
 // GET /api/rooms/:roomId/layout
 // Auth: roomAccessToken (header/query). No Firebase auth required.
@@ -45,7 +42,7 @@ router.get("/:roomId/layout", requireRoomAccessToken as any, async (req: any, re
 });
 
 // PATCH /api/rooms/:roomId/layout
-// Auth: Firebase auth + roomAccessToken, host-only.
+// Auth: Firebase auth + roomAccessToken; host, or cohost with canLayout.
 router.patch("/:roomId/layout", requireAuth as any, requireRoomAccessToken as any, async (req: any, res) => {
   const roomId = String(req.params.roomId || "").trim();
   if (!roomId) return res.status(400).json({ error: "roomId_required" });
@@ -53,7 +50,7 @@ router.patch("/:roomId/layout", requireAuth as any, requireRoomAccessToken as an
   const access = (req as any).roomAccess as RoomAccessClaims | undefined;
   if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.ROOM_TOKEN_REQUIRED });
   if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
-  if (!isHost(access.role)) {
+  if (!actorMay(access.role, access.permissions, "canLayout")) {
     return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
   }
 

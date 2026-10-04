@@ -29,6 +29,7 @@ import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { isAdmin } from "../middleware/adminAuth";
 import { resolveHostName } from "../lib/resolveHostName";
 import { logDelegatedRoomAction, resolveOwnerActingContext } from "../lib/collaborators";
+import { mergeCohostControlScopes } from "../lib/roomModerationPolicy";
 
 /**
  * Invite JWT from x-invite-token, body.inviteToken or query inviteToken/t.
@@ -125,6 +126,24 @@ export function tryGetRoomAccessShareGuest(req: any, roomId: string): { role: "g
     }
   }
   return null;
+}
+
+/**
+ * Role of a valid roomAccessToken for this room sent via x-room-access-token,
+ * or null. Read-only membership proof (used by GET /rooms/:roomId/status).
+ */
+export function roomAccessRoleForRoom(req: any, roomId: string): string | null {
+  const hdr = (req?.headers as any) || {};
+  const raw = hdr["x-room-access-token"] ?? hdr["X-Room-Access-Token"];
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    const claims = verifyRoomAccessToken(raw.trim()) as any;
+    if (String(claims?.roomId || "").trim() !== roomId) return null;
+    const role = String(claims?.role || "").trim().toLowerCase();
+    return role || null;
+  } catch {
+    return null;
+  }
 }
 
 /** Random LiveKit identity for an invite-based guest. */
@@ -822,6 +841,9 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       isViewer: false, // All invite-based guests are RTC participants with mic+cam (guest role)
       role: mintedRole,
       roomName,
+      permissions: basePerms,
+      adminOverride: false,
+      presenceMode: "normal",
     });
     } finally {
       if (capLockOwner) {
@@ -858,9 +880,26 @@ router.get("/rooms/:roomId/status", async (req: any, res) => {
     const user = await tryGetAuthUserAny(req);
     let guest: { roomId: string } | null = tryGetGuestSession(req, roomId);
 
+    // Any valid roomAccessToken for this room (x-room-access-token) proves
+    // membership. Host/cohost tokens are allowed even when guests are not.
+    const memberRole = roomAccessRoleForRoom(req, roomId);
+    if (!user && (memberRole === "host" || memberRole === "cohost")) {
+      return res.json({ roomId, status });
+    }
+
     // Optional per-room guest policy: only enforced when explicitly set.
     if (!user && allowGuestsPolicy === false) {
       return res.status(401).json({ error: "login_required" });
+    }
+
+    if (!user && memberRole) {
+      return res.json({ roomId, status });
+    }
+
+    // Any verified invite JWT for this room (x-invite-token), including
+    // cohost invites, may read the coarse status.
+    if (!user && (!guest || guest.roomId !== roomId) && !tryGetLegacyInviteGuest(req, roomId) && getInviteClaimsForRoom(req, roomId)) {
+      return res.json({ roomId, status });
     }
 
     if (!user && (!guest || guest.roomId !== roomId)) {
@@ -1013,12 +1052,26 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     const hasGuestSessionForRoom = !!guest && guest.roomId === roomId;
     // Direct (no-invite) guest sessions don't open private rooms.
     const hasInviteSessionForRoom = hasGuestSessionForRoom && !guest!.inviteId.startsWith("direct:");
+    const hasInviteAccess0 = !!inviteClaims || !!acceptance || hasGuestSessionForRoom;
+
+    // Platform admin acting as host in a room they don't own: asked for the
+    // host role (or no role, with no invite/session evidence). Gets host
+    // grants and full room permissions; adminOverride is reported so the
+    // client doesn't end the room when the admin leaves.
+    const requestedRole = String(req.body?.role || "").trim().toLowerCase();
+    const isAdminHost =
+      !!user &&
+      !isPrivilegedProducer &&
+      (requestedRole === "host" || (!requestedRole && !hasInviteAccess0)) &&
+      (await isAdmin(user.uid));
+    const isHostLike = isPrivilegedProducer || isAdminHost;
+    const adminOverride = isAdminHost;
 
     // Policy: visibility
     // Private rooms are owner-only UNLESS the caller has invite access.
     // This supports "invite someone on stage" while keeping strict access by default.
     const hasInviteAccess = !!inviteClaims || !!acceptance || hasInviteSessionForRoom;
-    if (visibility === "private" && !isPrivilegedProducer && !hasInviteAccess) {
+    if (visibility === "private" && !isHostLike && !hasInviteAccess) {
       return res.status(403).json({ error: "not_allowed" });
     }
 
@@ -1026,7 +1079,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // cohost invite JWT for this room.
     const inviteClaimIsCohost =
       !!inviteClaims && (inviteClaims.role === "cohost" || inviteClaims.role === "moderator");
-    const isCohost = !!user && !isPrivilegedProducer && (acceptance?.role === "cohost" || inviteClaimIsCohost);
+    const isCohost = !!user && !isHostLike && (acceptance?.role === "cohost" || inviteClaimIsCohost);
     if (isCohost && inviteClaimIsCohost && acceptance?.role !== "cohost") {
       // Persist so the cohost keeps the role after the invite link is gone.
       await recordInviteAcceptance({
@@ -1040,7 +1093,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     }
 
     // Policy: payment
-    if (requiresPayment && !isPrivilegedProducer) {
+    if (requiresPayment && !isHostLike) {
       return res.status(402).json({ error: "payment_required" });
     }
 
@@ -1054,7 +1107,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // Escape hatch: ROOM_TOKEN_STRICT_AUTHED_PUBLISH=0.
     const strictAuthedPublish = String(process.env.ROOM_TOKEN_STRICT_AUTHED_PUBLISH || "").trim() !== "0";
     let authedSubscribeOnly = false;
-    if (user && !isPrivilegedProducer && !isCohost && strictAuthedPublish) {
+    if (user && !isHostLike && !isCohost && strictAuthedPublish) {
       const isOpenPublicRoom = visibility === "public" && allowGuestsPolicy !== false;
       authedSubscribeOnly = !(hasGuestSessionForRoom || !!inviteClaims || !!acceptance || isOpenPublicRoom);
     }
@@ -1094,7 +1147,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // non-normal presence modes.  Guests cannot.
     const rawPresenceMode = req.body?.presenceMode;
     let presenceMode: PresenceMode =
-      user && isPrivilegedProducer && isValidPresenceMode(rawPresenceMode)
+      user && isHostLike && isValidPresenceMode(rawPresenceMode)
         ? normalizePresenceMode(rawPresenceMode)
         : "normal";
 
@@ -1104,7 +1157,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
 
     // Server-side gate: invisible host requires the plan entitlement.
     // If the plan doesn't include it, silently downgrade to "normal".
-    if (presenceMode === "invisible" && user) {
+    if (presenceMode === "invisible" && user && !isAdminHost) {
       try {
         const ent = await getEffectiveEntitlements(ownerId || user.uid);
         if (!ent.features.invisibleHost) {
@@ -1119,7 +1172,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // - Authenticated users: host (if owner) or participant
     // - Guest sessions: "guest" (RTC participant with mic/cam)
     let lkRole: MintRole = user
-      ? (isPrivilegedProducer ? "host" : isCohost ? "cohost" : authedSubscribeOnly ? "viewer" : "participant")
+      ? (isHostLike ? "host" : isCohost ? "cohost" : authedSubscribeOnly ? "viewer" : "participant")
       : shareViewerOnly
         ? "viewer"
         : guest?.role === "participant"
@@ -1132,7 +1185,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       roomId,
       livekitRoomName,
       ownerId: ownerId || null,
-      bypass: !!(user && isPrivilegedProducer),
+      bypass: !!(user && isHostLike),
       res,
     });
     if (!capacity.ok) return;
@@ -1156,11 +1209,13 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // re-mint after a role change doesn't undo it. Owners/delegates are never
     // affected; cohost is only granted to signed-in users (anonymous guests get
     // participant-level publish instead).
+    let identityControls: Record<string, unknown> | null = null;
     if (lkRole !== "host") {
       try {
         const docId = String(identity).includes("/") ? "" : String(identity).slice(0, 128);
         if (docId) {
           const ctlSnap = await firestore.collection("rooms").doc(roomId).collection("controls").doc(docId).get();
+          identityControls = ((ctlSnap.data() as any) || null) as Record<string, unknown> | null;
           const hostRole = String((ctlSnap.data() as any)?.role || "").trim().toLowerCase();
           if (hostRole === "viewer") {
             lkRole = "viewer";
@@ -1213,9 +1268,14 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     const effectiveRoleKey: MintRole = lkRole;
     // Cohost room permissions: the cohost role profile, limited to what the
     // owner's plan allows (recording, destinations).
+    // Capability scopes the host set on this cohost's controls doc (e.g. the
+    // cohost preset's canMuteGuests/canRemoveGuests) are folded in.
     const cohostPerms =
       effectiveRoleKey === "cohost"
-        ? await intersectPermissionsWithEntitlements({ ...ROLE_PERMISSIONS.cohost }, ownerId || undefined)
+        ? mergeCohostControlScopes(
+            await intersectPermissionsWithEntitlements({ ...ROLE_PERMISSIONS.cohost }, ownerId || undefined),
+            identityControls,
+          )
         : null;
     const basePerms =
       cohostPerms
@@ -1281,6 +1341,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       identity,
       presenceMode,
       actingOwnerUid: isDelegatedProducer ? ownerId : undefined,
+      adminOverride: adminOverride || undefined,
     } as const;
 
     const roomAccessToken = jwt.sign(roomAccessPayload, getRoomAccessSecret(), { expiresIn: "12h" });
@@ -1340,6 +1401,11 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       ...(renewedGuestSessionToken ? { guestSessionToken: renewedGuestSessionToken } : {}),
       role: lkRole,
       effectiveRoleKey,
+      // Same permissions as in roomAccessToken (what the server enforces).
+      permissions: basePerms,
+      // True when a platform admin was elevated to host in a room they don't own.
+      adminOverride,
+      // Effective presence mode after any server-side downgrade.
       presenceMode,
       effectiveEntitlements: ownerEntitlements,
       actingContext: user
@@ -1651,6 +1717,9 @@ router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
         roomAccessToken,
         role: "guest",
         roomName,
+        permissions: roomAccessPayload.permissions,
+        adminOverride: false,
+        presenceMode: "normal",
       });
     } finally {
       if (capLockOwner) {

@@ -7,6 +7,7 @@ import {
   type RoomAccessClaims,
 } from "../middleware/roomAccessToken";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { actorMay } from "../lib/roomModerationPolicy";
 import {
   normalizeProgramState,
   DEFAULT_PROGRAM_STATE,
@@ -15,11 +16,6 @@ import {
 import { getLiveKitSdk } from "../lib/livekit";
 
 const router = Router();
-
-function isHostOrCohost(role?: string): boolean {
-  const r = String(role || "").toLowerCase();
-  return r === "host" || r === "cohost";
-}
 
 // ---------------------------------------------------------------------------
 // Broadcast program state to all room participants via LiveKit room metadata
@@ -124,7 +120,7 @@ router.get(
 
 // ---------------------------------------------------------------------------
 // PATCH /api/rooms/:roomId/program-state
-// Auth: Firebase auth + roomAccessToken, host or cohost.
+// Auth: Firebase auth + roomAccessToken; host, or cohost with canLayout.
 // ---------------------------------------------------------------------------
 router.patch(
   "/:roomId/program-state",
@@ -143,7 +139,7 @@ router.patch(
       return res
         .status(403)
         .json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
-    if (!isHostOrCohost(access.role))
+    if (!actorMay(access.role, access.permissions, "canLayout"))
       return res
         .status(403)
         .json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
