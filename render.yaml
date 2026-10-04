@@ -62,8 +62,9 @@ services:
       # "Run now" still work). JOB_<NAME>_MS overrides one job's interval,
       # e.g. JOB_MEDIA_PURGE_MS=1800000 ("0" disables its timer).
       # EXPORT_RETENTION_DAYS (default 30, "0" = keep forever) expires rendered
-      # export files; JOB_HISTORY_RETENTION_DAYS / STRIPE_EVENT_RETENTION_DAYS
-      # (default 30) bound jobRuns / stripeEvents.
+      # export files; JOB_HISTORY_RETENTION_DAYS / STRIPE_EVENT_RETENTION_DAYS /
+      # TELEMETRY_RETENTION_DAYS (default 30) bound jobRuns / stripeEvents /
+      # telemetryEvents. TELEMETRY_DISABLED=true stops telemetry writes.
       - key: JOBS_ENABLED
         sync: false
       - key: EXPORT_RETENTION_DAYS

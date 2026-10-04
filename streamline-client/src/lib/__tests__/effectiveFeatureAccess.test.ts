@@ -35,7 +35,6 @@ const FLAGS = {
   myContentRecordingsEnabled: true,
   audioMixerEnabled: false,
   advancedScreenShareEnabled: false,
-  mixedAudioPublishEnabled: false,
   monetizationEnabled: false,
   payPerViewEnabled: false,
   invisibleHostEnabled: false,

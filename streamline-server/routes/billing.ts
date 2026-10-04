@@ -1,3 +1,4 @@
+import { recordTelemetry } from "../lib/telemetry";
 import { Router } from "express";
 import type Stripe from "stripe";
 import type { DocumentReference } from "firebase-admin/firestore";
@@ -857,9 +858,17 @@ router.post("/checkout", requireAuth, async (req, res) => {
       { merge: true }
     );
 
+    recordTelemetry("checkout.started", {
+      userId: uid,
+      metadata: { kind: "subscription", planId: canonicalPlan, planVariant: plan, trial: !!useTrial },
+    });
     return res.json({ success: true, url: session.url, reason: "checkout_session_created", requestId });
   } catch (err: any) {
     console.error("POST /api/billing/checkout failed:", err?.message || err);
+    recordTelemetry("checkout.failed", {
+      userId: (req as any).user?.uid || null,
+      metadata: { kind: "subscription", stage: "create_session", error: err?.code || err?.message || "error" },
+    });
 
     const code = String(err?.code || "").toUpperCase();
     if (code === "MISSING_STRIPE_KEY" || String(err?.message || "") === "missing_stripe_key") {
@@ -1303,111 +1312,6 @@ router.post(
     now: () => Date.now(),
   })
 );
-
-router.get("/me", requireAuth, async (req, res) => {
-  try {
-    const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    const account = (req as any).account || await getUserAccount(uid);
-
-    const snap = await getUserRef(uid).get();
-    const raw = snap.exists ? snap.data() : account.rawUser;
-    return res.json({
-      id: uid,
-      ...raw,
-      planId: account.planId,
-      billingEnabled: account.billingEnabled,
-      platformBillingEnabled: account.platformBillingEnabled,
-      effectiveBillingEnabled: account.effectiveBillingEnabled,
-      isAdmin: account.isAdmin,
-    });
-  } catch (err: any) {
-    console.error("GET /api/billing/me failed:", err?.message || err);
-    return res.status(500).json({ error: "Failed to load user" });
-  }
-});
-
-// Safely check if a subscription change is scheduled
-// Returns: { scheduledChange, effectiveDate, hasSubscription, status, cancelAtPeriodEnd, billingActive }
-router.get("/pending-change", requireAuth, async (req, res) => {
-  try {
-    const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    const account = (req as any).account || await getUserAccount(uid);
-
-    const snap = await getUserRef(uid).get();
-    if (!snap.exists) return res.status(404).json({ error: "User not found" });
-    const user = snap.data() as any;
-
-    const subscriptionId: string | undefined =
-      user?.billing?.subscriptionId || user?.stripeSubscriptionId;
-
-    const hasSubscription = !!subscriptionId;
-    const billingActive = !!(user?.billingStatus === "active" || user?.billingStatus === "trialing");
-
-    if (!subscriptionId) {
-      return res.json({
-        scheduledChange: false,
-        effectiveDate: null,
-        hasSubscription,
-        status: user?.billingStatus || "none",
-        cancelAtPeriodEnd: false,
-        billingActive,
-      });
-    }
-
-    const sub = await stripe.subscriptions.retrieve(subscriptionId);
-    const cancelAtPeriodEnd = !!(sub as any).cancel_at_period_end;
-    const status = (sub as any).status as string | undefined;
-    const currentPeriodEnd = getSubscriptionPeriodEnd(sub)
-      ? new Date(getSubscriptionPeriodEnd(sub)! * 1000).toISOString()
-      : null;
-
-    let scheduledChange = false;
-    let effectiveDate: string | null = null;
-
-    // If set to cancel at period end, consider that a scheduled change
-    if (cancelAtPeriodEnd) {
-      scheduledChange = true;
-      effectiveDate = currentPeriodEnd;
-    }
-
-    // If there is a schedule attached, treat it as scheduled
-    if (!scheduledChange) {
-      const scheduleId = (sub as any).schedule || (sub as any).subscription_schedule;
-      if (scheduleId) {
-        scheduledChange = true;
-        // Best-effort: try to read schedule
-        try {
-          const schedule = await stripe.subscriptionSchedules.retrieve(String(scheduleId));
-          const phases = (schedule.phases || []) as any[];
-          const last = phases[phases.length - 1];
-          if (last?.end_date) {
-            effectiveDate = new Date(last.end_date * 1000).toISOString();
-          }
-        } catch {}
-      }
-    }
-
-    // Some accounts expose pending_update
-    if (!scheduledChange && (sub as any).pending_update) {
-      scheduledChange = true;
-      effectiveDate = currentPeriodEnd;
-    }
-
-    return res.json({
-      scheduledChange,
-      effectiveDate,
-      hasSubscription,
-      status,
-      cancelAtPeriodEnd,
-      billingActive,
-    });
-  } catch (err: any) {
-    console.error("GET /api/billing/pending-change failed:", err?.message || err);
-    return res.status(500).json({ error: "Server error" });
-  }
-});
 
 // Comprehensive billing/plan state for UI state machine
 router.get("/status", requireAuth, async (req, res) => {

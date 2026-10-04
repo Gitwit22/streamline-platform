@@ -40,7 +40,7 @@ import {
   apiFetchOptionalAuth,
   hasAuthSession,
 } from "../../lib/api";
-import { logTelemetry, markTiming, measureTiming, postGuestPresence } from "../../lib/telemetry";
+import { postGuestPresence } from "../../lib/telemetry";
 import {
   classifyDisconnect,
   hasRoomPermission,
@@ -121,93 +121,6 @@ const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
 // the options' JSON changes). livekit-client has no room-level screen-share
 // capture defaults, so CaptureDefaultsSync injects ScreenShareCaptureOptions
 // (1080p30 + system/tab audio) when screen share is enabled without options.
-
-// Telemetry tracker for measuring guest invite flow performance
-function GuestTelemetryTracker({ roomId, isViewer }: { roomId: string | null; isViewer: boolean }) {
-  const room = useRoomContext();
-  const [guestSessionToken] = useState(() => getGuestSessionToken(roomId));
-  const [hasLoggedJoinSuccess, setHasLoggedJoinSuccess] = useState(false);
-  const [hasLoggedFirstVideo, setHasLoggedFirstVideo] = useState(false);
-
-  // Track when viewer lands in room (mark timing start)
-  useEffect(() => {
-    if (!isViewer || !roomId || !guestSessionToken) return;
-    
-    const timingKey = `viewer_first_video:${roomId}`;
-    markTiming(timingKey);
-    console.log('[Telemetry] Marking timing start for viewer join:', roomId);
-
-    return () => {
-      // Cleanup timing mark if component unmounts without video
-      measureTiming(timingKey);
-    };
-  }, [isViewer, roomId, guestSessionToken]);
-
-  // Track viewer_join_success when connected to LiveKit
-  useEffect(() => {
-    if (!room || !isViewer || !roomId || !guestSessionToken || hasLoggedJoinSuccess) return;
-
-    const onConnected = () => {
-      console.log('[Telemetry] Viewer connected successfully');
-      logTelemetry({
-        event: "viewer_join_success",
-        roomId,
-        guestSessionToken,
-      });
-      setHasLoggedJoinSuccess(true);
-    };
-
-    if (room.state === 'connected') {
-      onConnected();
-    }
-
-    room.on(RoomEvent.Connected, onConnected);
-
-    return () => {
-      room.off(RoomEvent.Connected, onConnected);
-    };
-  }, [room, isViewer, roomId, guestSessionToken, hasLoggedJoinSuccess]);
-
-  // Track viewer_first_video_track_ms when first video track is subscribed
-  useEffect(() => {
-    if (!room || !isViewer || !roomId || !guestSessionToken || hasLoggedFirstVideo) return;
-
-    const timingKey = `viewer_first_video:${roomId}`;
-
-    const onTrackSubscribed = (track: any, publication: any, participant: any) => {
-      // Only care about video tracks
-      if (track.kind !== 'video') return;
-
-      const durationMs = measureTiming(timingKey);
-      if (durationMs === null) {
-        console.warn('[Telemetry] No timing mark found for first video track');
-        return;
-      }
-
-      console.log('[Telemetry] First video track subscribed', {
-        durationMs,
-        participantIdentity: participant.identity,
-      });
-
-      logTelemetry({
-        event: "viewer_first_video_track_ms",
-        roomId,
-        durationMs,
-        guestSessionToken,
-      });
-
-      setHasLoggedFirstVideo(true);
-    };
-
-    room.on(RoomEvent.TrackSubscribed, onTrackSubscribed);
-
-    return () => {
-      room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
-    };
-  }, [room, isViewer, roomId, guestSessionToken, hasLoggedFirstVideo]);
-
-  return null;
-}
 
 // Comprehensive LiveKit video debugging logger
 function LiveKitDebugLogger() {
@@ -1341,8 +1254,6 @@ type LiveKitShellProps = {
   roomAccessMode?: RoomAccessMode | null;
   onRoomAccessChange?: (mode: RoomAccessMode) => void;
   effectivePermissionsMode: "simple" | "advanced";
-  dashboardGreenroomEnabled: boolean;
-  dashboardOverlaysEnabled: boolean;
   dashboardRole: "host" | "moderator" | "participant";
   onLeaveRequested?: () => void;
   /** LiveKit Disconnected (reason is a DisconnectReason value when known). */
@@ -1392,8 +1303,6 @@ function LiveKitShell({
   roomAccessMode,
   onRoomAccessChange,
   effectivePermissionsMode,
-  dashboardGreenroomEnabled,
-  dashboardOverlaysEnabled,
   dashboardRole,
   onLeaveRequested,
   onDisconnected,
@@ -1605,7 +1514,6 @@ function LiveKitShell({
         <LiveKitDebugLogger />
         <VideoElementMonitor />
         {DEV_CONTROLS && <PermissionsDebugOverlay dashboardRole={dashboardRole === "host" ? "host" : "participant"} />}
-        <GuestTelemetryTracker roomId={roomId} isViewer={isViewer} />
         <MediaDeviceErrorHandler onError={handleMediaDeviceError} />
         <WaitingForHostBanner isViewer={isViewer} />
         <MediaPermissionErrorBanner 
@@ -1751,8 +1659,6 @@ function LiveKitShell({
             canRemoveGuests={canRemoveGuests}
             canModerate={canModerate}
             advancedRolesEnabled={effectivePermissionsMode === "advanced"}
-            greenroomEnabled={dashboardGreenroomEnabled}
-            overlaysEnabled={dashboardOverlaysEnabled}
             roomAccessMode={roomAccessMode}
             onRoomAccessChange={onRoomAccessChange}
           />
@@ -2031,8 +1937,6 @@ function RoomPage() {
   const [platformHlsEnabled, setPlatformHlsEnabled] = useState<boolean>(true);
   const [platformRecordingEnabled, setPlatformRecordingEnabled] = useState<boolean>(true);
   const [entitlementsReady, setEntitlementsReady] = useState(false);
-  const [dashboardGreenroomEnabled, setDashboardGreenroomEnabled] = useState<boolean>(false);
-  const [dashboardOverlaysEnabled, setDashboardOverlaysEnabled] = useState<boolean>(false);
   const [dualRecordingAllowed, setDualRecordingAllowed] = useState<boolean>(false);
   const [watermarkEnabled, setWatermarkEnabled] = useState<boolean>(false);
   const [maxGuestsAllowed, setMaxGuestsAllowed] = useState<number | null>(null);
@@ -2664,18 +2568,6 @@ function RoomPage() {
       if (typeof (platform as any).recordingEnabled === "boolean") {
         setPlatformRecordingEnabled((platform as any).recordingEnabled);
       }
-    }
-
-    const dashboardGreenroomFlag =
-      (platform as any).dashboardGreenroomEnabled ?? (platform as any).greenroomDashboard;
-    if (typeof dashboardGreenroomFlag === "boolean") {
-      setDashboardGreenroomEnabled(dashboardGreenroomFlag);
-    }
-
-    const dashboardOverlaysFlag =
-      (platform as any).dashboardOverlaysEnabled ?? (platform as any).overlaysDashboard;
-    if (typeof dashboardOverlaysFlag === "boolean") {
-      setDashboardOverlaysEnabled(dashboardOverlaysFlag);
     }
 
     let appliedEff = false;
@@ -5333,8 +5225,6 @@ function RoomPage() {
           roomAccessMode={roomAccessMode}
           onRoomAccessChange={setRoomAccessMode}
           effectivePermissionsMode={effectivePermissionsMode}
-          dashboardGreenroomEnabled={dashboardGreenroomEnabled}
-          dashboardOverlaysEnabled={dashboardOverlaysEnabled}
           key={connectAttempt}
           dashboardRole={dashboardRole}
           canLayout={canLayoutUi}

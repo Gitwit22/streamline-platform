@@ -47,7 +47,6 @@ export type ServerPlatformFlags = {
   myContentRecordingsEnabled: boolean;
   audioMixerEnabled: boolean;
   advancedScreenShareEnabled: boolean;
-  mixedAudioPublishEnabled: boolean;
   monetizationEnabled: boolean;
   payPerViewEnabled: boolean;
   invisibleHostEnabled: boolean;

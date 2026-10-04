@@ -10,6 +10,7 @@
  * POST   /api/monetization/enter            – gate check (can viewer watch?)
  */
 
+import { recordTelemetry } from "../lib/telemetry";
 import { Router, type Request, type Response } from "express";
 import { stripe } from "../lib/stripe";
 import { requireAuth, tryGetAuthUserAny } from "../middleware/requireAuth";
@@ -344,9 +345,17 @@ router.post("/checkout", async (req: Request, res: Response) => {
       cancel_url: `${CLIENT_URL}${returnPath}${sep}canceled=1`,
     });
 
+    recordTelemetry("checkout.started", {
+      userId: viewer?.uid || null,
+      roomId: typeof event.roomId === "string" ? event.roomId : null,
+      metadata: { kind: "monetization", type, eventId: event.id, amountCents: finalAmountCents, currency: event.currency || "usd" },
+    });
     return res.json({ ok: true, url: session.url });
   } catch (err: any) {
     console.error("[monetization] checkout error:", err?.message);
+    recordTelemetry("checkout.failed", {
+      metadata: { kind: "monetization", stage: "create_session", eventId: req.body?.eventId, error: err?.code || err?.message || "error" },
+    });
     return res.status(500).json({ error: "internal_error" });
   }
 });

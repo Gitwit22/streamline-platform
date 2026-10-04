@@ -23,6 +23,7 @@ import { checkStreamingStartGate, closeOutputIntervals, openOutputInterval, stre
 import { OUTPUT_FORMAT_DIMENSIONS } from "../lib/roomLayout";
 import { logDelegatedRoomAction } from "../lib/collaborators";
 import { FieldValue } from "firebase-admin/firestore";
+import { recordTelemetry } from "../lib/telemetry";
 import { decideMultistreamStart, maskSecretTail, redactRtmpUrl } from "../lib/mediaPure";
 import { compositorUrl, instagramAspectFor, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
 
@@ -442,6 +443,16 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
     const startedEgressIds: string[] = [];
     const failStart = async (status: number, body: Record<string, any>) => {
       await stopEgressesQuietly(startedEgressIds);
+      recordTelemetry("destination.failed", {
+        userId: ownerUid,
+        roomId,
+        metadata: {
+          stage: "start",
+          status,
+          error: body?.error,
+          platforms: [...logEntries.map((e) => e.platform), ...instagramLogEntries.map((e) => e.platform)],
+        },
+      });
       // Remove our claim: other code (recordings/start) treats the doc's
       // existence as "a stream is live".
       try {
@@ -628,6 +639,24 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
           action: "multistream_start",
           metadata: { destinationCount: destIds.length },
         }).catch(() => {});
+      }
+
+      for (const row of intervals) {
+        if (!row.id) continue;
+        recordTelemetry("broadcast.started", {
+          userId: ownerUid,
+          roomId,
+          broadcastId: row.id,
+          metadata: { kind: row.kind, destinations: row.destinations, presetId: effectiveId, delegated: ownerUid !== uid },
+        });
+        for (const platform of row.destinations) {
+          recordTelemetry("destination.connected", {
+            userId: ownerUid,
+            roomId,
+            broadcastId: row.id,
+            metadata: { platform, kind: row.kind },
+          });
+        }
       }
 
       // Ensure non-empty JSON body

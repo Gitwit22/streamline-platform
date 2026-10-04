@@ -17,6 +17,7 @@ import { setHlsIdle } from "../services/rooms";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
 import { copyViewerStatsToRecording, ensureLiveSession, onHlsIdle, onRoomFinished, recordRtcViewerLeft, recordViewer } from "../lib/viewerStats";
 import { recordEgressOutcome } from "../lib/streamSummary";
+import { recordTelemetry } from "../lib/telemetry";
 import { isCountableRtcViewer, viewerKeyFor } from "../lib/viewerStatsPure";
 import Stripe from "stripe";
 import { firestore as db } from "../firebaseAdmin";
@@ -271,6 +272,16 @@ async function handleMonetizationSession(session: Stripe.Checkout.Session): Prom
     });
     return;
   }
+  recordTelemetry("checkout.completed", {
+    userId: typeof session.metadata?.viewerUid === "string" ? session.metadata.viewerUid : null,
+    metadata: {
+      kind: "monetization",
+      type: session.metadata?.type,
+      eventId: session.metadata?.eventId,
+      amountCents: session.amount_total ?? null,
+      currency: session.currency || null,
+    },
+  });
   try {
     const {
       createPurchase,
@@ -627,10 +638,31 @@ router.post(
             { merge: true }
           );
 
+          recordTelemetry("checkout.completed", {
+            userId: uid,
+            metadata: { kind: "subscription", planId, planVariant: planVariant || null, billingStatus },
+          });
+
           console.log("[stripe] Billing written from checkout.session.completed", {
             uid,
             planId,
             billingStatus,
+          });
+          break;
+        }
+
+        case "checkout.session.async_payment_failed": {
+          const session = event.data.object as Stripe.Checkout.Session;
+          const isMonetization = session.metadata?.source === "streamline_monetization";
+          recordTelemetry("checkout.failed", {
+            userId: (isMonetization ? session.metadata?.viewerUid : session.metadata?.userId) || null,
+            metadata: {
+              kind: isMonetization ? "monetization" : "subscription",
+              stage: "async_payment",
+              type: session.metadata?.type,
+              eventId: session.metadata?.eventId,
+              planId: session.metadata?.plan,
+            },
           });
           break;
         }
@@ -1128,6 +1160,12 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
 
     if (!objectKey) {
       console.error(`[livekit-webhook] No objectKey for recording ${recordingId}`);
+      recordTelemetry("recording.failed", {
+        userId: recordingBillingUid(recordingData) || null,
+        roomId: typeof recordingData.roomId === "string" ? recordingData.roomId : null,
+        broadcastId: recordingId,
+        metadata: { via: "egress_ended", stage: "egress", error: "no_object_key" },
+      });
       await recordingRef.update({
         status: "failed",
         errorMessage: "No file path in egress response or database",
@@ -1219,6 +1257,19 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     }
 
     await recordingRef.update(updates);
+
+    if (finalStatus === "ready" || finalStatus === "failed") {
+      recordTelemetry(finalStatus === "ready" ? "recording.completed" : "recording.failed", {
+        userId: recordingBillingUid(recordingData) || null,
+        roomId: typeof recordingData.roomId === "string" ? recordingData.roomId : null,
+        broadcastId: recordingId,
+        metadata: {
+          via: "egress_ended",
+          egressStatus,
+          ...(finalStatus === "ready" ? { fileSize } : { stage: "egress", error: errorMessage }),
+        },
+      });
+    }
 
     // Count storage once. storageCounted is flipped inside a transaction (the
     // post-stop head-check in recordings.ts races this webhook); only the call

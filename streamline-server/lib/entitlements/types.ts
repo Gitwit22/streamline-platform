@@ -123,7 +123,6 @@ export type PlatformFlags = {
   myContentRecordingsEnabled: boolean;
   audioMixerEnabled: boolean;
   advancedScreenShareEnabled: boolean;
-  mixedAudioPublishEnabled: boolean;
   monetizationEnabled: boolean;
   payPerViewEnabled: boolean;
   invisibleHostEnabled: boolean;

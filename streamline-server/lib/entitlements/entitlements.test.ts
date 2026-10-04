@@ -416,7 +416,7 @@ test("flag defaults are single-source: kill switches ON, opt-in switches OFF whe
   for (const name of ["recording", "hlsSettingsTab", "contentLibraryEnabled", "projectsEnabled", "editorEnabled", "myContentEnabled", "myContentRecordingsEnabled"] as const) {
     assert.equal(f[name], true, name);
   }
-  for (const name of ["monetizationEnabled", "payPerViewEnabled", "invisibleHostEnabled", "collaboratorDelegationEnabled", "audioMixerEnabled", "advancedScreenShareEnabled", "mixedAudioPublishEnabled"] as const) {
+  for (const name of ["monetizationEnabled", "payPerViewEnabled", "invisibleHostEnabled", "collaboratorDelegationEnabled", "audioMixerEnabled", "advancedScreenShareEnabled"] as const) {
     assert.equal(f[name], false, name);
   }
   // /me and /api/plans share the same payload builder.

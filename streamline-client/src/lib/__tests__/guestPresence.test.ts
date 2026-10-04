@@ -2,9 +2,10 @@ import { describe, expect, it } from "vitest";
 import { buildGuestPresenceBody } from "../telemetry";
 
 describe("buildGuestPresenceBody", () => {
-  it("includes stage, roomId and legacy event; drops empty fields", () => {
+  it("includes stage and roomId; drops empty fields", () => {
     const body = buildGuestPresenceBody({ roomId: "r1", stage: "join_page", displayName: "  Ann ", identity: null });
-    expect(body).toMatchObject({ roomId: "r1", stage: "join_page", event: "guest_join_page", displayName: "Ann" });
+    expect(body).toMatchObject({ roomId: "r1", stage: "join_page", displayName: "Ann" });
+    expect(body).not.toHaveProperty("event");
     expect(body).not.toHaveProperty("identity");
     expect(body).not.toHaveProperty("guestSessionToken");
     expect(typeof body.ts).toBe("number");

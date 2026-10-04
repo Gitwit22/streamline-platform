@@ -29,7 +29,6 @@ export type PlatformFlagsLike = {
   myContentRecordingsEnabled?: unknown;
 
   // Experimental: publish mixer's program audio instead of raw mic via LiveKit
-  mixedAudioPublishEnabled?: unknown;
 
   // Advanced screen share routing (pop-out, main-stage modes)
   advancedScreenShareEnabled?: unknown;

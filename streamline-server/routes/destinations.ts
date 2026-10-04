@@ -255,28 +255,6 @@ router.post("/validate", requireAuth, async (req: any, res) => {
   }
 });
 
-// POST /api/destinations/:id/validate (validate existing; does not update)
-router.post("/:id/validate", requireAuth, async (req: any, res) => {
-  try {
-    const uid = req.user?.uid;
-    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-
-    // Read-only check of the caller's own destination: never gated.
-    const id = String(req.params.id || "");
-    if (!id) return res.status(400).json({ error: "invalid_query" as ApiErrorCode });
-
-    const ref = firestore.collection("users").doc(uid).collection("destinations").doc(id);
-    const snap = await ref.get();
-    if (!snap.exists) return res.status(404).json({ error: "destination_not_found" as ApiErrorCode });
-    const item = toItem(snap);
-    const payload: ValidateResponse = { ok: true, status: item.status, statusReason: item.statusReason ?? null };
-    return res.json(payload);
-  } catch (err: any) {
-    console.error("POST /api/destinations/:id/validate error:", err);
-    return res.status(500).json({ error: "server_error" as ApiErrorCode, details: err?.message || String(err) });
-  }
-});
-
 // PUT /api/destinations/:id
 router.put("/:id", requireAuth, async (req: any, res) => {
   try {

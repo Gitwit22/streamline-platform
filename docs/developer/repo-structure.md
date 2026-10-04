@@ -45,7 +45,6 @@ streamline-server/
 │   ├── live.ts             # Live broadcast endpoints
 │   ├── maintenance.ts      # Admin maintenance tools
 │   ├── multistream.ts      # Multi-destination RTMP streaming
-│   ├── onboarding.ts       # Onboarding workflows (EDU, Corporate)
 │   ├── plans.ts            # Pricing plans API
 │   ├── platformHealth.ts   # Health check endpoints
 │   ├── publicHls.ts        # Public HLS (no auth)

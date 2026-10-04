@@ -11,12 +11,18 @@
  * Everything here is best-effort; callers catch.
  */
 import { firestore as db } from "../firebaseAdmin";
+import { recordTelemetry } from "./telemetry";
+import { urlHost } from "./telemetryPure";
+import { toEpochMs } from "./streamingMeterPure";
 import { readViewerStats, type ViewerStats } from "./viewerStatsPure";
 import {
   buildStreamSummary,
   computeWatchStats,
   egressOutcomeFields,
+  outputStatusFor,
   outputsForSession,
+  redactEgressError,
+  streamResultStatusName,
   readStoredSummary,
   storedSummaryFrom,
   type StoredSessionSummary,
@@ -119,5 +125,40 @@ export async function recordEgressOutcome(egressId: string, egressInfo: any): Pr
   const ref = db.collection("egressSessions").doc(id);
   const snap = await ref.get();
   if (!snap.exists) return;
-  await ref.set(egressOutcomeFields(egressInfo), { merge: true });
+  const outcome = egressOutcomeFields(egressInfo);
+  await ref.set(outcome, { merge: true });
+  emitEgressEndedTelemetry(id, { ...(snap.data() || {}), ...outcome }, egressInfo);
+}
+
+/** broadcast.ended / destination.failed for RTMP outputs (multistream, Instagram). */
+function emitEgressEndedTelemetry(egressId: string, d: any, egressInfo: any): void {
+  const kind = String(d?.kind || "").toLowerCase();
+  if (kind !== "multistream" && kind !== "instagram") return;
+  const base = {
+    userId: typeof d?.ownerUid === "string" ? d.ownerUid : null,
+    roomId: typeof d?.roomId === "string" ? d.roomId : null,
+    broadcastId: egressId,
+  };
+  const { status, error } = outputStatusFor(d);
+  const startedMs = toEpochMs(d?.startedAt);
+  const endedMs = toEpochMs(egressInfo?.endedAt) || Date.now();
+  recordTelemetry("broadcast.ended", {
+    ...base,
+    metadata: {
+      kind,
+      outcome: status,
+      egressStatus: d?.egressStatus ?? null,
+      error,
+      destinations: Array.isArray(d?.destinations) ? d.destinations : [],
+      durationSec: startedMs ? Math.max(0, Math.round((Math.min(endedMs, Date.now()) - startedMs) / 1000)) : null,
+    },
+  });
+  const results: any[] = Array.isArray(egressInfo?.streamResults) ? egressInfo.streamResults : [];
+  for (const r of results.slice(0, 20)) {
+    if (streamResultStatusName(r?.status) !== "failed") continue;
+    recordTelemetry("destination.failed", {
+      ...base,
+      metadata: { stage: "egress", kind, host: urlHost(r?.url), error: redactEgressError(r?.error) },
+    });
+  }
 }

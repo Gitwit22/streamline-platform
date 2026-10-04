@@ -150,21 +150,6 @@ Get room information and access requirements.
 }
 ```
 
-### Update Room Layout
-
-🔓 `PUT /api/rooms/:roomId/layout`
-
-Change the room's layout mode.
-
-**Body:**
-```json
-{
-  "mode": "speaker"
-}
-```
-
-**Modes:** `speaker`, `grid`, `carousel`, `pip`
-
 ### Update Room Policy
 
 🔓 `PUT /api/rooms/:roomId/policy`
@@ -255,32 +240,10 @@ Retrieve chat history for the room.
 
 ### Create Invite
 
-🔓 `POST /api/rooms/:roomId/invites`
+🔓 `POST /api/invites/create`
 
-Create an invite link for the room.
-
-**Body:**
-```json
-{
-  "role": "participant",
-  "maxUses": 10,
-  "expiresInHours": 24
-}
-```
-
-**Response:**
-```json
-{
-  "inviteToken": "jwt-invite-token",
-  "inviteUrl": "https://app.example.com/i/jwt-invite-token"
-}
-```
-
-### List Invites
-
-🔓 `GET /api/rooms/:roomId/invites`
-
-List all invites for a room.
+Create an invite link for the room (host/cohost). Guests join via
+`POST /api/invites/:inviteId/join-now`.
 
 ---
 
@@ -302,11 +265,11 @@ Resolve an invite token to get room details.
 }
 ```
 
-### Redeem Invite
+### Join Via Invite
 
-🌐 `POST /api/invites/redeem/:token`
+🌐 `POST /api/invites/:inviteId/join-now`
 
-Redeem an invite token and get room access.
+Redeem an invite and get a room token in one step.
 
 ---
 
@@ -493,8 +456,6 @@ All admin endpoints require `isAdmin` flag on the user document.
 
 🔓 `GET /api/admin` — Admin dashboard data
 
-🔓 `GET /api/admin/status` — Platform status
-
 🔓 `GET /api/diagnostics` — System diagnostics
 
 🔓 `GET /api/platformHealth` — Platform health check
@@ -530,33 +491,16 @@ Check feature access for the authenticated user based on their plan.
 
 ---
 
-## Onboarding
-
-### Create EDU Organization
-
-🌐 `POST /api/onboarding/create-edu-org`
-
-Create a new EDU organization with a faculty admin user.
-
-**Body:**
-```json
-{
-  "orgName": "Springfield Elementary",
-  "orgType": "edu",
-  "email": "admin@school.edu",
-  "password": "securePassword"
-}
-```
-
----
-
 ## Health and Telemetry
 
 🌐 `GET /api/health` — Basic health check
 
 🌐 `GET /api/platformHealth` — Detailed platform health
 
-🔓 `POST /api/telemetry` — Submit telemetry events
+🌐 `POST /api/telemetry/guest` — Guest join-page presence (`{ roomId, stage }`)
+
+Product telemetry is recorded server-side (no client endpoint): allowlisted events are
+written to the `telemetryEvents` collection by `streamline-server/lib/telemetry.ts`.
 
 🔓 `GET /api/stats` — Analytics data
 

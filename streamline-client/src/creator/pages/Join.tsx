@@ -688,23 +688,6 @@ export default function Join() {
     if (!hideLegacyJoinToast) {
       setShowLegacyJoinToast(true);
       console.log("[Join] Legacy room-name join fallback", { roomName: roomLabel });
-      try {
-        fetch(`${API_BASE}/api/telemetry/event`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({
-            event: "legacy_roomname_join_attempt",
-            roomName: roomLabel,
-            source: "join",
-            ts: Date.now(),
-          }),
-        }).catch((err) => {
-          console.warn("Failed to send telemetry event", err);
-        });
-      } catch (err) {
-        console.warn("Error scheduling telemetry event", err);
-      }
     }
 
     nav(`/room/${encodeURIComponent(roomLabel)}`);

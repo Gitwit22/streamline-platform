@@ -12,12 +12,11 @@
  * - POST /api/recordings/stop
  * - GET /api/recordings/:id
  * - GET /api/recordings/:id/download-link
- * - GET /api/recordings/:id/download
- * - GET /api/recordings/:id/storage-check
  * - POST /api/recordings/:id/report-download-issue
  */
 
 import { Router } from "express";
+import { recordTelemetry } from "../lib/telemetry";
 import crypto from "crypto";
 import { firestore } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
@@ -972,6 +971,12 @@ router.post(
 
       if (configErrors.length > 0) {
         console.error("[recordings/start] S3 config errors:", configErrors);
+        recordTelemetry("recording.failed", {
+          userId: ownerUid,
+          roomId,
+          broadcastId: recordingId,
+          metadata: { stage: "start", reason: "storage_config" },
+        });
         await recordingRef.update({
           status: "failed",
           errorMessage: `S3 config errors: ${configErrors.join(", ")}`,
@@ -1057,6 +1062,12 @@ router.post(
         errorMessage: egressError?.message || "egress_start_failed",
         updatedAt: new Date(),
       });
+      recordTelemetry("recording.failed", {
+        userId: ownerUid,
+        roomId,
+        broadcastId: recordingId,
+        metadata: { stage: "start", reason: "egress_start_failed", error: egressError?.message || null },
+      });
 
       return res.status(500).json({
         success: false,
@@ -1090,6 +1101,13 @@ router.post(
     }
 
     console.log(`[recordings/start] Complete in ${Date.now() - startTime}ms, maxRecordingMinutesPerClip=${maxRecordingMinutesPerClip}, autoStopAt=${autoStopAt?.toISOString() ?? "none"}`);
+
+    recordTelemetry("recording.started", {
+      userId: ownerUid,
+      roomId,
+      broadcastId: recordingId,
+      metadata: { egressId, presetId: effectiveId, emergency: isEmergency, delegated: ownerUid !== uid },
+    });
 
     const finalSnap = await recordingRef.get();
     const finalData = finalSnap.data();
@@ -1321,6 +1339,14 @@ router.post(
               return;
             }
             const alreadyCounted = !flip.claimed;
+            if (flip.claimed) {
+              recordTelemetry("recording.completed", {
+                userId: billingUid || null,
+                roomId: typeof (data as any).roomId === "string" ? (data as any).roomId : null,
+                broadcastId: recordingId,
+                metadata: { via: "stop_head_check", fileSize: size },
+              });
+            }
             console.log(`[recordings/stop] ✅ File confirmed via head-check: ${objectKey} (${size} bytes)`);
 
             // Count storage for this recording (only if this call flipped storageCounted)
@@ -1418,39 +1444,6 @@ router.get("/library", requireAuth, requireMyContentRecordingsEnabled as any, as
   } catch (err: any) {
     console.error("[recordings/library] Error:", err);
     return res.status(500).json({ error: "Failed to fetch recordings library" });
-  }
-});
-
-// =============================================================================
-// GET /:id/storage-check - Debug: verify object exists in R2
-// =============================================================================
-
-router.get("/:id/storage-check", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
-  try {
-    const uid = getAuthUserId(req);
-    const recordingId = String(req.params.id ?? "");
-
-    const snap = await firestore.collection("recordings").doc(recordingId).get();
-    if (!snap.exists) {
-      return res.status(404).json({ error: "Recording not found" });
-    }
-
-    const data = snap.data() || {};
-    if (data.userId && data.userId !== uid) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-
-    const objectKey = normalizeStorageKey(data.objectKey || data.downloadPath);
-    if (!objectKey) {
-      return res.json({ success: false, message: "No object key on recording" });
-    }
-
-    const size = await r2HeadObjectSize(objectKey);
-    return res.json({ success: size > 0, size, objectKey });
-
-  } catch (err: any) {
-    console.error("[recordings/storage-check] Error:", err);
-    return res.status(500).json({ error: "Failed to check storage" });
   }
 });
 
@@ -1729,34 +1722,6 @@ router.post("/:id/report-download-issue", requireAuth, requireMyContentRecording
   } catch (err: any) {
     console.error("[recordings/report-download-issue] Error:", err);
     return res.status(500).json({ error: "Failed to report issue" });
-  }
-});
-
-// =============================================================================
-// GET /:id/download - Legacy direct download (placeholder)
-// =============================================================================
-
-router.get("/:id/download", requireAuth, async (req, res) => {
-  try {
-    const uid = getAuthUserId(req);
-    const recordingId = String(req.params.id ?? "");
-
-    const snap = await firestore.collection("recordings").doc(recordingId).get();
-    if (!snap.exists) {
-      return res.status(404).send("Recording not found");
-    }
-
-    const data = snap.data() || {};
-    if (data.userId && data.userId !== uid) {
-      return res.status(403).send(PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS);
-    }
-
-    // Redirect to download-link endpoint for proper signed URL
-    res.redirect(`/api/recordings/${recordingId}/download-link`);
-
-  } catch (err: any) {
-    console.error("[recordings/download] Error:", err);
-    return res.status(500).send("Failed to serve download");
   }
 });
 

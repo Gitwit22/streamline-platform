@@ -92,7 +92,7 @@ All API calls from the frontend use relative paths (`/api/*`), which the Vite pr
 - `POST /api/admin/remove` - Remove participant
 
 ### Usage
-- `GET /api/usage/summary` - Get usage stats
+- `GET /api/usage/me` - Get usage stats
 - Response header: `x-sl-usage-summary-version: v1`
 - `POST /api/usage/streamEnded` - Log stream end
 

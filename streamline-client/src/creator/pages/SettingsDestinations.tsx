@@ -31,12 +31,10 @@ export default function SettingsDestinations(
   const [limit, setLimit] = useState<number | null | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [connectedPlatforms, setConnectedPlatforms] = useState<{ youtube: boolean; facebook: boolean; twitch: boolean }>({ youtube: false, facebook: false, twitch: false });
 
   const platformDisabled = access.platform.transcodeEnabled === false;
 
   const [platform, setPlatform] = useState("youtube");
-  const [mode, setMode] = useState<"manual" | "connected">("manual");
   const [name, setName] = useState("");
   const [streamKey, setStreamKey] = useState("");
   const [persistent, setPersistent] = useState(true);
@@ -82,13 +80,6 @@ export default function SettingsDestinations(
         const data = await getMeCached();
         if (typeof props.locked === "undefined") {
           setEffectiveEntitlements(data?.entitlements || data?.effectiveEntitlements || null);
-        }
-        if (data?.connectedPlatforms) {
-          setConnectedPlatforms({
-            youtube: !!data.connectedPlatforms.youtube,
-            facebook: !!data.connectedPlatforms.facebook,
-            twitch: !!data.connectedPlatforms.twitch,
-          });
         }
       } catch {
         // ignore
@@ -213,13 +204,12 @@ export default function SettingsDestinations(
     setError(null);
     try {
       const base = getDefaultRtmpBase(platform);
-      const res = await createDestination({ platform, name, rtmpUrlBase: base, streamKeyPlain: streamKey || undefined, mode, persistent });
+      const res = await createDestination({ platform, name, rtmpUrlBase: base, streamKeyPlain: streamKey || undefined, mode: "manual", persistent });
       // After creating, clear validation so the form is "fresh" for the next key
       setValidation(null);
       setUsedCount(res.usedCount);
       setLimit(res.limit);
       setPlatform("youtube");
-      setMode("manual");
       setName("");
       setStreamKey("");
       setPersistent(true);
@@ -413,40 +403,6 @@ export default function SettingsDestinations(
               autoComplete="new-password"
             />
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-              <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#e5e7eb" }}>
-                <span>Mode:</span>
-                <select
-                  value={mode}
-                  onChange={e => setMode(e.target.value as any)}
-                  style={{
-                    border: "1px solid rgba(248, 250, 252, 0.2)",
-                    borderRadius: 6,
-                    padding: "4px 6px",
-                    color: "#f9fafb",
-                    background: "rgba(15, 23, 42, 0.7)",
-                  }}
-                >
-                  <option value="manual">Manual key</option>
-                  <option value="connected" disabled={!connectedPlatforms[platform as keyof typeof connectedPlatforms]}>Connected</option>
-                </select>
-              </label>
-              {!connectedPlatforms[platform as keyof typeof connectedPlatforms] && (
-                <button
-                  type="button"
-                  onClick={() => window.location.assign("/settings/integrations")}
-                  style={{
-                    fontSize: 12,
-                    borderRadius: 999,
-                    padding: "4px 10px",
-                    border: "1px solid rgba(248, 113, 113, 0.6)",
-                    background: "transparent",
-                    color: "#fecaca",
-                    cursor: "pointer",
-                  }}
-                >
-                  Connect {platform}
-                </button>
-              )}
               <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#e5e7eb" }}>
                 <input
                   type="checkbox"

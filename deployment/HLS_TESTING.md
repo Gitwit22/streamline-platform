@@ -80,5 +80,5 @@ curl -X POST "http://localhost:5137/api/hls/stop/<ROOM_ID>" -H "Authorization: B
 Viewer public status (no auth, minimal data):
 
 ```powershell
-curl "http://localhost:5137/api/hls/public/<ROOM_ID>"
+curl "http://localhost:5137/api/public/hls/<ROOM_ID>"
 ```

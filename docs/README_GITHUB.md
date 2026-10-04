@@ -155,7 +155,7 @@ streamline/
 - `POST /api/auth/signup` - User signup
 - `POST /api/rooms/{roomId}/token` - Get LiveKit room token (RTC)
 - `POST /api/usage/streamEnded` - Log stream completion
-- `GET /api/usage/summary` - Get user usage stats
+- `GET /api/usage/me` - Get user usage stats
   - Response header: `x-sl-usage-summary-version: v1`
 - `POST /api/editing/*` - Editing API endpoints
 - `POST /api/rooms/*` - Multistream endpoints

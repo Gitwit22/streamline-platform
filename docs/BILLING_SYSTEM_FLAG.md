@@ -56,8 +56,8 @@ The core normalization lives in `streamline-server/lib/userAccount.ts` and expos
   - Rejects with `403 { success: false, error: "billing_disabled" }` when `effectiveBillingEnabled === false`.
 - `POST /api/billing/portal`
   - Same guard: blocks when `effectiveBillingEnabled === false`.
-- `GET /api/billing/me`
-  - Returns `billingEnabled`, `platformBillingEnabled`, and `effectiveBillingEnabled` alongside other billing fields.
+- `GET /api/billing/status`
+  - Returns the billing/plan state used by the Billing settings UI.
 
 ### Test Mode Plan Switching
 

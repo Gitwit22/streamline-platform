@@ -4,7 +4,6 @@ export type PlatformFlags = {
   recordingEnabled?: boolean;
   transcodeEnabled?: boolean;
   /** Experimental: publish mixed program audio instead of raw mic. */
-  mixedAudioPublishEnabled?: boolean;
   /** Advanced screen share routing (pop-out, main-stage modes). */
   advancedScreenShareEnabled?: boolean;
   /** Audio mixer panel (bus routing, ducking, program output). */

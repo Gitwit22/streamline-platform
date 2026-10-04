@@ -148,7 +148,7 @@ async function getUsageSummary(jwtToken: string): Promise<{
   json: any;
   hlsCurrent: number;
 }> {
-  const resp = await fetchWithJwt("/api/usage/summary", jwtToken, {});
+  const resp = await fetchWithJwt("/api/usage/me", jwtToken, {});
   const json = resp.json || {};
   const hlsCurrentRaw =
     json?.usage?.minutes?.hls?.currentPeriod ??

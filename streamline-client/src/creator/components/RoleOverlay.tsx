@@ -90,8 +90,6 @@ export default function RoleOverlay({
   canRemoveGuests,
   canModerate,
   advancedRolesEnabled,
-  greenroomEnabled,
-  overlaysEnabled,
   roomAccessMode,
   onRoomAccessChange,
 }: {
@@ -105,8 +103,6 @@ export default function RoleOverlay({
   canRemoveGuests?: boolean;
   canModerate?: boolean;
   advancedRolesEnabled?: boolean;
-  greenroomEnabled?: boolean;
-  overlaysEnabled?: boolean;
   /** Production-room access (Invite Only / Anyone With Link / Public). */
   roomAccessMode?: RoomAccessMode | null;
   onRoomAccessChange?: (mode: RoomAccessMode) => void;
@@ -211,8 +207,6 @@ export default function RoleOverlay({
               canRemoveGuests={canRemoveGuests}
               canModerate={canModerate}
               advancedRolesEnabled={advancedRolesEnabled}
-              greenroomEnabled={greenroomEnabled}
-              overlaysEnabled={overlaysEnabled}
               cohostView={role === "moderator"}
             />
           )}
@@ -234,8 +228,6 @@ function HostPanel({
   canRemoveGuests,
   canModerate,
   advancedRolesEnabled,
-  greenroomEnabled,
-  overlaysEnabled,
   cohostView = false,
 }: {
   roomName: string;
@@ -245,8 +237,6 @@ function HostPanel({
   canRemoveGuests?: boolean;
   canModerate?: boolean;
   advancedRolesEnabled?: boolean;
-  greenroomEnabled?: boolean;
-  overlaysEnabled?: boolean;
   /** Co-host moderating: no co-host assignment, can't remove/mute the owner. */
   cohostView?: boolean;
 }) {
@@ -621,22 +611,6 @@ function HostPanel({
         >
           {roleToast}
         </div>
-      )}
-
-      {greenroomEnabled && (
-        <Section title="Greenroom (Coming Soon)">
-          <p style={{ fontSize: '0.875rem', opacity: 0.7, color: 'rgba(255, 255, 255, 0.7)', lineHeight: 1.5 }}>
-            Admit/Reject guests from a separate lobby room.
-          </p>
-        </Section>
-      )}
-
-      {overlaysEnabled && (
-        <Section title="Overlays (Coming Soon)">
-          <p style={{ fontSize: '0.875rem', opacity: 0.7, color: 'rgba(255, 255, 255, 0.7)', lineHeight: 1.5 }}>
-            Lower thirds and on-screen graphics are on the way.
-          </p>
-        </Section>
       )}
 
       {deviceModalOpen && (

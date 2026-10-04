@@ -3,6 +3,7 @@ import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { firestore } from "../firebaseAdmin";
 import { SlidingWindowLimiter, clientIp } from "../lib/rateLimit";
 import { tryGetGuestSession } from "../middleware/guestSession";
+import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import {
   isValidPresenceRoomId,
   joinPresenceKey,
@@ -93,83 +94,13 @@ async function handleGuestPresence(req: express.Request, res: express.Response, 
   return res.json({ ok: true });
 }
 
-// Lightweight telemetry endpoint for client-side events
-router.post("/event", (req, res) => {
-  try {
-    const { event, roomName, source, ts } = req.body || {};
-
-    if (!event || typeof event !== "string") {
-      return res.status(400).json({ error: "event_required" });
-    }
-
-    const numericTs =
-      typeof ts === "number" && Number.isFinite(ts) ? ts : Date.now();
-
-    const payload = {
-      event,
-      roomName:
-        typeof roomName === "string"
-          ? sanitizeDisplayName(roomName).trim() || undefined
-          : undefined,
-      source: typeof source === "string" ? source : undefined,
-      ts: new Date(numericTs).toISOString(),
-      receivedAt: new Date().toISOString(),
-      userAgent: req.get("user-agent") || undefined,
-      ip:
-        (req.headers["x-forwarded-for"] as string) ||
-        req.socket.remoteAddress ||
-        undefined,
-    };
-
-    console.log("[telemetry:event]", payload);
-
-    return res.json({ ok: true });
-  } catch (err) {
-    console.error("telemetry/event error", err);
-    return res.status(500).json({ error: "telemetry_error" });
-  }
-});
-
-// Guest invite flow telemetry endpoint
+// Guest join-page presence: { roomId, stage: "join_page" | "entered_room" | "left", ... }.
+// (Product telemetry is recorded server-side via lib/telemetry.ts.)
 router.post("/guest", async (req, res) => {
   try {
-    // Join-page presence shape: { roomId, stage, ... } (no `event`).
-    const rawStage = (req.body as any)?.stage;
-    if (rawStage !== undefined && !(req.body as any)?.event) {
-      const stage = parseGuestPresenceStage(rawStage);
-      if (!stage) return res.status(400).json({ error: "stage_invalid" });
-      return await handleGuestPresence(req, res, stage);
-    }
-
-    const { event, roomId, durationMs, guestSessionToken, ts } = req.body || {};
-
-    if (!event || typeof event !== "string") {
-      return res.status(400).json({ error: "event_required" });
-    }
-
-    const numericTs =
-      typeof ts === "number" && Number.isFinite(ts) ? ts : Date.now();
-
-    const payload = {
-      event,
-      roomId: typeof roomId === "string" ? roomId : undefined,
-      durationMs: typeof durationMs === "number" && Number.isFinite(durationMs) ? durationMs : undefined,
-      guestSessionToken: typeof guestSessionToken === "string" ? guestSessionToken.substring(0, 16) + "..." : undefined,
-      ts: new Date(numericTs).toISOString(),
-      receivedAt: new Date().toISOString(),
-      userAgent: req.get("user-agent") || undefined,
-      ip:
-        (req.headers["x-forwarded-for"] as string) ||
-        req.socket.remoteAddress ||
-        undefined,
-    };
-
-    console.log("[telemetry:guest]", payload);
-
-    // TODO: Store in Firestore for analytics dashboard
-    // Example: admin.firestore().collection('guestTelemetry').add(payload);
-
-    return res.json({ ok: true });
+    const stage = parseGuestPresenceStage((req.body as any)?.stage);
+    if (!stage) return res.status(400).json({ error: "stage_invalid" });
+    return await handleGuestPresence(req, res, stage);
   } catch (err) {
     console.error("telemetry/guest error", err);
     return res.status(500).json({ error: "telemetry_error" });

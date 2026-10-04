@@ -29,7 +29,6 @@ export const PLATFORM_FLAG_DEFAULTS = {
   // Opt-in switches (default disabled)
   audioMixerEnabled: false,
   advancedScreenShareEnabled: false,
-  mixedAudioPublishEnabled: false,
   monetizationEnabled: false,
   payPerViewEnabled: false,
   invisibleHostEnabled: false,
@@ -101,7 +100,6 @@ export function toPlatformFlagsPayload(flags: PlatformFlags) {
     myContentRecordingsEnabled: flags.myContentRecordingsEnabled,
     audioMixerEnabled: flags.audioMixerEnabled,
     advancedScreenShareEnabled: flags.advancedScreenShareEnabled,
-    mixedAudioPublishEnabled: flags.mixedAudioPublishEnabled,
     monetizationEnabled: flags.monetizationEnabled,
     payPerViewEnabled: flags.payPerViewEnabled,
     invisibleHostEnabled: flags.invisibleHostEnabled,

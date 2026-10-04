@@ -16,7 +16,6 @@ import usageRoutes from "./routes/usageRoutes";
 import plansRoutes from "./routes/plans";
 import roomsCreateRoutes from "./routes/roomsCreate";
 import invitesRoutes from "./routes/invites";
-import roomInvitesRoutes from "./routes/roomInvites";
 import roomGuestAccessRoutes from "./routes/roomGuestAccess";
 import multistreamRoutes from "./routes/multistream";
 import roomsResolveRoutes from "./routes/roomsResolve";
@@ -24,8 +23,6 @@ import roomsHlsConfigRoutes from "./routes/roomsHlsConfig";
 import roomsActiveEmbedRoutes from "./routes/roomsActiveEmbed";
 import roomControlsRoutes, { enforceRoomControlsForRoom, listRoomCohostIdentities } from "./routes/roomControls";
 import roomChatRoutes from "./routes/roomChat";
-import roomsLayoutRoutes from "./routes/roomsLayout";
-import roomsStudioLayoutRoutes from "./routes/roomsStudioLayout";
 import roomsProgramStateRoutes from "./routes/roomsProgramState";
 import roomsPolicyRoutes from "./routes/roomsPolicy";
 import roomsRecordingsRoutes from "./routes/roomsRecordings";
@@ -33,12 +30,12 @@ import destinationsRoutes from "./routes/destinations";
 import liveRoutes from "./routes/live";
 import statsRoutes from "./routes/stats";
 import telemetryRoutes from "./routes/telemetry";
+import { entitlementDenialTelemetry } from "./lib/telemetry";
 import savedEmbedsRoutes from "./routes/savedEmbeds";
 import editingRoutes from "./routes/editing";
 import projectsRoutes from "./routes/projects";
 import myContentRoutes from "./routes/myContent";
 import maintenanceRoutes from "./routes/maintenance";
-import onboardingRoutes from "./routes/onboarding";
 import { startScheduledJobs, stopJobScheduler } from "./lib/jobs";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
@@ -157,9 +154,6 @@ const corsOptions: CorsOptions = {
     "Authorization",
     "X-Requested-With",
     "Cache-Control",
-    // Optional onboarding key for controlled self-serve onboarding
-    "x-onboarding-key",
-    "X-Onboarding-Key",
     // Room-level access token used by in-room APIs (HLS, multistream, controls, etc.).
     // Explicitly allow both typical header casings to satisfy browser preflight checks.
     "x-room-access-token",
@@ -256,6 +250,10 @@ app.use(
   })
 );
 
+// Product telemetry: record entitlement denials (any route answering with a
+// feature/limit/usage error body) into telemetryEvents.
+app.use("/api", entitlementDenialTelemetry);
+
 app.use("/api/auth", authRoutes);
 app.use("/api/account", accountRoutes);
 app.use("/api/collaborators", collaboratorsRoutes);
@@ -300,8 +298,6 @@ app.use("/api/public", publicPlaybackRoutes);
 // Monetization v1 (PPV, PWYW, Donations for HLS rooms)
 app.use("/api/monetization", monetizationRoutes);
 
-// Onboarding/reset endpoints (guarded; demo-safe)
-app.use("/api/onboarding", onboardingRoutes);
 // Recordings API - This handles GET /:id and POST /start, /stop
 app.use("/api/recordings", recordingsRoutes);
 
@@ -316,7 +312,7 @@ app.use("/api/my-content", myContentRoutes);
 
 // Health check
 app.get("/", (_req, res) => res.send("API up"));
-app.use("/api/usage", usageRoutes); // gives /api/usage/summary
+app.use("/api/usage", usageRoutes); // GET /api/usage/me, /entitlements
 
 // =============================================================================
 // API ROUTES - Order matters! More specific routes first
@@ -326,9 +322,6 @@ app.use("/api/usage", usageRoutes); // gives /api/usage/summary
 
 // Room creation (host flow)
 app.use("/api/rooms", roomsCreateRoutes);
-
-// Room invite creation (authenticated)
-app.use("/api/rooms", roomInvitesRoutes);
 
 // Guest invite redeem + room status/token (mixed auth)
 app.use("/api", roomGuestAccessRoutes);
@@ -348,10 +341,6 @@ app.use("/api/rooms", roomControlsRoutes);
 app.use("/api/rooms", roomChatRoutes);
 // Horizon ↔ room hooks (chat-events, voice-stream, agent chat response)
 app.use("/api/rooms", horizonRoomHooks);
-// Persistent room layout config (controls viewer layout; recordings inherit)
-app.use("/api/rooms", roomsLayoutRoutes);
-// Studio layout config (preset-based canvas composition for the program output)
-app.use("/api/rooms", roomsStudioLayoutRoutes);
 // Program state (shared output/compositor state; synced to LiveKit room metadata)
 app.use("/api/rooms", roomsProgramStateRoutes);
 // Latest recording state + reconcile helpers
@@ -899,7 +888,7 @@ app.get("/api/health", (_req, res) => {
   res.json({ ok: true });
 });
 
-// NOTE: /api/usage/summary is implemented in routes/usageRoutes.ts
+// NOTE: /api/usage/me is implemented in routes/usageRoutes.ts
 // and is requireAuth-protected with a stable payload.
 
 // Compat endpoint: older clients POST here on Leave. Streaming minutes are now

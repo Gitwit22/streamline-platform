@@ -296,7 +296,7 @@ router.post("/legacy/resolve", async (req, res) => {
 
 // NOTE: New invite model (Firestore roomInvites + HttpOnly sl_guest cookie)
 // is implemented in routes/roomGuestAccess.ts at:
-//   POST /api/invites/:inviteId/redeem
+//   POST /api/invites/:inviteId/join-now
 // Keeping this router for legacy JWT invite tokens.
 
 /**
@@ -395,67 +395,6 @@ router.post("/resolve", async (req, res) => {
     });
   } catch (err: any) {
     console.error("/api/invites/resolve error", err?.message || err);
-    return res.status(401).json({ error: "invalid_invite" });
-  }
-});
-
-/**
- * POST /api/invites/accept
- * Body: { inviteToken }
- * Auth: required for cohost; guest does not require auth
- * Returns: { roomName, role, requiresAuth }
- */
-router.post("/accept", async (req, res) => {
-  try {
-    const inviteToken = String((req.body as any)?.inviteToken || "").trim();
-    if (!inviteToken) return res.status(400).json({ error: "inviteToken_required" });
-
-    const claims = verifyInviteJwt(inviteToken) as any;
-    const roomId = normalizeRoomId(claims?.roomId);
-    const roomName = normalizeRoomName(claims?.roomName || claims?.room);
-    const role = normalizeRole(claims?.role || "guest") || "guest";
-
-    if (!roomId && !roomName) return res.status(400).json({ error: "invite_room_missing" });
-
-    const resolved = await resolveRoomIdentity({ roomId, roomName });
-    if (!resolved) return res.status(400).json({ error: "invite_room_missing" });
-
-    const user = await tryGetAuthUserAny(req);
-
-    if (user) {
-      const docId = `${user.uid}_${Buffer.from(inviteToken).toString("base64url").slice(0, 40)}`;
-      await firestore.collection("inviteAcceptances").doc(docId).set(
-        {
-          uid: user.uid,
-          roomId: resolved.roomId,
-          roomName: resolved.roomName,
-          role,
-          createdByUid: claims?.createdByUid || null,
-          acceptedAt: new Date(),
-        },
-        { merge: true }
-      );
-      const expSec = Number(claims?.exp || 0);
-      await recordInviteAcceptance({
-        roomId: resolved.roomId,
-        uid: user.uid,
-        inviteId: jwtInviteAcceptanceId(inviteToken),
-        role: role === "cohost" ? "cohost" : "participant",
-        createdByUid: typeof claims?.createdByUid === "string" ? claims.createdByUid : null,
-        expiresAtMs: Number.isFinite(expSec) && expSec > 0 ? expSec * 1000 : null,
-      }).catch((err: any) => console.warn("/api/invites/accept acceptance record failed", err?.message || err));
-    }
-
-    const requiresAuth = role === "cohost";
-
-    return res.json({
-      roomId: resolved.roomId,
-      roomName: resolved.roomName,
-      role,
-      requiresAuth,
-    });
-  } catch (err: any) {
-    console.error("/api/invites/accept error", err?.message || err);
     return res.status(401).json({ error: "invalid_invite" });
   }
 });

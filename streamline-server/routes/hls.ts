@@ -24,7 +24,8 @@ import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { deletePrefix } from "../lib/storageClient";
 import { resolveRoomViewerAccess } from "../lib/viewerAccessStore";
 import { hlsProxyAll, hlsRunPrefix } from "../lib/hlsPlayback";
-import { getCurrentViewers, onHlsIdle, onHlsLive } from "../lib/viewerStats";
+import { onHlsIdle, onHlsLive } from "../lib/viewerStats";
+import { recordTelemetry } from "../lib/telemetry";
 
 const router = Router();
 
@@ -54,51 +55,6 @@ async function cleanupHlsArtifacts(params: { roomId: string; prefix?: string | n
     console.warn("[hls] failed to delete HLS prefix", { roomId: params.roomId, prefix, error: e?.message || e });
   }
 }
-
-router.get("/ping", (req, res) => res.send("hls ok"));
-
-// Public viewer-safe endpoint: returns only minimal, non-sensitive info.
-// GET /api/hls/public/:roomId -> { status, playlistUrl }
-router.get("/public/:roomId", async (req: any, res) => {
-  const roomId = req.params.roomId;
-  if (/[ \u2013#]/.test(roomId)) {
-    return res.status(400).json({ error: "invalid_room_id" });
-  }
-  try {
-    const { data: room } = await getRoom(roomId);
-    const hls = room.hls || {};
-    // Non-public channels only expose playback via the authorized playback
-    // endpoint (signed, short-lived URLs). Fail closed on lookup errors.
-    let paywalled = false;
-    if (hls.playlistUrl) {
-      try {
-        paywalled = hlsProxyAll() || (await resolveRoomViewerAccess(roomId, { room })).access.mode !== "public";
-      } catch {
-        paywalled = true;
-      }
-    }
-    let viewerCount: number | undefined;
-    if (hls.status === "live") {
-      try {
-        viewerCount = (await getCurrentViewers(roomId, { room })).total;
-      } catch {
-        viewerCount = undefined;
-      }
-    }
-    return res.json({
-      status: hls.status || "idle",
-      playlistUrl: paywalled ? null : hls.playlistUrl || null,
-      paywalled: paywalled || undefined,
-      viewerCount,
-    });
-  } catch (e: any) {
-    if (e?.message === PERMISSION_ERRORS.ROOM_NOT_FOUND) {
-      return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
-    }
-    console.error("HLS public status error", e);
-    return res.status(500).json({ error: "Failed to fetch HLS status" });
-  }
-});
 
 router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any, async (req: any, res) => {
   const { roomId: canonicalRoomId, livekitRoomName } = getRoomAccess(req);
@@ -312,6 +268,13 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
           metadata: { presetId },
         }).catch(() => {});
       }
+
+      recordTelemetry("hls.started", {
+        userId: ownerUid,
+        roomId,
+        broadcastId: egressId,
+        metadata: { presetId, presetClamped: !!hlsPresetClamped, protectedRun, delegated: ownerUid !== uid },
+      });
 
       return res.json({
         roomId,

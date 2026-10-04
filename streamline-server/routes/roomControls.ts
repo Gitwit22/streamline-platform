@@ -417,8 +417,7 @@ async function presetOwnerUidFor(roomId: string, uid: string | undefined): Promi
  * Apply a role preset (the room owner's participant/cohost template) to a
  * participant identity: persists rooms/{roomId}/controls/{identity}, pushes
  * the matching LiveKit permission and asks the participant's controls SSE
- * stream to refresh their token. Shared by POST /permissions, POST
- * apply-preset and PATCH controls/:identity with { role }.
+ * stream to refresh their token. Used by POST /permissions.
  *
  * Callers have already checked the actor (canModerate, canAssignRolePreset,
  * protected identities).
@@ -666,112 +665,6 @@ router.patch("/:roomId/controls", requireRoomAccessToken as any, async (req: any
   return res.json({ ok: true, controls: merged, enforcement });
 });
 
-// Host/cohost updates controls for a specific participant identity (override doc).
-// PATCH /api/rooms/:roomId/controls/:identity
-// Auth: Firebase session cookie + Authorization: Bearer <roomAccessToken>
-router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAccessToken as any, async (req: any, res) => {
-  const roomId = String(req.params.roomId || "").trim();
-  if (!roomId) return res.status(400).json({ error: "roomId_required" });
-
-  const access = (req as any).roomAccess as RoomAccessClaims | undefined;
-  if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-  if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
-
-  if (!isHostOrCohost(access)) {
-    return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-  }
-
-  const uid = (req as any).user?.uid as string | undefined;
-  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-
-  const rawIdentity = String(req.params.identity || "").trim();
-  if (!rawIdentity) return res.status(400).json({ error: "identity_required" });
-
-  // Cohosts/producers never act on the room owner / producers.
-  const actorIsHost = isHostRole(access);
-  if (!actorIsHost && isProtectedIdentity(rawIdentity, await getRoomOwnerUid(roomId))) {
-    return res.status(403).json({ error: "cannot_moderate_host" });
-  }
-
-  const identityDocId = normalizeControlsDocId(rawIdentity);
-  const body = (req.body || {}) as any;
-
-  // If a role is provided, treat this as a role change and
-  // apply the corresponding preset defaults, resetting overrides.
-  const rolePresetId = parsePresetId(body.role);
-  if (rolePresetId) {
-    const denied = await checkRolePresetAssignment(access, roomId, rawIdentity, rolePresetId);
-    if (denied) return res.status(denied.status).json({ error: denied.error });
-    return applyRolePresetToIdentity(req, res, { roomId, rawIdentity, presetId: rolePresetId, uid });
-  }
-
-  // Otherwise, behave as a classic partial controls patch.
-  const patch: RoomControls = {
-    canPublishAudio: pickBoolean(body.canPublishAudio),
-    canPublishVideo: pickBoolean(body.canPublishVideo),
-    canScreenShare: pickBoolean(body.canScreenShare),
-    tileVisible: pickBoolean(body.tileVisible),
-    canMuteGuests: pickBoolean(body.canMuteGuests),
-    canRemoveGuests: pickBoolean(body.canRemoveGuests),
-    canInviteLinks: pickBoolean(body.canInviteLinks),
-    canManageDestinations: pickBoolean(body.canManageDestinations),
-    canStartStopStream: pickBoolean(body.canStartStopStream),
-    canStartStopRecording: pickBoolean(body.canStartStopRecording),
-    forcedMute: pickBoolean(body.forcedMute),
-    forcedVideoOff: pickBoolean(body.forcedVideoOff),
-    screenShareLayout: pickScreenShareLayout(body.screenShareLayout),
-    outputFormat: pickOutputFormat(body.outputFormat),
-  };
-
-  const cleaned: RoomControls = {};
-  const STRING_CTRL_KEYS = new Set<keyof RoomControls>(["screenShareLayout", "outputFormat"]);
-  (Object.keys(patch) as Array<keyof RoomControls>).forEach((k) => {
-    const val = patch[k];
-    if (typeof val === "boolean") (cleaned as any)[k] = val;
-    else if (typeof val === "string" && STRING_CTRL_KEYS.has(k)) (cleaned as any)[k] = val;
-  });
-
-  if (Object.keys(cleaned).length === 0) {
-    return res.status(400).json({ error: "no_valid_fields" });
-  }
-
-  const missingPerm = missingPermForControlsPatch(access, access.permissions, Object.keys(cleaned));
-  if (missingPerm) {
-    return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS, required: missingPerm });
-  }
-
-  const ref = controlsDocRef(roomId, identityDocId);
-  await ref.set(
-    {
-      ...cleaned,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedByUid: uid,
-    },
-    { merge: true },
-  );
-
-  // Enforce mic/camera/screen restrictions in LiveKit (not just via SSE),
-  // so a modified client cannot ignore forcedMute / canPublishAudio etc.
-  let enforcement: { applied: boolean; reason?: string } | null = null;
-  if (patchTouchesEnforcedKeys(cleaned as any)) {
-    try {
-      const { livekitRoomName } = getRoomAccess(req as any);
-      const ownerUid = await getRoomOwnerUid(roomId);
-      if (isProtectedIdentity(rawIdentity, ownerUid, [access.identity])) {
-        enforcement = { applied: false, reason: "protected_identity" };
-      } else {
-        const r = await enforceRoomControlsForIdentity({ roomId, livekitRoomName, identity: rawIdentity });
-        enforcement = { applied: r.applied, reason: r.reason };
-      }
-    } catch (err) {
-      enforcement = { applied: false, reason: "livekit_push_failed" };
-    }
-  }
-
-  const merged = await readControlsMerged(roomId, identityDocId);
-  return res.json({ ok: true, controls: merged, enforcement });
-});
-
 // Apply a role's permissions to a LiveKit participant immediately.
 // POST /api/rooms/:roomId/participants/:identity/permissions
 // Body: { roleId: "cohost" | "participant" }  (legacy "moderator" = cohost)
@@ -795,33 +688,6 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
   if (!presetId) {
     return res.status(400).json({ error: "roleId_invalid" });
   }
-
-  const denied = await checkRolePresetAssignment(access, roomId, rawIdentity, presetId);
-  if (denied) return res.status(denied.status).json({ error: denied.error });
-
-  return applyRolePresetToIdentity(req, res, { roomId, rawIdentity, presetId, uid });
-});
-
-// Apply a saved preset to a participant identity (same as /permissions:
-// LiveKit push + token refresh hint).
-// POST /api/rooms/:roomId/controls/:identity/apply-preset  Body: { presetId }
-// Auth: Firebase session cookie + Authorization: Bearer <roomAccessToken>
-router.post("/:roomId/controls/:identity/apply-preset", requireAuth as any, requireRoomAccessToken as any, async (req: any, res) => {
-  const roomId = String(req.params.roomId || "").trim();
-  if (!roomId) return res.status(400).json({ error: "roomId_required" });
-
-  const access = (req as any).roomAccess as RoomAccessClaims | undefined;
-  if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-  if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
-
-  const uid = (req as any).user?.uid as string | undefined;
-  if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-
-  const rawIdentity = String(req.params.identity || "").trim();
-  if (!rawIdentity) return res.status(400).json({ error: "identity_required" });
-
-  const presetId = parsePresetId((req.body as any)?.presetId);
-  if (!presetId) return res.status(400).json({ error: "presetId_required" });
 
   const denied = await checkRolePresetAssignment(access, roomId, rawIdentity, presetId);
   if (denied) return res.status(denied.status).json({ error: denied.error });

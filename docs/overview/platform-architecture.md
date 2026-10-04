@@ -113,7 +113,6 @@ Routes are organized by domain across 42+ files in `streamline-server/routes/`:
 | Features | `featureAccess.ts`, `skillsIntegration.ts` | `/api/featureAccess` |
 | Telemetry | `stats.ts`, `telemetry.ts` | `/api/stats`, `/api/telemetry` |
 | AI/Horizon | `horizonApi.ts`, `horizonWs.ts`, `horizon/roomHooks.ts` | `/api/horizon` |
-| Onboarding | `onboarding.ts` | `/api/onboarding` |
 | Misc | `invites.ts`, `recordings.ts`, `savedEmbeds.ts` | `/api/invites`, `/api/recordings` |
 
 ### Error Handling

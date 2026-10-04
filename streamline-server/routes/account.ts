@@ -410,36 +410,6 @@ router.get("/me", async (req, res) => {
           // non-fatal
         }
 
-    // Optional EDU/org context for client-side EDU lane routing + guards.
-    // This is intentionally best-effort and non-fatal if org collections
-    // aren't populated yet.
-    let orgId: string | null = null;
-    let orgType: string | null = null;
-    let orgName: string | null = null;
-    let orgRole: string | null = null;
-
-    try {
-      const rawOrgId = (data as any)?.orgId ?? (data as any)?.org?.id ?? (data as any)?.org?.orgId;
-      orgId = typeof rawOrgId === "string" && rawOrgId.trim() ? rawOrgId.trim() : null;
-
-      const rawOrgType = (data as any)?.orgType ?? (data as any)?.org?.orgType;
-      orgType = typeof rawOrgType === "string" && rawOrgType.trim() ? rawOrgType.trim() : null;
-
-      if (orgId) {
-        const orgSnap = await firestore.collection("orgs").doc(orgId).get().catch(() => null as any);
-        const org = orgSnap && orgSnap.exists ? (orgSnap.data() as any) : null;
-        if (org && typeof org.orgType === "string" && String(org.orgType).trim()) orgType = String(org.orgType).trim();
-        if (org && typeof org.name === "string" && String(org.name).trim()) orgName = String(org.name).trim();
-
-        const memberId = `${orgId}_${uid}`;
-        const memberSnap = await firestore.collection("orgMembers").doc(memberId).get().catch(() => null as any);
-        const member = memberSnap && memberSnap.exists ? (memberSnap.data() as any) : null;
-        if (member && typeof member.role === "string" && String(member.role).trim()) orgRole = String(member.role).trim();
-      }
-    } catch {
-      // non-fatal
-    }
-
     const payload = {
       id: uid,
       email: data.email || null,
@@ -448,10 +418,6 @@ router.get("/me", async (req, res) => {
       recovery: buildPublicRecoveryState((data as any).recovery),
       recoveryConfigured: !needsRecoverySetup(data),
       recoveryRequired: needsRecoverySetup(data),
-      orgId,
-      orgType,
-      orgName,
-      orgRole,
       billingTruth,
       billingSettings: {
         overagesEnabled:
@@ -781,34 +747,6 @@ router.patch("/role-presets/:presetId", requireAuth, async (req, res) => {
     console.error("[account/role-presets patch] error", err);
     return res.status(500).json({ error: "failed_to_update_role_preset" });
   }
-});
-
-// Advanced custom roles have been fully replaced by two fixed role
-// templates (participant and cohost). Expose a clear, non-successful
-// response for any legacy callers so they cannot silently reintroduce
-// complexity.
-
-router.get("/roles", async (_req, res) => {
-  return res.status(410).json({
-    error: "roles_disabled",
-    message: "Custom roles have been removed; use role-presets instead.",
-  });
-});
-
-router.post("/roles", async (_req, res) => {
-  return res.status(410).json({ error: "roles_disabled" });
-});
-
-router.patch("/roles/:id", async (_req, res) => {
-  return res.status(410).json({ error: "roles_disabled" });
-});
-
-router.delete("/roles/:id", async (_req, res) => {
-  return res.status(410).json({ error: "roles_disabled" });
-});
-
-router.put("/roles/quick", async (_req, res) => {
-  return res.status(410).json({ error: "roles_disabled" });
 });
 
 export default router;

@@ -9,6 +9,8 @@
  *   stripeEvents               createdAt (ms) older than 30 days (webhook de-dup
  *                               markers; Stripe stops retrying after 3 days)
  *   jobRuns                    startedAtMs older than 30 days (job history)
+ *   telemetryEvents            timestamp (ms) older than TELEMETRY_RETENTION_DAYS
+ *                               (default 30; product telemetry, lib/telemetry.ts)
  *
  * Every query is a single-field range (no composite index). The two presence
  * sub-collections are queried as collection groups; when the collection-group
@@ -19,6 +21,7 @@ import { FieldPath } from "firebase-admin/firestore";
 import { firestore } from "../../firebaseAdmin";
 import { defineJob, JOB_RUNS } from "./framework";
 import { envNumber } from "./pure";
+import { TELEMETRY_COLLECTION } from "../telemetryPure";
 
 const PAGE = 400;
 const MAX_PER_COLLECTION = 2_000;
@@ -78,6 +81,7 @@ export async function cleanupEphemeralDocs(now: Date, opts: { shouldStop?: () =>
   const shouldStop = opts.shouldStop ?? (() => false);
   const retentionDays = envNumber(process.env.JOB_HISTORY_RETENTION_DAYS, 30);
   const stripeDays = envNumber(process.env.STRIPE_EVENT_RETENTION_DAYS, 30);
+  const telemetryDays = envNumber(process.env.TELEMETRY_RETENTION_DAYS, 30);
   const presenceCutoff = nowMs - PRESENCE_MAX_AGE_MS;
   const counts: Record<string, number> = {};
   const errors: string[] = [];
@@ -134,6 +138,13 @@ export async function cleanupEphemeralDocs(now: Date, opts: { shouldStop?: () =>
   await step("jobRuns", () =>
     deleteMatching(firestore.collection(JOB_RUNS).where("startedAtMs", "<", nowMs - retentionDays * DAY_MS), MAX_PER_COLLECTION, shouldStop)
   );
+  await step("telemetryEvents", () =>
+    deleteMatching(
+      firestore.collection(TELEMETRY_COLLECTION).where("timestamp", "<", nowMs - telemetryDays * DAY_MS),
+      MAX_PER_COLLECTION,
+      shouldStop
+    )
+  );
 
   const deleted = Object.entries(counts)
     .filter(([k]) => k !== "presenceRoomsScanned")
@@ -145,7 +156,7 @@ export const ephemeralCleanupJob = defineJob({
   name: "expired-sessions",
   title: "Expired Sessions & Ephemeral Docs",
   description:
-    "Deletes expired invite acceptances and pending checkout codes, presence/HLS-viewer docs idle > 1h, stripeEvents and jobRuns older than 30 days.",
+    "Deletes expired invite acceptances and pending checkout codes, presence/HLS-viewer docs idle > 1h, stripeEvents and jobRuns older than 30 days, telemetryEvents older than TELEMETRY_RETENTION_DAYS (30).",
   intervalMs: 60 * 60_000,
   highlight: "deleted",
   async run(ctx) {

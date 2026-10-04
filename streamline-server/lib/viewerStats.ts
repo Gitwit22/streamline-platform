@@ -17,6 +17,7 @@
  * Every hook is best-effort: callers wrap these in try/catch or `void ...catch`.
  * Timestamps are epoch milliseconds.
  */
+import { recordTelemetry } from "./telemetry";
 import { randomUUID } from "node:crypto";
 import { firestore as db } from "../firebaseAdmin";
 import { getLiveKitSdk } from "./livekit";
@@ -172,6 +173,12 @@ export async function recordHlsHeartbeat(roomId: string, viewerId: string, sessi
     const recorded = await recordViewer(roomId, viewerKeyFor("hls", viewerId), "hls");
     await pRef.set({ sessionId, firstSeenAt: now, lastSeenAtMs: now });
     currentCache.delete(roomId);
+    // First heartbeat of this viewer in this live session (not per heartbeat).
+    recordTelemetry("hls.viewer_joined", {
+      roomId,
+      broadcastId: sessionId,
+      metadata: { returning: pSnap.exists, newUnique: !!recorded },
+    });
     return recorded ? recorded.stats : null;
   }
   await pRef.set({ lastSeenAtMs: now }, { merge: true });
@@ -183,9 +190,19 @@ export async function markHlsViewerLeft(roomId: string, viewerId: string): Promi
   const pRef = hlsViewersCol(roomId).doc(viewerId);
   const pSnap = await pRef.get();
   if (!pSnap.exists) return;
+  const prev = (pSnap.data() || {}) as any;
+  // A repeated leave beacon for the same viewer is not a second leave.
+  if (prev.leftAtMs && !(Number(prev.lastSeenAtMs) > Number(prev.leftAtMs))) return;
+  const now = Date.now();
   // leftAtMs keeps the real leave time for watch-time stats.
-  await pRef.set({ lastSeenAtMs: 0, leftAtMs: Date.now() }, { merge: true });
+  await pRef.set({ lastSeenAtMs: 0, leftAtMs: now }, { merge: true });
   currentCache.delete(roomId);
+  const firstSeen = Number(prev.firstSeenAt);
+  recordTelemetry("hls.viewer_left", {
+    roomId,
+    broadcastId: typeof prev.sessionId === "string" ? prev.sessionId : null,
+    metadata: { watchedSec: Number.isFinite(firstSeen) && firstSeen > 0 ? Math.max(0, Math.round((now - firstSeen) / 1000)) : null },
+  });
 }
 
 /**

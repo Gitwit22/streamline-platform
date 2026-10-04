@@ -58,7 +58,6 @@ The Broadcast Studio is StreamLine's live streaming system. It handles starting 
 | `/api/rooms/:roomId/controls/stop-hls` | POST | Stop HLS broadcast |
 | `/api/rooms/:roomId/start-multistream` | POST | Start multi-destination RTMP |
 | `/api/rooms/:roomId/stop-multistream` | POST | Stop multi-destination RTMP |
-| `/api/rooms/:roomId/layout` | PUT | Update room layout mode |
 | `/api/public/hls/:roomId` | GET | Public HLS playlist access |
 
 ---
@@ -104,7 +103,7 @@ Rooms are the core unit of real-time interaction in StreamLine. A room is a Live
 | `/api/rooms/:roomId/controls` | POST | Room control actions |
 | `/api/rooms/:roomId/policy` | PUT | Update room access policies |
 | `/api/rooms/:roomId/hls-config` | PUT | Update HLS configuration |
-| `/api/rooms/:roomId/active-embed` | GET/PUT | Manage active viewer embed |
+| `/api/rooms/:roomId/active-embed` | GET | Saved embed bound to the room |
 
 ---
 
@@ -302,7 +301,6 @@ Platform-wide administration interface for monitoring, user management, and supp
 | Endpoint | Method | Description |
 |---|---|---|
 | `/api/admin` | GET | Admin dashboard data |
-| `/api/admin/status` | GET | Platform status |
 | `/api/diagnostics` | GET | System diagnostics |
 | `/api/platformHealth` | GET | Health check |
 | `/api/alerts` | GET/POST | Alert management |
@@ -336,10 +334,9 @@ Allow external participants to join rooms via invite links without requiring a f
 
 | Endpoint | Method | Description |
 |---|---|---|
-| `/api/rooms/:roomId/invites` | POST | Create a room invite |
-| `/api/rooms/:roomId/invites` | GET | List room invites |
+| `/api/invites/create` | POST | Create a room invite |
 | `/api/invites/resolve/:token` | GET | Resolve invite token details |
-| `/api/invites/redeem/:token` | POST | Redeem an invite token |
+| `/api/invites/:inviteId/join-now` | POST | Redeem an invite and mint a room token |
 | `/api/rooms/:roomId/token` | POST | Mint guest access token |
 
 ---

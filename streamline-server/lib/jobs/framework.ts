@@ -23,6 +23,7 @@
  * Nothing here throws out of a timer: Firestore failures are logged and the
  * run is reported as an error outcome.
  */
+import { recordTelemetry } from "../telemetry";
 import os from "os";
 import crypto from "crypto";
 import { FieldValue } from "firebase-admin/firestore";
@@ -270,6 +271,11 @@ export async function runJob(
     if (rec.processed > 0 || status !== "success") {
       console.log(`[jobs] ${name} ${status}`, { processed: rec.processed, durationMs: rec.durationMs, trigger, details: rec.details, error: rec.error });
     }
+    if (status === "error") {
+      recordTelemetry("job.failed", {
+        metadata: { job: name, trigger, runId, error: rec.error, processed: rec.processed, durationMs: rec.durationMs },
+      });
+    }
 
     return {
       job: name,
@@ -285,6 +291,7 @@ export async function runJob(
   } catch (e: any) {
     // Defensive: nothing above should throw, but a timer must never see it.
     console.error(`[jobs] ${name}: unexpected failure`, e?.message || e);
+    recordTelemetry("job.failed", { metadata: { job: name, trigger, error: errorMessage(e), stage: "framework" } });
     return { job: name, ran: false, status: "error", error: errorMessage(e), nextRunAtMs: Date.now() + 60_000 };
   } finally {
     runningLocally.delete(name);

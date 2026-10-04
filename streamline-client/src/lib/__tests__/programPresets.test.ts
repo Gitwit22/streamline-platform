@@ -11,7 +11,17 @@ import {
 } from "../programPresets";
 import { PORTRAIT_ALIASES, buildLayout, layoutHasScreenSlot, pickerPresets } from "../programResolve";
 import { ALL_PRESET_IDS } from "../studioLayout";
-import { VERTICAL_PRESETS } from "../verticalLayouts";
+
+// Legacy portrait preset ids (the retired lib/verticalLayouts.ts
+// VERTICAL_PRESETS) and their slot counts; saved rooms may still carry them.
+const VERTICAL_PRESETS: Array<{ id: string; slots: unknown[] }> = [
+  { id: "vertical_solo", slots: [1] },
+  { id: "vertical_host_guest_stack", slots: [1, 2] },
+  { id: "vertical_3up_panel", slots: [1, 2, 3] },
+  { id: "vertical_featured_2small", slots: [1, 2, 3] },
+  { id: "vertical_screenshare_facecam", slots: [1, 2] },
+  { id: "vertical_interview", slots: [1, 2] },
+];
 
 // ../programPresets.ts is a byte-for-byte copy of
 // streamline-server/lib/programPresets.ts (enforced by the server test

@@ -17,7 +17,6 @@ import {
   normalizePasswordResetState,
   normalizeRecoveryState,
   reserveRecoveryAttempt,
-  SECURITY_QUESTIONS,
   stripSensitiveRecoveryFields,
   validatePassword,
   validateRecoverySetupInput,
@@ -197,9 +196,6 @@ async function ensureFirebaseCustomToken(uid: string, email: string, password?: 
     return null;
   }
 }
-
-// Health check for auth router
-router.get("/ping", (_req, res) => res.json({ ok: true }));
 
 /**
  * GET /api/auth/me
@@ -580,10 +576,6 @@ router.post("/signup", signupRateLimit, async (req, res) => {
 router.post("/logout", (_req, res) => {
   res.clearCookie("token", { path: "/" });
   return res.json({ ok: true });
-});
-
-router.get("/recovery/questions", (_req, res) => {
-  return res.json({ questions: SECURITY_QUESTIONS });
 });
 
 const FORGOT_PASSWORD_UNAVAILABLE_MESSAGE =

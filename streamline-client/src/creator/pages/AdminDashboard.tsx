@@ -358,8 +358,8 @@ function categorizeFeature(flag: FeatureFlag): { category: FeatureCategory; labe
   // 1) AI-related flags
   if (key.includes("ai")) return { category: "AI", label: titleize(flag.name) };
 
-  // 2) Access programs: waitlist, greenroom, priority access
-  if (key.includes("waitlist") || key.includes("greenroom") || key.includes("priority")) {
+  // 2) Access programs: waitlist, priority access
+  if (key.includes("waitlist") || key.includes("priority")) {
     return { category: "Access", label: titleize(flag.name) };
   }
 
