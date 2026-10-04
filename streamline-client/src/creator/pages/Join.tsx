@@ -10,6 +10,12 @@ import { logout } from "../../lib/logout";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
 import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
 import { usageLabels } from "../../lib/usageLabels";
+import {
+  DEFAULT_ROOM_ACCESS,
+  ROOM_ACCESS_HLS_NOTE,
+  ROOM_ACCESS_OPTIONS,
+  type RoomAccessMode,
+} from "../../lib/roomAccess";
 import { TourProvider, useTour } from "../../components/tour/TourProvider";
 import {
   clearSelectedOwnerContext,
@@ -170,6 +176,9 @@ export default function Join() {
 
   // Presence mode: controls how the host joins (normal, invisible)
   const [hostPresenceMode, setHostPresenceMode] = useState<"normal" | "invisible">("normal");
+
+  // Production-room access for new rooms (invite-only by default).
+  const [newRoomAccess, setNewRoomAccess] = useState<RoomAccessMode>(DEFAULT_ROOM_ACCESS);
 
   // Platform-level HLS flag (controls enablement of Saved Room join when HLS is disabled)
   // Default to false so HLS-only UI is disabled until account flags load.
@@ -609,6 +618,7 @@ export default function Join() {
             roomType: "rtc",
             savedEmbedId: undefined,
             presenceMode: hostPresenceMode,
+            access: newRoomAccess,
           }),
         }, { allowNonOk: true });
 
@@ -1441,6 +1451,52 @@ export default function Join() {
                   >
                     Use Saved Room
                   </button>
+                </div>
+              </div>
+            )}
+
+            {/* HOST: Access for a new room (invite-only by default) */}
+            {!isParticipant && joinMode === "new" && (
+              <div style={{ marginBottom: "20px" }} role="radiogroup" aria-label="Room access">
+                <div style={{ fontSize: "12px", color: "#9ca3af", marginBottom: "6px" }}>Access</div>
+                <div style={{ display: "grid", gap: "6px" }}>
+                  {ROOM_ACCESS_OPTIONS.map((opt) => {
+                    const selected = newRoomAccess === opt.value;
+                    return (
+                      <label
+                        key={opt.value}
+                        style={{
+                          display: "flex",
+                          alignItems: "flex-start",
+                          gap: "8px",
+                          padding: "8px 10px",
+                          borderRadius: "10px",
+                          border: `1px solid ${selected ? "rgba(249,115,22,0.7)" : "rgba(55,65,81,0.9)"}`,
+                          background: selected ? "rgba(249,115,22,0.08)" : "rgba(15,23,42,0.85)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        <input
+                          type="radio"
+                          name="new-room-access"
+                          value={opt.value}
+                          checked={selected}
+                          onChange={() => setNewRoomAccess(opt.value)}
+                          style={{ marginTop: "2px" }}
+                        />
+                        <span style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+                          <span style={{ fontSize: "13px", fontWeight: 600, color: "#e5e7eb" }}>
+                            {opt.label}
+                            {opt.value === DEFAULT_ROOM_ACCESS ? " (default)" : ""}
+                          </span>
+                          <span style={{ fontSize: "11px", color: "#9ca3af" }}>{opt.description}</span>
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+                <div style={{ marginTop: "6px", fontSize: "11px", color: "#9ca3af" }}>
+                  {ROOM_ACCESS_HLS_NOTE} You can change this later from the host dashboard.
                 </div>
               </div>
             )}

@@ -27,6 +27,13 @@ import { getPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { stripe } from "../lib/stripe";
 import { computeAccountMeBillingFields } from "../lib/billingTruth";
 import { normalizeRoomLayout } from "../lib/roomLayout";
+import {
+  ROLE_PRESET_DEFAULTS,
+  ROLE_PRESET_EDITABLE_KEYS,
+  cleanRolePresetPatch,
+  normalizeRolePresetId,
+} from "../lib/permissions/roleDefaults";
+import { loadOwnerRolePreset, rolePresetDocRef } from "../lib/permissions/rolePresetStore";
 
 const router = Router();
 
@@ -43,127 +50,10 @@ const DEFAULT_MEDIA_PREFS = {
   permissionsMode: "simple" as "simple" | "advanced",
 };
 
-const DEFAULT_COHOST_PROFILE = {
-  label: "Co-Host",
-  canStream: false,
-  canRecord: false,
-  canDestinations: false,
-  canModerate: false,
-  canLayout: true,
-  canScreenShare: true,
-  canInvite: true,
-  canAnalytics: false,
-  expiresHours: 24,
-  maxUses: 1,
-};
-
-type RolePresetId = "participant" | "cohost" | "moderator";
-type RolePresetDoc = {
-  role: RolePresetId;
-  canPublishAudio: boolean;
-  canPublishVideo: boolean;
-  canScreenShare: boolean;
-  tileVisible: boolean;
-  canMuteGuests: boolean;
-  canInviteLinks: boolean;
-  canManageDestinations: boolean;
-  canStartStopStream: boolean;
-  canStartStopRecording: boolean;
-  // Optional future scopes. Moderator must never have these enabled.
-  canViewAnalytics?: boolean;
-  canChangeLayoutScene?: boolean;
-  updatedAt?: number;
-};
-
-const DEFAULT_ROLE_PRESETS: Record<RolePresetId, RolePresetDoc> = {
-  participant: {
-    role: "participant",
-    canPublishAudio: true,
-    canPublishVideo: true,
-    canScreenShare: false,
-    tileVisible: true,
-    // Host-only moderation: participants never gain mute/remove powers from templates.
-    canMuteGuests: false,
-    canInviteLinks: false,
-    canManageDestinations: false,
-    canStartStopStream: false,
-    canStartStopRecording: false,
-  },
-  moderator: {
-    role: "moderator",
-    canPublishAudio: true,
-    canPublishVideo: true,
-    canScreenShare: false,
-    tileVisible: true,
-    // Legacy moderator profile kept for backwards-compat reads only.
-    // Moderation powers are enforced host-only elsewhere.
-    canMuteGuests: false,
-    canInviteLinks: true,
-    canManageDestinations: false,
-    canStartStopStream: false,
-    canStartStopRecording: false,
-    canViewAnalytics: false,
-    canChangeLayoutScene: false,
-  },
-  cohost: {
-    role: "cohost",
-    canPublishAudio: true,
-    canPublishVideo: true,
-    canScreenShare: true,
-    tileVisible: true,
-    // Host-only moderation: co-hosts never gain mute/remove powers from templates.
-    canMuteGuests: false,
-    canInviteLinks: true,
-    canManageDestinations: true,
-    canStartStopStream: true,
-    canStartStopRecording: true,
-  },
-};
-
-function parseRolePresetId(raw: any): RolePresetId | null {
-  const v = String(raw || "").toLowerCase();
-  if (v === "participant" || v === "cohost" || v === "moderator") return v;
-  return null;
-}
-
-function pickBoolean(v: any): boolean | undefined {
-  if (typeof v === "boolean") return v;
-  return undefined;
-}
-
-async function readRolePreset(uid: string, presetId: RolePresetId): Promise<RolePresetDoc> {
-  const base = DEFAULT_ROLE_PRESETS[presetId];
-  try {
-    const snap = await firestore.collection("users").doc(uid).collection("rolePresets").doc(presetId).get();
-    const data = snap.exists ? (snap.data() as any) : {};
-    const merged: RolePresetDoc = {
-      ...base,
-      role: presetId,
-      canPublishAudio: pickBoolean(data.canPublishAudio) ?? base.canPublishAudio,
-      canPublishVideo: pickBoolean(data.canPublishVideo) ?? base.canPublishVideo,
-      canScreenShare: pickBoolean(data.canScreenShare) ?? base.canScreenShare,
-      tileVisible: pickBoolean(data.tileVisible) ?? base.tileVisible,
-      canMuteGuests: pickBoolean(data.canMuteGuests) ?? base.canMuteGuests,
-      canInviteLinks: pickBoolean(data.canInviteLinks) ?? base.canInviteLinks,
-      canManageDestinations: pickBoolean(data.canManageDestinations) ?? base.canManageDestinations,
-      canStartStopStream: pickBoolean(data.canStartStopStream) ?? base.canStartStopStream,
-      canStartStopRecording: pickBoolean(data.canStartStopRecording) ?? base.canStartStopRecording,
-      canViewAnalytics: pickBoolean(data.canViewAnalytics) ?? base.canViewAnalytics,
-      canChangeLayoutScene: pickBoolean(data.canChangeLayoutScene) ?? base.canChangeLayoutScene,
-      updatedAt: typeof data.updatedAt === "number" ? data.updatedAt : undefined,
-    };
-
-    // Hard guarantees: moderator must never have these enabled.
-    if (presetId === "moderator") {
-      merged.canViewAnalytics = false;
-      merged.canChangeLayoutScene = false;
-    }
-
-    return merged;
-  } catch {
-    return base;
-  }
-}
+// In-room role defaults (participant / cohost) live in
+// lib/permissions/roleDefaults.ts (single source of truth shared with room
+// controls and roomAccessToken minting); stored per owner at
+// users/{uid}/rolePresets/{presetId}.
 
 type PermissionSet = RolePermissionMap;
 
@@ -345,25 +235,6 @@ function clampNumber(value: any, min: number, max: number, fallback: number) {
   const num = Number(value);
   if (!Number.isFinite(num)) return fallback;
   return Math.min(max, Math.max(min, num));
-}
-
-function normalizeCohostProfile(raw: any) {
-  const merged = { ...DEFAULT_COHOST_PROFILE, ...(raw || {}) };
-  return {
-    label: typeof merged.label === "string" && merged.label.trim()
-      ? merged.label.trim().slice(0, 64)
-      : DEFAULT_COHOST_PROFILE.label,
-    canStream: !!merged.canStream,
-    canRecord: !!merged.canRecord,
-    canDestinations: !!merged.canDestinations,
-    canModerate: !!merged.canModerate,
-    canLayout: !!merged.canLayout,
-    canScreenShare: !!merged.canScreenShare,
-    canInvite: !!merged.canInvite,
-    canAnalytics: !!merged.canAnalytics,
-    expiresHours: clampNumber(merged.expiresHours, 1, 168, DEFAULT_COHOST_PROFILE.expiresHours),
-    maxUses: clampNumber(merged.maxUses, 1, 20, DEFAULT_COHOST_PROFILE.maxUses),
-  };
 }
 
 function normalizePermissions(raw: any): PermissionSet {
@@ -1044,57 +915,25 @@ router.post("/accept-tos", async (req, res) => {
   }
 });
 
-router.get("/cohost-profile", async (req, res) => {
-  try {
-    const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-
-    const { mediaPrefs } = await getNormalizedMediaPrefs(uid);
-    const adv = await getAdvancedPermissionsEnabled(uid);
-    const simpleMode = mediaPrefs.permissionsMode === "simple" || !adv.enabled;
-    const profile = simpleMode
-      ? normalizeCohostProfile({ ...SIMPLE_ROLE_DEFAULTS.cohost, label: "Co-Host", isSystem: true })
-      : normalizeCohostProfile((await firestore.collection("users").doc(uid).get()).data()?.cohostProfile);
-
-    return res.json({
-      profile,
-      locked: simpleMode,
-      note: simpleMode
-        ? adv.globalLock
-          ? "Co-host is locked to simple defaults (temporarily disabled globally)."
-          : "Co-host is locked to the simple defaults."
-        : undefined,
-      lockReason: adv.globalLock ? "global_lock" : undefined,
-    });
-  } catch (err: any) {
-    console.error("[account/cohost-profile] error", err);
-    return res.status(500).json({ error: "failed_to_load_cohost_profile" });
-  }
-});
-
-// Role presets used for in-room controls (applied to rooms/{roomId}/controls/{identity}).
+// Role presets used for in-room controls (applied to rooms/{roomId}/controls/{identity}
+// and folded into cohost/participant roomAccessToken permissions).
 router.get("/role-presets", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    // Role defaults are now locked to two templates: participant and cohost.
-    // Any legacy moderator data is ignored for new writes and UI, but can
-    // still be read/migrated server-side if needed.
     const [participant, cohost] = await Promise.all([
-      readRolePreset(uid, "participant"),
-      readRolePreset(uid, "cohost"),
+      loadOwnerRolePreset(uid, "participant"),
+      loadOwnerRolePreset(uid, "cohost"),
     ]);
 
     return res.json({
-      presets: {
-        participant,
-        cohost,
-      },
+      presets: { participant, cohost },
       defaults: {
-        participant: DEFAULT_ROLE_PRESETS.participant,
-        cohost: DEFAULT_ROLE_PRESETS.cohost,
+        participant: ROLE_PRESET_DEFAULTS.participant,
+        cohost: ROLE_PRESET_DEFAULTS.cohost,
       },
+      editableKeys: ROLE_PRESET_EDITABLE_KEYS,
     });
   } catch (err: any) {
     console.error("[account/role-presets] error", err);
@@ -1107,84 +946,26 @@ router.patch("/role-presets/:presetId", requireAuth, async (req, res) => {
     const uid = (req as any).user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    const presetId = parseRolePresetId(req.params.presetId);
-    if (!presetId) return res.status(400).json({ error: "invalid_presetId" });
-
-    // Moderator templates are legacy-only and no longer user-editable.
-    if (presetId === "moderator") {
-      return res.status(400).json({ error: "preset_disabled" });
+    // Legacy "moderator" is the cohost template.
+    const presetId = normalizeRolePresetId(req.params.presetId);
+    if (!presetId || !["participant", "cohost", "moderator"].includes(String(req.params.presetId || "").toLowerCase())) {
+      return res.status(400).json({ error: "invalid_presetId" });
     }
 
-    const body = (req.body || {}) as any;
-    const patch: Partial<RolePresetDoc> = {
-      canPublishAudio: pickBoolean(body.canPublishAudio),
-      canPublishVideo: pickBoolean(body.canPublishVideo),
-      canScreenShare: pickBoolean(body.canScreenShare),
-      tileVisible: pickBoolean(body.tileVisible),
-      canMuteGuests: pickBoolean(body.canMuteGuests),
-      canInviteLinks: pickBoolean(body.canInviteLinks),
-      canManageDestinations: pickBoolean(body.canManageDestinations),
-      canStartStopStream: pickBoolean(body.canStartStopStream),
-      canStartStopRecording: pickBoolean(body.canStartStopRecording),
-      canViewAnalytics: pickBoolean(body.canViewAnalytics),
-      canChangeLayoutScene: pickBoolean(body.canChangeLayoutScene),
-    };
-
-    const cleaned: any = {};
-    (Object.keys(patch) as Array<keyof RolePresetDoc>).forEach((k) => {
-      const val = (patch as any)[k];
-      if (typeof val === "boolean") cleaned[k] = val;
-    });
-
+    // Only the toggles shown in Settings are writable; participants can
+    // never get moderation/production scopes.
+    const cleaned = cleanRolePresetPatch(presetId, req.body);
     if (Object.keys(cleaned).length === 0) {
       return res.status(400).json({ error: "no_valid_fields" });
     }
 
-    // Host-only moderation: templates never grant guest mute/remove powers.
-    if ("canMuteGuests" in cleaned) delete cleaned.canMuteGuests;
+    await rolePresetDocRef(uid, presetId).set({ ...cleaned, role: presetId, updatedAt: Date.now() }, { merge: true });
 
-    await firestore
-      .collection("users")
-      .doc(uid)
-      .collection("rolePresets")
-      .doc(presetId)
-      .set({ ...cleaned, role: presetId, updatedAt: Date.now() }, { merge: true });
-
-    const preset = await readRolePreset(uid, presetId);
+    const preset = await loadOwnerRolePreset(uid, presetId);
     return res.json({ ok: true, preset });
   } catch (err: any) {
     console.error("[account/role-presets patch] error", err);
     return res.status(500).json({ error: "failed_to_update_role_preset" });
-  }
-});
-
-router.patch("/cohost-profile", async (req, res) => {
-  try {
-    const uid = (req as any).user?.uid;
-    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-
-    const { mediaPrefs } = await getNormalizedMediaPrefs(uid);
-    const adv = await getAdvancedPermissionsEnabled(uid);
-    const simpleMode = mediaPrefs.permissionsMode === "simple" || !adv.enabled;
-    if (simpleMode) {
-      const lockedProfile = normalizeCohostProfile({ ...SIMPLE_ROLE_DEFAULTS.cohost, label: "Co-Host", isSystem: true });
-      return res.json({
-        profile: lockedProfile,
-        locked: true,
-        note: adv.globalLock
-          ? "Advanced Permissions are temporarily disabled globally; co-host settings are locked to simple defaults."
-          : "Co-host settings are locked in simple mode.",
-        lockReason: adv.globalLock ? "global_lock" : "simple_mode_locked",
-      });
-    }
-
-    const profile = normalizeCohostProfile(req.body || {});
-    await firestore.collection("users").doc(uid).set({ cohostProfile: profile }, { merge: true });
-
-    return res.json({ profile, locked: false });
-  } catch (err: any) {
-    console.error("[account/cohost-profile] update error", err);
-    return res.status(500).json({ error: "failed_to_update_cohost_profile" });
   }
 });
 

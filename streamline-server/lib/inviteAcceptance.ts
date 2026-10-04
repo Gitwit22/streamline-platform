@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { firestore } from "../firebaseAdmin";
+import { applyOwnerPresetToControls } from "./permissions/rolePresetStore";
 
 /**
  * When INVITE_TOKEN_SECRET / ROOM_ACCESS_TOKEN_SECRET / GUEST_SESSION_SECRET
@@ -95,11 +96,11 @@ export async function recordInviteAcceptance(params: {
   role: AcceptanceRole;
   createdByUid?: string | null;
   expiresAtMs?: number | null;
-}): Promise<void> {
+}): Promise<{ role: AcceptanceRole; becameCohost: boolean } | void> {
   const { roomId, uid, inviteId, role } = params;
   if (!roomId || !uid) return;
   const ref = firestore.collection(INVITE_ACCEPTANCES_COLLECTION).doc(acceptanceDocId(roomId, uid));
-  await firestore.runTransaction(async (tx) => {
+  const result = await firestore.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     const existing = snap.exists ? ((snap.data() as any) || {}) : null;
     const existingValid = existing ? parseAcceptance(existing, roomId, uid) : null;
@@ -117,7 +118,16 @@ export async function recordInviteAcceptance(params: {
       updatedAt: new Date(),
       revokedAt: null,
     });
+    return { role: mergedRole, becameCohost: mergedRole === "cohost" && existingValid?.role !== "cohost" };
   });
+
+  // Cohosts get the room OWNER's cohost preset on their controls doc no
+  // matter how they joined (invite link, accept, join-now, /token), so their
+  // scopes and minted permissions are consistent.
+  if (result.becameCohost) {
+    await applyOwnerPresetToControls({ roomId, identity: uid, presetId: "cohost", updatedBy: params.createdByUid ?? null });
+  }
+  return result;
 }
 
 /**

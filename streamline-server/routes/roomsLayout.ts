@@ -50,7 +50,7 @@ router.patch("/:roomId/layout", requireAuth as any, requireRoomAccessToken as an
   const access = (req as any).roomAccess as RoomAccessClaims | undefined;
   if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.ROOM_TOKEN_REQUIRED });
   if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
-  if (!actorMay(access.role, access.permissions, "canLayout")) {
+  if (!actorMay(access, access.permissions, "canLayout")) {
     return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
   }
 

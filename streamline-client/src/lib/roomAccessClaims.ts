@@ -29,8 +29,16 @@ export type RoomAccessPayload = {
   role?: string;
   identity?: string;
   permissions?: RoomAccessPermissions;
+  /** Set for delegated producers: a "host" token limited by `permissions`. */
+  actingOwnerUid?: string;
   exp?: number;
 };
+
+/** True for a delegated producer's token (role host, limited by its permissions). */
+export function isLimitedHostToken(token: string | null | undefined): boolean {
+  const p = decodeRoomAccessToken(token);
+  return !!p && String(p.role || "").toLowerCase() === "host" && typeof p.actingOwnerUid === "string" && !!p.actingOwnerUid;
+}
 
 function base64UrlDecode(input: string): string {
   let s = input.replace(/-/g, "+").replace(/_/g, "/");
@@ -79,8 +87,9 @@ export function getRoomAccessPermissions(token: string | null | undefined): Room
 export function normalizeRoomRole(raw: unknown): RoomRole | null {
   const r = String(raw ?? "").trim().toLowerCase();
   if (r === "host" || r === "cohost" || r === "participant" || r === "guest" || r === "viewer") return r;
-  if (r === "co-host" || r === "co_host") return "cohost";
-  if (r === "moderator" || r === "speaker") return "participant";
+  // Legacy "moderator" is a co-host everywhere (server roleDefaults).
+  if (r === "co-host" || r === "co_host" || r === "moderator") return "cohost";
+  if (r === "speaker") return "participant";
   return null;
 }
 

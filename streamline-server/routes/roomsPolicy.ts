@@ -4,11 +4,29 @@ import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { requireRoomAccessToken, type RoomAccessClaims } from "../middleware/roomAccessToken";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { actorMay } from "../lib/roomModerationPolicy";
+import {
+  derivePolicyFields,
+  normalizeRoomAccessMode,
+  resolveRoomAccessMode,
+  isDiscoverable,
+} from "../lib/roomAccessPolicy";
 
 const router = Router();
 
-function isHost(role?: string): boolean {
-  return String(role || "").toLowerCase() === "host";
+function policyPayload(roomId: string, room: Record<string, any>) {
+  const access = resolveRoomAccessMode(room);
+  const derived = derivePolicyFields(access);
+  return {
+    ok: true as const,
+    roomId,
+    access,
+    discoverable: isDiscoverable(access),
+    visibility: derived.visibility,
+    requiresAuth: derived.requiresAuth,
+    requiresPayment: room.requiresPayment === true,
+    allowGuests: typeof room.allowGuests === "boolean" ? !!room.allowGuests : null,
+  };
 }
 
 // GET /api/rooms/:roomId/policy
@@ -24,30 +42,14 @@ router.get("/:roomId/policy", requireRoomAccessToken as any, async (req: any, re
   const snap = await db.collection("rooms").doc(roomId).get();
   if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
-  const room = (snap.data() as any) || {};
-
-  const visibilityRaw = typeof room.visibility === "string" ? room.visibility.trim().toLowerCase() : "";
-  const visibility: "public" | "unlisted" | "private" =
-    visibilityRaw === "public" || visibilityRaw === "unlisted" || visibilityRaw === "private"
-      ? (visibilityRaw as any)
-      : "unlisted";
-
-  const requiresAuth = typeof room.requiresAuth === "boolean" ? !!room.requiresAuth : false;
-  const requiresPayment = typeof room.requiresPayment === "boolean" ? !!room.requiresPayment : false;
-  const allowGuests = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
-
-  return res.json({
-    ok: true,
-    roomId,
-    visibility,
-    requiresAuth,
-    requiresPayment,
-    allowGuests,
-  });
+  return res.json(policyPayload(roomId, (snap.data() as any) || {}));
 });
 
 // PATCH /api/rooms/:roomId/policy
-// Auth: Firebase auth + roomAccessToken, host-only.
+// Body: { access?: "invite_only" | "link" | "public", allowGuests?: boolean }
+// Auth: Firebase auth + roomAccessToken. Owner/admin host, or a producer /
+// cohost whose token holds canModerate. Only affects the production room;
+// the viewer-facing HLS channel is unaffected.
 router.patch("/:roomId/policy", requireAuth as any, requireRoomAccessToken as any, async (req: any, res) => {
   const roomId = String(req.params.roomId || "").trim();
   if (!roomId) return res.status(400).json({ error: "roomId_required" });
@@ -55,7 +57,7 @@ router.patch("/:roomId/policy", requireAuth as any, requireRoomAccessToken as an
   const access = (req as any).roomAccess as RoomAccessClaims | undefined;
   if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.ROOM_TOKEN_REQUIRED });
   if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
-  if (!isHost(access.role)) {
+  if (!actorMay(access, access.permissions, "canModerate")) {
     return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
   }
 
@@ -64,18 +66,34 @@ router.patch("/:roomId/policy", requireAuth as any, requireRoomAccessToken as an
 
   const body = (req.body || {}) as any;
   const allowGuests = typeof body.allowGuests === "boolean" ? body.allowGuests : undefined;
-
-  if (typeof allowGuests !== "boolean") {
+  const hasAccess = body.access !== undefined;
+  const nextAccess = hasAccess ? normalizeRoomAccessMode(body.access) : null;
+  if (hasAccess && !nextAccess) {
+    return res.status(400).json({ error: "invalid_access" });
+  }
+  if (typeof allowGuests !== "boolean" && !nextAccess) {
     return res.status(400).json({ error: "invalid_policy_patch" });
   }
 
-  const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
-  await db
-    .collection("rooms")
-    .doc(roomId)
-    .set({ allowGuests, updatedAt: serverTimestamp } as any, { merge: true });
+  const ref = db.collection("rooms").doc(roomId);
+  const snap = await ref.get();
+  if (!snap.exists) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
-  return res.json({ ok: true, roomId, allowGuests });
+  const patch: Record<string, unknown> = {
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+  if (typeof allowGuests === "boolean") patch.allowGuests = allowGuests;
+  if (nextAccess) {
+    const derived = derivePolicyFields(nextAccess);
+    patch.access = derived.access;
+    patch.visibility = derived.visibility;
+    patch.requiresAuth = derived.requiresAuth;
+    patch.accessUpdatedBy = uid;
+  }
+  await ref.set(patch as any, { merge: true });
+
+  const after = await ref.get();
+  return res.json(policyPayload(roomId, (after.data() as any) || {}));
 });
 
 export default router;

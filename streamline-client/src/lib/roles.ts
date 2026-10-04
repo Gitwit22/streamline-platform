@@ -1,7 +1,9 @@
 export type UiRolePresetId = "participant" | "cohost";
 
 export function normalizeUiRolePresetId(raw: any): UiRolePresetId {
-  return raw === "cohost" ? "cohost" : "participant";
+  // Legacy "moderator" is a co-host everywhere.
+  const v = String(raw ?? "").trim().toLowerCase();
+  return v === "cohost" || v === "co-host" || v === "moderator" ? "cohost" : "participant";
 }
 
 // ---------------------------------------------------------------------------

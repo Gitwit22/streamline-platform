@@ -34,7 +34,7 @@ describe("roomAccessClaims", () => {
     expect(normalizeRoomRole("viewer")).toBe("viewer");
     expect(normalizeRoomRole("Guest")).toBe("guest");
     expect(normalizeRoomRole("co-host")).toBe("cohost");
-    expect(normalizeRoomRole("moderator")).toBe("participant");
+    expect(normalizeRoomRole("moderator")).toBe("cohost");
     expect(normalizeRoomRole("something-new")).toBeNull();
     expect(normalizeRoomRole(undefined)).toBeNull();
   });

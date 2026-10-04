@@ -4,11 +4,65 @@ import {
   accessHasPerm,
   actorMay,
   canAssignRolePreset,
+  collaboratorToRoomAccessPermissions,
+  isAnonymousIdentity,
+  isFullHostActor,
   isProtectedRoomIdentity,
+  isStaffActor,
   mergeCohostControlScopes,
   missingPermForControlsPatch,
   moderationActorRole,
 } from "./roomModerationPolicy";
+
+test("delegated producers (host token + actingOwnerUid) are limited by their permissions", () => {
+  const limitedPerms = collaboratorToRoomAccessPermissions({
+    manageParticipants: false,
+    controlLayouts: false,
+    manageRecording: true,
+    manageStreaming: false,
+  });
+  const producer = { role: "host", actingOwnerUid: "owner1", permissions: limitedPerms };
+  const owner = { role: "host", permissions: {} };
+
+  assert.equal(moderationActorRole(producer), "producer");
+  assert.equal(moderationActorRole(owner), "host");
+  assert.equal(moderationActorRole("moderator"), "cohost");
+  assert.equal(isFullHostActor(producer), false);
+  assert.equal(isFullHostActor(owner), true);
+  assert.equal(isStaffActor(producer), true);
+
+  assert.equal(actorMay(owner, {}, "canModerate"), true);
+  assert.equal(actorMay(producer, producer.permissions, "canModerate"), false);
+  assert.equal(actorMay(producer, producer.permissions, "canLayout"), false);
+  assert.equal(actorMay(producer, producer.permissions, "canRecord"), true);
+  assert.equal(actorMay(producer, producer.permissions, "canStream"), false);
+
+  assert.equal(missingPermForControlsPatch(producer, producer.permissions, ["screenShareLayout"]), "canLayout");
+  assert.equal(missingPermForControlsPatch(producer, producer.permissions, ["forcedMute"]), "canMuteGuests");
+  assert.equal(missingPermForControlsPatch(producer, producer.permissions, ["canMuteGuests"]), "host");
+
+  const fullProducerPerms = collaboratorToRoomAccessPermissions({
+    manageParticipants: true,
+    controlLayouts: true,
+    manageRecording: true,
+    manageStreaming: true,
+  });
+  const fullProducer = { role: "host", actingOwnerUid: "owner1" };
+  assert.equal(missingPermForControlsPatch(fullProducer, fullProducerPerms, ["canMuteGuests", "screenShareLayout"]), null);
+  assert.equal(canAssignRolePreset(fullProducer, "cohost"), true);
+  assert.equal(fullProducerPerms.canDestinations, true);
+  assert.equal(fullProducerPerms.canInvite, true);
+});
+
+test("anonymous identities can't be cohosts", () => {
+  assert.equal(isAnonymousIdentity("invite:abc:123"), true);
+  assert.equal(isAnonymousIdentity("guest_1700000000_ab12"), true);
+  assert.equal(isAnonymousIdentity("direct:room:guest_1"), true);
+  assert.equal(isAnonymousIdentity("producer:uid:owner"), true);
+  assert.equal(isAnonymousIdentity("invisible_uid_123"), true);
+  assert.equal(isAnonymousIdentity(""), true);
+  assert.equal(isAnonymousIdentity("kX9f2LmQ1aZpR7tYvB3cW8nD4eH2"), false);
+});
 
 test("moderationActorRole maps roles", () => {
   assert.equal(moderationActorRole("host"), "host");
@@ -58,7 +112,7 @@ test("canAssignRolePreset: cohosts cannot hand out cohost", () => {
   assert.equal(canAssignRolePreset("participant", "participant"), false);
 });
 
-test("mergeCohostControlScopes folds host-granted scopes without widening streaming", () => {
+test("mergeCohostControlScopes folds preset/host-granted scopes (streaming included; plan limits applied later)", () => {
   const base = {
     canStream: false,
     canRecord: false,
@@ -84,8 +138,15 @@ test("mergeCohostControlScopes folds host-granted scopes without widening stream
   assert.equal(merged.canRemoveGuests, true);
   assert.equal(merged.canModerate, true);
   assert.equal(merged.canInvite, false);
-  assert.equal(merged.canStream, false);
-  assert.equal(merged.canRecord, false);
+  // Cohost stream/record/destinations toggles are real now: they come from
+  // the owner's cohost preset (intersected with the owner's plan by callers).
+  assert.equal(merged.canStream, true);
+  assert.equal(merged.canRecord, true);
+  assert.equal(merged.canDestinations, false);
+  assert.equal(
+    mergeCohostControlScopes(base, { canManageDestinations: true }).canDestinations,
+    true,
+  );
   assert.deepEqual(mergeCohostControlScopes(base, null), base);
   assert.deepEqual(mergeCohostControlScopes(base, { role: "cohost" }), base);
 });

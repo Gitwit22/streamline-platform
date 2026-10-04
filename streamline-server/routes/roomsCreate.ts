@@ -7,13 +7,20 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeRoomLayout, type RoomLayout } from "../lib/roomLayout";
 import { isValidPresenceMode, normalizePresenceMode, type PresenceMode } from "../lib/presenceMode";
 import { logDelegatedRoomAction, resolveOwnerActingContext } from "../lib/collaborators";
+import {
+  accessFromCreateBody,
+  normalizeRoomAccessMode,
+  resolveRoomAccessMode,
+  type RoomAccessMode,
+} from "../lib/roomAccessPolicy";
 
 const router = Router();
 
 /**
  * POST /api/rooms/create
  * Creates a new Firestore room document and returns its id.
- * Body: { livekitRoomName?: string, roomType?: "rtc" | "hls", presenceMode?: PresenceMode }
+ * Body: { livekitRoomName?: string, roomType?: "rtc" | "hls", presenceMode?: PresenceMode,
+ *         access?: "invite_only" | "link" | "public" }  (default invite_only)
  *
  * roomId is generated from Firestore (roomsRef.doc().id).
  */
@@ -38,12 +45,12 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
     ? normalizePresenceMode(rawPresenceMode)
     : "normal";
 
-  // Optional room access policy (secure defaults are applied in ensureRoomDoc).
-  const visibilityRaw = String(req.body?.visibility || "").trim().toLowerCase();
-  const visibility = (visibilityRaw === "public" || visibilityRaw === "unlisted" || visibilityRaw === "private")
-    ? (visibilityRaw as "public" | "unlisted" | "private")
-    : undefined;
-  const requiresAuth = typeof req.body?.requiresAuth === "boolean" ? req.body.requiresAuth : undefined;
+  // Room access for the production room: invite_only (default) | link | public.
+  // An explicit but unknown value is rejected rather than silently widened.
+  if (req.body?.access !== undefined && req.body?.access !== null && !normalizeRoomAccessMode(req.body.access)) {
+    return res.status(400).json({ error: "invalid_access" });
+  }
+  const access: RoomAccessMode = accessFromCreateBody(req.body);
   const requiresPayment = typeof req.body?.requiresPayment === "boolean" ? req.body.requiresPayment : undefined;
   const rawNameInput = String(req.body?.livekitRoomName || req.body?.roomName || "");
   const rawName = sanitizeDisplayName(rawNameInput).trim();
@@ -83,8 +90,7 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
       initialStatus: "idle",
       initialRoomLayout,
       savedEmbedId: savedEmbedId || undefined,
-      visibility,
-      requiresAuth,
+      access,
       requiresPayment,
     });
 
@@ -92,6 +98,7 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
       roomId,
       livekitRoomName: data.livekitRoomName || livekitRoomName,
       roomType: data.roomType || roomType,
+      access: resolveRoomAccessMode(data as any),
       presenceMode,
       actingContext: {
         ownerUid,

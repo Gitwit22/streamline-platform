@@ -102,10 +102,29 @@ router.post("/invite", requireAuth as any, async (req: any, res) => {
     return res.status(400).json({ error: "cannot_invite_self" });
   }
 
+  const hasPermissionsInBody = !!req.body?.permissions && typeof req.body.permissions === "object";
   const permissions = normalizeCollaboratorPermissions(req.body?.permissions || DEFAULT_COLLABORATOR_PERMISSIONS);
   const collaboratorDisplayName = String(collaborator.data.displayName || collaborator.data.name || "").trim() || null;
   const collaboratorEmail = normalizeEmail(collaborator.data.email || email) || null;
   const relationshipId = getCollaboratorRelationshipId(uid, collaborator.uid);
+
+  // Re-inviting an ACCEPTED collaborator must not reset them to pending (that
+  // would silently drop their access). Only update permissions when sent.
+  const existing = await getRelationshipById(relationshipId);
+  const existingStatus = String(existing?.data?.status || "");
+  if (existing && existingStatus === "accepted") {
+    if (hasPermissionsInBody) {
+      await firestore.collection("collaboratorRelationships").doc(relationshipId).set({
+        permissions,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, { merge: true });
+    }
+    const current = await getRelationshipById(relationshipId);
+    return res.status(200).json({
+      relationship: current ? serializeRelationship(current, uid) : null,
+      alreadyAccepted: true,
+    });
+  }
 
   await firestore.collection("collaboratorRelationships").doc(relationshipId).set({
     ownerUid: uid,
@@ -118,7 +137,7 @@ router.post("/invite", requireAuth as any, async (req: any, res) => {
     permissions,
     invitedByUid: uid,
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    ...(existing ? {} : { createdAt: admin.firestore.FieldValue.serverTimestamp() }),
     acceptedAt: null,
     declinedAt: null,
     revokedAt: null,
@@ -176,6 +195,39 @@ router.post("/:relationshipId/decline", requireAuth as any, async (req: any, res
     status: "declined",
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     declinedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+
+  const updated = await getRelationshipById(relationshipId);
+  return res.json({ relationship: updated ? serializeRelationship(updated, uid) : null });
+});
+
+// PATCH /api/collaborators/:relationshipId/permissions
+// Body: { permissions: Partial<CollaboratorPermissions> }
+// Owner-only. Missing keys keep their current value.
+router.patch("/:relationshipId/permissions", requireAuth as any, async (req: any, res) => {
+  const uid = String(req.user?.uid || "").trim();
+  const relationshipId = String(req.params.relationshipId || "").trim();
+  if (!uid) return res.status(401).json({ error: "unauthorized" });
+  if (!relationshipId) return res.status(400).json({ error: "relationship_required" });
+
+  const raw = req.body?.permissions;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return res.status(400).json({ error: "permissions_required" });
+  }
+
+  const relationship = await getRelationshipById(relationshipId);
+  if (!relationship) return res.status(404).json({ error: "not_found" });
+  if (relationship.data.ownerUid !== uid) return res.status(403).json({ error: "forbidden" });
+  if (String(relationship.data.status || "") === "revoked" || String(relationship.data.status || "") === "declined") {
+    return res.status(409).json({ error: "invalid_status", status: relationship.data.status || null });
+  }
+
+  const current = normalizeCollaboratorPermissions(relationship.data.permissions);
+  const next = normalizeCollaboratorPermissions({ ...current, ...raw });
+
+  await firestore.collection("collaboratorRelationships").doc(relationshipId).set({
+    permissions: next,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   }, { merge: true });
 
   const updated = await getRelationshipById(relationshipId);

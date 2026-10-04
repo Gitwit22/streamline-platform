@@ -1,4 +1,6 @@
 import React from "react";
+import RoomAccessControl from "./RoomAccessControl";
+import { isAccountIdentity, type RoomAccessMode } from "../../lib/roomAccess";
 import { useParticipants, useLocalParticipant, useRoomContext } from "@livekit/components-react";
 import { normalizeUiRolePresetId, isParticipantHidden, extractPresenceMetadata, presenceModeLabel } from "../../lib/roles";
 import { apiFetch, apiFetchAuth } from "../../lib/api";
@@ -90,6 +92,8 @@ export default function RoleOverlay({
   advancedRolesEnabled,
   greenroomEnabled,
   overlaysEnabled,
+  roomAccessMode,
+  onRoomAccessChange,
 }: {
   open: boolean;
   onClose: () => void;
@@ -103,6 +107,9 @@ export default function RoleOverlay({
   advancedRolesEnabled?: boolean;
   greenroomEnabled?: boolean;
   overlaysEnabled?: boolean;
+  /** Production-room access (Invite Only / Anyone With Link / Public). */
+  roomAccessMode?: RoomAccessMode | null;
+  onRoomAccessChange?: (mode: RoomAccessMode) => void;
 }) {
   if (!open) return null;
 
@@ -186,6 +193,15 @@ export default function RoleOverlay({
           flexDirection: 'column',
           gap: '0.75rem'
         }}>
+          {(role === "host" || role === "moderator") && roomId && roomAccessToken && (
+            <RoomAccessControl
+              roomId={roomId}
+              roomAccessToken={roomAccessToken}
+              value={roomAccessMode ?? null}
+              canEdit={!!canModerate}
+              onChange={onRoomAccessChange}
+            />
+          )}
           {(role === "host" || role === "moderator") && (
             <HostPanel
               roomName={roomName}
@@ -1525,7 +1541,10 @@ function ParticipantList({
                       }}
                     >
                       <option value="participant">Participant</option>
-                      <option value="cohost">Co-host</option>
+                      {/* Co-host needs a StreamLine account: anonymous guests can't be promoted. */}
+                      {(isAccountIdentity(p.identity) || currentRole === "cohost") && (
+                        <option value="cohost">Co-host</option>
+                      )}
                     </select>
                     {roleStatus && roleStatus[p.identity] === 'saving' && (
                       <span style={{ fontSize: '0.65rem', color: 'rgba(148, 163, 184, 0.9)' }}>Saving…</span>

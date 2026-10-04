@@ -1,3 +1,5 @@
+import { ROLE_PRESET_DEFAULT_PERMISSIONS } from "./roleDefaults";
+
 export type RolePermissionMap = {
   canStream: boolean;
   canRecord: boolean;
@@ -36,8 +38,9 @@ function perms(p: Partial<RolePermissionMap>): RolePermissionMap {
   };
 }
 
-// Canonical default role profiles shared by simple and advanced modes.
-// This is the single authored source of default role permissions.
+// Canonical default role profiles. Participant/cohost permissions are derived
+// from lib/permissions/roleDefaults.ts (the single authored source of role
+// defaults, also used by Settings > Role Defaults and room role presets).
 export const DEFAULT_ROLE_PROFILES: DefaultRoleProfile[] = [
   {
     id: "host",
@@ -62,54 +65,22 @@ export const DEFAULT_ROLE_PROFILES: DefaultRoleProfile[] = [
     name: "Co-Host",
     lockedName: true,
     isSystemDefault: true,
-    permissions: perms({
-      canStream: false,
-      canRecord: false,
-      canDestinations: false,
-      canModerate: false,
-      canLayout: true,
-      canScreenShare: true,
-      canInvite: true,
-      canAnalytics: false,
-      canMuteGuests: false,
-      canRemoveGuests: false,
-    }),
+    permissions: perms(ROLE_PRESET_DEFAULT_PERMISSIONS.cohost),
   },
   {
+    // Legacy alias: "moderator" is treated as cohost everywhere.
     id: "moderator",
     name: "Moderator",
     lockedName: true,
     isSystemDefault: true,
-    permissions: perms({
-      canStream: false,
-      canRecord: false,
-      canDestinations: false,
-      canModerate: false,
-      canLayout: true,
-      canScreenShare: false,
-      canInvite: false,
-      canAnalytics: false,
-      canMuteGuests: false,
-      canRemoveGuests: false,
-    }),
+    permissions: perms(ROLE_PRESET_DEFAULT_PERMISSIONS.cohost),
   },
   {
     id: "participant",
     name: "Participant",
     lockedName: true,
     isSystemDefault: true,
-    permissions: perms({
-      canStream: false,
-      canRecord: false,
-      canDestinations: false,
-      canModerate: false,
-      canLayout: false,
-      canScreenShare: false,
-      canInvite: false,
-      canAnalytics: false,
-      canMuteGuests: false,
-      canRemoveGuests: false,
-    }),
+    permissions: perms(ROLE_PRESET_DEFAULT_PERMISSIONS.participant),
   },
   {
     id: "viewer",

@@ -473,6 +473,10 @@ export async function apiUpdateProgramState(
 }
 
 export type RoomPolicy = {
+  /** Production-room access (invite_only default). HLS viewers are unaffected. */
+  access: "invite_only" | "link" | "public";
+  discoverable?: boolean;
+  // Legacy fields, derived from `access` by the server.
   visibility: "public" | "unlisted" | "private";
   requiresAuth: boolean;
   requiresPayment: boolean;
@@ -493,7 +497,7 @@ export async function apiGetRoomPolicy(roomId: string, roomAccessToken: string) 
 export async function apiUpdateRoomPolicy(
   roomId: string,
   roomAccessToken: string,
-  patch: Pick<Required<RoomPolicy>, "allowGuests">
+  patch: Partial<Pick<RoomPolicy, "access">> & { allowGuests?: boolean }
 ) {
   const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/policy`, {
     method: "PATCH",
@@ -502,7 +506,7 @@ export async function apiUpdateRoomPolicy(
     },
     body: JSON.stringify(patch),
   });
-  return res.json() as Promise<{ ok: true; roomId: string; allowGuests: boolean }>;
+  return res.json() as Promise<{ ok: true; roomId: string } & RoomPolicy>;
 }
 
 export function clearAuthStorage() {

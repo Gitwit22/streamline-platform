@@ -5,6 +5,12 @@ import type { HlsPresetId } from "./livekitEgress";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import type { RoomLayout } from "../lib/roomLayout";
 import { decideHlsStart } from "../lib/mediaPure";
+import {
+  DEFAULT_ROOM_ACCESS,
+  derivePolicyFields,
+  normalizeRoomAccessMode,
+  type RoomAccessMode,
+} from "../lib/roomAccessPolicy";
 
 export type RoomHlsConfig = {
   enabled: boolean;
@@ -33,8 +39,10 @@ export type RoomDoc = {
   // Canonical room layout configuration (controls viewer/participant layout;
   // recordings inherit this by default).
   roomLayout?: RoomLayout;
-  // Room access policy (server-enforced during token issuance).
-  // Defaults are intentionally secure.
+  // Room access policy for the RTC production room (server-enforced during
+  // token issuance). See lib/roomAccessPolicy.ts. Missing = "invite_only".
+  access?: RoomAccessMode;
+  // Legacy fields, derived from `access` on write (kept for older readers).
   visibility?: "public" | "unlisted" | "private";
   requiresAuth?: boolean;
   requiresPayment?: boolean;
@@ -75,9 +83,9 @@ export async function ensureRoomDoc(params: {
   initialRoomLayout?: RoomLayout;
   // When provided, bind this room to a specific saved embed.
   savedEmbedId?: string;
-  // Optional policy overrides (otherwise defaults apply).
-  visibility?: RoomDoc["visibility"];
-  requiresAuth?: boolean;
+  // Optional policy overrides (otherwise defaults apply). `access` defaults
+  // to invite_only; visibility/requiresAuth are derived from it.
+  access?: RoomAccessMode | string;
   requiresPayment?: boolean;
 }): Promise<{
   ref: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
@@ -88,11 +96,7 @@ export async function ensureRoomDoc(params: {
   const snap = await ref.get();
   const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
 
-  const visibility: RoomDoc["visibility"] =
-    params.visibility === "public" || params.visibility === "unlisted" || params.visibility === "private"
-      ? params.visibility
-      : "unlisted";
-  const requiresAuth = params.requiresAuth === undefined ? false : !!params.requiresAuth;
+  const policy = derivePolicyFields(normalizeRoomAccessMode(params.access) ?? DEFAULT_ROOM_ACCESS);
   const requiresPayment = params.requiresPayment === undefined ? false : !!params.requiresPayment;
 
   if (!snap.exists) {
@@ -101,8 +105,9 @@ export async function ensureRoomDoc(params: {
       roomType: roomType || "rtc",
       livekitRoomName,
       ...(initialRoomLayout ? { roomLayout: initialRoomLayout } : {}),
-      visibility,
-      requiresAuth,
+      access: policy.access,
+      visibility: policy.visibility,
+      requiresAuth: policy.requiresAuth,
       requiresPayment,
       ...(savedEmbedId ? { savedEmbedId } : {}),
       createdAt: serverTimestamp,
@@ -119,10 +124,14 @@ export async function ensureRoomDoc(params: {
     if (!existing.ownerId) patch.ownerId = ownerId;
     if (!existing.roomType) patch.roomType = roomType || "rtc";
     if (!existing.livekitRoomName) patch.livekitRoomName = livekitRoomName;
-    if (existing.visibility !== "public" && existing.visibility !== "unlisted" && existing.visibility !== "private") {
-      patch.visibility = visibility;
+    // Existing rooms keep their access setting. A doc without `access` is
+    // invite_only (see resolveRoomAccessMode); it is only written when the
+    // caller asked for a specific mode.
+    if (!normalizeRoomAccessMode(existing.access) && params.access !== undefined && normalizeRoomAccessMode(params.access)) {
+      patch.access = policy.access;
+      patch.visibility = policy.visibility;
+      patch.requiresAuth = policy.requiresAuth;
     }
-    if (typeof existing.requiresAuth !== "boolean") patch.requiresAuth = requiresAuth;
     if (typeof existing.requiresPayment !== "boolean") patch.requiresPayment = requiresPayment;
     if (savedEmbedId && !existing.savedEmbedId) patch.savedEmbedId = savedEmbedId;
     if (initialRoomLayout && !existing.roomLayout) patch.roomLayout = initialRoomLayout;

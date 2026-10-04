@@ -22,7 +22,7 @@ import multistreamRoutes from "./routes/multistream";
 import roomsResolveRoutes from "./routes/roomsResolve";
 import roomsHlsConfigRoutes from "./routes/roomsHlsConfig";
 import roomsActiveEmbedRoutes from "./routes/roomsActiveEmbed";
-import roomControlsRoutes, { enforceRoomControlsForRoom } from "./routes/roomControls";
+import roomControlsRoutes, { enforceRoomControlsForRoom, listRoomCohostIdentities } from "./routes/roomControls";
 import roomChatRoutes from "./routes/roomChat";
 import roomsLayoutRoutes from "./routes/roomsLayout";
 import roomsStudioLayoutRoutes from "./routes/roomsStudioLayout";
@@ -692,13 +692,15 @@ app.post("/api/roomModeration/mute-lock", requireAuth, requireRoomAccessToken as
     // mic. Permissions are recomputed from each participant's base permission
     // (numeric TrackSource enums, as read from listParticipants) plus the
     // current room controls, so unlocking never re-grants audio to someone the
-    // host individually force-muted. Hosts/producers are never restricted.
+    // host individually force-muted. Hosts/producers and cohosts are never
+    // restricted by the mute lock.
     let enforcement: { applied: number; skipped: number } | null = null;
     try {
+      const cohostIdentities = await listRoomCohostIdentities(roomId);
       enforcement = await enforceRoomControlsForRoom({
         roomId,
         livekitRoomName,
-        skipIdentities: [access.identity, hostIdentity],
+        skipIdentities: [access.identity, hostIdentity, ...cohostIdentities],
       });
     } catch (permErr) {
       // Don't fail the whole request if permissions update has issues; just log

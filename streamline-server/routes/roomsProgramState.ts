@@ -146,7 +146,7 @@ router.patch(
       return res
         .status(403)
         .json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
-    if (!actorMay(access.role, access.permissions, "canLayout"))
+    if (!actorMay(access, access.permissions, "canLayout"))
       return res
         .status(403)
         .json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });

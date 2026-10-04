@@ -86,7 +86,15 @@ import { normalizeUiRolePresetId } from "../../lib/roles";
 import { recordingEvents } from "../../lib/recordingEvents";
 import { detectInAppBrowser } from "../../lib/detectInAppBrowser";
 import {
+  ROOM_ACCESS_HLS_NOTE,
+  normalizeRoomAccess,
+  roomAccessInviteSummary,
+  roomAccessLabel,
+  type RoomAccessMode,
+} from "../../lib/roomAccess";
+import {
   getRoomAccessPermissions,
+  isLimitedHostToken,
   normalizeRoomRole,
   type RoomAccessPermissions,
   type RoomRole,
@@ -1329,6 +1337,9 @@ type LiveKitShellProps = {
   canMuteGuests: boolean;
   canRemoveGuests: boolean;
   canModerate: boolean;
+  /** Production-room access mode shown/edited in the host dashboard. */
+  roomAccessMode?: RoomAccessMode | null;
+  onRoomAccessChange?: (mode: RoomAccessMode) => void;
   effectivePermissionsMode: "simple" | "advanced";
   dashboardGreenroomEnabled: boolean;
   dashboardOverlaysEnabled: boolean;
@@ -1378,6 +1389,8 @@ function LiveKitShell({
   canMuteGuests,
   canRemoveGuests,
   canModerate,
+  roomAccessMode,
+  onRoomAccessChange,
   effectivePermissionsMode,
   dashboardGreenroomEnabled,
   dashboardOverlaysEnabled,
@@ -1740,6 +1753,8 @@ function LiveKitShell({
             advancedRolesEnabled={effectivePermissionsMode === "advanced"}
             greenroomEnabled={dashboardGreenroomEnabled}
             overlaysEnabled={dashboardOverlaysEnabled}
+            roomAccessMode={roomAccessMode}
+            onRoomAccessChange={onRoomAccessChange}
           />
         )}
       </div>
@@ -1825,6 +1840,8 @@ function RoomPage() {
   });
   const [isViewer, setIsViewer] = useState(false);
   const [roomPermissions, setRoomPermissions] = useState<RoomPermissions | null>(null);
+  // Production-room access (invite_only | link | public), from /token.
+  const [roomAccessMode, setRoomAccessMode] = useState<RoomAccessMode | null>(null);
   const [needsReauth, setNeedsReauth] = useState(false);
   const [reauthBannerText, setReauthBannerText] = useState<string>(
     "Session expired — re-auth to enable host tools."
@@ -1853,6 +1870,9 @@ function RoomPage() {
   const [mintAttempt, setMintAttempt] = useState(0);
   const mintRetryCountRef = useRef(0);
   const requestMint = React.useCallback(() => setMintAttempt((n) => n + 1), []);
+  // Anonymous visitors of an "Anyone With Link" / "Public" room: one direct
+  // join-guest attempt (audience viewer) before asking them to sign in.
+  const linkViewerJoinTriedRef = useRef(false);
   // Role from the last successful /token mint (authoritative over local hints).
   const mintedRoleRef = useRef<string | null>(null);
   // Pending mint retry timer (409 backoff / network error).
@@ -2096,31 +2116,24 @@ function RoomPage() {
     () => getRoomAccessPermissions(roomAccessToken),
     [roomAccessToken],
   );
-  // Host, or the /token `permissions`, or the RAT claims (co-hosts get their
-  // stream/record/moderation abilities from these, not from isHost).
+  // Delegated producers carry a "host" token limited by its permissions
+  // (their collaborator permissions); only the owner/admin host has all.
+  const isLimitedHost = isHost && isLimitedHostToken(roomAccessToken);
+  const isFullHost = isHost && !isLimitedHost;
+  // Full host, or the /token `permissions`, or the RAT claims (co-hosts and
+  // producers get their stream/record/moderation abilities from these).
+  // Buttons reflect token permissions only: the server enforces the same.
   const can = (key: keyof RoomPermissions) =>
-    hasRoomPermission(key, { isHost, needsReauth, roomPermissions, ratPermissions });
-  const isCohost = !isHost && normalizeRoomRole(userRole) === "cohost";
-  // Co-hosts' scopes come from their minted permissions; other roles also
-  // need the host to have granted the scope via room controls.
-  const scopeGranted = (controlFlag: boolean | undefined) => isCohost || !!controlFlag;
-  const canInviteLinks =
-    !needsReauth && !isViewer && (isHost || (scopeGranted(effectiveControls.canInviteLinks) && can("canInvite")));
+    hasRoomPermission(key, { isHost: isFullHost, needsReauth, roomPermissions, ratPermissions });
+  const canInviteLinks = !needsReauth && !isViewer && can("canInvite");
   const canManageStream =
-    !needsReauth &&
-    !isViewer &&
-    (isHost ||
-      (scopeGranted(effectiveControls.canStartStopStream) && can("canStream")) ||
-      (scopeGranted(effectiveControls.canStartStopRecording) && can("canRecord")) ||
-      (scopeGranted(effectiveControls.canManageDestinations) && can("canDestinations")));
-  const canMuteGuestsUi =
-    !needsReauth && !isViewer && (isHost || can("canMuteGuests") || can("canModerate"));
+    !needsReauth && !isViewer && (can("canStream") || can("canRecord") || can("canDestinations"));
+  const canMuteGuestsUi = !needsReauth && !isViewer && (can("canMuteGuests") || can("canModerate"));
 
-  const canRemoveGuestsUi =
-    !needsReauth && !isViewer && (isHost || can("canRemoveGuests") || can("canModerate"));
+  const canRemoveGuestsUi = !needsReauth && !isViewer && (can("canRemoveGuests") || can("canModerate"));
 
-  const canModerateUi = !needsReauth && !isViewer && (isHost || can("canModerate"));
-  const canLayoutUi = !needsReauth && !isViewer && (isHost || can("canLayout"));
+  const canModerateUi = !needsReauth && !isViewer && can("canModerate");
+  const canLayoutUi = !needsReauth && !isViewer && can("canLayout");
   // Co-hosts with moderation rights get the host dashboard (minus co-host
   // assignment and removing the owner, handled inside RoleOverlay).
   const dashboardRole: "host" | "moderator" | "participant" = isHost
@@ -2948,6 +2961,9 @@ function RoomPage() {
               typeof data?.roomAccessToken === "string" ? data.roomAccessToken : null,
             ),
           );
+          if (typeof data?.access === "string") {
+            setRoomAccessMode(normalizeRoomAccess(data.access));
+          }
           // Invisible joins can be downgraded server-side (e.g. not allowed
           // for this role): follow the server and tell the user.
           if (data?.presenceMode === "normal" || data?.presenceMode === "invisible" || data?.presenceMode === "silent") {
@@ -3186,13 +3202,48 @@ function RoomPage() {
               }
             }
 
+            // No invite and no session: link/public rooms let anyone with the
+            // link watch from the audience (server: POST /join-guest, viewer
+            // only). Invite-only rooms refuse this, so fall through to sign-in.
+            if (!inviteToken && !inviteTokenForJoin && !gst && roomId && !linkViewerJoinTriedRef.current) {
+              linkViewerJoinTriedRef.current = true;
+              const viewerName = String(payload?.displayName || displayName || "").trim() || "Viewer";
+              const jg = await apiFetch(
+                `/api/rooms/${encodeURIComponent(roomId)}/join-guest`,
+                {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ displayName: viewerName }),
+                },
+                { allowNonOk: true },
+              ).catch(() => null);
+              const jgData = jg && jg.ok ? await jg.json().catch(() => null) : null;
+              if (jgData && typeof jgData.guestSessionToken === "string" && jgData.guestSessionToken.trim()) {
+                storeGuestSession(roomId, jgData.guestSessionToken.trim());
+                requestMint();
+                return;
+              }
+              if (jg && jg.status === 409) {
+                // Link room not live yet: wait and try again.
+                linkViewerJoinTriedRef.current = false;
+                setRoomGateStatus("idle");
+                if (mintRetryTimerRef.current) clearTimeout(mintRetryTimerRef.current);
+                const delay = nextMintRetryDelayMs(mintRetryCountRef.current++);
+                mintRetryTimerRef.current = setTimeout(() => {
+                  mintRetryTimerRef.current = null;
+                  requestMint();
+                }, delay);
+                return;
+              }
+            }
+
             setNeedsReauth(true);
             setAuthStatus("guest");
             setReauthBannerText(
               mapped ||
                 (inviteToken
                   ? "Invite invalid or expired."
-                  : "This room requires an account to join. Please sign in.")
+                  : "This room is invite-only. Use your invite link, or sign in.")
             );
             // Only force login redirect when we truly have no invite or guest session to attempt guest join.
             if (!inviteToken && !inviteTokenForJoin && !gst) {
@@ -4752,16 +4803,14 @@ function RoomPage() {
     platformRecordingEnabled &&
     !needsReauth &&
     !isViewer &&
-    (isHost || can("canRecord") || !!effectiveControls.canStartStopRecording);
+    can("canRecord");
   const canMultistream =
     featureAccess.canUse.destinations &&
     !needsReauth &&
     !isViewer &&
-    (isHost || can("canDestinations") || !!effectiveControls.canManageDestinations);
+    can("canDestinations");
   const hlsAvailable = featureAccess.canUse.hlsRuntime && !needsReauth;
-  const canStartStopHls =
-    !isViewer &&
-    (isHost || can("canStream") || !!effectiveControls.canStartStopStream);
+  const canStartStopHls = !isViewer && can("canStream");
 
   const handleUpgradeHls = () => {
     nav("/settings/billing");
@@ -5278,6 +5327,8 @@ function RoomPage() {
           canMuteGuests={canMuteGuestsUi}
           canRemoveGuests={canRemoveGuestsUi}
           canModerate={canModerateUi}
+          roomAccessMode={roomAccessMode}
+          onRoomAccessChange={setRoomAccessMode}
           effectivePermissionsMode={effectivePermissionsMode}
           dashboardGreenroomEnabled={dashboardGreenroomEnabled}
           dashboardOverlaysEnabled={dashboardOverlaysEnabled}
@@ -5346,9 +5397,25 @@ function RoomPage() {
               </button>
             </div>
 
-            <p style={{ marginTop: 0, marginBottom: 14, color: "#94a3b8", fontSize: 13 }}>
+            <p style={{ marginTop: 0, marginBottom: 10, color: "#94a3b8", fontSize: 13 }}>
               Copy a participant link to invite someone on stage{isHost ? ", or a co-host link for someone who helps run the room" : ""}.
             </p>
+            <div
+              data-testid="invite-access-state"
+              style={{
+                marginBottom: 14,
+                padding: "8px 10px",
+                borderRadius: 8,
+                border: "1px solid rgba(59,130,246,0.35)",
+                background: "rgba(59,130,246,0.08)",
+                fontSize: 12,
+                color: "#bfdbfe",
+              }}
+            >
+              <strong>Access: {roomAccessLabel(roomAccessMode)}</strong>
+              {" — "}
+              {roomAccessInviteSummary(roomAccessMode)} {ROOM_ACCESS_HLS_NOTE}
+            </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div

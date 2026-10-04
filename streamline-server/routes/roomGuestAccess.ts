@@ -22,15 +22,24 @@ import {
   isInviteShapedClaims,
   type InviteAcceptance,
 } from "../lib/inviteAcceptance";
-import { ROLE_PERMISSIONS, intersectPermissionsWithEntitlements } from "../lib/rolePermissions";
+import { resolveCohostRoomPermissions } from "../lib/rolePermissions";
 import { roleToParticipantPermission, applyPresenceModeToGrant, toLiveKitTrackSourceNumber } from "../lib/livekitPermissions";
 import { isValidPresenceMode, normalizePresenceMode, buildPresenceMetadata, type PresenceMode } from "../lib/presenceMode";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { isAdmin } from "../middleware/adminAuth";
 import { resolveHostName } from "../lib/resolveHostName";
 import { logDelegatedRoomAction, resolveOwnerActingContext } from "../lib/collaborators";
-import { mergeCohostControlScopes } from "../lib/roomModerationPolicy";
 import { onHostGoingLive } from "../lib/viewerStats";
+import { collaboratorToRoomAccessPermissions } from "../lib/roomModerationPolicy";
+import {
+  anonymousGuestsAllowed,
+  decideDirectGuestJoin,
+  decideTokenAccess,
+  directJoinAllowed,
+  isInviteSessionId,
+  resolveRoomAccessMode,
+} from "../lib/roomAccessPolicy";
+import { applyOwnerPresetToControls, loadOwnerRolePreset } from "../lib/permissions/rolePresetStore";
 
 /**
  * Invite JWT from x-invite-token, body.inviteToken or query inviteToken/t.
@@ -354,11 +363,46 @@ function getRoomAccessSecret() {
 
 type MintRole = "viewer" | "guest" | "participant" | "cohost" | "host";
 
+const NO_ROOM_PERMISSIONS: Record<string, boolean> = {
+  canStream: false,
+  canRecord: false,
+  canDestinations: false,
+  canModerate: false,
+  canLayout: false,
+  canScreenShare: false,
+  canInvite: false,
+  canAnalytics: false,
+  canMuteGuests: false,
+  canRemoveGuests: false,
+};
+
+const FULL_ROOM_PERMISSIONS: Record<string, boolean> = {
+  canStream: true,
+  canRecord: true,
+  canDestinations: true,
+  canModerate: true,
+  canLayout: true,
+  canScreenShare: true,
+  canInvite: true,
+  canAnalytics: true,
+  canMuteGuests: true,
+  canRemoveGuests: true,
+};
+
+/** Controls-doc role -> "viewer" | "participant" | "cohost" | "" (legacy moderator = cohost). */
+export function normalizeControlsRole(raw: unknown): "viewer" | "participant" | "cohost" | "" {
+  const r = String(raw ?? "").trim().toLowerCase();
+  if (r === "viewer") return "viewer";
+  if (r === "participant" || r === "speaker") return "participant";
+  if (r === "cohost" || r === "moderator" || r === "co-host" || r === "co_host") return "cohost";
+  return "";
+}
+
 // Cohosts get host-level publish sources but never roomAdmin: LiveKit admin
 // stays with the owner (and delegated producers).
-function roleGrant(role: MintRole, presenceMode?: PresenceMode) {
+function roleGrant(role: MintRole, presenceMode?: PresenceMode, opts?: { screenShare?: boolean }) {
   // Use canonical roleToParticipantPermission() for consistency
-  const participantPerm = roleToParticipantPermission(role);
+  const participantPerm = roleToParticipantPermission(role, { screenShare: opts?.screenShare });
   const isHost = role === "host";
 
   // Apply presence-mode restrictions when joining as invisible.
@@ -752,7 +796,9 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     // redeem step above). Logged-in invitees are reported as "participant",
     // which carries the same publish grant.
     const mintedRole: "guest" | "participant" = authedUser ? "participant" : "guest";
-    const grant = roleGrant(mintedRole);
+    // Participant "Share Screen" comes from the room owner's participant preset.
+    const participantScreenShare = (await loadOwnerRolePreset(ownerId, "participant")).canScreenShare;
+    const grant = roleGrant(mintedRole, undefined, { screenShare: participantScreenShare });
     at.addGrant({ room: livekitRoomName, ...grant } as any);
 
     const livekitToken = await at.toJwt();
@@ -768,32 +814,7 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     logPayload.guestSessionTtl = GUEST_SESSION_TTL;
 
     // Step 5: Create room access token
-    const basePerms =
-      inviteRole === "guest"
-        ? {
-            canStream: false,
-            canRecord: false,
-            canDestinations: false,
-            canModerate: false,
-            canLayout: false,
-            canScreenShare: false,
-            canInvite: false,
-            canAnalytics: false,
-            canMuteGuests: false,
-            canRemoveGuests: false,
-          }
-        : {
-            canStream: false,
-            canRecord: false,
-            canDestinations: false,
-            canModerate: false,
-            canLayout: false,
-            canScreenShare: false,
-            canInvite: false,
-            canAnalytics: false,
-            canMuteGuests: false,
-            canRemoveGuests: false,
-          };
+    const basePerms = { ...NO_ROOM_PERMISSIONS, canScreenShare: participantScreenShare };
 
     const roomAccessPayload = {
       roomId,
@@ -912,8 +933,9 @@ router.get("/rooms/:roomId/status", async (req: any, res) => {
           GUEST_SESSION_TTL,
         );
         setGuestSessionCookie(res, sessionJwt);
-      } else if (tryGetRoomAccessShareGuest(req, roomId)) {
-        // Read-only status for share-link holders; no session is minted.
+      } else if (resolveRoomAccessMode(room) !== "invite_only" && tryGetRoomAccessShareGuest(req, roomId)) {
+        // Read-only status for share-link holders in link/public rooms; no
+        // session is minted.
         guest = { roomId };
       }
     }
@@ -970,6 +992,9 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // Anonymous share-link holder whose token is a room access token: may
     // join at that token's own role, viewer stays subscribe-only.
     let shareViewerOnly = false;
+    // True when the guest identity came from a room access token share link
+    // (not an invite). Share links count as "anyone with the link".
+    let viaShareLink = false;
 
     if (!user && !guest) {
       const legacyGuest = tryGetLegacyInviteGuest(req, roomId);
@@ -981,6 +1006,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
           const shareId = `share:${crypto.createHash("sha256").update(share.raw).digest("base64url").slice(0, 24)}`;
           guest = { inviteId: shareId, roomId, role: "guest", identity: newInviteIdentity(shareId) };
           shareViewerOnly = share.role === "viewer";
+          viaShareLink = true;
         }
       }
     }
@@ -1003,38 +1029,27 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     );
     const isPrivilegedProducer = isOwner || isDelegatedProducer;
 
-    // Room policy defaults (secure-by-default for older docs)
-    const visibilityRaw = typeof room.visibility === "string" ? room.visibility.trim().toLowerCase() : "";
-    const visibility: "public" | "unlisted" | "private" =
-      visibilityRaw === "public" || visibilityRaw === "unlisted" || visibilityRaw === "private"
-        ? (visibilityRaw as any)
-        : "unlisted";
-    const requiresAuth = typeof room.requiresAuth === "boolean" ? !!room.requiresAuth : true;
+    // Room access mode (invite_only default; see lib/roomAccessPolicy.ts).
+    const roomAccessMode = resolveRoomAccessMode(room);
     const requiresPayment = typeof room.requiresPayment === "boolean" ? !!room.requiresPayment : false;
     const roomType = typeof room.roomType === "string" ? String(room.roomType).trim() : "";
-    const allowGuestsPolicy = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
 
     // Policy: room type must be rtc when explicitly set
     if (roomType && roomType !== "rtc") {
       return res.status(400).json({ error: "room_not_rtc" });
     }
 
-    // Policy: auth requirement
-    // Allow guests to join via a verified guest session (sl_guest cookie) or legacy invite token.
-    if (requiresAuth && !user && !guest) {
-      return res.status(401).json({ error: "login_required" });
-    }
-
-    // Optional per-room guest policy: only enforced when explicitly set.
-    if (!user && allowGuestsPolicy === false) {
+    // Explicit host override: no anonymous guests at all (even invited ones).
+    if (!user && !anonymousGuestsAllowed(room)) {
       return res.status(401).json({ error: "login_required" });
     }
 
     // If not authed, must have a verified guest session scoped to this room.
     // Guests with a pre-existing session (issued by join-now after invite
-    // validation) can refresh tokens without the ALLOW_GUEST_RTC_JOIN env-var
-    // gate — the session IS the proof of prior authorization.
-    // Only newly-promoted legacy-invite guests are gated by the env var.
+    // validation, or by join-guest) can refresh tokens without the
+    // ALLOW_GUEST_RTC_JOIN env-var gate — the session IS the proof of prior
+    // authorization. Only newly-promoted legacy-invite guests are gated by the
+    // env var.
     if (!user) {
       if (!guest || guest.roomId !== roomId) {
         return res.status(401).json({ error: "login_required" });
@@ -1045,15 +1060,18 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     }
 
     // Invite evidence. Only real invites count: a verified invite JWT for this
-    // room, a guest session for this room, or (logged in) an acceptance doc.
-    // Room access tokens are never treated as invites.
+    // room, an invite guest session for this room, or (logged in) an
+    // acceptance doc. Room access tokens, share links and direct (link)
+    // guest sessions are never invites.
     const inviteClaims = getInviteClaimsForRoom(req, roomId);
     const acceptance: InviteAcceptance | null =
       user && !isPrivilegedProducer ? await getInviteAcceptance(roomId, user.uid) : null;
     const hasGuestSessionForRoom = !!guest && guest.roomId === roomId;
-    // Direct (no-invite) guest sessions don't open private rooms.
-    const hasInviteSessionForRoom = hasGuestSessionForRoom && !guest!.inviteId.startsWith("direct:");
-    const hasInviteAccess0 = !!inviteClaims || !!acceptance || hasGuestSessionForRoom;
+    // Sessions minted for direct link joins ("direct:") or renewed for a
+    // share-link holder ("share:") are not invites.
+    const isDirectSession = hasGuestSessionForRoom && !isInviteSessionId(guest!.inviteId);
+    const hasInviteSessionForRoom = hasGuestSessionForRoom && !isDirectSession && !viaShareLink;
+    const hasInviteAccess = !!inviteClaims || !!acceptance || hasInviteSessionForRoom;
 
     // Platform admin acting as host in a room they don't own: asked for the
     // host role (or no role, with no invite/session evidence). Gets host
@@ -1063,26 +1081,64 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     const isAdminHost =
       !!user &&
       !isPrivilegedProducer &&
-      (requestedRole === "host" || (!requestedRole && !hasInviteAccess0)) &&
+      (requestedRole === "host" || (!requestedRole && !hasInviteAccess && !hasGuestSessionForRoom)) &&
       (await isAdmin(user.uid));
     const isHostLike = isPrivilegedProducer || isAdminHost;
     const adminOverride = isAdminHost;
 
-    // Policy: visibility
-    // Private rooms are owner-only UNLESS the caller has invite access.
-    // This supports "invite someone on stage" while keeping strict access by default.
-    const hasInviteAccess = !!inviteClaims || !!acceptance || hasInviteSessionForRoom;
-    if (visibility === "private" && !isHostLike && !hasInviteAccess) {
-      return res.status(403).json({ error: "not_allowed" });
+    const identity = user
+      ? isDelegatedProducer
+        ? `producer:${user.uid}:${ownerId}`
+        : user.uid
+      : guest!.identity || newInviteIdentity(guest!.inviteId);
+    if (!identity || !String(identity).trim()) {
+      return res.status(500).json({ code: "internal_error", error: "invalid_identity" });
     }
 
-    // Cohost: logged-in, not the owner, holding a cohost acceptance or a
-    // cohost invite JWT for this room.
+    // Host stage decisions (Bring on stage / Move to audience / role preset)
+    // live in rooms/{roomId}/controls/{identity}. Honor them so a token
+    // re-mint after a role change doesn't undo it, and treat a host stage
+    // grant (participant/cohost) as invite evidence. Owners/delegates are
+    // never affected.
+    let identityControls: Record<string, unknown> | null = null;
+    let controlsRole = "";
+    if (!isHostLike) {
+      try {
+        const docId = String(identity).includes("/") ? "" : String(identity).slice(0, 128);
+        if (docId) {
+          const ctlSnap = await firestore.collection("rooms").doc(roomId).collection("controls").doc(docId).get();
+          identityControls = ((ctlSnap.data() as any) || null) as Record<string, unknown> | null;
+          controlsRole = normalizeControlsRole(identityControls?.role);
+        }
+      } catch (err: any) {
+        console.warn("[roomGuestAccess] controls role lookup failed", err?.message || err);
+      }
+    }
+    const hasStageGrant = controlsRole === "participant" || controlsRole === "cohost";
+
+    // Cohost: logged-in, not the owner, holding a cohost acceptance, a cohost
+    // invite JWT (legacy "moderator" included) or a host-applied cohost role.
     const inviteClaimIsCohost =
       !!inviteClaims && (inviteClaims.role === "cohost" || inviteClaims.role === "moderator");
-    const isCohost = !!user && !isHostLike && (acceptance?.role === "cohost" || inviteClaimIsCohost);
+    const isCohost =
+      !!user && !isHostLike && (acceptance?.role === "cohost" || inviteClaimIsCohost || controlsRole === "cohost");
+
+    // Policy: room access. invite_only refuses everyone without an invite,
+    // cohost role or stage grant (403 not_allowed, no audience either);
+    // link/public let them watch subscribe-only.
+    const accessDecision = decideTokenAccess(roomAccessMode, {
+      isHostLike,
+      isCohost,
+      hasInvite: hasInviteAccess || hasStageGrant,
+    });
+    if (!accessDecision.allow) {
+      return res.status(accessDecision.status).json({ error: accessDecision.error, access: roomAccessMode });
+    }
+    const viewerOnly = accessDecision.maxRole === "viewer";
+
     if (isCohost && inviteClaimIsCohost && acceptance?.role !== "cohost") {
-      // Persist so the cohost keeps the role after the invite link is gone.
+      // Persist so the cohost keeps the role after the invite link is gone
+      // (also applies the owner's cohost preset to their controls doc).
       await recordInviteAcceptance({
         roomId,
         uid: user!.uid,
@@ -1091,26 +1147,15 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
         createdByUid: inviteClaims!.createdByUid,
         expiresAtMs: inviteClaims!.exp ? inviteClaims!.exp * 1000 : null,
       }).catch((err: any) => console.warn("[token] failed to record cohost acceptance", err?.message || err));
+    } else if (isCohost && !identityControls) {
+      // Cohost from before presets were applied on acceptance: give them the
+      // owner's cohost preset now (only when the host hasn't set a role).
+      await applyOwnerPresetToControls({ roomId, identity: user!.uid, presetId: "cohost", ownerUid: ownerId || null, onlyIfUnset: true });
     }
 
     // Policy: payment
     if (requiresPayment && !isHostLike) {
       return res.status(402).json({ error: "payment_required" });
-    }
-
-    // Policy: publish rights for authenticated non-owners. Logged-in users who
-    // aren't the owner/delegate can publish only with a guest session, invite
-    // JWT or invite acceptance for this room, or when the room is explicitly
-    // public and allows guests; otherwise they get a subscribe-only token. The
-    // client forwards the guest session via x-guest-session on authed
-    // requests, so this doesn't depend on the cross-site sl_guest cookie.
-    // A roomAccessToken (even the caller's own) is not invite evidence.
-    // Escape hatch: ROOM_TOKEN_STRICT_AUTHED_PUBLISH=0.
-    const strictAuthedPublish = String(process.env.ROOM_TOKEN_STRICT_AUTHED_PUBLISH || "").trim() !== "0";
-    let authedSubscribeOnly = false;
-    if (user && !isHostLike && !isCohost && strictAuthedPublish) {
-      const isOpenPublicRoom = visibility === "public" && allowGuestsPolicy !== false;
-      authedSubscribeOnly = !(hasGuestSessionForRoom || !!inviteClaims || !!acceptance || isOpenPublicRoom);
     }
 
     // First-time guests (no pre-existing session) can only join once room is live.
@@ -1172,13 +1217,21 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // Determine LiveKit role based on authentication
     // - Authenticated users: host (if owner) or participant
     // - Guest sessions: "guest" (RTC participant with mic/cam)
+    // Uninvited link/public visitors (and share-link holders) are audience
+    // viewers until the host brings them on stage.
     let lkRole: MintRole = user
-      ? (isHostLike ? "host" : isCohost ? "cohost" : authedSubscribeOnly ? "viewer" : "participant")
-      : shareViewerOnly
+      ? (isHostLike ? "host" : isCohost ? "cohost" : viewerOnly ? "viewer" : "participant")
+      : shareViewerOnly || viewerOnly
         ? "viewer"
         : guest?.role === "participant"
           ? "participant"
           : "guest";
+    // Host stage decisions override the default role (see identityControls).
+    if (lkRole !== "host") {
+      if (controlsRole === "viewer") lkRole = "viewer";
+      else if (controlsRole === "participant") lkRole = "participant";
+      else if (controlsRole === "cohost") lkRole = user ? "cohost" : "participant";
+    }
 
     // Enforce room capacity (plan maxGuests) for non-owner joins.
     // Fail-closed if we cannot determine occupancy.
@@ -1193,42 +1246,8 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
 
     const capLockOwner = capacity.lockOwner;
     try {
-    const identity = user
-      ? isDelegatedProducer
-        ? `producer:${user.uid}:${ownerId}`
-        : user.uid
-      : guest!.identity || newInviteIdentity(guest!.inviteId);
-    if (!identity || !String(identity).trim()) {
-      return res.status(500).json({ code: "internal_error", error: "invalid_identity" });
-    }
     if (!livekitRoomName) {
       return res.status(500).json({ code: "internal_error", error: "invalid_livekit_room_name" });
-    }
-
-    // Host stage decisions (Bring on stage / Move to audience / role preset)
-    // live in rooms/{roomId}/controls/{identity}. Honor them here so a token
-    // re-mint after a role change doesn't undo it. Owners/delegates are never
-    // affected; cohost is only granted to signed-in users (anonymous guests get
-    // participant-level publish instead).
-    let identityControls: Record<string, unknown> | null = null;
-    if (lkRole !== "host") {
-      try {
-        const docId = String(identity).includes("/") ? "" : String(identity).slice(0, 128);
-        if (docId) {
-          const ctlSnap = await firestore.collection("rooms").doc(roomId).collection("controls").doc(docId).get();
-          identityControls = ((ctlSnap.data() as any) || null) as Record<string, unknown> | null;
-          const hostRole = String((ctlSnap.data() as any)?.role || "").trim().toLowerCase();
-          if (hostRole === "viewer") {
-            lkRole = "viewer";
-          } else if (hostRole === "participant") {
-            lkRole = "participant";
-          } else if (hostRole === "cohost") {
-            lkRole = user ? "cohost" : "participant";
-          }
-        }
-      } catch (err: any) {
-        console.warn("[roomGuestAccess] controls role lookup failed", err?.message || err);
-      }
     }
 
     // When host joins, flip room live.
@@ -1257,7 +1276,16 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       name: displayName,
     });
 
-    const grant = roleGrant(lkRole, presenceMode);
+    // Participant "Share Screen" (Settings > Role Defaults): the identity's
+    // applied preset wins, else the room owner's participant preset.
+    const isStageParticipant = lkRole === "participant" || lkRole === "guest";
+    const participantScreenShare = isStageParticipant
+      ? typeof identityControls?.canScreenShare === "boolean"
+        ? (identityControls.canScreenShare as boolean)
+        : (await loadOwnerRolePreset(ownerId || null, "participant")).canScreenShare
+      : false;
+
+    const grant = roleGrant(lkRole, presenceMode, { screenShare: participantScreenShare });
     at.addGrant({ room: livekitRoomName, ...grant } as any);
 
     // Attach presence metadata so the frontend can filter the roster
@@ -1273,71 +1301,24 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     const token = await at.toJwt();
 
     const effectiveRoleKey: MintRole = lkRole;
-    // Cohost room permissions: the cohost role profile, limited to what the
-    // owner's plan allows (recording, destinations).
-    // Capability scopes the host set on this cohost's controls doc (e.g. the
-    // cohost preset's canMuteGuests/canRemoveGuests) are folded in.
-    const cohostPerms =
+    // Cohost room permissions: the room owner's cohost preset (with any
+    // scopes the host set on this cohost's controls doc), limited to what the
+    // owner's plan allows (recording, destinations, streaming).
+    const basePerms: Record<string, boolean> =
       effectiveRoleKey === "cohost"
-        ? mergeCohostControlScopes(
-            await intersectPermissionsWithEntitlements({ ...ROLE_PERMISSIONS.cohost }, ownerId || undefined),
+        ? await resolveCohostRoomPermissions({
+            roomId,
+            identity: String(identity),
+            ownerUid: ownerId || null,
             identityControls,
-          )
-        : null;
-    const basePerms =
-      cohostPerms
-        ? cohostPerms
+          })
         : effectiveRoleKey === "host"
-        ? isDelegatedProducer
-          ? {
-              canStream: !!actingContext?.permissions?.manageStreaming,
-              canRecord: !!actingContext?.permissions?.manageRecording,
-              canDestinations: !!actingContext?.permissions?.manageStreaming,
-              canModerate: !!actingContext?.permissions?.manageParticipants,
-              canLayout: !!actingContext?.permissions?.controlLayouts,
-              canScreenShare: true,
-              canInvite: !!actingContext?.permissions?.manageParticipants,
-              canAnalytics: true,
-              canMuteGuests: !!actingContext?.permissions?.manageParticipants,
-              canRemoveGuests: !!actingContext?.permissions?.manageParticipants,
-            }
-          : {
-              canStream: true,
-              canRecord: true,
-              canDestinations: true,
-              canModerate: true,
-              canLayout: true,
-              canScreenShare: true,
-              canInvite: true,
-              canAnalytics: true,
-              canMuteGuests: true,
-              canRemoveGuests: true,
-            }
-        : effectiveRoleKey === "participant"
-          ? {
-              canStream: false,
-              canRecord: false,
-              canDestinations: false,
-              canModerate: false,
-              canLayout: false,
-              canScreenShare: false,
-              canInvite: false,
-              canAnalytics: false,
-              canMuteGuests: false,
-              canRemoveGuests: false,
-            }
-          : {
-              canStream: false,
-              canRecord: false,
-              canDestinations: false,
-              canModerate: false,
-              canLayout: false,
-              canScreenShare: false,
-              canInvite: false,
-              canAnalytics: false,
-              canMuteGuests: false,
-              canRemoveGuests: false,
-            };
+          ? isDelegatedProducer
+            ? collaboratorToRoomAccessPermissions(actingContext?.permissions)
+            : { ...FULL_ROOM_PERMISSIONS }
+          : effectiveRoleKey === "participant" || effectiveRoleKey === "guest"
+            ? { ...NO_ROOM_PERMISSIONS, canScreenShare: participantScreenShare }
+            : { ...NO_ROOM_PERMISSIONS };
 
     const roomAccessPayload = {
       roomId,
@@ -1414,6 +1395,8 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       adminOverride,
       // Effective presence mode after any server-side downgrade.
       presenceMode,
+      // Production-room access mode (invite_only | link | public).
+      access: roomAccessMode,
       effectiveEntitlements: ownerEntitlements,
       actingContext: user
         ? {
@@ -1487,8 +1470,12 @@ router.get("/rooms/:roomId/info", async (req: any, res) => {
 
     const room = (snap.data() as any) || {};
     const roomStatus = deriveRoomStatus(room);
-    const allowGuests = typeof room.allowGuests === "boolean" ? room.allowGuests : true;
-    const guestJoinAllowed = roomStatus === "live" && allowGuests;
+    const roomAccessMode = resolveRoomAccessMode(room);
+    // allowGuests / guestJoinAllowed describe joining WITHOUT an invite from
+    // the room link: never in invite_only rooms. Invite holders use
+    // /invites/:inviteId/info.
+    const allowGuests = anonymousGuestsAllowed(room) && roomAccessMode !== "invite_only";
+    const guestJoinAllowed = directJoinAllowed(roomAccessMode, room, roomStatus === "live");
     const roomName = String(room.roomName || room.name || roomId);
     const hostName = await resolveHostName(room.ownerId);
     const roomType = room.roomType === "hls" || room.hlsConfig?.enabled === true ? "hls" : "rtc";
@@ -1502,6 +1489,7 @@ router.get("/rooms/:roomId/info", async (req: any, res) => {
       roomStatus,
       allowGuests,
       guestJoinAllowed,
+      access: roomAccessMode,
       hostName,
       roomType,
       debugReason,
@@ -1589,9 +1577,11 @@ router.get("/invites/:inviteId/info", async (req: any, res) => {
  * Body: { displayName: string }
  * Returns: { serverUrl, roomToken, roomId, identity, displayName, guestSessionToken, roomAccessToken, role }
  *
- * This enables "click link → enter name → join" without creating an invite.
- * The room must have allowGuests !== false and be live (or the env flag
- * ALLOW_GUEST_DIRECT_JOIN=1 must be set to allow joining idle rooms).
+ * This enables "click link → enter name → watch" without an invite. Only for
+ * rooms whose access is "link" or "public" (invite_only rooms answer 403
+ * not_allowed); the visitor joins as a subscribe-only audience viewer. The
+ * room must have allowGuests !== false and be live (or the env flag
+ * ALLOW_GUEST_DIRECT_JOIN_IDLE=1 must be set to allow joining idle rooms).
  */
 router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
   try {
@@ -1618,27 +1608,18 @@ router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
     const livekitRoomName = String(room.livekitRoomName || roomId).trim();
     const roomName = String(room.roomName || room.name || livekitRoomName || roomId);
     const roomStatus = room.status === "live" ? "live" : "idle";
-    const allowGuests = typeof room.allowGuests === "boolean" ? room.allowGuests : true;
     const ownerId = typeof room.ownerId === "string" && room.ownerId.trim() ? room.ownerId.trim() : null;
 
-    // Policy: room must allow guests
-    if (!allowGuests) {
-      return res.status(403).json({ error: "guests_not_allowed" });
-    }
-
-    // Policy: same room gates as /token. Anonymous direct join must not get
-    // into private or paid rooms, or rooms that explicitly require login.
-    // (requiresAuth defaults to true on /token; here only an explicit `true`
-    // is enforced so existing open rooms keep working.)
-    const visibility = typeof room.visibility === "string" ? room.visibility.trim().toLowerCase() : "";
-    if (visibility === "private") {
-      return res.status(403).json({ error: "not_allowed" });
+    // Policy: room access. invite_only rooms refuse direct (no-invite) joins;
+    // link/public rooms admit the visitor as a subscribe-only audience
+    // viewer. Publishing needs an invite or the host's "Bring on stage".
+    const roomAccessMode = resolveRoomAccessMode(room);
+    const decision = decideDirectGuestJoin(roomAccessMode, room);
+    if (!decision.allow) {
+      return res.status(decision.status).json({ error: decision.error, access: roomAccessMode });
     }
     if (room.requiresPayment === true) {
       return res.status(402).json({ error: "payment_required" });
-    }
-    if (room.requiresAuth === true) {
-      return res.status(401).json({ error: "login_required" });
     }
 
     // Policy: room must be live for direct guest join (unless env override)
@@ -1674,7 +1655,7 @@ router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
         ttl: "30m",
       });
 
-      const grant = roleGrant("guest");
+      const grant = roleGrant("viewer");
       at.addGrant({ room: livekitRoomName, ...grant } as any);
       const livekitToken = await at.toJwt();
 
@@ -1689,19 +1670,8 @@ router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
         roomId,
         roomName,
         livekitRoomName,
-        role: "guest" as const,
-        permissions: {
-          canStream: false,
-          canRecord: false,
-          canDestinations: false,
-          canModerate: false,
-          canLayout: false,
-          canScreenShare: false,
-          canInvite: false,
-          canAnalytics: false,
-          canMuteGuests: false,
-          canRemoveGuests: false,
-        },
+        role: "viewer" as const,
+        permissions: { ...NO_ROOM_PERMISSIONS },
         identity,
       };
       const roomAccessToken = jwt.sign(roomAccessPayload, getRoomAccessSecret(), { expiresIn: "12h" });
@@ -1722,7 +1692,9 @@ router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
         displayName,
         guestSessionToken,
         roomAccessToken,
-        role: "guest",
+        role: "viewer",
+        isViewer: true,
+        access: roomAccessMode,
         roomName,
         permissions: roomAccessPayload.permissions,
         adminOverride: false,

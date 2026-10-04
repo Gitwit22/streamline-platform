@@ -18,6 +18,9 @@ export type RoomAccessClaims = {
   // True when the caller was elevated to host due to internal-admin override.
   // Useful for client UX decisions (e.g., avoid ending the room when an admin leaves).
   adminOverride?: boolean;
+  // Set for delegated producers (role "host" acting for the room owner).
+  // Such tokens are limited by their `permissions` (see roomModerationPolicy).
+  actingOwnerUid?: string;
 };
 
 function getRoomAccessSecret(): string {

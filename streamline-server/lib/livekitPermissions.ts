@@ -51,9 +51,13 @@ export function presetToLiveKitGrant(p: RealtimePreset): LiveKitGrant {
   };
 }
 
-// Optional coarse role mapping so role-based grants can share the same truth
+// Optional coarse role mapping so role-based grants can share the same truth.
+// `opts.screenShare` adds screen_share sources for guest/participant (the
+// owner's participant preset "Share Screen" toggle); it never affects
+// viewers, and cohost/host always include screen share.
 export function roleToParticipantPermission(
   role: "viewer" | "guest" | "participant" | "cohost" | "host",
+  opts?: { screenShare?: boolean },
 ): LiveKitGrant {
   const canSubscribe = true;
   let canPublish = false;
@@ -73,7 +77,9 @@ export function roleToParticipantPermission(
       // Invite-based guests and authenticated participants both get mic+cam
       canPublish = true;
       canPublishData = true;
-      canPublishSources = ["microphone", "camera"];
+      canPublishSources = opts?.screenShare
+        ? ["microphone", "camera", "screen_share", "screen_share_audio"]
+        : ["microphone", "camera"];
       break;
     }
     case "cohost":
@@ -276,4 +282,22 @@ export function restrictPermissionByControls(
     return { ...perm, canPublish: false, canPublishSources: [] };
   }
   return { ...perm, canPublishSources: sources };
+}
+
+/**
+ * Base LiveKit permission for a role plus restrictions from room controls.
+ * `screenShareScope` is the identity's own screen-share scope (the applied
+ * role preset's canScreenShare): participants get screen_share only when it
+ * is true. Restrictions (canPublishAudio/Video === false, forcedMute, mute
+ * lock, canScreenShare === false...) then remove sources.
+ */
+export function permissionForRoleWithControls(
+  role: "viewer" | "guest" | "participant" | "cohost" | "host",
+  controls: Parameters<typeof restrictPermissionByControls>[1],
+  screenShareScope?: boolean,
+): LiveKitParticipantPermissionInit {
+  return restrictPermissionByControls(
+    roleToParticipantPermission(role, { screenShare: screenShareScope === true }),
+    controls || {},
+  );
 }

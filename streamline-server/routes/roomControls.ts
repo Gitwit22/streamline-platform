@@ -8,6 +8,7 @@ import { resolveRoomIdentity } from "../lib/roomIdentity";
 import {
   roleToParticipantPermission,
   restrictPermissionByControls,
+  permissionForRoleWithControls,
   toLiveKitParticipantPermission,
   LIVEKIT_TRACK_SOURCE_ENUM,
   type LiveKitParticipantPermissionInit,
@@ -17,10 +18,19 @@ import { tryGetAuthUserAny } from "../middleware/requireAuth";
 import {
   actorMay,
   canAssignRolePreset,
+  isAnonymousIdentity,
+  isFullHostActor,
   isProtectedRoomIdentity,
+  isStaffActor,
   missingPermForControlsPatch,
-  moderationActorRole,
 } from "../lib/roomModerationPolicy";
+import { normalizeRolePresetId, type RolePresetId } from "../lib/permissions/roleDefaults";
+import {
+  getRoomOwnerUid as getRoomOwnerUidShared,
+  loadOwnerRolePreset,
+  presetControlsPatch,
+} from "../lib/permissions/rolePresetStore";
+import { getInviteAcceptance } from "../lib/inviteAcceptance";
 
 const router = Router();
 
@@ -34,8 +44,9 @@ type BaseRole = "viewer" | "guest" | "participant" | "cohost" | "host";
 function normalizeBaseRole(raw: unknown): BaseRole | null {
   const r = String(raw || "").trim().toLowerCase();
   if (r === "viewer" || r === "guest" || r === "participant" || r === "cohost" || r === "host") return r;
-  if (r === "moderator" || r === "speaker") return "participant";
-  if (r === "co-host" || r === "co_host") return "cohost";
+  // Legacy "moderator" is treated as cohost everywhere (see roleDefaults).
+  if (r === "speaker") return "participant";
+  if (r === "moderator" || r === "co-host" || r === "co_host") return "cohost";
   return null;
 }
 
@@ -73,14 +84,7 @@ function isLiveKitNotFound(err: unknown): boolean {
 }
 
 async function getRoomOwnerUid(roomId: string): Promise<string | null> {
-  try {
-    const snap = await admin.firestore().collection("rooms").doc(roomId).get();
-    const data = (snap.data() || {}) as any;
-    const owner = data.ownerId || data.ownerUid || data.hostUid || data.createdBy || null;
-    return typeof owner === "string" && owner ? owner : null;
-  } catch {
-    return null;
-  }
+  return getRoomOwnerUidShared(roomId);
 }
 
 /** Identities that room controls must never restrict (the host/producers). */
@@ -156,7 +160,8 @@ export async function enforceRoomControlsForIdentity(opts: {
     let base: any = null;
     const docRole = normalizeBaseRole(identityDoc.role);
     if (docRole) {
-      base = roleToParticipantPermission(docRole);
+      // The identity's applied preset decides participant screen share.
+      base = roleToParticipantPermission(docRole, { screenShare: identityDoc.canScreenShare === true });
     } else if (identityDoc.lkBasePermission && typeof identityDoc.lkBasePermission === "object") {
       base = identityDoc.lkBasePermission;
     } else {
@@ -179,13 +184,20 @@ export async function enforceRoomControlsForIdentity(opts: {
     }
 
     const baseRole = docRole || normalizeBaseRole(opts.fallbackRole);
+    // Mute lock never applies to hosts or cohosts (protected like the owner
+    // and producers). A cohost without a role on their controls doc is
+    // recognised by their cohost acceptance.
+    const muteLockExempt =
+      baseRole === "host" ||
+      baseRole === "cohost" ||
+      (merged.muteLocked === true && !baseRole && (await getInviteAcceptance(roomId, identity))?.role === "cohost");
     const permission = restrictPermissionByControls(base, {
       canPublishAudio: merged.canPublishAudio,
       canPublishVideo: merged.canPublishVideo,
       canScreenShare: merged.canScreenShare,
       forcedMute: merged.forcedMute,
       forcedVideoOff: merged.forcedVideoOff,
-      muteLocked: merged.muteLocked === true && baseRole !== "host",
+      muteLocked: merged.muteLocked === true && !muteLockExempt,
     });
 
     // Mirror tileVisible into participant metadata so every client can hide
@@ -230,6 +242,31 @@ export async function enforceRoomControlsForIdentity(opts: {
     console.warn("[roomControls] enforce controls failed", { roomId, identity, error: (err as any)?.message || String(err) });
     return { applied: false, reason: "livekit_push_failed" };
   }
+}
+
+/**
+ * LiveKit identities that are cohosts in this room: a cohost invite
+ * acceptance, or a host-applied cohost role on their controls doc.
+ * Best-effort (empty on errors).
+ */
+export async function listRoomCohostIdentities(roomId: string): Promise<string[]> {
+  const out = new Set<string>();
+  try {
+    const [acceptances, controls] = await Promise.all([
+      admin.firestore().collection("roomInviteAcceptances").where("roomId", "==", roomId).where("role", "==", "cohost").get(),
+      admin.firestore().collection("rooms").doc(roomId).collection("controls").where("role", "==", "cohost").get(),
+    ]);
+    for (const d of acceptances.docs) {
+      const data = (d.data() as any) || {};
+      if (!data.revokedAt && typeof data.uid === "string" && data.uid) out.add(data.uid);
+    }
+    for (const d of controls.docs) {
+      if (d.id && d.id !== "default") out.add(d.id);
+    }
+  } catch (err) {
+    console.warn("[roomControls] cohost lookup failed", (err as any)?.message || err);
+  }
+  return Array.from(out);
 }
 
 /** Enforce controls on every (non-protected) participant in the room. */
@@ -314,138 +351,11 @@ function normalizeControlsDocId(raw: any): string {
   return id;
 }
 
-type RawPresetId = "moderator" | "cohost" | "participant";
-type PresetId = "cohost" | "participant";
+type PresetId = RolePresetId;
 
-const SYSTEM_ROLE_PRESETS: Record<
-  PresetId,
-  Required<
-    Pick<
-      RoomControls,
-      | "role"
-      | "canPublishAudio"
-      | "canPublishVideo"
-      | "canScreenShare"
-      | "tileVisible"
-      | "canMuteGuests"
-      | "canRemoveGuests"
-      | "canInviteLinks"
-      | "canManageDestinations"
-      | "canStartStopStream"
-      | "canStartStopRecording"
-      | "canViewAnalytics"
-      | "canChangeLayoutScene"
-    >
-  >
-> = {
-  participant: {
-    role: "participant",
-    canPublishAudio: true,
-    canPublishVideo: true,
-    canScreenShare: false,
-    tileVisible: true,
-    canMuteGuests: false,
-    canRemoveGuests: false,
-    canInviteLinks: false,
-    canManageDestinations: false,
-    canStartStopStream: false,
-    canStartStopRecording: false,
-    canViewAnalytics: false,
-    canChangeLayoutScene: false,
-  },
-  cohost: {
-    role: "cohost",
-    canPublishAudio: true,
-    canPublishVideo: true,
-    canScreenShare: true,
-    tileVisible: true,
-    canMuteGuests: true,
-    canRemoveGuests: true,
-    canInviteLinks: true,
-    canManageDestinations: false,
-    canStartStopStream: false,
-    canStartStopRecording: false,
-    canViewAnalytics: false,
-    canChangeLayoutScene: true,
-  },
-};
-
-function presetDocRef(uid: string, presetId: PresetId) {
-  // "Account" is currently modeled as the authenticated user document.
-  return admin.firestore().collection("users").doc(uid).collection("rolePresets").doc(presetId);
-}
-
-function parsePresetId(raw: any): RawPresetId | null {
-  const v = String(raw || "").toLowerCase();
-  if (v === "moderator" || v === "cohost" || v === "participant") return v as RawPresetId;
-  return null;
-}
-
-function coercePresetIdForApply(presetId: RawPresetId): PresetId {
-  // Moderator is no longer a public-facing role. For any new apply
-  // operations, treat incoming "moderator" as "participant" so legacy
-  // data and stale clients cannot re-introduce a distinct moderator role
-  // in LiveKit metadata or controls.
-  if (presetId === "moderator") return "participant";
-  return presetId;
-}
-
-async function loadPresetForUser(uid: string, presetId: PresetId): Promise<RoomControls> {
-  try {
-    const snap = await presetDocRef(uid, presetId).get();
-    if (snap.exists) {
-      const data = (snap.data() || {}) as any;
-      const merged: RoomControls = {
-        role: typeof data.role === "string" ? data.role : presetId,
-        canPublishAudio: pickBoolean(data.canPublishAudio),
-        canPublishVideo: pickBoolean(data.canPublishVideo),
-        canScreenShare: pickBoolean(data.canScreenShare),
-        tileVisible: pickBoolean(data.tileVisible),
-        canMuteGuests: pickBoolean(data.canMuteGuests),
-        canRemoveGuests: pickBoolean(data.canRemoveGuests),
-        canInviteLinks: pickBoolean(data.canInviteLinks),
-        canManageDestinations: pickBoolean(data.canManageDestinations),
-        canStartStopStream: pickBoolean(data.canStartStopStream),
-        canStartStopRecording: pickBoolean(data.canStartStopRecording),
-        canViewAnalytics: pickBoolean(data.canViewAnalytics),
-        canChangeLayoutScene: pickBoolean(data.canChangeLayoutScene),
-      };
-
-      return merged;
-    }
-  } catch {
-    // ignore and fall back to system preset
-  }
-
-  return { ...SYSTEM_ROLE_PRESETS[presetId] };
-}
-
-function normalizePresetForApply(presetId: PresetId, preset: RoomControls): RoomControls {
-  const system = SYSTEM_ROLE_PRESETS[presetId];
-
-  const coerce = <K extends keyof typeof system>(key: K): boolean => {
-    const v = (preset as any)?.[key];
-    if (typeof v === "boolean") return v;
-    return !!system[key];
-  };
-
-  const normalized: RoomControls = {
-    role: presetId,
-    canPublishAudio: coerce("canPublishAudio"),
-    canPublishVideo: coerce("canPublishVideo"),
-    canScreenShare: coerce("canScreenShare"),
-    tileVisible: coerce("tileVisible"),
-    canMuteGuests: coerce("canMuteGuests"),
-    canRemoveGuests: coerce("canRemoveGuests"),
-    canInviteLinks: coerce("canInviteLinks"),
-    canManageDestinations: coerce("canManageDestinations"),
-    canStartStopStream: coerce("canStartStopStream"),
-    canStartStopRecording: coerce("canStartStopRecording"),
-    canViewAnalytics: coerce("canViewAnalytics"),
-    canChangeLayoutScene: coerce("canChangeLayoutScene"),
-  };
-
-  return normalized;
+/** Role preset id from a request body; legacy "moderator" maps to cohost. */
+function parsePresetId(raw: any): PresetId | null {
+  return normalizeRolePresetId(raw);
 }
 
 function mergeControls(defaultDoc: any, identityDoc: any) {
@@ -484,34 +394,188 @@ function pickOutputFormat(v: any): string | undefined {
   return undefined;
 }
 
-function isHostOrCohost(role?: string): boolean {
-  // Hosts can do everything; cohosts are further limited per endpoint by
-  // their roomAccessToken permissions (see lib/roomModerationPolicy).
-  return moderationActorRole(role) !== "other";
+/** Host, producer or cohost token (per-key checks still apply). */
+function isHostOrCohost(access: RoomAccessClaims): boolean {
+  return isStaffActor(access);
 }
 
-function isHostRole(role?: string): boolean {
-  return moderationActorRole(role) === "host";
+/** Owner/admin host token (delegated producers are limited by their permissions). */
+function isHostRole(access: RoomAccessClaims): boolean {
+  return isFullHostActor(access);
 }
 
 /**
- * Whose saved role presets apply: the acting user for hosts (owner or
- * delegated producer), the room owner for cohosts (so a cohost can't apply
- * presets they authored themselves).
+ * Whose saved role presets apply: always the room OWNER (also for delegated
+ * producers, admins and cohosts), so a role means the same thing no matter
+ * who applies it.
  */
-async function presetOwnerUidFor(roomId: string, access: RoomAccessClaims, uid: string | undefined): Promise<string | null> {
-  if (isHostRole(access.role) && uid) return uid;
+async function presetOwnerUidFor(roomId: string, uid: string | undefined): Promise<string | null> {
   return (await getRoomOwnerUid(roomId)) || uid || null;
 }
 
-function mapPresetToLivekitPermission(role: PresetId) {
-  // Map our simple room role presets (participant/cohost) to LiveKit
-  // ParticipantPermission objects so we can accurately control which
-  // track sources (including screen share) are allowed. This is
-  // important for demotion flows where we need to detect when
-  // screen-share capability is lost and proactively mute any
-  // existing screen-share tracks.
-  return roleToParticipantPermission(role);
+/**
+ * Apply a role preset (the room owner's participant/cohost template) to a
+ * participant identity: persists rooms/{roomId}/controls/{identity}, pushes
+ * the matching LiveKit permission and asks the participant's controls SSE
+ * stream to refresh their token. Shared by POST /permissions, POST
+ * apply-preset and PATCH controls/:identity with { role }.
+ *
+ * Callers have already checked the actor (canModerate, canAssignRolePreset,
+ * protected identities).
+ */
+async function applyRolePresetToIdentity(
+  req: any,
+  res: any,
+  params: { roomId: string; rawIdentity: string; presetId: PresetId; uid: string },
+) {
+  const { roomId, rawIdentity, presetId, uid } = params;
+  const identityDocId = normalizeControlsDocId(rawIdentity);
+
+  try {
+    const preset = await loadOwnerRolePreset(await presetOwnerUidFor(roomId, uid), presetId);
+    await controlsDocRef(roomId, identityDocId).set(presetControlsPatch(preset, uid), { merge: true });
+
+    // Push to LiveKit in real time so the participant's in-room
+    // capabilities update immediately.
+    let appliedPermission: any | null = null;
+    let livekitApplied = false;
+    let livekitReason: string | null = null;
+    try {
+      const roomService = await getRoomServiceClient();
+
+      if (roomService) {
+        const mergedControls = (await readControlsMerged(roomId, identityDocId)) as any;
+        const permission = permissionForRoleWithControls(
+          presetId,
+          {
+            ...mergedControls,
+            // Mute lock never applies to cohosts.
+            muteLocked: presetId === "cohost" ? false : mergedControls.muteLocked,
+          },
+          preset.canScreenShare,
+        );
+        const { livekitRoomName } = getRoomAccess(req as any);
+
+        console.log("[roomControls] APPLY ROLE PRESET", {
+          roomId,
+          livekitRoomName,
+          targetIdentity: rawIdentity,
+          roleId: presetId,
+        });
+
+        // Merge rolePresetId into existing metadata so host UIs can
+        // render a stable role label and dropdown value.
+        let nextMetadata: string | undefined;
+        let target: any = null;
+        try {
+          const participants = await listLiveKitParticipants(roomService, livekitRoomName);
+          target = participants.find((p) => p && p.identity === rawIdentity) || null;
+          nextMetadata = mergeParticipantMetadata(target?.metadata, { rolePresetId: presetId });
+        } catch {
+          nextMetadata = JSON.stringify({ rolePresetId: presetId });
+        }
+
+        await roomService.updateParticipant(livekitRoomName, rawIdentity, {
+          permission,
+          metadata: nextMetadata,
+        });
+        appliedPermission = permission;
+        livekitApplied = true;
+
+        // Demotion cleanup: mute anything the new permission no longer allows
+        // (e.g. a screen share after losing the Share Screen scope).
+        if (target) {
+          const allowed = new Set(permission.canPublish === false ? [] : permission.canPublishSources);
+          const allowAll = permission.canPublish !== false && permission.canPublishSources.length === 0;
+          const tracks: any[] = Array.isArray(target.tracks) ? target.tracks : [];
+          for (const t of tracks) {
+            const source = typeof t?.source === "number" ? t.source : null;
+            const sid = t?.sid || t?.trackSid;
+            if (!sid || source == null || allowAll || allowed.has(source) || t?.muted === true) continue;
+            if (source !== LIVEKIT_TRACK_SOURCE_ENUM.screen_share && source !== LIVEKIT_TRACK_SOURCE_ENUM.screen_share_audio && source !== TrackSource.SCREEN_SHARE) {
+              continue;
+            }
+            try {
+              await roomService.mutePublishedTrack(livekitRoomName, rawIdentity, sid, true);
+            } catch (muteErr) {
+              console.warn("[roomControls] role preset cleanup: mutePublishedTrack failed", {
+                roomId,
+                identity: rawIdentity,
+                error: (muteErr as any)?.message || String(muteErr),
+              });
+            }
+          }
+        }
+      } else {
+        console.warn("[roomControls] LiveKit RoomServiceClient not configured; skipping permission update");
+        livekitReason = "not_configured";
+      }
+    } catch (err) {
+      if (isLiveKitNotFound(err)) {
+        livekitReason = "not_found";
+      } else {
+        // Firestore controls were already persisted — the participant will
+        // receive the update via the SSE controls stream (and refresh their
+        // token) regardless. Surface a warning instead of failing.
+        console.error("[roomControls] livekit apply role preset failed (Firestore persisted, SSE will deliver)", err);
+        livekitReason = "livekit_push_failed";
+      }
+    }
+
+    const merged = await readControlsMerged(roomId, identityDocId);
+    return res.json({
+      ok: true,
+      appliedPermission,
+      applied: appliedPermission,
+      livekitApplied,
+      livekitReason,
+      controls: merged,
+      roleId: presetId,
+      tokenRefreshRequested: true,
+    });
+  } catch (err: any) {
+    console.error("[roomControls] apply role preset error", err);
+    return res.status(500).json({ error: "failed_to_apply_permissions" });
+  }
+}
+
+/**
+ * Shared actor checks for assigning `presetId` to `rawIdentity`. Returns an
+ * error response tuple or null when allowed.
+ */
+async function checkRolePresetAssignment(
+  access: RoomAccessClaims,
+  roomId: string,
+  rawIdentity: string,
+  presetId: PresetId,
+): Promise<{ status: number; error: string } | null> {
+  // Hosts, producers/cohosts with canModerate. Cohosts may only assign
+  // participant and never act on the owner/producers.
+  if (!actorMay(access, access.permissions, "canModerate") || !canAssignRolePreset(access, presetId)) {
+    return { status: 403, error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS };
+  }
+  if (!isHostRole(access) && isProtectedIdentity(rawIdentity, await getRoomOwnerUid(roomId))) {
+    return { status: 403, error: "cannot_moderate_host" };
+  }
+  // Cohost needs a StreamLine account: anonymous guests can't be promoted.
+  if (presetId === "cohost" && !(await identityHasAccount(rawIdentity))) {
+    return { status: 403, error: "cohost_requires_account" };
+  }
+  return null;
+}
+
+/** True when the LiveKit identity is a signed-in account (Firebase uid). */
+async function identityHasAccount(identity: string): Promise<boolean> {
+  if (isAnonymousIdentity(identity)) return false;
+  try {
+    await admin.auth().getUser(identity);
+    return true;
+  } catch (err: any) {
+    const code = String(err?.code || err?.errorInfo?.code || "");
+    if (code.includes("user-not-found") || code.includes("invalid-uid")) return false;
+    // Auth backend unavailable: fall back to the identity shape check above.
+    return true;
+  }
 }
 
 // Host/cohost updates controls for the whole room.
@@ -530,7 +594,7 @@ router.patch("/:roomId/controls", requireRoomAccessToken as any, async (req: any
   if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
   if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
 
-  if (!isHostOrCohost(access.role)) {
+  if (!isHostOrCohost(access)) {
     return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
   }
 
@@ -569,7 +633,7 @@ router.patch("/:roomId/controls", requireRoomAccessToken as any, async (req: any
     return res.status(400).json({ error: "no_valid_fields" });
   }
 
-  const missingRoomPerm = missingPermForControlsPatch(access.role, access.permissions, Object.keys(cleaned));
+  const missingRoomPerm = missingPermForControlsPatch(access, access.permissions, Object.keys(cleaned));
   if (missingRoomPerm) {
     return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS, required: missingRoomPerm });
   }
@@ -613,7 +677,7 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
   if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
   if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
 
-  if (!isHostOrCohost(access.role)) {
+  if (!isHostOrCohost(access)) {
     return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
   }
 
@@ -623,8 +687,8 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
   const rawIdentity = String(req.params.identity || "").trim();
   if (!rawIdentity) return res.status(400).json({ error: "identity_required" });
 
-  // Cohosts never act on the room owner / producers.
-  const actorIsHost = isHostRole(access.role);
+  // Cohosts/producers never act on the room owner / producers.
+  const actorIsHost = isHostRole(access);
   if (!actorIsHost && isProtectedIdentity(rawIdentity, await getRoomOwnerUid(roomId))) {
     return res.status(403).json({ error: "cannot_moderate_host" });
   }
@@ -634,93 +698,11 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
 
   // If a role is provided, treat this as a role change and
   // apply the corresponding preset defaults, resetting overrides.
-  const parsedRolePresetId = parsePresetId(body.role);
-  if (parsedRolePresetId) {
-    const rolePresetId: PresetId = coercePresetIdForApply(parsedRolePresetId);
-    // Cohosts need canModerate and may only assign participant.
-    if (!actorMay(access.role, access.permissions, "canModerate") || !canAssignRolePreset(access.role, rolePresetId)) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-    const loadedPreset = await loadPresetForUser((await presetOwnerUidFor(roomId, access, uid)) || uid, rolePresetId);
-    const presetPatch = normalizePresetForApply(rolePresetId, loadedPreset);
-
-    // Strip out any undefined booleans so Firestore never sees undefined fields.
-    const cleanedFromPreset: RoomControls = {};
-    (Object.keys(presetPatch) as Array<keyof RoomControls>).forEach((k) => {
-      const val = presetPatch[k];
-      if (k === "role") {
-        (cleanedFromPreset as any)[k] = val;
-      } else if (typeof val === "boolean") {
-        (cleanedFromPreset as any)[k] = val;
-      }
-    });
-
-    const ref = controlsDocRef(roomId, identityDocId);
-    await ref.set(
-      {
-        ...cleanedFromPreset,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedByUid: uid,
-        appliedPresetId: rolePresetId,
-        lkBasePermission: admin.firestore.FieldValue.delete(),
-        // Hint for the participant's controls SSE stream: re-fetch the
-        // room token so roomAccessToken permissions match the new role.
-        tokenRefreshRequestedAt: Date.now(),
-      },
-      { merge: true },
-    );
-
-    // Update LiveKit participant permissions to reflect the new role.
-    try {
-      const roomService = await getRoomServiceClient();
-
-      if (roomService) {
-        const mergedControls = (await readControlsMerged(roomId, identityDocId)) as any;
-        const permission = restrictPermissionByControls(mapPresetToLivekitPermission(rolePresetId), mergedControls);
-        const { livekitRoomName } = getRoomAccess(req as any);
-
-        console.log("[roomControls] ROLE UPDATE", {
-          roomId,
-          livekitRoomName,
-          targetIdentity: rawIdentity,
-          newRoleId: rolePresetId,
-        });
-
-        // Merge rolePresetId into existing metadata so clients can
-        // render a stable role label and dropdown value.
-        let nextMetadata: string | undefined;
-        try {
-          const participants = await listLiveKitParticipants(roomService, livekitRoomName);
-          const target = participants.find((p: any) => p && p.identity === rawIdentity);
-          nextMetadata = mergeParticipantMetadata(target?.metadata, { rolePresetId });
-        } catch {
-          nextMetadata = JSON.stringify({ rolePresetId: rolePresetId });
-        }
-
-        await roomService.updateParticipant(livekitRoomName, rawIdentity, {
-          permission,
-          metadata: nextMetadata,
-        });
-      } else {
-        console.warn("[roomControls] LiveKit RoomServiceClient not configured; skipping permission update");
-      }
-    } catch (err) {
-      const message = (err as any)?.message || String(err);
-      // If the room/participant no longer exists in LiveKit (404), treat as non-fatal.
-      if (message.includes("status 404")) {
-        console.warn("[roomControls] LiveKit role update 404 (room or participant missing)", {
-          roomId,
-          identity: rawIdentity,
-          rolePresetId,
-        });
-      } else {
-        console.error("[roomControls] livekit role update failed", err);
-        return res.status(500).json({ error: "livekit_role_update_failed" });
-      }
-    }
-
-    const merged = await readControlsMerged(roomId, identityDocId);
-    return res.json({ ok: true, controls: merged });
+  const rolePresetId = parsePresetId(body.role);
+  if (rolePresetId) {
+    const denied = await checkRolePresetAssignment(access, roomId, rawIdentity, rolePresetId);
+    if (denied) return res.status(denied.status).json({ error: denied.error });
+    return applyRolePresetToIdentity(req, res, { roomId, rawIdentity, presetId: rolePresetId, uid });
   }
 
   // Otherwise, behave as a classic partial controls patch.
@@ -753,7 +735,7 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
     return res.status(400).json({ error: "no_valid_fields" });
   }
 
-  const missingPerm = missingPermForControlsPatch(access.role, access.permissions, Object.keys(cleaned));
+  const missingPerm = missingPermForControlsPatch(access, access.permissions, Object.keys(cleaned));
   if (missingPerm) {
     return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS, required: missingPerm });
   }
@@ -792,7 +774,7 @@ router.patch("/:roomId/controls/:identity", requireAuth as any, requireRoomAcces
 
 // Apply a role's permissions to a LiveKit participant immediately.
 // POST /api/rooms/:roomId/participants/:identity/permissions
-// Body: { roleId: "moderator" | "cohost" | "participant" }
+// Body: { roleId: "cohost" | "participant" }  (legacy "moderator" = cohost)
 // Auth: Firebase session cookie + Authorization: Bearer <roomAccessToken>
 router.post("/:roomId/participants/:identity/permissions", requireAuth as any, requireRoomAccessToken as any, async (req: any, res) => {
   const roomId = String(req.params.roomId || "").trim();
@@ -802,12 +784,6 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
   if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
   if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
 
-  // Hosts, or cohosts with canModerate (who may only assign participant and
-  // never act on the owner/producers).
-  if (!actorMay(access.role, access.permissions, "canModerate")) {
-    return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-  }
-
   const uid = (req as any).user?.uid as string | undefined;
   if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
@@ -815,184 +791,20 @@ router.post("/:roomId/participants/:identity/permissions", requireAuth as any, r
   if (!rawIdentity) return res.status(400).json({ error: "identity_required" });
 
   const body = (req.body || {}) as any;
-  const parsedPresetId = parsePresetId(body.roleId || body.role || body.presetId);
-  if (!parsedPresetId) {
+  const presetId = parsePresetId(body.roleId || body.role || body.presetId);
+  if (!presetId) {
     return res.status(400).json({ error: "roleId_invalid" });
   }
 
-  const presetId: PresetId = coercePresetIdForApply(parsedPresetId);
+  const denied = await checkRolePresetAssignment(access, roomId, rawIdentity, presetId);
+  if (denied) return res.status(denied.status).json({ error: denied.error });
 
-  if (!isHostRole(access.role)) {
-    if (!canAssignRolePreset(access.role, presetId)) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-    if (isProtectedIdentity(rawIdentity, await getRoomOwnerUid(roomId))) {
-      return res.status(403).json({ error: "cannot_moderate_host" });
-    }
-  }
-
-  const identityDocId = normalizeControlsDocId(rawIdentity);
-
-  try {
-    const loadedPreset = await loadPresetForUser((await presetOwnerUidFor(roomId, access, uid)) || uid, presetId);
-    const presetPatch = normalizePresetForApply(presetId, loadedPreset);
-
-    const cleanedFromPreset: RoomControls = {};
-    (Object.keys(presetPatch) as Array<keyof RoomControls>).forEach((k) => {
-      const val = presetPatch[k];
-      if (k === "role") {
-        (cleanedFromPreset as any)[k] = val;
-      } else if (typeof val === "boolean") {
-        (cleanedFromPreset as any)[k] = val;
-      }
-    });
-
-    const ref = controlsDocRef(roomId, identityDocId);
-    await ref.set(
-      {
-        ...cleanedFromPreset,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        updatedByUid: uid,
-        appliedPresetId: presetId,
-        lkBasePermission: admin.firestore.FieldValue.delete(),
-        // Hint for the participant's controls SSE stream to re-fetch its token.
-        tokenRefreshRequestedAt: Date.now(),
-      },
-      { merge: true },
-    );
-
-    // Push to LiveKit in real time so the participant's in-room
-    // capabilities update immediately.
-    let appliedPermission: any | null = null;
-    let livekitApplied = false;
-    let livekitReason: string | null = null;
-    try {
-      const roomService = await getRoomServiceClient();
-
-      if (roomService) {
-        const mergedControls = (await readControlsMerged(roomId, identityDocId)) as any;
-        const permission = restrictPermissionByControls(mapPresetToLivekitPermission(presetId), mergedControls);
-        const { livekitRoomName } = getRoomAccess(req as any);
-
-        console.log("[roomControls] APPLY PERMISSIONS", {
-          roomId,
-          livekitRoomName,
-          targetIdentity: rawIdentity,
-          roleId: presetId,
-        });
-
-        // Merge rolePresetId into existing metadata so host UIs can
-        // render a stable role label and dropdown value.
-        let nextMetadata: string | undefined;
-        try {
-          const participants = await listLiveKitParticipants(roomService, livekitRoomName);
-          const target = participants.find((p) => p && p.identity === rawIdentity);
-          nextMetadata = mergeParticipantMetadata(target?.metadata, { rolePresetId: presetId });
-        } catch {
-          nextMetadata = JSON.stringify({ rolePresetId: presetId });
-        }
-
-        await roomService.updateParticipant(livekitRoomName, rawIdentity, {
-          permission,
-          metadata: nextMetadata,
-        });
-        appliedPermission = permission;
-        livekitApplied = true;
-        livekitReason = null;
-
-        const sources: number[] = permission.canPublishSources;
-        const hasScreenShare = sources.includes(LIVEKIT_TRACK_SOURCE_ENUM.screen_share);
-        const lostScreenShare = (sources.length > 0 || permission.canPublish === false) && !hasScreenShare;
-
-        if (lostScreenShare) {
-          try {
-            const participants = await listLiveKitParticipants(roomService, livekitRoomName);
-
-            const target = participants.find((p) => p && p.identity === rawIdentity);
-            if (!target) {
-              console.warn("[roomControls] demote-cleanup: participant not found in listParticipants", {
-                roomId,
-                livekitRoomName,
-                identity: rawIdentity,
-              });
-            } else {
-              const tracks: any[] = Array.isArray((target as any).tracks) ? (target as any).tracks : [];
-              for (const track of tracks) {
-                try {
-                  if (!track) continue;
-                  const source = (track as any).source;
-                  const sid = (track as any).sid || (track as any).trackSid;
-                  if (source === TrackSource.SCREEN_SHARE && sid) {
-                    console.log("[roomControls] demote-cleanup: muting screen_share track", {
-                      roomId,
-                      livekitRoomName,
-                      identity: rawIdentity,
-                      trackSid: sid,
-                    });
-                    await (roomService as any).mutePublishedTrack(livekitRoomName, rawIdentity, sid, true);
-                  }
-                } catch (muteErr) {
-                  console.warn("[roomControls] demote-cleanup: mutePublishedTrack failed", {
-                    roomId,
-                    livekitRoomName,
-                    identity: rawIdentity,
-                    error: muteErr,
-                  });
-                }
-              }
-            }
-          } catch (cleanupErr) {
-            console.warn("[roomControls] demote-cleanup: listParticipants failed", {
-              roomId,
-              identity: rawIdentity,
-              error: cleanupErr,
-            });
-          }
-        }
-      } else {
-        console.warn("[roomControls] LiveKit RoomServiceClient not configured; skipping permission update");
-        livekitApplied = false;
-        livekitReason = "not_configured";
-      }
-    } catch (err) {
-      const message = (err as any)?.message || String(err);
-      if (message.includes("status 404")) {
-        console.warn("[roomControls] LiveKit apply-permissions 404 (room or participant missing)", {
-          roomId,
-          identity: rawIdentity,
-          roleId: presetId,
-        });
-        livekitApplied = false;
-        livekitReason = "not_found";
-      } else {
-        // Firestore controls were already persisted — the participant will
-        // receive the update via the SSE controls stream regardless.  Don't
-        // return 500 for a LiveKit-only failure; instead surface a warning
-        // in the response so the host UI can still show "Role updated."
-        console.error("[roomControls] livekit apply-permissions failed (Firestore persisted, SSE will deliver)", err);
-        livekitApplied = false;
-        livekitReason = "livekit_push_failed";
-      }
-    }
-
-    const merged = await readControlsMerged(roomId, identityDocId);
-    return res.json({
-      ok: true,
-      appliedPermission,
-      applied: appliedPermission,
-      livekitApplied,
-      livekitReason,
-      controls: merged,
-      roleId: presetId,
-    });
-  } catch (err: any) {
-    console.error("[roomControls] apply-permissions error", err);
-    return res.status(500).json({ error: "failed_to_apply_permissions" });
-  }
+  return applyRolePresetToIdentity(req, res, { roomId, rawIdentity, presetId, uid });
 });
 
-// Apply a saved preset to a participant identity.
-// POST /api/rooms/:roomId/controls/:identity/apply-preset
+// Apply a saved preset to a participant identity (same as /permissions:
+// LiveKit push + token refresh hint).
+// POST /api/rooms/:roomId/controls/:identity/apply-preset  Body: { presetId }
 // Auth: Firebase session cookie + Authorization: Bearer <roomAccessToken>
 router.post("/:roomId/controls/:identity/apply-preset", requireAuth as any, requireRoomAccessToken as any, async (req: any, res) => {
   const roomId = String(req.params.roomId || "").trim();
@@ -1002,44 +814,19 @@ router.post("/:roomId/controls/:identity/apply-preset", requireAuth as any, requ
   if (!access || !access.roomId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
   if (access.roomId !== roomId) return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
 
-  if (!isHostOrCohost(access.role)) {
-    return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-  }
-
   const uid = (req as any).user?.uid as string | undefined;
   if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-  const parsedPresetId = parsePresetId((req.body as any)?.presetId);
-  if (!parsedPresetId) return res.status(400).json({ error: "presetId_required" });
+  const rawIdentity = String(req.params.identity || "").trim();
+  if (!rawIdentity) return res.status(400).json({ error: "identity_required" });
 
-  const presetId: PresetId = coercePresetIdForApply(parsedPresetId);
+  const presetId = parsePresetId((req.body as any)?.presetId);
+  if (!presetId) return res.status(400).json({ error: "presetId_required" });
 
-  if (!isHostRole(access.role)) {
-    if (!actorMay(access.role, access.permissions, "canModerate") || !canAssignRolePreset(access.role, presetId)) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-    if (isProtectedIdentity(String(req.params.identity || "").trim(), await getRoomOwnerUid(roomId))) {
-      return res.status(403).json({ error: "cannot_moderate_host" });
-    }
-  }
+  const denied = await checkRolePresetAssignment(access, roomId, rawIdentity, presetId);
+  if (denied) return res.status(denied.status).json({ error: denied.error });
 
-  const identityDocId = normalizeControlsDocId(req.params.identity);
-  const loadedPreset = await loadPresetForUser((await presetOwnerUidFor(roomId, access, uid)) || uid, presetId);
-  const cleaned = normalizePresetForApply(presetId, loadedPreset);
-
-  const ref = controlsDocRef(roomId, identityDocId);
-  await ref.set(
-    {
-      ...cleaned,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      updatedByUid: uid,
-      appliedPresetId: presetId,
-    },
-    { merge: true },
-  );
-
-  const merged = await readControlsMerged(roomId, identityDocId);
-  return res.json({ ok: true, controls: merged });
+  return applyRolePresetToIdentity(req, res, { roomId, rawIdentity, presetId, uid });
 });
 
 // SSE stream of current controls.
@@ -1212,8 +999,8 @@ function stageChangeHandler(direction: "promote" | "demote") {
       return res.status(403).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
     }
 
-    // Hosts, or cohosts with canModerate, can move people on/off stage.
-    if (!actorMay(access.role, access.permissions, "canModerate")) {
+    // Hosts, or producers/cohosts with canModerate, can move people on/off stage.
+    if (!actorMay(access, access.permissions, "canModerate")) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -1225,7 +1012,7 @@ function stageChangeHandler(direction: "promote" | "demote") {
       if (isProtectedIdentity(targetIdentity, ownerUid, [access.identity])) {
         return res.status(400).json({ error: "cannot_demote_host" });
       }
-    } else if (!isHostRole(access.role)) {
+    } else if (!isHostRole(access)) {
       // Promoting the owner would rewrite their controls doc; cohosts can't.
       if (isProtectedIdentity(targetIdentity, await getRoomOwnerUid(roomId))) {
         return res.status(403).json({ error: "cannot_moderate_host" });
@@ -1243,6 +1030,10 @@ function stageChangeHandler(direction: "promote" | "demote") {
 
       const { livekitRoomName } = getRoomAccess(req as any);
 
+      // Participant "Share Screen" comes from the room owner's participant preset.
+      const participantPreset =
+        direction === "promote" ? await loadOwnerRolePreset(await getRoomOwnerUid(roomId), "participant") : null;
+
       // Persist first so the SSE stream/rejoin enforcement sees the new role.
       const ref = controlsDocRef(roomId, identityDocId);
       await ref.set(
@@ -1251,7 +1042,7 @@ function stageChangeHandler(direction: "promote" | "demote") {
               role: "participant",
               canPublishAudio: true,
               canPublishVideo: true,
-              canScreenShare: false, // Participants can't screen share by default
+              canScreenShare: !!participantPreset?.canScreenShare,
               forcedMute: false,
               forcedVideoOff: false,
               promotedToSpeaker: true,
@@ -1276,7 +1067,7 @@ function stageChangeHandler(direction: "promote" | "demote") {
       );
 
       const mergedControls = (await readControlsMerged(roomId, identityDocId)) as any;
-      const permission = restrictPermissionByControls(roleToParticipantPermission(newRole), mergedControls);
+      const permission = permissionForRoleWithControls(newRole, mergedControls, !!participantPreset?.canScreenShare);
 
       console.log(`[${direction}] stage change`, {
         roomId,
@@ -1326,7 +1117,13 @@ function stageChangeHandler(direction: "promote" | "demote") {
         role: newRole,
         permissions:
           direction === "promote"
-            ? { canPublish: true, canPublishData: true, canPublishSources: ["microphone", "camera"] }
+            ? {
+                canPublish: true,
+                canPublishData: true,
+                canPublishSources: participantPreset?.canScreenShare
+                  ? ["microphone", "camera", "screen_share", "screen_share_audio"]
+                  : ["microphone", "camera"],
+              }
             : { canPublish: false, canPublishData: !!permission.canPublishData, canPublishSources: [] },
         appliedPermission: permission,
       });

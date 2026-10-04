@@ -23,7 +23,7 @@ import {
   usagePercent,
   type UsageSummaryModel,
 } from "../../lib/usageSummary";
-import { type CollaboratorsPayload } from "../../lib/producerDelegation";
+import { type CollaboratorPermissions, type CollaboratorsPayload } from "../../lib/producerDelegation";
 import { DEFAULT_MEDIA_PRESET_ID, mediaPresetLabel, toPresetOptions, type PresetOption } from "../../lib/mediaPresetLabels";
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
@@ -50,101 +50,90 @@ type RolePresetDoc = {
   canPublishVideo: boolean;
   canScreenShare: boolean;
   tileVisible: boolean;
-  // Access scopes (in-room gated UI)
-  // NOTE: moderation powers are host-only and not driven by templates.
+  // In-room scopes (single source: server lib/permissions/roleDefaults.ts)
   canMuteGuests: boolean;
+  canRemoveGuests: boolean;
   canInviteLinks: boolean;
+  canChangeLayoutScene: boolean;
   canManageDestinations: boolean;
   canStartStopStream: boolean;
   canStartStopRecording: boolean;
-  // Optional future scopes
-  canViewAnalytics?: boolean;
-  canChangeLayoutScene?: boolean;
   updatedAt?: number;
 };
 
 type RolePresetToggleKey =
   | "canScreenShare"
   | "canInviteLinks"
+  | "canChangeLayoutScene"
+  | "canMuteGuests"
+  | "canRemoveGuests"
   | "canManageDestinations"
   | "canStartStopStream"
-  | "canStartStopRecording"
-  | "canChangeLayoutScene"
-  | "canViewAnalytics";
+  | "canStartStopRecording";
 
 const ROLE_PRESET_LABELS: Record<RolePresetId, string> = {
   participant: "Participant",
   cohost: "Co-host",
 };
 
-const ROLE_PRESET_GROUPS: Array<{ title: string; keys: Array<{ key: RolePresetToggleKey; label: string }> }> = [
-  {
-    title: "Core actions",
-    keys: [
-      { key: "canScreenShare", label: "Share Screen" },
-      { key: "canInviteLinks", label: "Invite/Generate Links" },
-    ],
-  },
-  {
-    title: "Stream controls",
-    keys: [
-      { key: "canStartStopStream", label: "Start/Stop Stream" },
-      { key: "canStartStopRecording", label: "Start/Stop Recording" },
-      { key: "canManageDestinations", label: "Manage Destinations" },
-      { key: "canChangeLayoutScene", label: "Change Layout/Scene" },
-      { key: "canViewAnalytics", label: "View Analytics" },
-    ],
-  },
-];
-
-const EMPTY_PERMISSIONS = {
-  canStream: false,
-  canRecord: false,
-  canDestinations: false,
-  canModerate: false,
-  canLayout: false,
-  canScreenShare: false,
-  canInvite: false,
-  canAnalytics: false,
+// Toggles per role. Every toggle is enforced by the server: co-host toggles
+// shape the co-host's room token (stream/record/destinations also need your
+// plan), and participant "Share Screen" adds screen share to their LiveKit grant.
+const ROLE_PRESET_GROUPS: Record<
+  RolePresetId,
+  Array<{ title: string; keys: Array<{ key: RolePresetToggleKey; label: string }> }>
+> = {
+  participant: [
+    {
+      title: "On stage",
+      keys: [{ key: "canScreenShare", label: "Share Screen" }],
+    },
+  ],
+  cohost: [
+    {
+      title: "Core actions",
+      keys: [
+        { key: "canScreenShare", label: "Share Screen" },
+        { key: "canInviteLinks", label: "Invite/Generate Links" },
+        { key: "canChangeLayoutScene", label: "Change Layout/Scene" },
+      ],
+    },
+    {
+      title: "Moderation",
+      keys: [
+        { key: "canMuteGuests", label: "Mute Guests" },
+        { key: "canRemoveGuests", label: "Remove Guests" },
+      ],
+    },
+    {
+      title: "Stream controls (requires your plan)",
+      keys: [
+        { key: "canStartStopStream", label: "Start/Stop Stream" },
+        { key: "canStartStopRecording", label: "Start/Stop Recording" },
+        { key: "canManageDestinations", label: "Manage Destinations" },
+      ],
+    },
+  ],
 };
 
-const PERMISSION_ITEMS = [{
-  key: "canStream", label: "Start/Stop Stream",
-}, { key: "canRecord", label: "Start/Stop Recording" }, { key: "canDestinations", label: "Manage Destinations" }, {
-  key: "canModerate", label: "Mute/Kick Guests",
-}, { key: "canLayout", label: "Change Layout/Scene" }, { key: "canScreenShare", label: "Share Screen" }, {
-  key: "canInvite", label: "Invite/Generate Links",
-}, { key: "canAnalytics", label: "View Analytics" }];
-// Temporary fallback; canonical defaults come from the server.
-const SIMPLE_ROLE_DEFAULTS = {
-  participant: {
-    label: "Participant",
-    permissions: {
-      canStream: false,
-      canRecord: false,
-      canDestinations: false,
-      canModerate: false,
-      canLayout: false,
-      canScreenShare: false,
-      canInvite: false,
-      canAnalytics: false,
-    },
-  },
-  cohost: {
-    label: "Co-host",
-    permissions: {
-      canStream: true,
-      canRecord: true,
-      canDestinations: true,
-      canModerate: false,
-      canLayout: true,
-      canScreenShare: true,
-      canInvite: true,
-      canAnalytics: false,
-    },
-    expiresHours: 24,
-    maxUses: 1,
-  },
+const COLLABORATOR_PERMISSION_ITEMS: Array<{ key: keyof CollaboratorPermissions; label: string }> = [
+  { key: "createRooms", label: "Create rooms" },
+  { key: "startRooms", label: "Start rooms" },
+  { key: "joinInvisibleProducer", label: "Join invisibly" },
+  { key: "manageParticipants", label: "Manage participants (mute/remove/invite)" },
+  { key: "controlLayouts", label: "Control layouts" },
+  { key: "manageRecording", label: "Manage recording" },
+  { key: "manageStreaming", label: "Manage streaming & destinations" },
+];
+
+const DEFAULT_COLLABORATOR_PERMISSIONS: CollaboratorPermissions = {
+  createRooms: true,
+  startRooms: true,
+  joinInvisibleProducer: true,
+  manageParticipants: true,
+  controlLayouts: true,
+  manageRecording: true,
+  manageStreaming: true,
 };
 
 const DEFAULT_ENTITLEMENTS = {
@@ -282,6 +271,8 @@ export default function SettingsBilling() {
   const [platformMonetizationEnabled, setPlatformMonetizationEnabled] = useState<boolean>(false);
   const [platformPayPerViewEnabled, setPlatformPayPerViewEnabled] = useState<boolean>(false);
   const [platformCollaboratorDelegationEnabled, setPlatformCollaboratorDelegationEnabled] = useState<boolean>(false);
+  // True once /api/plans platform flags have been applied (or failed).
+  const [platformFlagsLoaded, setPlatformFlagsLoaded] = useState<boolean>(false);
 
   // Track which room is currently selected in the HLS tab so we can show per-room monetization toggles
   const [hlsSelectedRoomId, setHlsSelectedRoomId] = useState<string | null>(null);
@@ -310,15 +301,6 @@ export default function SettingsBilling() {
     }
   );
 
-  const [cohostProfile, setCohostProfile] = useState<any>({
-    label: SIMPLE_ROLE_DEFAULTS.cohost.label,
-    expiresHours: SIMPLE_ROLE_DEFAULTS.cohost.expiresHours || 24,
-    maxUses: SIMPLE_ROLE_DEFAULTS.cohost.maxUses || 1,
-    ...SIMPLE_ROLE_DEFAULTS.cohost.permissions,
-  });
-  const [cohostSaving, setCohostSaving] = useState(false);
-  const [cohostMessage, setCohostMessage] = useState<string | null>(null);
-
   const [serverDefaultRoleProfiles, setServerDefaultRoleProfiles] = useState<any[] | null>(null);
   const [roleProfiles, setRoleProfiles] = useState<any[]>([]);
   const [rolePresets, setRolePresets] = useState<Record<RolePresetId, RolePresetDoc> | null>(null);
@@ -331,7 +313,6 @@ export default function SettingsBilling() {
   const [roleMessage, setRoleMessage] = useState<string | null>(null);
   const [roleSaveStatus, setRoleSaveStatus] = useState<Record<string, "idle" | "saving" | "saved" | "error">>({});
   const roleSaveTimersRef = useRef<Record<string, number | undefined>>({});
-  const cohostProfileSaveTimerRef = useRef<number | null>(null);
 
   const [mediaPrefsSaving, setMediaPrefsSaving] = useState(false);
   const [mediaPrefsMessage, setMediaPrefsMessage] = useState<string | null>(null);
@@ -382,12 +363,24 @@ export default function SettingsBilling() {
   const [collaboratorsLoading, setCollaboratorsLoading] = useState(false);
   const [collaboratorsError, setCollaboratorsError] = useState<string | null>(null);
   const [collaboratorInviteEmail, setCollaboratorInviteEmail] = useState("");
+  const [collaboratorInvitePermissions, setCollaboratorInvitePermissions] = useState<CollaboratorPermissions>({
+    ...DEFAULT_COLLABORATOR_PERMISSIONS,
+  });
   const [collaboratorActionLoading, setCollaboratorActionLoading] = useState<string | null>(null);
+  const [collaboratorEditId, setCollaboratorEditId] = useState<string | null>(null);
+  const [collaboratorEditPermissions, setCollaboratorEditPermissions] = useState<CollaboratorPermissions | null>(null);
 
   // Allow other pages to deep-link into a specific settings tab.
   // Example: nav('/settings/billing', { state: { openTab: 'usage', usageRoomId: 'my-room' } })
   useEffect(() => {
-    const openTab = (location.state as any)?.openTab;
+    // Also accepts ?openTab=<tab> (e.g. links in emails / other pages).
+    let queryTab: string | null = null;
+    try {
+      queryTab = new URLSearchParams(location.search || "").get("openTab");
+    } catch {
+      queryTab = null;
+    }
+    const openTab = (location.state as any)?.openTab ?? queryTab;
     const validTabs: Array<typeof activeTab> = ["plan", "usage", "destinations", "hls", "defaults", "roles", "collaborators", "close"];
     if (typeof openTab === "string" && validTabs.includes(openTab as any)) {
       setActiveTab(openTab as any);
@@ -397,7 +390,7 @@ export default function SettingsBilling() {
     if (typeof usageRoomId === "string" && usageRoomId.trim()) {
       setEmergencyRoomId(usageRoomId.trim());
     }
-  }, [location.state]);
+  }, [location.state, location.search]);
 
   // If a platform-wide feature is disabled, avoid landing on a hidden tab.
   useEffect(() => {
@@ -407,10 +400,12 @@ export default function SettingsBilling() {
     if (activeTab === "hls" && platformHlsSettingsTabEnabled === false) {
       setActiveTab("plan");
     }
-    if (activeTab === "collaborators" && platformCollaboratorDelegationEnabled === false) {
+    // Wait for platform flags before bouncing off Collaborators, so a deep
+    // link (?openTab=collaborators) isn't reset while flags are loading.
+    if (activeTab === "collaborators" && platformFlagsLoaded && platformCollaboratorDelegationEnabled === false) {
       setActiveTab("plan");
     }
-  }, [activeTab, platformTranscodeEnabled, platformHlsSettingsTabEnabled, platformCollaboratorDelegationEnabled]);
+  }, [activeTab, platformTranscodeEnabled, platformHlsSettingsTabEnabled, platformCollaboratorDelegationEnabled, platformFlagsLoaded]);
 
   useEffect(() => {
     if (activeTab !== "collaborators" || !platformCollaboratorDelegationEnabled) return;
@@ -443,12 +438,17 @@ export default function SettingsBilling() {
     };
   }, [activeTab, platformCollaboratorDelegationEnabled]);
 
-  const runCollaboratorAction = async (path: string, body?: Record<string, any>, onDone?: () => void) => {
+  const runCollaboratorAction = async (
+    path: string,
+    body?: Record<string, any>,
+    onDone?: () => void,
+    method: "POST" | "PATCH" = "POST",
+  ) => {
     setCollaboratorActionLoading(path);
     setCollaboratorsError(null);
     try {
       const actionRes = await apiFetchWithCookieFallback(path, {
-        method: "POST",
+        method,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}),
       });
@@ -568,7 +568,6 @@ export default function SettingsBilling() {
         loadEntitlements(),
         loadBillingStatus(),
         loadMediaPrefs(),
-        loadCohostProfile(),
         loadRolePresets(),
       ]);
     } catch (err: any) {
@@ -763,6 +762,7 @@ export default function SettingsBilling() {
           setPlatformMonetizationEnabled(pf.monetizationEnabled === true);
           setPlatformPayPerViewEnabled(pf.payPerViewEnabled === true);
           setPlatformCollaboratorDelegationEnabled(pf.collaboratorDelegationEnabled === true);
+          setPlatformFlagsLoaded(true);
           const hlsTabFlag =
             typeof pf.hlsSettingsTab === "boolean"
               ? pf.hlsSettingsTab
@@ -778,6 +778,7 @@ export default function SettingsBilling() {
           setPlatformMonetizationEnabled(false);
           setPlatformPayPerViewEnabled(false);
           setPlatformCollaboratorDelegationEnabled(false);
+          setPlatformFlagsLoaded(true);
         }
 
         if (Array.isArray(data.plans) && data.plans.length) {
@@ -965,19 +966,6 @@ export default function SettingsBilling() {
     }
   };
 
-  const loadCohostProfile = async () => {
-    try {
-      const res = await apiFetchAuth(`${API_BASE}/api/account/cohost-profile`, {}, { allowNonOk: true });
-      if (!res.ok) throw new Error("cohost profile endpoint failed");
-      const data = await res.json();
-      if (data?.profile) {
-        setCohostProfile((prev) => ({ ...prev, ...data.profile }));
-      }
-    } catch (err) {
-      console.warn("loadCohostProfile failed; using defaults", err);
-    }
-  };
-
   const loadRolePresets = async () => {
     try {
       const res = await apiFetchAuth(`${API_BASE}/api/account/role-presets`, {}, { allowNonOk: true });
@@ -994,90 +982,6 @@ export default function SettingsBilling() {
     } catch (err) {
       console.warn("loadRolePresets failed", err);
       setRolePresets(null);
-    }
-  };
-
-  const applySimpleRoleDefaults = () => {
-    const source = serverDefaultRoleProfiles ?? null;
-    const ensureDefaults = (id: string) => {
-      const fromServer = source?.find((p) => p.id === id);
-      if (fromServer) {
-        return {
-          label: fromServer.name,
-          permissions: fromServer.permissions,
-        };
-      }
-      const key = id as keyof typeof SIMPLE_ROLE_DEFAULTS;
-      return SIMPLE_ROLE_DEFAULTS[key];
-    };
-
-    const simpleList = ["participant", "cohost"].map((key) => {
-      const def = ensureDefaults(key);
-      return {
-        id: key,
-        label: def.label,
-        system: true,
-        lockedName: true,
-        permissions: def.permissions,
-      };
-    });
-    setRoleProfiles(simpleList);
-    setQuickRoleIds(["participant", "cohost"]);
-  };
-
-  const saveCohostProfile = async () => {
-    setCohostSaving(true);
-    setCohostMessage(null);
-    try {
-      const res = await apiFetchAuth(
-        `${API_BASE}/api/account/cohost-profile`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(cohostProfile),
-        },
-        { allowNonOk: true }
-      );
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || "Failed to save co-host defaults");
-      }
-      const data = await res.json();
-      if (data?.profile) setCohostProfile(data.profile);
-      setCohostMessage("Co-host defaults saved");
-      setTimeout(() => setCohostMessage(null), 2200);
-    } catch (err: any) {
-      setError(err?.message || "Failed to save co-host defaults");
-    } finally {
-      setCohostSaving(false);
-    }
-  };
-
-  const saveCohostProfileWith = async (next: any) => {
-    setCohostSaving(true);
-    setCohostMessage(null);
-    try {
-      const res = await apiFetchAuth(
-        `${API_BASE}/api/account/cohost-profile`,
-        {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(next),
-        },
-        { allowNonOk: true }
-      );
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || "Failed to save co-host defaults");
-      }
-      const data = await res.json();
-      if (data?.profile) setCohostProfile(data.profile);
-      setCohostMessage("Co-host defaults saved");
-      setTimeout(() => setCohostMessage(null), 2200);
-    } catch (err: any) {
-      setError(err?.message || "Failed to save co-host defaults");
-    } finally {
-      setCohostSaving(false);
     }
   };
 
@@ -1263,26 +1167,6 @@ export default function SettingsBilling() {
       }
       setOveragesToggleSaving(false);
     }
-  };
-
-  const scheduleCohostProfileSave = (nextProfile: any) => {
-    if (cohostProfileSaveTimerRef.current) {
-      window.clearTimeout(cohostProfileSaveTimerRef.current);
-    }
-    setCohostSaving(true);
-    setCohostMessage("Saving…");
-    cohostProfileSaveTimerRef.current = window.setTimeout(async () => {
-      try {
-        await saveCohostProfileWith(nextProfile);
-        setCohostSaving(false);
-        setCohostMessage("Saved");
-        window.setTimeout(() => setCohostMessage(null), 1800);
-      } catch (err: any) {
-        setCohostSaving(false);
-        setCohostMessage("Couldn't save — retry");
-        setError(err?.message || "Failed to save co-host defaults");
-      }
-    }, 700);
   };
 
   const handleEmergencyDownload = async () => {
@@ -2113,8 +1997,9 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
             </div>
 
             <p style={{ color: "#94a3b8", marginBottom: 14 }}>
-              Configure what Participants and Co-hosts can do in-room. These templates apply whenever you change a guest's
-              role from the Host Dashboard. Moderation (mute/remove) always stays host-only.
+              Configure what Participants and Co-hosts can do in your rooms. These defaults apply to everyone who joins with
+              that role — co-hosts get them however they joined (co-host link or promoted from the Host Dashboard). Co-host
+              moderation (mute/remove) is on by default and can be turned off here.
             </p>
 
             <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
@@ -2124,8 +2009,8 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 const label = ROLE_PRESET_LABELS[id];
                 const description =
                   id === "participant"
-                    ? "Guests who join as standard participants. Usually limited to screen share and invites."
-                    : "Elevated guests who can help run the stream (destinations, layout, recording).";
+                    ? "Guests on stage with mic and camera. Optionally allow screen sharing."
+                    : "Signed-in helpers who run the room with you: layout, invites, moderation, and optionally stream/recording.";
 
                 return (
                   <div
@@ -2169,7 +2054,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                       <div style={{ color: "#f97316", fontSize: 12, fontWeight: 600 }}>Error — retry</div>
                     )}
 
-                    {ROLE_PRESET_GROUPS.map((group) => (
+                    {ROLE_PRESET_GROUPS[id].map((group) => (
                       <div key={group.title} style={{ display: "grid", gap: 6 }}>
                         <div style={{ fontSize: 12, fontWeight: 700, color: "#e5e7eb" }}>{group.title}</div>
                         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -2221,11 +2106,10 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
             <div style={{ marginTop: 14, color: "#9ca3af", fontSize: 12 }}>
               Notes:
               <ul style={{ marginTop: 6, paddingLeft: 18 }}>
-                <li>Host-only actions like mute/remove, mute-all, and mute-lock are never granted by these templates.</li>
-                <li>
-                  If any legacy roles or moderator presets exist, they are treated as Participant in-room so older data can't
-                  reintroduce extra roles.
-                </li>
+                <li>Co-hosts are never affected by mute-lock and can't moderate you (the room owner) or your producers.</li>
+                <li>Start/Stop Stream, Recording and Destinations for co-hosts only work when your plan includes them.</li>
+                <li>Changes apply the next time a co-host or participant joins (or when you re-assign their role).</li>
+                <li>Legacy "moderator" roles are treated as Co-host.</li>
               </ul>
             </div>
           </div>
@@ -2262,9 +2146,14 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                   type="button"
                   disabled={!collaboratorInviteEmail.trim() || collaboratorActionLoading === "/api/collaborators/invite"}
                   onClick={() =>
-                    runCollaboratorAction("/api/collaborators/invite", { email: collaboratorInviteEmail.trim() }, () => {
-                      setCollaboratorInviteEmail("");
-                    })
+                    runCollaboratorAction(
+                      "/api/collaborators/invite",
+                      { email: collaboratorInviteEmail.trim(), permissions: collaboratorInvitePermissions },
+                      () => {
+                        setCollaboratorInviteEmail("");
+                        setCollaboratorInvitePermissions({ ...DEFAULT_COLLABORATOR_PERMISSIONS });
+                      },
+                    )
                   }
                   style={{
                     padding: "12px 16px",
@@ -2278,6 +2167,16 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 >
                   Send Invite
                 </button>
+              </div>
+
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 700, color: "#e5e7eb", marginBottom: 6 }}>What they can do</div>
+                <CollaboratorPermissionChips
+                  value={collaboratorInvitePermissions}
+                  onToggle={(key) =>
+                    setCollaboratorInvitePermissions((prev) => ({ ...prev, [key]: !prev[key] }))
+                  }
+                />
               </div>
 
               {collaboratorsError && (
@@ -2297,20 +2196,81 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                     )}
                     {(collaboratorsData?.outgoing || []).map((item) => (
                       <div key={item.id} style={{ border: "1px solid #1f2937", borderRadius: 12, padding: "12px 14px", background: "rgba(15,23,42,0.75)", display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-                        <div>
+                        <div style={{ flex: 1, minWidth: 0 }}>
                           <div style={{ color: "#fff", fontWeight: 600 }}>{item.counterpartyLabel}</div>
                           <div style={{ color: "#9ca3af", fontSize: 12 }}>Status: {item.status}</div>
+                          {(item.status === "pending" || item.status === "accepted") && collaboratorEditId !== item.id && (
+                            <div style={{ color: "#94a3b8", fontSize: 11, marginTop: 4 }}>
+                              Can:{" "}
+                              {COLLABORATOR_PERMISSION_ITEMS.filter((p) => item.permissions?.[p.key]).map((p) => p.label).join(", ") || "nothing yet"}
+                            </div>
+                          )}
+                          {collaboratorEditId === item.id && collaboratorEditPermissions && (
+                            <div style={{ marginTop: 8, display: "grid", gap: 8 }}>
+                              <CollaboratorPermissionChips
+                                value={collaboratorEditPermissions}
+                                onToggle={(key) =>
+                                  setCollaboratorEditPermissions((prev) => (prev ? { ...prev, [key]: !prev[key] } : prev))
+                                }
+                              />
+                              <div style={{ display: "flex", gap: 8 }}>
+                                <button
+                                  type="button"
+                                  disabled={collaboratorActionLoading === `/api/collaborators/${item.id}/permissions`}
+                                  onClick={() =>
+                                    runCollaboratorAction(
+                                      `/api/collaborators/${item.id}/permissions`,
+                                      { permissions: collaboratorEditPermissions },
+                                      () => {
+                                        setCollaboratorEditId(null);
+                                        setCollaboratorEditPermissions(null);
+                                      },
+                                      "PATCH",
+                                    )
+                                  }
+                                  style={{ padding: "6px 10px", borderRadius: 8, border: "none", background: "#22c55e", color: "#052e16", cursor: "pointer", fontWeight: 700, fontSize: 12 }}
+                                >
+                                  Save permissions
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setCollaboratorEditId(null);
+                                    setCollaboratorEditPermissions(null);
+                                  }}
+                                  style={{ padding: "6px 10px", borderRadius: 8, border: "1px solid #374151", background: "transparent", color: "#fff", cursor: "pointer", fontSize: 12 }}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          )}
                         </div>
-                        {item.status !== "revoked" && (
-                          <button
-                            type="button"
-                            disabled={collaboratorActionLoading === `/api/collaborators/${item.id}/revoke`}
-                            onClick={() => runCollaboratorAction(`/api/collaborators/${item.id}/revoke`)}
-                            style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid rgba(248,113,113,0.4)", background: "rgba(127,29,29,0.18)", color: "#fca5a5", cursor: "pointer", fontWeight: 700 }}
-                          >
-                            Revoke
-                          </button>
-                        )}
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", justifyContent: "flex-end" }}>
+                          {(item.status === "pending" || item.status === "accepted") && collaboratorEditId !== item.id && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setCollaboratorEditId(item.id);
+                                setCollaboratorEditPermissions({ ...DEFAULT_COLLABORATOR_PERMISSIONS, ...(item.permissions || {}) });
+                              }}
+                              style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid #374151", background: "transparent", color: "#e5e7eb", cursor: "pointer", fontWeight: 600 }}
+                            >
+                              Edit permissions
+                            </button>
+                          )}
+                          {/* Revoke only applies to live relationships; declined/revoked have nothing to revoke. */}
+                          {(item.status === "pending" || item.status === "accepted") && (
+                            <button
+                              type="button"
+                              disabled={collaboratorActionLoading === `/api/collaborators/${item.id}/revoke`}
+                              onClick={() => runCollaboratorAction(`/api/collaborators/${item.id}/revoke`)}
+                              style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid rgba(248,113,113,0.4)", background: "rgba(127,29,29,0.18)", color: "#fca5a5", cursor: "pointer", fontWeight: 700 }}
+                            >
+                              Revoke
+                            </button>
+                          )}
+                        </div>
                       </div>
                     ))}
                   </div>
@@ -2347,6 +2307,19 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                               Decline
                             </button>
                           </div>
+                        )}
+                        {item.status === "accepted" && (
+                          <button
+                            type="button"
+                            disabled={collaboratorActionLoading === `/api/collaborators/${item.id}/decline`}
+                            onClick={() => {
+                              if (!window.confirm(`Stop producing for ${item.counterpartyLabel}? They'll need to invite you again.`)) return;
+                              runCollaboratorAction(`/api/collaborators/${item.id}/decline`);
+                            }}
+                            style={{ padding: "8px 12px", borderRadius: 10, border: "1px solid rgba(248,113,113,0.4)", background: "rgba(127,29,29,0.18)", color: "#fca5a5", cursor: "pointer", fontWeight: 700 }}
+                          >
+                            Leave
+                          </button>
                         )}
                       </div>
                     ))}
@@ -3999,3 +3972,38 @@ function LockedFeature({ icon, title, description, requiredPlan }: { icon: strin
 
 
 // Styles moved to external files: SettingsBilling.styles.ts and SettingsBilling.css
+function CollaboratorPermissionChips({
+  value,
+  onToggle,
+}: {
+  value: CollaboratorPermissions;
+  onToggle: (key: keyof CollaboratorPermissions) => void;
+}) {
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+      {COLLABORATOR_PERMISSION_ITEMS.map(({ key, label }) => {
+        const enabled = !!value[key];
+        return (
+          <button
+            key={key}
+            type="button"
+            aria-pressed={enabled}
+            onClick={() => onToggle(key)}
+            style={{
+              padding: "3px 8px",
+              borderRadius: 999,
+              border: `1px solid ${enabled ? "rgba(34,197,94,0.5)" : "#1f2937"}`,
+              background: enabled ? "rgba(34,197,94,0.1)" : "rgba(255,255,255,0.02)",
+              color: enabled ? "#22c55e" : "#94a3b8",
+              fontSize: 11,
+              fontWeight: 600,
+              cursor: "pointer",
+            }}
+          >
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}

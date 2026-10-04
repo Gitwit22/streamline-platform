@@ -7,6 +7,10 @@ import type { RoomAccessClaims } from "../middleware/roomAccessToken";
 import { getRoom, type RoomDoc } from "../services/rooms";
 import { resolveOwnerActingContext } from "./collaborators";
 import { getInviteAcceptance, isInviteShapedClaims } from "./inviteAcceptance";
+import { firestore } from "../firebaseAdmin";
+import { collaboratorToRoomAccessPermissions, mergeCohostControlScopes } from "./roomModerationPolicy";
+import { presetToRoomPermissions } from "./permissions/roleDefaults";
+import { loadOwnerRolePreset, normalizeControlsDocId } from "./permissions/rolePresetStore";
 import {
   DEFAULT_ROLE_PROFILES_BY_ID,
   type RolePermissionMap,
@@ -67,6 +71,19 @@ export async function intersectPermissionsWithEntitlements(
       );
       const rtmpEnabled = rtmpEnabledByLimit || rtmpEnabledByFlags;
       next.canDestinations = !!next.canDestinations && rtmpEnabled;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(next, "canStream")) {
+      // Streaming = HLS broadcast or RTMP/multistream output.
+      const streamEnabled = Boolean(
+        planFeatures.hlsEnabled ||
+        planFeatures.canHls ||
+        planFeatures.hls ||
+        planFeatures.rtmp ||
+        planFeatures.multistream ||
+        Number(ent.limits?.rtmpDestinationsMax ?? 0) > 0
+      );
+      next.canStream = !!next.canStream && streamEnabled;
     }
 
     return next;
@@ -154,18 +171,43 @@ function ensureBooleanPerms(perms: Partial<RolePermissions> | undefined): RolePe
 }
 
 function collaboratorToRoomPermissions(raw: any): RolePermissions {
-  return ensureBooleanPerms({
-    canStream: !!raw?.manageStreaming,
-    canRecord: !!raw?.manageRecording,
-    canDestinations: !!raw?.manageStreaming,
-    canModerate: !!raw?.manageParticipants,
-    canLayout: !!raw?.controlLayouts,
-    canScreenShare: true,
-    canInvite: !!raw?.manageParticipants,
-    canAnalytics: true,
-    canMuteGuests: !!raw?.manageParticipants,
-    canRemoveGuests: !!raw?.manageParticipants,
-  });
+  return ensureBooleanPerms(collaboratorToRoomAccessPermissions(raw));
+}
+
+/**
+ * Permissions for a cohost of `roomId`: the room OWNER's cohost preset,
+ * overlaid with the scopes on the cohost's controls doc (the applied preset
+ * snapshot, possibly adjusted by the host), then limited to what the owner's
+ * plan allows (recording, destinations, streaming).
+ *
+ * Pass `identityControls` when the caller already read the controls doc
+ * (null = no doc); omit it to read rooms/{roomId}/controls/{identity}.
+ */
+export async function resolveCohostRoomPermissions(params: {
+  roomId: string;
+  identity: string;
+  ownerUid: string | null | undefined;
+  identityControls?: Record<string, unknown> | null;
+}): Promise<RolePermissions> {
+  const ownerUid = params.ownerUid || null;
+  let controls = params.identityControls;
+  if (controls === undefined) {
+    controls = null;
+    const docId = normalizeControlsDocId(params.identity);
+    if (params.roomId && docId) {
+      try {
+        const snap = await firestore.collection("rooms").doc(params.roomId).collection("controls").doc(docId).get();
+        controls = snap.exists ? (((snap.data() as any) || null) as Record<string, unknown> | null) : null;
+      } catch {
+        controls = null;
+      }
+    }
+  }
+  const preset = await loadOwnerRolePreset(ownerUid, "cohost");
+  const merged = mergeCohostControlScopes({ ...presetToRoomPermissions(preset) }, controls);
+  return ensureBooleanPerms(
+    (await intersectPermissionsWithEntitlements(merged, ownerUid || undefined)) as Partial<RolePermissions>,
+  );
 }
 
 export type RoomPermissionKey = keyof RolePermissions;
@@ -268,9 +310,7 @@ export async function assertRoomPerm(
         // Logged-in cohost invitee (cohost invite JWT for this room, or a
         // recorded cohost acceptance): cohost profile limited to the owner's plan.
         role = "cohost";
-        permissions = ensureBooleanPerms(
-          await intersectPermissionsWithEntitlements({ ...ROLE_PERMISSIONS.cohost }, ownerId || undefined),
-        );
+        permissions = await resolveCohostRoomPermissions({ roomId: trimmedRoomId, identity: uid, ownerUid: ownerId });
       } else {
         role = "participant";
         permissions = ensureBooleanPerms({});
