@@ -433,7 +433,9 @@ export async function apiUpdateStudioLayout(
 // ---------------------------------------------------------------------------
 
 import type { ProgramState } from "./programState";
+import type { ProgramStateV2, ProgramStateV2Patch } from "./programPresets";
 
+/** GET returns v2; older servers may still return a legacy (v1) state. */
 export async function apiGetProgramState(roomId: string, roomAccessToken: string) {
   const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/program-state`, {
     method: "GET",
@@ -444,14 +446,15 @@ export async function apiGetProgramState(roomId: string, roomAccessToken: string
   return res.json() as Promise<{
     ok: true;
     roomId: string;
-    programState: ProgramState | null;
+    programState: ProgramStateV2 | ProgramState | null;
   }>;
 }
 
+/** PATCH a v2 program state (server derives portrait when omitted and sets hostIdentity). */
 export async function apiUpdateProgramState(
   roomId: string,
   roomAccessToken: string,
-  patch: Partial<ProgramState>,
+  patch: ProgramStateV2Patch,
 ) {
   const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/program-state`, {
     method: "PATCH",
@@ -460,7 +463,7 @@ export async function apiUpdateProgramState(
       "x-room-access-token": roomAccessToken,
     },
   });
-  return res.json() as Promise<{ ok: true; roomId: string; programState: ProgramState }>;
+  return res.json() as Promise<{ ok: true; roomId: string; programState: ProgramStateV2 }>;
 }
 
 export type RoomPolicy = {

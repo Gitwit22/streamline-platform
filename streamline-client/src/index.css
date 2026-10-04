@@ -204,47 +204,79 @@ button:focus-visible {
   background: #000;
 }
 
-/* Optional in-room preview sync for key 2-person broadcast presets. */
-.sl-layout.sl-program-side_by_side [data-lk-layout] {
-  display: grid !important;
-  grid-template-columns: 1fr 1fr !important;
-  gap: 0 !important;
+/* ======================================
+   PROGRAM STAGE (live program layout, everyone in-room)
+   ====================================== */
+.sl-stage-root {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #000;
 }
-
-.sl-layout.sl-program-two_up_split [data-lk-layout] {
-  display: grid !important;
-  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) !important;
-  gap: 20px !important;
-  padding: 20px !important;
+.sl-stage-area {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
 }
-
-.sl-layout.sl-program-floating_guest [data-lk-layout],
-.sl-layout.sl-program-floating_host [data-lk-layout] {
-  position: relative !important;
-  display: block !important;
+.sl-stage-canvas {
+  position: absolute;
+  background: #0b0d12;
+  overflow: hidden;
+}
+.sl-stage-slot {
+  overflow: hidden;
+  background: #11141b;
+}
+.sl-stage-slot .lk-participant-tile {
+  width: 100%;
+  height: 100%;
+  border-radius: 0;
+  padding: 0;
+}
+.sl-stage-slot .lk-participant-media-video,
+.sl-stage-slot video {
   width: 100% !important;
   height: 100% !important;
+  object-fit: cover !important;
 }
-
-.sl-layout.sl-program-floating_guest [data-lk-layout] > *:first-child,
-.sl-layout.sl-program-floating_host [data-lk-layout] > *:first-child {
-  position: absolute !important;
-  inset: 0 !important;
-  width: 100% !important;
-  height: 100% !important;
+.sl-stage-slot[data-fit="contain"] .lk-participant-media-video,
+.sl-stage-slot[data-fit="contain"] video {
+  object-fit: contain !important;
+  background: #000;
 }
-
-.sl-layout.sl-program-floating_guest [data-lk-layout] > *:nth-child(2),
-.sl-layout.sl-program-floating_host [data-lk-layout] > *:nth-child(2) {
-  position: absolute !important;
-  right: 16px !important;
-  bottom: 16px !important;
-  width: min(22vw, 320px) !important;
-  height: min(16vw, 230px) !important;
-  z-index: 3 !important;
-  border-radius: 10px !important;
-  overflow: hidden !important;
-  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45) !important;
+.sl-stage-slot[data-label="false"] .lk-participant-metadata {
+  display: none !important;
+}
+.sl-stage-slot .lk-focus-toggle-button {
+  display: none !important;
+}
+.sl-stage-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(255, 255, 255, 0.55);
+  font-size: 14px;
+}
+.sl-stage-view-toggle {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  z-index: 15;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(15, 23, 42, 0.75);
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.sl-stage-view-toggle:hover {
+  background: rgba(30, 41, 59, 0.9);
 }
 
 /* ======================================
@@ -259,13 +291,15 @@ button:focus-visible {
   display: none !important;
 }
 
-/* Off mode: screen share tiles hidden everywhere */
-.sl-screen-off [data-lk-source="screen_share"] {
+/* Off mode (manual): screen share tiles hidden from the gallery view. The
+   program stage still shows a share in a layout's screen slot. */
+.sl-screen-off .sl-gallery-stage [data-lk-source="screen_share"] {
   display: none !important;
 }
 
-/* Popout mode: screen share tiles hidden from main stage (shown in pop-out window) */
-.sl-screen-popout [data-lk-source="screen_share"] {
+/* Popout mode: screen share tiles hidden from the gallery view (shown in the
+   pop-out window); the program stage mirrors the composed output. */
+.sl-screen-popout .sl-gallery-stage [data-lk-source="screen_share"] {
   display: none !important;
 }
 

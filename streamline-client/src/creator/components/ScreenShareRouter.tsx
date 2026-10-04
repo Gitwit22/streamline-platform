@@ -10,14 +10,14 @@ export type ScreenShareRouteMode =
   | "popout";
 
 export const SCREEN_SHARE_ROUTE_LABELS: Record<ScreenShareRouteMode, string> = {
-  off: "Off",
-  main: "Main Feed",
+  off: "Manual",
+  main: "Auto (Main Feed)",
   popout: "Pop-out Window",
 };
 
 export const SCREEN_SHARE_ROUTE_DESCRIPTIONS: Record<ScreenShareRouteMode, string> = {
-  off: "Screen share audio/video is disabled",
-  main: "Send screen share directly to the live stream",
+  off: "Manual: the stage only shows a share in a layout with a screen slot",
+  main: "Auto-switch the stage and stream to a screen layout while sharing",
   popout: "Open screen share in a separate producer preview window",
 };
 

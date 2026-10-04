@@ -51,7 +51,7 @@ import { JoinGateLayout, RoomUnavailableCard, WaitingForHostCard } from "../comp
 import StreamSetupModalV2 from "../components/StreamSetupModal";
 import { ErrorBoundary } from "../../components/ErrorBoundary";
 import { RoleChangeToast } from "../components/RoleChangeToast";
-import SafeVideoConference from "../components/SafeVideoConference";
+import ProgramStage, { ProgramStateProvider, useProgramState } from "../components/ProgramStage";
 import AudioMixerModal from "../components/AudioMixerModal";
 import MixerBridge from "../components/MixerBridge";
 import ScreenShareRouter, { type ScreenShareRouteMode } from "../components/ScreenShareRouter";
@@ -83,15 +83,13 @@ import {
   TileVisibilityEnforcer,
   type PublishPermissionState,
 } from "../components/HostControlsEnforcer";
-import { apiUpdateProgramState, apiGetProgramState } from "../../lib/api";
-import type { ProgramState } from "../../lib/programState";
-import { DEFAULT_PROGRAM_STATE } from "../../lib/programState";
 import {
-  type StudioLayoutPresetId,
-  getPresetSlots,
-  suggestPreset,
-  PRESET_INFO,
-} from "../../lib/studioLayout";
+  LANDSCAPE_PRESETS,
+  PORTRAIT_PRESETS,
+  type FracSlot,
+  type Orientation,
+} from "../../lib/programPresets";
+import { isEligible, resolveProgram, type ProgramResolution } from "../../lib/programResolve";
 
 const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
 
@@ -998,142 +996,171 @@ function getOrCreateUid() {
 }
 
 // ---------------------------------------------------------------------------
-// LayoutPickerPanel – in-room broadcast layout selector
-// Lives inside <LiveKitRoom> so it can use useParticipants().
+// LayoutPickerPanel – in-room program layout selector (host / cohost)
+// Lives inside <LiveKitRoom> + <ProgramStateProvider>. Picking a preset
+// applies it immediately: optimistic for this client, everyone else gets it
+// through LiveKit room metadata.
 // ---------------------------------------------------------------------------
 
-function LayoutPickerPanel({
-  roomId,
-  roomAccessToken,
-  open,
-  onClose,
-  onActivePresetChange,
+function initialsOf(name: string): string {
+  const parts = String(name || "").trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  return parts.slice(0, 2).map((p) => p[0]!.toUpperCase()).join("");
+}
+
+function SlotThumb({
+  slots,
+  orientation,
+  height,
+  names,
+  active,
+  testId,
 }: {
-  roomId: string;
-  roomAccessToken: string;
-  open: boolean;
-  onClose: () => void;
-  onActivePresetChange?: (presetId: StudioLayoutPresetId | null) => void;
+  slots: Array<{ id: string; x: number; y: number; w: number; h: number; z?: number; screen?: boolean; text?: string }>;
+  orientation: Orientation;
+  height: number;
+  names?: boolean;
+  active?: boolean;
+  testId?: string;
 }) {
-  const { localParticipant } = useLocalParticipant();
-  const participants = useParticipants();
-  const participantIdentities = useMemo(
-    () => participants.map((p) => p.identity).filter((id): id is string => !!id),
-    [participants],
+  const width = orientation === "portrait" ? (height * 9) / 16 : (height * 16) / 9;
+  return (
+    <div
+      data-testid={testId}
+      style={{
+        position: "relative",
+        width,
+        height,
+        background: "#020617",
+        borderRadius: 3,
+        overflow: "hidden",
+        border: active ? "1px solid rgba(250,204,21,0.8)" : "1px solid rgba(255,255,255,0.12)",
+        flex: "0 0 auto",
+      }}
+    >
+      {slots.map((s) => (
+        <div
+          key={s.id}
+          style={{
+            position: "absolute",
+            left: `${s.x * 100}%`,
+            top: `${s.y * 100}%`,
+            width: `${s.w * 100}%`,
+            height: `${s.h * 100}%`,
+            zIndex: s.z ?? 1,
+            boxSizing: "border-box",
+            border: "1px solid #020617",
+            background: s.screen ? "rgba(56,189,248,0.55)" : s.text === "" ? "rgba(148,163,184,0.12)" : "rgba(250,204,21,0.45)",
+            color: "#0f172a",
+            fontSize: names ? 9 : 0,
+            fontWeight: 700,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            overflow: "hidden",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {names ? s.text : null}
+        </div>
+      ))}
+    </div>
   );
-  const orderedIdentities = useMemo(() => {
-    const seen = new Set<string>();
-    const ids: string[] = [];
-    const localIdentity = localParticipant?.identity;
-    if (localIdentity) {
-      seen.add(localIdentity);
-      ids.push(localIdentity);
-    }
-    for (const id of participantIdentities) {
-      if (seen.has(id)) continue;
-      seen.add(id);
-      ids.push(id);
-    }
-    return ids;
-  }, [localParticipant?.identity, participantIdentities]);
-  const participantCount = orderedIdentities.length;
+}
 
-  const [activePreset, setActivePreset] = useState<StudioLayoutPresetId | null>(null);
-  const [programState, setProgramState] = useState<ProgramState>(DEFAULT_PROGRAM_STATE);
-  const [loaded, setLoaded] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const prevCountRef = useRef(participantCount);
+function presetThumbSlots(slots: FracSlot[]) {
+  return slots.map((s) => ({ ...s, screen: s.source.kind === "auto-screen" || (s.source.kind === "participant" && s.source.track === "screen") }));
+}
 
-  // Load program state on mount
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const data = await apiGetProgramState(roomId, roomAccessToken);
-        if (!cancelled && data.programState) {
-          setProgramState(data.programState);
-          const loadedPreset = data.programState.programLayout as StudioLayoutPresetId | null;
-          setActivePreset(loadedPreset);
-          onActivePresetChange?.(loadedPreset);
-        }
-      } catch { /* keep defaults */ }
-      finally { if (!cancelled) setLoaded(true); }
-    })();
-    return () => { cancelled = true; };
-  }, [roomId, roomAccessToken, onActivePresetChange]);
+function resolutionThumbSlots(res: ProgramResolution, nameOf: (id: string) => string) {
+  return res.slots.map((r) => ({
+    id: r.slot.id,
+    x: r.slot.x,
+    y: r.slot.y,
+    w: r.slot.w,
+    h: r.slot.h,
+    z: r.slot.z,
+    screen: r.track === "screen",
+    text: r.identity ? (r.track === "screen" ? "SCREEN" : initialsOf(nameOf(r.identity))) : "",
+  }));
+}
 
-  // Auto-suggest when participant count changes
-  useEffect(() => {
-    if (!loaded) return;
-    if (participantCount === prevCountRef.current) return;
-    prevCountRef.current = participantCount;
+function LayoutPickerPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const ctx = useProgramState();
+  const [tab, setTab] = useState<Orientation>("landscape");
+  const participants = ctx?.participants ?? [];
+  const state = ctx?.state ?? null;
 
-    const suggested = suggestPreset(participantCount);
-    // Only auto-apply if no preset has been manually chosen yet, or if
-    // the current preset slot count doesn't match the participant count.
-    if (activePreset === null || activePreset === undefined) {
-      applyPreset(suggested);
-    } else {
-      const currentSlots = getPresetSlots(activePreset, participantCount);
-      if (currentSlots.length !== participantCount) {
-        applyPreset(suggested);
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [participantCount, loaded]);
+  const nameOf = useMemo(() => {
+    const m = new Map(participants.map((p) => [p.identity, p.name || p.identity] as const));
+    return (id: string) => m.get(id) || id;
+  }, [participants]);
+  const eligibleCount = useMemo(() => participants.filter(isEligible).length, [participants]);
+  const resLandscape = useMemo(
+    () => resolveProgram({ state, participants, orientation: "landscape" }),
+    [state, participants],
+  );
+  const resPortrait = useMemo(
+    () => resolveProgram({ state, participants, orientation: "portrait" }),
+    [state, participants],
+  );
 
-  const applyPreset = async (presetId: StudioLayoutPresetId) => {
-    const slots = getPresetSlots(presetId, participantCount);
-    const hostIdentity = localParticipant?.identity ?? null;
-    const guestIdentities = orderedIdentities.filter((id) => id !== hostIdentity);
+  if (!open || !ctx) return null;
 
-    let identities: string[] = orderedIdentities;
-    if (presetId === "floating_guest" || presetId === "host_large_guest_small") {
-      identities = [
-        ...(hostIdentity ? [hostIdentity] : []),
-        ...guestIdentities,
-      ];
-    } else if (presetId === "floating_host") {
-      const primaryGuest = guestIdentities[0] ?? hostIdentity;
-      identities = [
-        ...(primaryGuest ? [primaryGuest] : []),
-        ...(hostIdentity ? [hostIdentity] : []),
-        ...guestIdentities.slice(primaryGuest ? 1 : 0),
-      ];
-    }
+  const activeId = tab === "landscape" ? state?.landscape?.presetId ?? null : state?.portrait?.presetId ?? null;
+  const presets = tab === "landscape" ? LANDSCAPE_PRESETS : PORTRAIT_PRESETS;
+  const screenMode = state?.screenShareMode ?? "auto";
 
-    identities = identities.slice(0, slots.length);
+  const tabBtn = (o: Orientation, label: string) => (
+    <button
+      type="button"
+      data-testid={`layout-tab-${o}`}
+      onClick={() => setTab(o)}
+      style={{
+        flex: 1,
+        padding: "6px 0",
+        borderRadius: 6,
+        border: "none",
+        background: tab === o ? "rgba(234,179,8,0.18)" : "transparent",
+        color: tab === o ? "#facc15" : "#94a3b8",
+        fontSize: 12,
+        fontWeight: 700,
+        cursor: "pointer",
+      }}
+    >
+      {label}
+    </button>
+  );
 
-    setActivePreset(presetId);
-    onActivePresetChange?.(presetId);
-    setSaving(true);
-
-    const patch: Partial<ProgramState> = {
-      programLayout: presetId,
-      programSlots: slots,
-      programParticipants: identities,
-    };
-
-    setProgramState((prev) => ({ ...prev, ...patch }));
-
-    try {
-      await apiUpdateProgramState(roomId, roomAccessToken, patch);
-    } catch (err) {
-      console.error("[LayoutPicker] Failed to update program state", err);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (!open) return null;
+  const modeBtn = (m: "auto" | "manual", label: string) => (
+    <button
+      type="button"
+      data-testid={`screen-mode-${m}`}
+      onClick={() => void ctx.apply({ screenShareMode: m })}
+      style={{
+        flex: 1,
+        padding: "5px 0",
+        borderRadius: 6,
+        border: screenMode === m ? "1px solid #38bdf8" : "1px solid rgba(255,255,255,0.1)",
+        background: screenMode === m ? "rgba(56,189,248,0.15)" : "transparent",
+        color: screenMode === m ? "#7dd3fc" : "#94a3b8",
+        fontSize: 11,
+        fontWeight: 600,
+        cursor: "pointer",
+      }}
+    >
+      {label}
+    </button>
+  );
 
   return (
     <div
+      data-testid="layout-picker"
       style={{
         position: "absolute",
         top: 8,
         right: 8,
-        width: 280,
+        width: 300,
         maxHeight: "calc(100% - 16px)",
         overflowY: "auto",
         zIndex: 30,
@@ -1146,11 +1173,11 @@ function LayoutPickerPanel({
         boxShadow: "0 8px 32px rgba(0,0,0,0.5)",
       }}
     >
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
-        <div style={{ fontWeight: 700, fontSize: 13 }}>
-          🎬 Broadcast Layout
-        </div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <div style={{ fontWeight: 700, fontSize: 13 }}>Program Layout</div>
         <button
+          type="button"
+          aria-label="Close layout picker"
           onClick={onClose}
           style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: 16, padding: 0 }}
         >
@@ -1159,58 +1186,109 @@ function LayoutPickerPanel({
       </div>
 
       <div style={{ fontSize: 11, color: "#94a3b8", marginBottom: 10 }}>
-        Controls the composed output sent to YouTube, Twitch, and Facebook.
-        {participantCount > 0 && (
-          <span style={{ display: "block", marginTop: 4, color: "#facc15" }}>
-            {participantCount} participant{participantCount !== 1 ? "s" : ""} in room
-          </span>
-        )}
+        Applies instantly to the room stage and the stream.
+        <span style={{ display: "block", marginTop: 4, color: "#facc15" }}>
+          {eligibleCount} on stage
+        </span>
       </div>
 
-      {saving && (
-        <div style={{ fontSize: 11, color: "#facc15", marginBottom: 6 }}>Applying…</div>
+      {/* Live preview of both orientations */}
+      <div style={{ display: "flex", gap: 8, alignItems: "flex-end", marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 10, color: "#64748b", marginBottom: 3 }}>Landscape</div>
+          <SlotThumb
+            testId="preview-landscape"
+            slots={resolutionThumbSlots(resLandscape, nameOf)}
+            orientation="landscape"
+            height={96}
+            names
+          />
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: "#64748b", marginBottom: 3 }}>Vertical</div>
+          <SlotThumb
+            testId="preview-portrait"
+            slots={resolutionThumbSlots(resPortrait, nameOf)}
+            orientation="portrait"
+            height={96}
+            names
+          />
+        </div>
+      </div>
+      {(resLandscape.screenOverride || resLandscape.fallbackGrid) && (
+        <div style={{ fontSize: 10, color: "#7dd3fc", marginBottom: 8 }}>
+          {resLandscape.screenOverride
+            ? "Screen share is live: showing Screen Focus until it stops."
+            : "No layout chosen yet: showing an automatic grid."}
+        </div>
       )}
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-        {PRESET_INFO.map((preset) => {
-          const isActive = activePreset === preset.id;
-          const supportsAdaptiveCount = preset.id === "four_grid";
-          const fits = supportsAdaptiveCount || preset.slotCount >= participantCount || participantCount === 0;
-          const shownSlotCount = supportsAdaptiveCount ? Math.max(4, participantCount) : preset.slotCount;
+      <div style={{ display: "flex", gap: 4, marginBottom: 8, background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: 2 }}>
+        {tabBtn("landscape", "Landscape")}
+        {tabBtn("portrait", "Vertical")}
+      </div>
+      {tab === "portrait" && (
+        <div style={{ fontSize: 10, color: "#64748b", marginBottom: 6 }}>
+          {ctx.portraitExplicit
+            ? "Vertical layout chosen manually."
+            : "Vertical follows the landscape layout until you pick one here."}
+        </div>
+      )}
+
+      {ctx.saving && <div style={{ fontSize: 11, color: "#facc15", marginBottom: 6 }}>Applying…</div>}
+      {ctx.error && <div style={{ fontSize: 11, color: "#f87171", marginBottom: 6 }}>{ctx.error}</div>}
+
+      <div style={{ display: "grid", gridTemplateColumns: tab === "portrait" ? "1fr 1fr 1fr" : "1fr 1fr", gap: 6 }}>
+        {presets.map((preset) => {
+          const isActive = activeId === preset.id;
           return (
             <button
               key={preset.id}
-              onClick={() => applyPreset(preset.id)}
+              type="button"
+              data-testid={`layout-preset-${preset.id}`}
+              data-active={isActive ? "true" : "false"}
+              onClick={() =>
+                void ctx.apply(tab === "landscape" ? { landscapeId: preset.id } : { portraitId: preset.id })
+              }
               title={preset.description}
               style={{
                 display: "flex",
                 flexDirection: "column",
                 alignItems: "center",
-                gap: 4,
-                padding: "10px 6px",
+                gap: 5,
+                padding: "8px 4px",
                 borderRadius: 8,
-                border: isActive
-                  ? "2px solid #facc15"
-                  : "1px solid rgba(255,255,255,0.1)",
-                background: isActive
-                  ? "rgba(234,179,8,0.12)"
-                  : "rgba(255,255,255,0.03)",
-                color: isActive ? "#facc15" : fits ? "#e2e8f0" : "#64748b",
+                border: isActive ? "2px solid #facc15" : "1px solid rgba(255,255,255,0.1)",
+                background: isActive ? "rgba(234,179,8,0.12)" : "rgba(255,255,255,0.03)",
+                color: isActive ? "#facc15" : "#e2e8f0",
                 cursor: "pointer",
-                transition: "all 0.2s ease",
                 fontSize: 11,
                 fontWeight: isActive ? 700 : 500,
-                opacity: fits ? 1 : 0.5,
               }}
             >
-              <span style={{ fontSize: 20 }}>{preset.icon}</span>
-              <span>{preset.label}</span>
-              <span style={{ fontSize: 9, color: "#64748b" }}>
-                {shownSlotCount} slot{shownSlotCount !== 1 ? "s" : ""}
-              </span>
+              <SlotThumb
+                slots={presetThumbSlots(preset.slots)}
+                orientation={preset.orientation}
+                height={tab === "portrait" ? 56 : 40}
+                active={isActive}
+              />
+              <span style={{ textAlign: "center", lineHeight: 1.2 }}>{preset.label}</span>
             </button>
           );
         })}
+      </div>
+
+      <div style={{ marginTop: 12, paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+        <div style={{ fontSize: 11, fontWeight: 700, marginBottom: 6 }}>Screen share</div>
+        <div style={{ display: "flex", gap: 6 }}>
+          {modeBtn("auto", "Auto-switch")}
+          {modeBtn("manual", "Manual")}
+        </div>
+        <div style={{ fontSize: 10, color: "#64748b", marginTop: 5 }}>
+          {screenMode === "auto"
+            ? "When someone shares, the stage switches to a screen layout (cameras stay visible)."
+            : "Shares only appear in layouts with a screen slot."}
+        </div>
       </div>
     </div>
   );
@@ -1229,6 +1307,8 @@ type LiveKitShellProps = {
   controlsTileVisible: boolean;
   controlsAllowScreenShare: boolean;
   screenShareMode: ScreenShareRouteMode;
+  /** Bumped when the user changes the screen-share route (maps to screenShareMode). */
+  screenShareRouteNonce?: number;
   watermarkEnabled: boolean;
   dashboardOpen: boolean;
   onCloseDashboard: () => void;
@@ -1275,6 +1355,7 @@ function LiveKitShell({
   controlsTileVisible,
    controlsAllowScreenShare,
   screenShareMode,
+  screenShareRouteNonce = 0,
   watermarkEnabled,
   dashboardOpen,
   onCloseDashboard,
@@ -1304,7 +1385,6 @@ function LiveKitShell({
   onPublishPermissionChange,
 }: LiveKitShellProps) {
   const [joinPagePresence, setJoinPagePresence] = useState<JoinPagePresence | null>(null);
-  const [roomPreviewPreset, setRoomPreviewPreset] = useState<StudioLayoutPresetId | null>(null);
   const mediaRootRef = useRef<HTMLDivElement | null>(null);
 
   // Stable LiveKitRoom callbacks: useLiveKitRoom re-runs its connect effect
@@ -1462,9 +1542,7 @@ function LiveKitShell({
         subjectToControls && !controlsTileVisible ? " sl-controls-hide-self" : ""
       }${
         subjectToControls && !controlsAllowScreenShare ? " sl-controls-no-screen" : ""
-      }${advancedScreenShareEnabled ? ` sl-screen-${screenShareMode}` : ""}${
-        roomPreviewPreset ? ` sl-program-${roomPreviewPreset}` : ""
-      }`}
+      }${advancedScreenShareEnabled ? ` sl-screen-${screenShareMode}` : ""}`}
       token={token}
       serverUrl={serverUrl}
       connect={true}
@@ -1484,6 +1562,14 @@ function LiveKitShell({
         position: "relative",
       }}
     >
+      <ProgramStateProvider
+        roomId={roomId}
+        roomAccessToken={roomAccessToken}
+        canLayout={isHost || canLayout}
+        isHost={isHost}
+        screenShareRouteMode={screenShareMode}
+        screenShareRouteNonce={screenShareRouteNonce}
+      >
       <div ref={mediaRootRef} style={{ width: "100%", height: "100%", position: "relative" }}>
         <LiveKitDebugLogger />
         <VideoElementMonitor />
@@ -1506,13 +1592,7 @@ function LiveKitShell({
         {audioMixerEnabled && <MixerBridge />}
         {advancedScreenShareEnabled && <ScreenSharePopout mode={screenShareMode} onActiveSharerChange={onActiveSharerChange} />}
         {(isHost || canLayout) && roomId && roomAccessToken && (
-          <LayoutPickerPanel
-            roomId={roomId}
-            roomAccessToken={roomAccessToken}
-            open={showLayoutPicker}
-            onClose={onToggleLayoutPicker}
-            onActivePresetChange={setRoomPreviewPreset}
-          />
+          <LayoutPickerPanel open={showLayoutPicker} onClose={onToggleLayoutPicker} />
         )}
         {canSeeJoinPage && (
           <div
@@ -1612,7 +1692,7 @@ function LiveKitShell({
               </div>
             }
           >
-            <SafeVideoConference />
+            <ProgramStage />
           </ErrorBoundary>
         </div>
         {watermarkEnabled && (
@@ -1644,6 +1724,7 @@ function LiveKitShell({
           />
         )}
       </div>
+      </ProgramStateProvider>
     </LiveKitRoom>
   );
 }
@@ -1700,6 +1781,8 @@ function RoomPage() {
   const [showScreenShareRouter, setShowScreenShareRouter] = useState(false);
   const [showLayoutPicker, setShowLayoutPicker] = useState(false);
   const [screenShareMode, setScreenShareModeRaw] = useState<ScreenShareRouteMode>("off");
+  // Bumped on user changes only: the stage maps them onto programState.screenShareMode.
+  const [screenShareRouteNonce, setScreenShareRouteNonce] = useState(0);
   const [activeSharerName, setActiveSharerName] = useState<string | null>(null);
   const [egressId, setEgressId] = useState<string | null>(null);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>("idle");
@@ -2061,6 +2144,7 @@ function RoomPage() {
   // Wrapper that persists to localStorage and broadcasts via room controls
   const setScreenShareMode = (mode: ScreenShareRouteMode) => {
     setScreenShareModeRaw(mode);
+    setScreenShareRouteNonce((n) => n + 1);
     // Persist locally
     if (roomId) {
       try {
@@ -5068,6 +5152,7 @@ function RoomPage() {
           controlsTileVisible={controlsTileVisible}
           controlsAllowScreenShare={controlsAllowScreenShare}
           screenShareMode={screenShareMode}
+          screenShareRouteNonce={screenShareRouteNonce}
           watermarkEnabled={watermarkEnabled}
           dashboardOpen={dashboardOpen}
           onCloseDashboard={() => setDashboardOpen(false)}
