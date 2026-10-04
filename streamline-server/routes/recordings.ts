@@ -47,6 +47,7 @@ import { createSavedVideoFromRecording } from "./myContent";
 import { releaseStorageUsage, reserveStorageUsage } from "../usageHelper";
 import { requireAdmin } from "../middleware/adminAuth";
 import { DOWNLOAD_LINK_TTL_SECONDS, evaluateDownloadRules, shouldClaimStorageCount } from "../lib/mediaPure";
+import { compositorUrl, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
 
 const router = Router();
 
@@ -1243,10 +1244,8 @@ router.post(
 
       // Prefer custom program-compositor template so recordings reflect
       // the host's layout choices (programState via room metadata).
-      const egressTemplateBase = process.env.EGRESS_TEMPLATE_BASE_URL;
-      const customBaseUrl = egressTemplateBase
-        ? `${egressTemplateBase.replace(/\/+$/, "")}/egress-templates/program-compositor.html`
-        : undefined;
+      const customBaseUrl = compositorUrl("landscape") || undefined;
+      if (!customBaseUrl) warnBuiltInLayoutFallback("recording", layout);
 
       const compositeOpts = {
         ...(customBaseUrl ? { customBaseUrl } : { layout: layout }),

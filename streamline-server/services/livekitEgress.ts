@@ -3,8 +3,10 @@ import {
   SegmentedFileOutput,
   SegmentedFileProtocol,
   S3Upload,
-  EncodingOptionsPreset,
+  EncodingOptions,
 } from "livekit-server-sdk";
+import { getPresetById, toEncodingOptions } from "../lib/mediaPresets";
+import { compositorUrl, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
 
 function requireEnv(name: string): string {
   const v = process.env[name];
@@ -14,10 +16,14 @@ function requireEnv(name: string): string {
 
 export type HlsPresetId = "hls_720p" | "hls_1080p";
 
-function mapPreset(_presetId: HlsPresetId): EncodingOptionsPreset | undefined {
-  // TODO: Wire presets into encoding options when supported.
-  // For now we rely on LiveKit defaults.
-  return undefined;
+/**
+ * HLS preset → advanced encoding options, using the same media-preset table
+ * (lib/mediaPresets.ts, "stream" profile) as multistream.  Landscape 16:9.
+ * Unknown ids fall back to 720p.
+ */
+export function mapPreset(presetId: HlsPresetId | string | null | undefined) {
+  const mediaPresetId = presetId === "hls_1080p" ? "hd_1080p30" : "standard_720p30";
+  return toEncodingOptions(getPresetById(mediaPresetId), "stream");
 }
 
 export async function startHlsEgress(params: {
@@ -64,12 +70,10 @@ export async function startHlsEgress(params: {
   // RoomComposite + Segments output => HLS manifest + segments uploaded continuously.
   // Prefer the custom program-compositor template so the egress output reflects
   // the host's real-time layout choices (programState via room metadata).
-  const egressTemplateBase = process.env.EGRESS_TEMPLATE_BASE_URL;
-  const customBaseUrl = egressTemplateBase
-    ? `${egressTemplateBase.replace(/\/+$/, "")}/egress-templates/program-compositor.html`
-    : undefined;
-
+  const customBaseUrl = compositorUrl("landscape") || undefined;
   const layoutWithNames = `${params.layout}-dark`;
+  if (!customBaseUrl) warnBuiltInLayoutFallback("hls", layoutWithNames);
+  const encodingOptions = new EncodingOptions(mapPreset(params.presetId));
 
   if (process.env.AUTH_DEBUG === "1") {
     console.log("[livekit-debug] startRoomCompositeEgress (HLS)", {
@@ -77,6 +81,7 @@ export async function startHlsEgress(params: {
       layout: params.layout,
       prefix: params.prefix,
       customBaseUrl: customBaseUrl || "(fallback: built-in layout)",
+      encodingOptions,
     });
   }
 
@@ -85,10 +90,9 @@ export async function startHlsEgress(params: {
     { segments: output },
     {
       ...(customBaseUrl ? { customBaseUrl } : { layout: layoutWithNames }),
+      encodingOptions,
     }
   );
-
-  // mapPreset(params.presetId) reserved for future encoding options usage
 
   return { egressId: info.egressId };
 }

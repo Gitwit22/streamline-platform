@@ -111,15 +111,37 @@ export function clampRecordingPreset(
   return { ...planClamp, clampedToStream: false };
 }
 
-export function toEncodingOptions(preset: MediaPreset, target: "record" | "stream") {
-  const cfg = preset[target];
+/**
+ * LiveKit egress "advanced" EncodingOptions (protobuf livekit.EncodingOptions).
+ * Field names must match the proto exactly (width / height / framerate) –
+ * unknown keys are silently dropped – and bitrates are in **kbps**.
+ */
+export type EgressEncodingOptions = {
+  width: number;
+  height: number;
+  framerate: number;
+  videoBitrate: number;
+  audioBitrate: number;
+};
+
+export function encodingOptionsFor(cfg: {
+  width: number;
+  height: number;
+  fps: number;
+  videoKbps: number;
+  audioKbps: number;
+}): EgressEncodingOptions {
   return {
-    videoWidth: cfg.width,
-    videoHeight: cfg.height,
-    videoBitrate: cfg.videoKbps * 1000,
-    audioBitrate: cfg.audioKbps * 1000,
-    frameRate: cfg.fps,
-  } as const;
+    width: cfg.width,
+    height: cfg.height,
+    framerate: cfg.fps,
+    videoBitrate: cfg.videoKbps,
+    audioBitrate: cfg.audioKbps,
+  };
+}
+
+export function toEncodingOptions(preset: MediaPreset, target: "record" | "stream"): EgressEncodingOptions {
+  return encodingOptionsFor(preset[target]);
 }
 
 export async function getUserPlanId(uid: string): Promise<string> {

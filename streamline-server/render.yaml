@@ -47,6 +47,12 @@ projects:
         sync: false
       - key: LIVEKIT_URL
         sync: false
+      # Public https origin of this backend, e.g. https://<backend-host>.
+      # LiveKit egress loads <origin>/egress-templates/program-compositor.html
+      # so every output follows the host's program layout. Falls back to
+      # RENDER_EXTERNAL_URL, then to LiveKit built-in layouts.
+      - key: EGRESS_TEMPLATE_BASE_URL
+        sync: false
       region: ohio
       buildCommand: npm ci --include=dev && npm run build
       startCommand: npm run start

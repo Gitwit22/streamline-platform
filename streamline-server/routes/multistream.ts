@@ -5,7 +5,7 @@ import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "..
 import { canAccessFeature } from "./featureAccess";
 import type { ApiErrorCode } from "../types/streaming";
 import { decryptStreamKey, normalizeRtmpBase } from "../lib/crypto";
-import { clampPresetForPlan, getUserPlanId, toEncodingOptions } from "../lib/mediaPresets";
+import { clampPresetForPlan, encodingOptionsFor, getUserPlanId, toEncodingOptions } from "../lib/mediaPresets";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
@@ -18,6 +18,7 @@ import { OUTPUT_FORMAT_DIMENSIONS } from "../lib/roomLayout";
 import { logDelegatedRoomAction } from "../lib/collaborators";
 import { FieldValue } from "firebase-admin/firestore";
 import { decideMultistreamStart, maskSecretTail, redactRtmpUrl } from "../lib/mediaPure";
+import { compositorUrl, instagramAspectFor, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
 
 // livekit-server-sdk is ESM; use dynamic import so CommonJS builds work on Render
 let _lkMod: any | null = null;
@@ -499,12 +500,11 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       if (urls.length > 0) {
         const streamOutput = new StreamOutput({ protocol: StreamProtocol.RTMP, urls });
 
-        // Prefer custom program-compositor template so the RTMP output reflects
-        // the host's real-time layout choices (programState via room metadata).
-        const egressTemplateBase = process.env.EGRESS_TEMPLATE_BASE_URL;
-        const customBaseUrl = egressTemplateBase
-          ? `${egressTemplateBase.replace(/\/+$/, "")}/egress-templates/program-compositor.html`
-          : undefined;
+        // Prefer the program-compositor template so the RTMP output reflects
+        // the host's real-time layout choices (programState.landscape via
+        // room metadata).
+        const customBaseUrl = compositorUrl("landscape") || undefined;
+        if (!customBaseUrl) warnBuiltInLayoutFallback("multistream", "grid-dark");
 
         const response = await egressClient.startRoomCompositeEgress(
           roomName,
@@ -533,22 +533,24 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         const instagramStreamOutput = new StreamOutput({ protocol: StreamProtocol.RTMP, urls: instagramUrls });
 
         const igDims = OUTPUT_FORMAT_DIMENSIONS["vertical_9x16"];
-        const instagramEncodingOptions = {
-          videoWidth: igDims.width,
-          videoHeight: igDims.height,
-          frameRate: 30,
-          videoBitrate: 3000 * 1000,
-          audioBitrate: 128 * 1000,
-        } as const;
+        // 1080×1920 @30fps, 3000 kbps video / 128 kbps audio.  (Proto field
+        // names; the previous videoWidth/videoHeight keys were dropped by the
+        // SDK, so Instagram egress silently ran at the 1920×1080 default.)
+        const instagramEncodingOptions = encodingOptionsFor({
+          width: igDims.width,
+          height: igDims.height,
+          fps: 30,
+          videoKbps: 3000,
+          audioKbps: 128,
+        });
 
-        // Custom portrait template: renders the active speaker / screen-share
-        // at ~87 % scale centred inside the 1080×1920 canvas with safe padding
-        // and a dark background.  Falls back to the built-in layout when the
-        // env var is not set (local dev without a public URL).
-        const egressTemplateBase = process.env.EGRESS_TEMPLATE_BASE_URL;
-        const igCustomBaseUrl = egressTemplateBase
-          ? `${egressTemplateBase.replace(/\/+$/, "")}/egress-templates/ig-portrait.html`
-          : undefined;
+        // Instagram is vertical: the program compositor renders the host's
+        // PORTRAIT layout (programState.portrait) natively at 1080×1920 – no
+        // letterboxed 16:9 slice.  The destination's layoutPreset hint
+        // ("instagram_reels_9x16") maps to the portrait orientation.
+        const igAspect = instagramAspectFor(instagramLayoutPreset);
+        const igCustomBaseUrl = compositorUrl(igAspect) || undefined;
+        if (!igCustomBaseUrl) warnBuiltInLayoutFallback("instagram", "single-speaker-dark");
 
         if (process.env.AUTH_DEBUG === "1") {
           console.log("[livekit-debug] startRoomCompositeEgress (instagram)", {
@@ -556,6 +558,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
             urls: instagramUrls.map((u) => redactRtmpUrl(u)),
             instagramFit,
             instagramLayoutPreset: instagramLayoutPreset || null,
+            igAspect,
             igCustomBaseUrl: igCustomBaseUrl || "(fallback: single-speaker-dark)",
           });
         }

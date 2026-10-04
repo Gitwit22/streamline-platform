@@ -2,74 +2,71 @@
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=1280, height=720" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Streamline – Program Compositor</title>
+<!--
+  LiveKit RoomComposite egress template for every Streamline output
+  (multistream RTMP, Instagram, HLS, recordings).
+
+  Query params (LiveKit appends url/token/layout to the customBaseUrl):
+    url, token        LiveKit connection (required)
+    aspect            "landscape" | "portrait" (default: from window aspect)
+    idleEndSec        seconds without eligible participants before END_RECORDING
+                      (default 30; 0 disables)
+
+  Layout comes from room metadata `programState` (v2, see
+  streamline-server/lib/programPresets.ts).  Resolution logic is imported from
+  ./program-layout.mjs, which is generated from that same TypeScript file so
+  the egress output and the in-room stage resolve identically.
+-->
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
-
   html, body {
-    width: 100%;
-    height: 100%;
-    overflow: hidden;
+    width: 100%; height: 100%; overflow: hidden;
     background: #0a0a0a;
-    font-family: system-ui, -apple-system, sans-serif;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   }
-
-  #canvas {
-    position: relative;
-    width: 1280px;
-    height: 720px;
-    overflow: hidden;
-    background: #0a0a0a;
-    transform-origin: top left;
-    /* Scaled dynamically by JS to fill the actual encoding viewport */
+  #stage {
+    position: absolute; overflow: hidden; background: #0a0a0a;
+    --label-size: 16px;
   }
-
   .slot {
-    position: absolute;
-    overflow: hidden;
-    border-radius: 8px;
-    background: #111;
-    transition: left 0.35s ease, top 0.35s ease, width 0.35s ease, height 0.35s ease;
+    position: absolute; overflow: hidden; background: #111;
+    outline: 1px solid #0a0a0a;
   }
-
+  .slot.screen { background: #000; }
   .slot video {
-    width: 100%;
-    height: 100%;
-    object-fit: contain;
-    background: #000;
-    display: block;
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    display: block; background: transparent;
   }
-
-  .slot-empty {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #333;
-    font-size: 14px;
-    letter-spacing: 0.05em;
+  .slot .ph {
+    position: absolute; inset: 0; display: none;
+    align-items: center; justify-content: center;
+    color: #8a8a8a; font-weight: 600; font-size: calc(var(--label-size) * 1.4);
+    text-align: center; padding: 8px;
   }
-
-  /* Placeholder when no program state is set */
+  .slot.novideo .ph { display: flex; }
+  .slot.novideo video { visibility: hidden; }
+  .slot .label {
+    position: absolute; left: calc(var(--label-size) * 0.6); bottom: calc(var(--label-size) * 0.6);
+    max-width: calc(100% - var(--label-size) * 1.2);
+    padding: calc(var(--label-size) * 0.2) calc(var(--label-size) * 0.55);
+    border-radius: calc(var(--label-size) * 0.35);
+    background: rgba(0, 0, 0, 0.6); color: #fff;
+    font-size: var(--label-size); line-height: 1.25; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .slot .label:empty { display: none; }
   #placeholder {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #444;
-    font-size: 28px;
-    letter-spacing: 0.05em;
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #333; font-size: 28px; letter-spacing: 0.08em; font-weight: 700;
   }
   #placeholder.hidden { display: none; }
-
-  /* Hidden audio container */
   #audio-bin { position: absolute; width: 0; height: 0; overflow: hidden; }
 </style>
 </head>
 <body>
-  <div id="canvas"></div>
-  <div id="placeholder">STREAMLINE</div>
+  <div id="stage"><div id="placeholder">STREAMLINE</div></div>
   <div id="audio-bin"></div>
 
   <script type="module">
@@ -77,329 +74,244 @@
       Room,
       RoomEvent,
       Track,
-      ConnectionState,
-    } from "https://cdn.jsdelivr.net/npm/livekit-client@2/+esm";
+    } from "https://cdn.jsdelivr.net/npm/livekit-client@2.22.3/dist/livekit-client.esm.mjs";
+    import {
+      resolveProgramLayout,
+      buildOrientationLayout,
+      isHiddenParticipant,
+    } from "./program-layout.mjs";
 
-    const params = new URLSearchParams(window.location.search);
-    const wsUrl  = params.get("url");
-    const token  = params.get("token");
+    // Tolerate a second "?" in case the egress appended its params naively
+    // to a customBaseUrl that already carried ?aspect=…
+    const params = new URLSearchParams(window.location.search.slice(1).replace(/\?/g, "&"));
+    const wsUrl = params.get("url");
+    const token = params.get("token");
+    const aspectParam = (params.get("aspect") || "").toLowerCase();
+    const idleEndSec = params.has("idleEndSec") ? Math.max(0, Number(params.get("idleEndSec")) || 0) : 30;
+
+    const stage = document.getElementById("stage");
+    const placeholder = document.getElementById("placeholder");
+    const audioBin = document.getElementById("audio-bin");
+
+    function orientation() {
+      if (aspectParam === "portrait" || aspectParam === "landscape") return aspectParam;
+      return window.innerHeight > window.innerWidth ? "portrait" : "landscape";
+    }
+
+    // Fit a uniform 16:9 / 9:16 stage inside the viewport (no stretching).
+    function layoutStage() {
+      const o = orientation();
+      const ar = o === "portrait" ? 9 / 16 : 16 / 9;
+      const vw = window.innerWidth, vh = window.innerHeight;
+      let w = vw, h = vw / ar;
+      if (h > vh) { h = vh; w = vh * ar; }
+      stage.style.width = w + "px";
+      stage.style.height = h + "px";
+      stage.style.left = (vw - w) / 2 + "px";
+      stage.style.top = (vh - h) / 2 + "px";
+      const short = Math.min(w, h);
+      stage.style.setProperty("--label-size", Math.max(12, Math.round(short * 0.03)) + "px");
+    }
+    window.addEventListener("resize", () => { layoutStage(); render(); });
+    layoutStage();
 
     if (!wsUrl || !token) {
-      document.getElementById("placeholder").textContent = "Missing url / token";
+      placeholder.textContent = "Missing url / token";
       throw new Error("Missing LiveKit connection params");
     }
 
-    const canvas      = document.getElementById("canvas");
-    const audioBin    = document.getElementById("audio-bin");
-    const placeholder = document.getElementById("placeholder");
-
-    // ─── State ───
-    let programState  = null;   // parsed from room metadata
-    let slotElements  = [];     // { el, videoEl, identity, slotIdx }
-    let audioElements = new Map(); // trackSid -> HTMLElement
-
     const room = new Room({ adaptiveStream: false, dynacast: false });
+    const firstSeen = new Map(); // trackSid -> ms first observed (publish-order proxy)
+    const slotEls = new Map();   // key -> { el, video, ph, label, track }
+    const audioEls = new Map();  // trackSid -> { track, el }
 
-    // ─── Parse program state from room metadata ───
-    function parseProgramState() {
+    function seen(pub) {
+      if (!pub) return null;
+      const sid = pub.trackSid;
+      if (!firstSeen.has(sid)) firstSeen.set(sid, Date.now());
+      return firstSeen.get(sid);
+    }
+
+    function programState() {
       try {
-        const raw = room.metadata;
-        if (!raw) return null;
-        const meta = JSON.parse(raw);
-        return meta.programState || null;
-      } catch {
-        return null;
-      }
+        const meta = room.metadata ? JSON.parse(room.metadata) : null;
+        return meta && meta.programState ? meta.programState : null;
+      } catch { return null; }
     }
 
-    // ─── Get ordered remote participants ───
-    function getRemoteParticipants() {
-      const list = [];
-      for (const p of room.remoteParticipants.values()) {
-        list.push(p);
-      }
-      // Sort by join time for stable ordering
-      list.sort((a, b) => (a.joinedAt?.getTime() || 0) - (b.joinedAt?.getTime() || 0));
-      return list;
+    function describe(p) {
+      const cam = p.getTrackPublication(Track.Source.Camera);
+      const scr = p.getTrackPublication(Track.Source.ScreenShare);
+      return {
+        identity: p.identity,
+        name: p.name || null,
+        metadata: p.metadata || null,
+        isAgent: !!p.isAgent,
+        canPublish: p.permissions ? p.permissions.canPublish !== false : undefined,
+        joinedAt: p.joinedAt ? p.joinedAt.getTime() : null,
+        camera: cam ? { publishedAt: seen(cam) } : null,
+        screen: scr ? { publishedAt: seen(scr) } : null,
+      };
     }
 
-    // ─── Find participant by identity ───
-    function findParticipant(identity) {
-      for (const p of room.remoteParticipants.values()) {
-        if (p.identity === identity) return p;
+    // Legacy (v1) metadata → v2 layout so old rooms still render sensibly.
+    function layoutFromState(ps, o) {
+      if (!ps) return null;
+      if (ps.version === 2 && ps[o]) return ps[o];
+      if (o === "landscape" && Array.isArray(ps.programSlots) && ps.programSlots.length) {
+        const preset = typeof ps.programLayout === "string" ? buildOrientationLayout(ps.programLayout, "landscape") : null;
+        if (preset && preset.slots.length) return preset;
+        return {
+          presetId: "custom",
+          slots: ps.programSlots.slice(0, 9).map((s) => ({
+            id: String(s.id), x: s.x / 1280, y: s.y / 720, w: s.width / 1280, h: s.height / 720,
+            z: s.zIndex || 1, source: { kind: "auto" },
+          })),
+        };
       }
       return null;
     }
 
-    // ─── Get the best video track for a participant ───
-    function getVideoTrack(participant) {
-      if (!participant) return null;
-      // Prefer screen share, then camera
-      for (const pub of participant.trackPublications.values()) {
-        if (pub.source === Track.Source.ScreenShare && pub.track && !pub.isMuted) {
-          return pub.track;
-        }
-      }
-      const cam = participant.getTrackPublication(Track.Source.Camera);
-      if (cam?.track && !cam.isMuted) return cam.track;
-      return null;
+    function videoTrackFor(identity, kind) {
+      const p = room.remoteParticipants.get(identity);
+      if (!p) return null;
+      const pub = p.getTrackPublication(kind === "screen" ? Track.Source.ScreenShare : Track.Source.Camera);
+      if (!pub || !pub.track || pub.isMuted) return null;
+      return pub.track;
     }
 
-    // ─── Build the default layout when no program state is set ───
-    function buildAdaptiveGridSlots(participantCount) {
-      const count = Math.max(1, Math.floor(participantCount || 1));
-      if (count <= 4) {
-        return [
-          { id: "slot1", x: 20, y: 10, width: 610, height: 345, zIndex: 1 },
-          { id: "slot2", x: 650, y: 10, width: 610, height: 345, zIndex: 1 },
-          { id: "slot3", x: 20, y: 365, width: 610, height: 345, zIndex: 1 },
-          { id: "slot4", x: 650, y: 365, width: 610, height: 345, zIndex: 1 },
-        ].slice(0, count);
-      }
+    let lastResolved = null;
+    let startedLogged = false;
+    let idleSince = null;
+    let ended = false;
 
-      const outerX = 20;
-      const outerY = 10;
-      const gapX = 10;
-      const gapY = 10;
-      const cols = Math.max(2, Math.ceil(Math.sqrt(count * (1280 / 720))));
-      const rows = Math.ceil(count / cols);
-
-      const usableWidth = 1280 - outerX * 2;
-      const usableHeight = 720 - outerY * 2;
-      const tileWidth = Math.floor((usableWidth - gapX * (cols - 1)) / cols);
-      const tileHeight = Math.floor((usableHeight - gapY * (rows - 1)) / rows);
-
-      const slots = [];
-      for (let i = 0; i < count; i++) {
-        const row = Math.floor(i / cols);
-        const col = i % cols;
-        const isLastRow = row === rows - 1;
-        const itemsInLastRow = count - cols * (rows - 1);
-        const rowCols = isLastRow && itemsInLastRow > 0 ? itemsInLastRow : cols;
-        const rowWidth = rowCols * tileWidth + (rowCols - 1) * gapX;
-        const startX = Math.floor((1280 - rowWidth) / 2);
-
-        slots.push({
-          id: `slot${i + 1}`,
-          x: startX + col * (tileWidth + gapX),
-          y: outerY + row * (tileHeight + gapY),
-          width: tileWidth,
-          height: tileHeight,
-          zIndex: 1,
-        });
-      }
-
-      return slots;
-    }
-
-    function getDefaultSlots(participantCount) {
-      if (participantCount <= 1) {
-        return [{ id: "slot1", x: 0, y: 0, width: 1280, height: 720, zIndex: 1 }];
-      }
-      if (participantCount === 2) {
-        return [
-          { id: "slot1", x: 0, y: 0, width: 640, height: 720, zIndex: 1 },
-          { id: "slot2", x: 640, y: 0, width: 640, height: 720, zIndex: 1 },
-        ];
-      }
-      if (participantCount === 3) {
-        return [
-          { id: "slot1", x: 328, y: 10, width: 625, height: 345, zIndex: 1 },
-          { id: "slot2", x: 10, y: 365, width: 625, height: 345, zIndex: 1 },
-          { id: "slot3", x: 645, y: 365, width: 625, height: 345, zIndex: 1 },
-        ];
-      }
-      return buildAdaptiveGridSlots(participantCount);
-    }
-
-    // ─── Main render ───
     function render() {
-      const ps = parseProgramState();
-      programState = ps;
+      const o = orientation();
+      const ps = programState();
+      const participants = [];
+      for (const p of room.remoteParticipants.values()) participants.push(describe(p));
+      const resolved = resolveProgramLayout({
+        layout: layoutFromState(ps, o),
+        orientation: o,
+        screenShareMode: ps && ps.screenShareMode === "manual" ? "manual" : "auto",
+        hostIdentity: ps && typeof ps.hostIdentity === "string" ? ps.hostIdentity : null,
+        participants,
+      });
+      lastResolved = resolved;
+      window.__compositor = { orientation: o, resolved };
 
-      const remotes = getRemoteParticipants();
-
-      // Determine slots and participant mapping
-      let slots;
-      let identities;
-
-      if (ps && ps.programSlots && ps.programSlots.length > 0) {
-        // Use program state, but fall back to the default layout when
-        // there are more program slots than actual participants.  This
-        // prevents large black empty areas on the composed output (e.g.
-        // a 2-person layout selected but only 1 person is streaming).
-        if (remotes.length > 0 && remotes.length < ps.programSlots.length) {
-          slots = getDefaultSlots(remotes.length);
-          identities = remotes.map((p) => p.identity);
-        } else {
-          slots = ps.programSlots;
-          if (ps.programParticipants && ps.programParticipants.length > 0) {
-            identities = ps.programParticipants;
-          } else {
-            identities = remotes.map((p) => p.identity);
-          }
+      const live = new Set();
+      resolved.slots.forEach((rs, i) => {
+        const key = rs.slot.id + "#" + i;
+        live.add(key);
+        let entry = slotEls.get(key);
+        if (!entry) {
+          const el = document.createElement("div");
+          el.className = "slot";
+          const video = document.createElement("video");
+          video.autoplay = true; video.playsInline = true; video.muted = true;
+          const ph = document.createElement("div"); ph.className = "ph";
+          const label = document.createElement("div"); label.className = "label";
+          el.append(video, ph, label);
+          stage.appendChild(el);
+          entry = { el, video, ph, label, track: null };
+          slotEls.set(key, entry);
         }
-      } else {
-        // Fallback: auto-layout by participant count
-        slots = getDefaultSlots(remotes.length);
-        identities = remotes.map((p) => p.identity);
-      }
+        const s = rs.slot;
+        entry.el.style.left = s.x * 100 + "%";
+        entry.el.style.top = s.y * 100 + "%";
+        entry.el.style.width = s.w * 100 + "%";
+        entry.el.style.height = s.h * 100 + "%";
+        entry.el.style.zIndex = String(s.z || 1);
+        entry.el.classList.toggle("screen", rs.track === "screen");
+        entry.el.dataset.identity = rs.identity || "";
+        entry.el.dataset.track = rs.track || "";
+        entry.video.style.objectFit = rs.fit;
 
-      // Show/hide placeholder
-      if (remotes.length === 0) {
-        placeholder.classList.remove("hidden");
-      } else {
-        placeholder.classList.add("hidden");
-      }
-
-      // Reconcile DOM: create/update/remove slot elements
-      const needed = slots.length;
-
-      // Remove excess slot elements
-      while (slotElements.length > needed) {
-        const removed = slotElements.pop();
-        // Detach video track before removing element
-        if (removed.track) {
-          removed.track.detach(removed.videoEl);
-        }
-        removed.el.remove();
-      }
-
-      // Create missing slot elements
-      while (slotElements.length < needed) {
-        const el = document.createElement("div");
-        el.className = "slot";
-        const videoEl = document.createElement("video");
-        videoEl.autoplay = true;
-        videoEl.playsInline = true;
-        videoEl.muted = true; // video elements are muted; audio is separate
-        el.appendChild(videoEl);
-        canvas.appendChild(el);
-        slotElements.push({ el, videoEl, identity: null, track: null, slotIdx: slotElements.length });
-      }
-
-      // Update slot positions and video assignments
-      for (let i = 0; i < needed; i++) {
-        const slot = slots[i];
-        const entry = slotElements[i];
-        const identity = identities[i] || null;
-        const participant = identity ? findParticipant(identity) : null;
-        const track = participant ? getVideoTrack(participant) : null;
-
-        // Position the slot
-        entry.el.style.left   = slot.x + "px";
-        entry.el.style.top    = slot.y + "px";
-        entry.el.style.width  = slot.width + "px";
-        entry.el.style.height = slot.height + "px";
-        entry.el.style.zIndex = slot.zIndex || 1;
-
-        // Update video track if changed
+        const track = rs.identity && rs.track ? videoTrackFor(rs.identity, rs.track) : null;
         if (track !== entry.track) {
-          if (entry.track) {
-            entry.track.detach(entry.videoEl);
-          }
-          if (track) {
-            track.attach(entry.videoEl);
-            entry.el.classList.remove("slot-empty");
-          } else {
-            entry.el.classList.add("slot-empty");
-          }
+          if (entry.track) entry.track.detach(entry.video);
+          if (track) track.attach(entry.video);
           entry.track = track;
         }
-
-        entry.identity = identity;
+        entry.el.classList.toggle("novideo", !track);
+        entry.ph.textContent = !track && rs.identity ? (rs.label || "") : "";
+        entry.label.textContent = track && rs.label ? rs.label : "";
+      });
+      for (const [key, entry] of slotEls) {
+        if (live.has(key)) continue;
+        if (entry.track) entry.track.detach(entry.video);
+        entry.el.remove();
+        slotEls.delete(key);
       }
+      placeholder.classList.toggle("hidden", resolved.slots.some((r) => !!r.identity));
+
+      syncAudio();
+      checkIdle(resolved);
     }
 
-    // ─── Audio handling ───
-    function attachAudio(track) {
-      if (audioElements.has(track.sid)) return;
-      const el = track.attach();
-      audioBin.appendChild(el);
-      audioElements.set(track.sid, el);
-    }
-
-    function detachAudio(track) {
-      const el = audioElements.get(track.sid);
-      if (el) {
-        el.remove();
-        audioElements.delete(track.sid);
-      }
-      track.detach();
-    }
-
-    // ─── Room events ───
-    room.on(RoomEvent.TrackSubscribed, (track, _pub, _participant) => {
-      if (track.kind === Track.Kind.Audio) attachAudio(track);
-      // Re-render on any track change (video may now be available)
-      render();
-    });
-
-    room.on(RoomEvent.TrackUnsubscribed, (track) => {
-      if (track.kind === Track.Kind.Audio) detachAudio(track);
-      // Clear from slot entries
-      for (const entry of slotElements) {
-        if (entry.track === track) {
-          entry.track = null;
+    // Audio from every non-hidden, non-recorder publisher.
+    function syncAudio() {
+      const want = new Map();
+      for (const p of room.remoteParticipants.values()) {
+        if (p.isAgent || p.identity.indexOf("EG_") === 0) continue;
+        if (isHiddenParticipant({ identity: p.identity, metadata: p.metadata })) continue;
+        for (const pub of p.audioTrackPublications.values()) {
+          if (pub.track) want.set(pub.trackSid, pub.track);
         }
       }
-      render();
-    });
-
-    room.on(RoomEvent.TrackMuted, () => render());
-    room.on(RoomEvent.TrackUnmuted, () => render());
-
-    room.on(RoomEvent.ParticipantConnected, () => render());
-    room.on(RoomEvent.ParticipantDisconnected, () => render());
-
-    room.on(RoomEvent.ActiveSpeakersChanged, () => {
-      // Could be used for active speaker highlighting in the future
-    });
-
-    // ─── Room metadata change = program state update ───
-    room.on(RoomEvent.RoomMetadataChanged, (_metadata) => {
-      console.log("[compositor] metadata changed, re-rendering");
-      render();
-    });
-
-    // ─── Periodic metadata poll ───
-    // Safety net: if the RoomMetadataChanged event is missed (e.g. due to
-    // network blip), re-check metadata every 2 seconds and re-render when
-    // the programState has changed since the last render.
-    let lastRenderedPsJson = "";
-    setInterval(() => {
-      try {
-        const ps = parseProgramState();
-        const psJson = JSON.stringify(ps || {});
-        if (psJson !== lastRenderedPsJson) {
-          console.log("[compositor] poll detected change, re-rendering");
-          lastRenderedPsJson = psJson;
-          render();
-        }
-      } catch { /* ignore */ }
-    }, 2000);
-    // Initialise the snapshot so the first poll doesn't cause a spurious re-render
-    try {
-      lastRenderedPsJson = JSON.stringify(parseProgramState() || {});
-    } catch { /* ignore */ }
-
-    // ─── Scale the 1 280×720 reference canvas to fill the actual viewport ───
-    // LiveKit sets the browser viewport to the encoding dimensions (e.g.
-    // 1 920×1 080 for HD).  We keep the slot coordinates on the 1 280×720
-    // reference grid and use a CSS transform to stretch the canvas to match.
-    function scaleCanvas() {
-      const sw = window.innerWidth / 1280;
-      const sh = window.innerHeight / 720;
-      canvas.style.transform = `scale(${sw}, ${sh})`;
+      for (const [sid, track] of want) {
+        if (audioEls.has(sid)) continue;
+        const el = track.attach();
+        audioBin.appendChild(el);
+        audioEls.set(sid, { track, el });
+      }
+      for (const [sid, a] of audioEls) {
+        if (want.has(sid)) continue;
+        a.track.detach(a.el);
+        a.el.remove();
+        audioEls.delete(sid);
+      }
     }
-    window.addEventListener("resize", scaleCanvas);
-    scaleCanvas();
 
-    // ─── Connect and start ───
+    function endRecording(reason) {
+      if (ended) return;
+      ended = true;
+      console.log("[compositor] ending:", reason);
+      console.log("END_RECORDING");
+    }
+
+    function checkIdle(resolved) {
+      if (!idleEndSec || !startedLogged) return;
+      const anyone = resolved.slots.some((r) => !!r.identity);
+      if (anyone) { idleSince = null; return; }
+      if (idleSince === null) idleSince = Date.now();
+      else if (Date.now() - idleSince >= idleEndSec * 1000) endRecording("no eligible participants for " + idleEndSec + "s");
+    }
+
+    const rerender = () => render();
+    room
+      .on(RoomEvent.TrackSubscribed, rerender)
+      .on(RoomEvent.TrackUnsubscribed, rerender)
+      .on(RoomEvent.TrackPublished, rerender)
+      .on(RoomEvent.TrackUnpublished, rerender)
+      .on(RoomEvent.TrackMuted, rerender)
+      .on(RoomEvent.TrackUnmuted, rerender)
+      .on(RoomEvent.ParticipantConnected, rerender)
+      .on(RoomEvent.ParticipantDisconnected, rerender)
+      .on(RoomEvent.ParticipantMetadataChanged, rerender)
+      .on(RoomEvent.ParticipantNameChanged, rerender)
+      .on(RoomEvent.ParticipantPermissionsChanged, rerender)
+      .on(RoomEvent.RoomMetadataChanged, rerender)
+      .on(RoomEvent.Disconnected, () => endRecording("disconnected"));
+
+    // Safety net for missed events + idle timer.
+    setInterval(render, 1000);
+
     await room.connect(wsUrl, token);
     render();
-
-    // LiveKit egress waits for this log line before starting the stream.
+    // LiveKit egress starts encoding once this line is logged.
+    startedLogged = true;
     console.log("START_RECORDING");
   </script>
 </body>

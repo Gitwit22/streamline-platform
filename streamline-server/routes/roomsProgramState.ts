@@ -9,9 +9,9 @@ import {
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { actorMay } from "../lib/roomModerationPolicy";
 import {
-  normalizeProgramState,
-  DEFAULT_PROGRAM_STATE,
-  type ProgramState,
+  applyProgramStatePatch,
+  upgradeProgramState,
+  type ProgramStateV2,
 } from "../lib/programState";
 import { getLiveKitSdk } from "../lib/livekit";
 
@@ -25,7 +25,7 @@ const BROADCAST_BASE_DELAY_MS = 200;
 
 async function broadcastProgramStateOnce(
   livekitRoomName: string,
-  programState: ProgramState,
+  programState: ProgramStateV2,
 ): Promise<void> {
   const sdk = await getLiveKitSdk();
   const RoomServiceClient = (sdk as any).RoomServiceClient;
@@ -58,7 +58,7 @@ async function broadcastProgramStateOnce(
 
 async function broadcastProgramStateWithRetry(
   livekitRoomName: string,
-  programState: ProgramState,
+  programState: ProgramStateV2,
 ): Promise<void> {
   for (let attempt = 1; attempt <= BROADCAST_MAX_RETRIES; attempt++) {
     try {
@@ -81,6 +81,12 @@ async function broadcastProgramStateWithRetry(
       }
     }
   }
+}
+
+/** LiveKit identity of the room owner (host tokens use the owner uid). */
+function roomHostIdentity(roomData: any): string | null {
+  const v = roomData?.ownerId || roomData?.ownerUid || roomData?.uid || null;
+  return typeof v === "string" && v.trim() ? v.trim() : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -106,8 +112,9 @@ router.get(
     try {
       const snap = await db.collection("rooms").doc(roomId).get();
       const data = snap.exists ? ((snap.data() as any) || {}) : {};
-      const programState: ProgramState | null = data.programState
-        ? { ...DEFAULT_PROGRAM_STATE, ...data.programState }
+      // Always answer in v2 (stored v1 documents are upgraded on read).
+      const programState: ProgramStateV2 | null = data.programState
+        ? upgradeProgramState(data.programState, roomHostIdentity(data))
         : null;
 
       return res.json({ ok: true, roomId, programState });
@@ -150,28 +157,24 @@ router.patch(
         .status(401)
         .json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    const patch = normalizeProgramState(req.body);
-    if (!patch) {
-      return res.status(400).json({ error: "invalid_program_state" });
-    }
-
     try {
       const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
-      const now = new Date().toISOString();
 
-      // Read current state, merge, persist
+      // Read current state, apply the (v2 or legacy v1) patch, persist v2 +
+      // legacy mirror fields.
       const roomRef = db.collection("rooms").doc(roomId);
       const snap = await roomRef.get();
-      const existing =
-        snap.exists && (snap.data() as any)?.programState
-          ? (snap.data() as any).programState
-          : {};
-      const merged: ProgramState = {
-        ...DEFAULT_PROGRAM_STATE,
-        ...existing,
-        ...patch,
-        updatedAt: now,
-      };
+      const roomData = snap.exists ? ((snap.data() as any) || {}) : {};
+      const result = applyProgramStatePatch(
+        roomData.programState,
+        req.body,
+        roomHostIdentity(roomData),
+        Date.now(),
+      );
+      if (!result.ok) {
+        return res.status(400).json({ error: "invalid_program_state", detail: result.error });
+      }
+      const merged = result.value;
 
       await roomRef.set(
         { programState: merged, updatedAt: serverTimestamp } as any,

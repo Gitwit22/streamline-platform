@@ -42,6 +42,7 @@ import onboardingRoutes from "./routes/onboarding";
 import { startRecordingCleanup, stopRecordingCleanup } from "./services/recordingCleanup";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
+import fs from "fs";
 import { getLiveKitSdk } from "./lib/livekit"; // adjust path
 import type { RoomServiceClient } from "livekit-server-sdk";
 import { getCurrentMonthKey } from "./lib/usageTracker";
@@ -80,6 +81,7 @@ import horizonRoomHooks from "./routes/horizon/roomHooks";
 import horizonBotApi from "./routes/horizon/botApi";
 
 import { uploadVideo } from "./lib/storageClient";
+import { egressTemplateBase, egressTemplateBaseSource } from "./lib/egressTemplate";
 
 
 const PORT = process.env.PORT || 5137;
@@ -235,10 +237,24 @@ app.use((req, _res, next) => {
 app.use(cookieParser());
 
 // Egress compositor templates – served as static HTML so LiveKit's headless
-// Chromium can load them via the customBaseUrl parameter.
+// Chromium can load them via the customBaseUrl parameter.  public/ is not
+// copied into dist/, so resolve it from the cwd (Render runs `npm run start`
+// in streamline-server/) and fall back to the path next to the build output
+// (dist/index.js → ../public) when started from elsewhere.
+const egressTemplatesDir = [
+  path.join(process.cwd(), "public", "egress-templates"),
+  path.join(__dirname, "..", "public", "egress-templates"),
+  path.join(__dirname, "public", "egress-templates"),
+].find((p) => fs.existsSync(path.join(p, "program-compositor.html")));
+if (!egressTemplatesDir) {
+  console.warn("[egress-templates] public/egress-templates not found; compositor template will 404");
+}
 app.use(
   "/egress-templates",
-  express.static(path.join(process.cwd(), "public", "egress-templates"))
+  express.static(egressTemplatesDir || path.join(process.cwd(), "public", "egress-templates"), {
+    // Templates are fetched once per egress; keep them fresh across deploys.
+    maxAge: 0,
+  })
 );
 
 app.use("/api/auth", authRoutes);
@@ -1028,6 +1044,22 @@ const server = app.listen(PORT, () => {
     },
     `Server listening on http://localhost:${PORT}`
   );
+
+  // Egress compositor template origin: without it every output (RTMP, HLS,
+  // recordings, Instagram) falls back to LiveKit's built-in layouts and
+  // ignores the host's 🎬 Layout choice.
+  {
+    const base = egressTemplateBase();
+    const source = egressTemplateBaseSource();
+    if (base) {
+      logger.info({ egressTemplateBase: base, source }, "Egress compositor template base configured");
+    } else if (String(process.env.NODE_ENV || "").toLowerCase() === "production") {
+      logger.warn(
+        "EGRESS_TEMPLATE_BASE_URL is not set (and RENDER_EXTERNAL_URL is unavailable): egress outputs " +
+          "will use LiveKit built-in layouts and ignore the program layout. Set it to this backend's public https origin."
+      );
+    }
+  }
 
   // Start the export render worker (background Firestore poller).
   // Set EXPORT_WORKER_ENABLED=0 to disable on instances that should not render.
