@@ -1,14 +1,10 @@
 /**
  * Support Tickets routes — admin-only ticket management.
  *
- * requireAdmin is applied at the mount point in index.ts.
+ * requireAdmin is applied at the mount point in index.ts
+ * (/api/horizon/support/tickets). Same handlers and collection
+ * (supportTickets) as /api/admin/support/tickets.
  */
-import { Router } from "express";
+import adminSupportTicketsRouter from "./adminSupportTickets";
 
-const router = Router();
-
-router.get("/", (_req, res) => {
-  res.json({ ok: true, tickets: [] });
-});
-
-export default router;
+export default adminSupportTicketsRouter;

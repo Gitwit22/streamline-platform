@@ -1,13 +1,15 @@
 /**
- * Admin monitoring & operational awareness endpoints.
+ * Admin monitoring & operational awareness endpoints (admin Operations tab).
  *
- * These endpoints give the admin console visibility into:
- *   - Platform health overview
- *   - Monitored service status
- *   - Webhook delivery log
- *   - Active alerts
- *   - Active rooms
- *   - Support tickets (horizon_events with type support.request)
+ *   GET /monitoring/overview           counts: webhooks 24h, live rooms, open tickets, pending alerts
+ *   GET /monitoring/services           dependency checks (lib/serviceHealth.ts, cached 30s; ?fresh=1)
+ *   GET /monitoring/webhooks           recent webhook deliveries (webhookDeliveries)
+ *   GET /alerts                        recent Horizon events (horizon_events, capped)
+ *   GET /rooms/active                  live rooms with access mode, viewers, active outputs
+ *   GET /rooms/:roomId/stream-summary  admin view of the post-stream summary
+ *
+ * Support tickets moved to routes/adminSupportTickets.ts (supportTickets
+ * collection), mounted by routes/admin.ts at /support/tickets.
  *
  * All routes require admin authentication (requireAdmin middleware is
  * applied by the parent router that mounts this sub-router).
@@ -15,54 +17,67 @@
 
 import express from "express";
 import { firestore } from "../firebaseAdmin";
+import { countQuery } from "../lib/adminMetrics";
+import { getServiceHealth } from "../lib/serviceHealth";
+import { getCurrentViewers } from "../lib/viewerStats";
+import { readViewerStats } from "../lib/viewerStatsPure";
+import { getStreamSummary } from "../lib/streamSummary";
+import { resolveRoomAccessMode } from "../lib/roomAccessPolicy";
+import { EGRESS_SESSIONS } from "../lib/streamingMeter";
 
 const router = express.Router();
 
+function toMs(v: any): number | null {
+  if (v === null || v === undefined) return null;
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v?.toMillis === "function") return v.toMillis();
+  if (v instanceof Date) return v.getTime();
+  if (typeof v === "string") {
+    const t = Date.parse(v);
+    return Number.isFinite(t) ? t : null;
+  }
+  return null;
+}
+
+/** Run fn over items with at most `n` in flight. */
+async function mapLimit<T, R>(items: T[], n: number, fn: (item: T) => Promise<R>): Promise<R[]> {
+  const out: R[] = new Array(items.length);
+  let i = 0;
+  const workers = Array.from({ length: Math.min(n, items.length) }, async () => {
+    while (i < items.length) {
+      const idx = i++;
+      out[idx] = await fn(items[idx]);
+    }
+  });
+  await Promise.all(workers);
+  return out;
+}
+
 // -------------------------------------------------------------------------
 // GET /api/admin/monitoring/overview
-// High-level health summary for the admin dashboard.
 // -------------------------------------------------------------------------
 router.get("/monitoring/overview", async (_req, res) => {
   try {
-    // Webhook delivery stats (last 24h)
     const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
-    const deliveriesSnap = await firestore
-      .collection("webhookDeliveries")
-      .where("createdAt", ">=", oneDayAgo)
-      .orderBy("createdAt", "desc")
-      .limit(200)
-      .get();
-
-    let successCount = 0;
-    let failedCount = 0;
-    for (const doc of deliveriesSnap.docs) {
-      const d = doc.data();
-      if (d.status === "success") successCount++;
-      else failedCount++;
-    }
-
-    // Active rooms count
-    const activeRoomsSnap = await firestore
-      .collection("rooms")
-      .where("status", "==", "live")
-      .limit(500)
-      .get();
-
-    // Pending support events count
-    const pendingSupportSnap = await firestore
-      .collection("horizon_events")
-      .where("status", "==", "pending")
-      .limit(500)
-      .get();
-
+    const deliveries = firestore.collection("webhookDeliveries").where("createdAt", ">=", oneDayAgo);
+    const [total, failed, retrying, activeRooms, openTickets, inProgressTickets, pendingAlerts] = await Promise.all([
+      countQuery(deliveries, "webhooks 24h"),
+      countQuery(deliveries.where("status", "==", "failed"), "webhooks failed"),
+      countQuery(deliveries.where("status", "==", "retrying"), "webhooks retrying"),
+      countQuery(firestore.collection("rooms").where("status", "==", "live"), "live rooms"),
+      countQuery(firestore.collection("supportTickets").where("status", "in", ["open", "new"]), "open tickets"),
+      countQuery(firestore.collection("supportTickets").where("status", "==", "in_progress"), "in-progress tickets"),
+      countQuery(firestore.collection("horizon_events").where("status", "==", "pending"), "pending alerts"),
+    ]);
+    const t = Number(total || 0);
+    const f = Number(failed || 0);
+    const r = Number(retrying || 0);
     return res.json({
-      webhooks: {
-        total: deliveriesSnap.size,
-        success: successCount,
-        failed: failedCount,
-      },
-      activeRooms: activeRoomsSnap.size,
-      pendingSupportEvents: pendingSupportSnap.size,
+      webhooks: { total: t, success: Math.max(0, t - f - r), failed: f, retrying: r },
+      activeRooms: Number(activeRooms || 0),
+      supportTickets: { open: Number(openTickets || 0), inProgress: Number(inProgressTickets || 0) },
+      // Legacy name: pending Horizon events (alerts / support requests).
+      pendingSupportEvents: Number(pendingAlerts || 0),
       checkedAt: new Date().toISOString(),
     });
   } catch (err: any) {
@@ -73,45 +88,11 @@ router.get("/monitoring/overview", async (_req, res) => {
 
 // -------------------------------------------------------------------------
 // GET /api/admin/monitoring/services
-// Returns a list of monitored services and their current state.
-// (Placeholder: initially populated from env-var presence checks.)
 // -------------------------------------------------------------------------
-router.get("/monitoring/services", async (_req, res) => {
+router.get("/monitoring/services", async (req, res) => {
   try {
-    const services = [
-      {
-        name: "api_server",
-        status: "operational",
-        checkedAt: new Date().toISOString(),
-      },
-      {
-        name: "firestore",
-        status: firestore ? "operational" : "degraded",
-        checkedAt: new Date().toISOString(),
-      },
-      {
-        name: "livekit",
-        status: process.env.LIVEKIT_URL ? "configured" : "not_configured",
-        checkedAt: new Date().toISOString(),
-      },
-      {
-        name: "webhook_hooks",
-        status:
-          process.env.STREAMLINE_HOOKS_ENABLED === "true"
-            ? "enabled"
-            : "disabled",
-        checkedAt: new Date().toISOString(),
-      },
-      {
-        name: "horizon_bot",
-        status:
-          process.env.HORIZON_WEBHOOK_URL && process.env.HORIZON_WEBHOOK_SECRET
-            ? "configured"
-            : "not_configured",
-        checkedAt: new Date().toISOString(),
-      },
-    ];
-
+    const fresh = String(req.query.fresh || "") === "1";
+    const services = await getServiceHealth({ fresh });
     return res.json({ services });
   } catch (err: any) {
     console.error("[admin/monitoring/services]", err?.message || err);
@@ -121,30 +102,17 @@ router.get("/monitoring/services", async (_req, res) => {
 
 // -------------------------------------------------------------------------
 // GET /api/admin/monitoring/webhooks
-// Recent webhook delivery log (paginated).
 // -------------------------------------------------------------------------
 router.get("/monitoring/webhooks", async (req, res) => {
   try {
-    const limit = Math.min(
-      Math.max(parseInt(String(req.query.limit || "50"), 10) || 50, 1),
-      200
-    );
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || "50"), 10) || 50, 1), 200);
     const statusFilter = String(req.query.status || "").trim().toLowerCase();
 
-    let query: FirebaseFirestore.Query = firestore
-      .collection("webhookDeliveries")
-      .orderBy("createdAt", "desc")
-      .limit(limit);
-
-    if (statusFilter === "success" || statusFilter === "failed") {
-      query = firestore
-        .collection("webhookDeliveries")
-        .where("status", "==", statusFilter)
-        .orderBy("createdAt", "desc")
-        .limit(limit);
+    let query: FirebaseFirestore.Query = firestore.collection("webhookDeliveries");
+    if (statusFilter === "success" || statusFilter === "failed" || statusFilter === "retrying") {
+      query = query.where("status", "==", statusFilter);
     }
-
-    const snap = await query.get();
+    const snap = await query.orderBy("createdAt", "desc").limit(limit).get();
     const deliveries = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
 
     return res.json({ deliveries, count: deliveries.length });
@@ -156,23 +124,14 @@ router.get("/monitoring/webhooks", async (req, res) => {
 
 // -------------------------------------------------------------------------
 // GET /api/admin/alerts
-// Recent alerts (horizon_events with type containing "alert" or "support").
+// Recent Horizon events (support.alert / alert.* / monitoring.*), stored by
+// routes/horizon/botApi.ts and routes/horizon.ts (capped collection).
 // -------------------------------------------------------------------------
 router.get("/alerts", async (req, res) => {
   try {
-    const limit = Math.min(
-      Math.max(parseInt(String(req.query.limit || "50"), 10) || 50, 1),
-      200
-    );
-
-    const snap = await firestore
-      .collection("horizon_events")
-      .orderBy("createdAt", "desc")
-      .limit(limit)
-      .get();
-
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || "50"), 10) || 50, 1), 200);
+    const snap = await firestore.collection("horizon_events").orderBy("createdAt", "desc").limit(limit).get();
     const alerts = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-
     return res.json({ alerts, count: alerts.length });
   } catch (err: any) {
     console.error("[admin/alerts]", err?.message || err);
@@ -182,34 +141,75 @@ router.get("/alerts", async (req, res) => {
 
 // -------------------------------------------------------------------------
 // GET /api/admin/rooms/active
-// List rooms with status "live".
+// Rooms with status "live": owner, access mode, participants, current/peak/
+// unique viewers, active outputs (open egress meters), session start.
 // -------------------------------------------------------------------------
 router.get("/rooms/active", async (req, res) => {
   try {
-    const limit = Math.min(
-      Math.max(parseInt(String(req.query.limit || "100"), 10) || 100, 1),
-      500
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit || "50"), 10) || 50, 1), 200);
+    const withViewers = String(req.query.viewers ?? "1") !== "0";
+
+    const snap = await firestore.collection("rooms").where("status", "==", "live").limit(limit).get();
+
+    const ownerIds = Array.from(
+      new Set(snap.docs.map((d) => String((d.data() as any)?.ownerId || "").trim()).filter(Boolean))
     );
+    const ownerEmails = new Map<string, string | null>();
+    for (let i = 0; i < ownerIds.length; i += 100) {
+      const refs = ownerIds.slice(i, i + 100).map((id) => firestore.collection("users").doc(id));
+      try {
+        const owners = await firestore.getAll(...refs, { fieldMask: ["email", "displayName"] });
+        owners.forEach((o) => ownerEmails.set(o.id, o.exists ? ((o.data() as any)?.email ?? null) : null));
+      } catch (err: any) {
+        console.warn("[admin/rooms/active] owner lookup failed:", err?.message || err);
+      }
+    }
 
-    const snap = await firestore
-      .collection("rooms")
-      .where("status", "==", "live")
-      .limit(limit)
-      .get();
-
-    const rooms = snap.docs.map((doc) => {
-      const d = doc.data() || {};
+    const rooms = await mapLimit(snap.docs, 8, async (doc) => {
+      const d = (doc.data() || {}) as any;
+      const stats = readViewerStats(d.viewerStats);
+      const [current, outputs] = await Promise.all([
+        withViewers ? getCurrentViewers(doc.id, { room: d }).catch(() => null) : Promise.resolve(null),
+        countQuery(
+          firestore.collection(EGRESS_SESSIONS).where("roomId", "==", doc.id).where("meterOpen", "==", true),
+          "room outputs"
+        ),
+      ]);
       return {
         roomId: doc.id,
+        name: d.name || d.title || null,
         livekitRoomName: d.livekitRoomName || null,
         roomType: d.roomType || null,
         ownerId: d.ownerId || null,
+        ownerEmail: d.ownerId ? ownerEmails.get(String(d.ownerId)) ?? null : null,
         status: d.status || null,
-        createdAt: d.createdAt || null,
+        access: resolveRoomAccessMode(d),
+        createdAt: toMs(d.createdAt),
+        startedAt: stats?.startedAt ?? toMs(d.liveStartedAt) ?? null,
+        sessionId: stats?.sessionId ?? null,
+        participants: current ? current.host + current.onStage + current.rtcAudience : null,
+        onStage: current ? current.host + current.onStage : null,
+        currentViewers: current ? current.total : null,
+        hlsViewers: current ? current.hls : null,
+        livekitRoomExists: current ? current.roomExists : null,
+        viewerStats: stats
+          ? {
+              sessionId: stats.sessionId,
+              startedAt: stats.startedAt,
+              endedAt: stats.endedAt,
+              peak: stats.peak,
+              totalUnique: stats.totalUnique,
+              totalUniqueRtc: stats.totalUniqueRtc,
+              totalUniqueHls: stats.totalUniqueHls,
+            }
+          : null,
+        hlsStatus: d.hls?.status || null,
+        activeOutputs: outputs,
       };
     });
 
-    return res.json({ rooms, count: rooms.length });
+    rooms.sort((a, b) => Number(b.startedAt || 0) - Number(a.startedAt || 0));
+    return res.json({ rooms, count: rooms.length, limit });
   } catch (err: any) {
     console.error("[admin/rooms/active]", err?.message || err);
     return res.status(500).json({ error: "internal_error" });
@@ -217,38 +217,23 @@ router.get("/rooms/active", async (req, res) => {
 });
 
 // -------------------------------------------------------------------------
-// GET /api/admin/support/tickets
-// List support-related horizon_events (type = support.request) with status.
+// GET /api/admin/rooms/:roomId/stream-summary?sessionId=
+// Same payload as GET /api/rooms/:roomId/stream-summary (host-only there).
 // -------------------------------------------------------------------------
-router.get("/support/tickets", async (req, res) => {
+router.get("/rooms/:roomId/stream-summary", async (req, res) => {
+  const roomId = String(req.params.roomId || "").trim();
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(roomId)) return res.status(400).json({ error: "invalid_room_id" });
+  const rawSession = typeof req.query.sessionId === "string" ? req.query.sessionId.trim() : "";
+  if (rawSession && !/^[A-Za-z0-9_-]{1,128}$/.test(rawSession)) return res.status(400).json({ error: "invalid_session_id" });
   try {
-    const limit = Math.min(
-      Math.max(parseInt(String(req.query.limit || "50"), 10) || 50, 1),
-      200
-    );
-    const statusFilter = String(req.query.status || "").trim().toLowerCase();
-
-    let query: FirebaseFirestore.Query = firestore
-      .collection("horizon_events")
-      .where("type", "==", "support.request")
-      .orderBy("createdAt", "desc")
-      .limit(limit);
-
-    if (statusFilter) {
-      query = firestore
-        .collection("horizon_events")
-        .where("type", "==", "support.request")
-        .where("status", "==", statusFilter)
-        .orderBy("createdAt", "desc")
-        .limit(limit);
-    }
-
-    const snap = await query.get();
-    const tickets = snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
-
-    return res.json({ tickets, count: tickets.length });
+    const roomSnap = await firestore.collection("rooms").doc(roomId).get();
+    if (!roomSnap.exists) return res.status(404).json({ error: "room_not_found" });
+    const summary = await getStreamSummary(roomId, roomSnap.data() || {}, rawSession || null);
+    if (!summary) return res.status(404).json({ error: "no_session" });
+    res.setHeader("Cache-Control", "no-store");
+    return res.json(summary);
   } catch (err: any) {
-    console.error("[admin/support/tickets]", err?.message || err);
+    console.error("[admin/rooms/stream-summary]", err?.message || err);
     return res.status(500).json({ error: "internal_error" });
   }
 });

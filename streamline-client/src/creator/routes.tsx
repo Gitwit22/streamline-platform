@@ -30,6 +30,7 @@ import EditorDisabled from "./pages/EditorDisabled";
 import AdminUsage from "./pages/AdminUsage";
 import AdminDashboard from "./pages/AdminDashboard";
 import SupportDashboard from "./pages/SupportDashboard";
+import { AdminGuard } from "./components/admin/AdminGuard";
 
 // ── Editing sub-lane (creator-only) ──────────────────────────────────
 import AssetLibrary from "./features/editing/AssetLibrary";
@@ -87,9 +88,11 @@ export function creatorRoutes(flags: CreatorRouteFlags) {
       <Route path="/invite/:inviteId" element={<InviteRedeem />} />
 
       {/* Admin */}
-      <Route path="/admin/usage" element={<AdminUsage />} />
-      <Route path="/admin/dashboard" element={<AdminDashboard />} />
-      <Route path="/admin/support" element={<SupportDashboard />} />
+      {/* Client guard only; every admin API is enforced server-side (requireAdmin). */}
+      <Route path="/admin" element={<Navigate to="/admin/dashboard" replace />} />
+      <Route path="/admin/usage" element={<AdminGuard><AdminUsage /></AdminGuard>} />
+      <Route path="/admin/dashboard" element={<AdminGuard><AdminDashboard /></AdminGuard>} />
+      <Route path="/admin/support" element={<AdminGuard><SupportDashboard /></AdminGuard>} />
 
       {/* Streaming flow */}
       <Route path="/join" element={<Join />} />

@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { firestore } from "../firebaseAdmin";
+import { touchUserActivity } from "../lib/activityTracker";
 
 /**
  * Admin authentication middleware
@@ -144,6 +145,8 @@ export async function requireAdmin(
       return;
     }
 
+    if (userData && Object.keys(userData).length > 0) touchUserActivity(userId, userData);
+
     req.adminUser = {
       uid: userId,
       email: userData.email || "unknown",
@@ -204,10 +207,15 @@ export async function logAdminAction(
       Object.entries(details || {}).filter(([, v]) => v !== undefined)
     );
     const ip = safeDetails.ip || "unknown";
+    // Top-level targetUid so the admin user detail view can query
+    // adminLogs where targetUid == uid (most actions pass details.userId).
+    const targetRaw = safeDetails.targetUid ?? safeDetails.userId;
+    const targetUid = typeof targetRaw === "string" && targetRaw.trim() ? targetRaw.trim() : null;
     await firestore.collection("adminLogs").add({
       adminId,
       action,
       details: safeDetails,
+      ...(targetUid ? { targetUid } : {}),
       timestamp: new Date(),
       ip,
     });

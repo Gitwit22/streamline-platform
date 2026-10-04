@@ -12,6 +12,8 @@
  *     • HMAC-SHA256 signature verification via X-Horizon-Signature header
  *     • Rate-limited (60 req / 60s per IP)
  *     • Accepts bot commands/responses (support.alert, chat.response, monitoring.heartbeat, etc.)
+ *     • support.alert / alert.* / monitoring.* (not heartbeats) are stored in the
+ *       capped horizon_events collection (GET /api/admin/alerts)
  *
  *   Support API (Bot queries StreamLine)
  *   ────────────────────────────────────
@@ -39,6 +41,8 @@ import { logger } from "../../lib/logger";
 import { verifyHorizonSecret, getHorizonWebhookConfig } from "../../lib/horizon/webhookConfig";
 import { verifySignature } from "../../lib/horizon/hmacVerify";
 import { PERMISSION_ERRORS } from "../../lib/permissionErrors";
+import { persistHorizonEvent } from "../../lib/horizonEventStore";
+import { shouldPersistHorizonEvent } from "../../lib/horizonEventStorePure";
 
 const router = Router();
 
@@ -148,11 +152,18 @@ router.post(
 
       logger.info({ requestId, eventType, eventId }, "horizon inbound event received");
 
+      // Alerts / support / monitoring events are kept in the capped
+      // horizon_events collection so the admin Operations tab shows them.
+      let storedId: string | null = null;
+      if (shouldPersistHorizonEvent(eventType)) {
+        storedId = await persistHorizonEvent(eventType, eventId, payload?.data);
+      }
+
       // ── Route by event type ──────────────────────────────────────
       switch (eventType) {
         case "support.alert": {
           logger.info({ requestId, eventId, data: payload.data }, "support alert received");
-          res.json({ ok: true, type: eventType, id: eventId });
+          res.json({ ok: true, type: eventType, id: eventId, stored: Boolean(storedId) });
           return;
         }
 
@@ -181,6 +192,10 @@ router.post(
         }
 
         default: {
+          if (storedId) {
+            res.json({ ok: true, type: eventType, id: eventId, stored: true });
+            return;
+          }
           // Unknown event type — accept but flag as unhandled
           logger.warn({ requestId, eventType, eventId }, "unhandled inbound event type");
           res.json({ ok: true, unhandled: true, type: eventType });

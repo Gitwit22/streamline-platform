@@ -4,13 +4,16 @@ import { apiFetchAuth } from "../../lib/api";
 import { ResetCodeDialog, type IssuedResetCode } from "../components/ResetCodeDialog";
 import { PlanOverridePanel, type AdminPlanOverrideView } from "../components/admin/PlanOverridePanel";
 import { UsageCreditsPanel } from "../components/admin/UsageCreditsPanel";
+import { AdminNav } from "../components/admin/AdminGuard";
+import { buildUsagePath, filterUsageRows, planLabel, type PlanOption } from "./adminUsageQuery";
 
 interface UsageData {
   userId: string;
-  email: string;
+  email?: string | null;
   displayName?: string;
   isAdmin?: boolean;
-  planId: "free" | "starter" | "pro" | "basic" | "enterprise" | "internal_unlimited";
+  /** Base plan id (any plan doc id). */
+  planId: string;
   passwordReset?: {
     active?: boolean;
     requestedAt?: number | null;
@@ -59,6 +62,7 @@ interface UsageData {
   percentUsed: number;
   isBlocked: boolean;
   lastActive?: Date;
+  lastActiveAt?: number | null;
 }
 
 interface AdminStats {
@@ -67,8 +71,11 @@ interface AdminStats {
   activeToday: number;
   activeThisWeek: number;
   activeThisMonth: number;
+  /** Streaming minutes this (UTC) month across all users. */
   totalMinutesUsed: number;
   averageMinutesPerUser: number;
+  averageMinutesPerActiveUser?: number;
+  monthKey?: string;
 }
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
@@ -82,6 +89,12 @@ export default function AdminUsage() {
   
   const [selectedPlan, setSelectedPlan] = useState<string>("all");
   const [searchQuery, setSearchQuery] = useState("");
+  // Server-side email prefix search (users.emailLower) + cursor pagination.
+  const [emailPrefix, setEmailPrefix] = useState("");
+  const [appliedPrefix, setAppliedPrefix] = useState("");
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [plans, setPlans] = useState<PlanOption[]>([]);
   
   // Modal states
   const [showGrantModal, setShowGrantModal] = useState(false);
@@ -94,27 +107,69 @@ export default function AdminUsage() {
   const [resetLoadingUserId, setResetLoadingUserId] = useState<string | null>(null);
   const [issuedResetCode, setIssuedResetCode] = useState<IssuedResetCode | null>(null);
 
-  // Get admin user ID (in production, extract from JWT)
-  const adminUserId = localStorage.getItem("sl_userId") || "admin";
+  // The server identifies the admin from the session; this is kept only for
+  // older request bodies that still carry it.
+  const adminUserId = "";
 
   useEffect(() => {
     fetchData();
-  }, [selectedPlan]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedPlan, appliedPrefix]);
+
+  // Plan list for filters / dropdowns (no hardcoded plan ids).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetchAuth(`${API_BASE}/api/admin/plans`, {}, { allowNonOk: true });
+        if (!res.ok || cancelled) return;
+        const body = await res.json().catch(() => ({}));
+        setPlans(((body?.plans || []) as Array<{ id: string; name?: string }>).map((p) => ({ id: p.id, name: p.name })));
+      } catch {
+        // dropdowns fall back to the ids present in the data
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const planOptions: PlanOption[] =
+    plans.length > 0
+      ? plans
+      : Array.from(new Set(usageData.map((u) => u.planId || "free"))).map((id) => ({ id }));
+
+  const loadMore = async () => {
+    if (!nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const res = await apiFetchAuth(
+        `${API_BASE}${buildUsagePath({ plan: selectedPlan, emailPrefix: appliedPrefix, cursor: nextCursor, limit: 100 })}`,
+        {},
+        { allowNonOk: true }
+      );
+      if (!res.ok) throw new Error(`Failed to fetch usage: ${res.status}`);
+      const body = await res.json();
+      setUsageData((prev) => [...prev, ...((body.usage || []) as UsageData[])]);
+      setNextCursor(body.nextCursor || null);
+    } catch (err: any) {
+      alert(`Error: ${err?.message || "Failed to load more users"}`);
+    } finally {
+      setLoadingMore(false);
+    }
+  };
 
   const fetchData = async () => {
     setLoading(true);
     setError(null);
 
     try {
-      // Fetch usage data
-      const usageUrl = new URL(`${API_BASE}/api/admin/usage`);
-      usageUrl.searchParams.append("adminUserId", adminUserId);
-      usageUrl.searchParams.append("limit", "100");
-      if (selectedPlan !== "all") {
-        usageUrl.searchParams.append("plan", selectedPlan);
-      }
-
-      const usageRes = await apiFetchAuth(usageUrl.toString(), {}, { allowNonOk: true });
+      // Fetch usage data (relative-safe path; see buildUsagePath)
+      const usageRes = await apiFetchAuth(
+        `${API_BASE}${buildUsagePath({ plan: selectedPlan, emailPrefix: appliedPrefix, limit: 100 })}`,
+        {},
+        { allowNonOk: true }
+      );
       
       if (usageRes.status === 403) {
         setError("Access denied. Admin privileges required.");
@@ -128,12 +183,10 @@ export default function AdminUsage() {
 
       const usageJson = await usageRes.json();
       setUsageData(usageJson.usage || []);
+      setNextCursor(usageJson.nextCursor || null);
 
       // Fetch stats
-      const statsUrl = new URL(`${API_BASE}/api/admin/stats`);
-      statsUrl.searchParams.append("adminUserId", adminUserId);
-
-      const statsRes = await apiFetchAuth(statsUrl.toString(), {}, { allowNonOk: true });
+      const statsRes = await apiFetchAuth(`${API_BASE}/api/admin/stats`, {}, { allowNonOk: true });
       if (statsRes.ok) {
         const statsJson = await statsRes.json();
         setStats(statsJson);
@@ -246,7 +299,7 @@ export default function AdminUsage() {
       );
       if (typeof data?.resetSecret === "string" && data.resetSecret) {
         setIssuedResetCode({
-          email: user.email,
+          email: user.email || user.userId,
           code: data.resetSecret,
           expiresAt: data?.passwordReset?.expiresAt ?? null,
         });
@@ -258,15 +311,8 @@ export default function AdminUsage() {
     }
   };
 
-  // Filter data by search query
-  const filteredData = usageData.filter((user) => {
-    const query = searchQuery.toLowerCase();
-    return (
-      user.email.toLowerCase().includes(query) ||
-      user.displayName?.toLowerCase().includes(query) ||
-      user.userId.toLowerCase().includes(query)
-    );
-  });
+  // Filter the loaded rows (email / name / uid); missing emails are fine.
+  const filteredData = filterUsageRows(usageData, searchQuery);
 
   if (loading && !stats) {
     return (
@@ -305,7 +351,8 @@ export default function AdminUsage() {
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-3xl font-bold mb-2">Admin Usage Dashboard</h1>
-            <p className="text-gray-400">Manage users, plans, and feature flags</p>
+            <p className="text-gray-400 mb-2">Streaming usage, credits, overrides and billing per user</p>
+            <AdminNav current="usage" />
           </div>
           <button
             onClick={() => nav("/admin/dashboard")}
@@ -321,13 +368,13 @@ export default function AdminUsage() {
             <StatCard label="Total Users" value={stats.totalUsers} icon="👥" />
             <StatCard label="Active Today" value={stats.activeToday} icon="🟢" />
             <StatCard
-              label="Total Minutes"
-              value={Math.round(stats.totalMinutesUsed).toLocaleString()}
+              label={`Streaming min (${stats.monthKey || "this month"})`}
+              value={Math.round(stats.totalMinutesUsed || 0).toLocaleString()}
               icon="⏱️"
             />
             <StatCard
-              label="Avg Minutes/User"
-              value={Math.round(stats.averageMinutesPerUser)}
+              label="Avg min / active user"
+              value={Math.round(stats.averageMinutesPerActiveUser ?? stats.averageMinutesPerUser ?? 0)}
               icon="📊"
             />
           </div>
@@ -336,12 +383,12 @@ export default function AdminUsage() {
         {/* Plan Distribution */}
         {stats && (
           <div className="bg-gray-900 rounded-lg p-6 mb-8">
-            <h2 className="text-xl font-semibold mb-4">Users by Plan</h2>
+            <h2 className="text-xl font-semibold mb-4">Users by Base Plan</h2>
             <div className="grid grid-cols-4 gap-4">
               {Object.entries(stats.usersByPlan).map(([plan, count]) => (
                 <div key={plan} className="text-center">
                   <div className="text-2xl font-bold text-red-500">{count}</div>
-                  <div className="text-sm text-gray-400 capitalize">{plan}</div>
+                  <div className="text-sm text-gray-400">{planLabel(planOptions, plan)}</div>
                 </div>
               ))}
             </div>
@@ -354,23 +401,45 @@ export default function AdminUsage() {
             <div className="flex-1">
               <input
                 type="text"
-                placeholder="Search by email, name, or user ID..."
+                placeholder="Filter loaded rows by email, name, or user ID..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded text-white"
               />
             </div>
+            <form
+              className="flex gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                setAppliedPrefix(emailPrefix.trim().toLowerCase());
+              }}
+            >
+              <input
+                type="search"
+                aria-label="Search all users by email prefix"
+                placeholder="Email starts with… (all users)"
+                value={emailPrefix}
+                onChange={(e) => {
+                  setEmailPrefix(e.target.value);
+                  if (!e.target.value.trim()) setAppliedPrefix("");
+                }}
+                className="px-4 py-2 bg-gray-800 border border-gray-700 rounded text-white"
+              />
+              <button type="submit" className="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm">
+                Search
+              </button>
+            </form>
             <select
               value={selectedPlan}
               onChange={(e) => setSelectedPlan(e.target.value)}
               className="px-4 py-2 bg-gray-800 border border-gray-700 rounded text-white"
             >
               <option value="all">All Plans</option>
-              <option value="free">Free</option>
-              <option value="basic">Basic</option>
-              <option value="starter">Starter</option>
-              <option value="pro">Pro</option>
-              <option value="enterprise">Enterprise</option>
+              {planOptions.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name || p.id}
+                </option>
+              ))}
             </select>
           </div>
         </div>
@@ -421,7 +490,7 @@ export default function AdminUsage() {
                           user.planId
                         )}`}
                       >
-                        {user.planId.toUpperCase()}
+                        {planLabel(planOptions, user.planId)}
                       </span>
                       <div className="text-[11px] text-gray-500 mt-1">Stripe/base plan</div>
                       {user.planOverride && (
@@ -567,6 +636,17 @@ export default function AdminUsage() {
               No users found matching your criteria
             </div>
           )}
+          {nextCursor && (
+            <div className="text-center py-4">
+              <button
+                onClick={loadMore}
+                disabled={loadingMore}
+                className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+              >
+                {loadingMore ? "Loading…" : "Load more users"}
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -616,7 +696,7 @@ export default function AdminUsage() {
                 planOverride={selectedUser.planOverride ?? null}
                 decidedBy={selectedUser.decidedBy}
                 subscriptionBlockedReason={selectedUser.subscriptionBlockedReason}
-                planOptions={["free", "basic", "starter", "pro", "enterprise", "internal_unlimited"].map((id) => ({ id }))}
+                planOptions={planOptions}
                 onChanged={async () => {
                   setShowPlanModal(false);
                   await fetchData();
@@ -633,11 +713,11 @@ export default function AdminUsage() {
                 onChange={(e) => setNewPlan(e.target.value)}
                 className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded text-white"
               >
-                <option value="free">Free</option>
-                <option value="basic">Basic</option>
-                <option value="starter">Starter</option>
-                <option value="pro">Pro</option>
-                <option value="enterprise">Enterprise</option>
+                {planOptions.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name || p.id}
+                  </option>
+                ))}
               </select>
             </div>
             <div>

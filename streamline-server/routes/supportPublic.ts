@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import admin from "firebase-admin";
 import { firestore } from "../firebaseAdmin";
 import { tryGetAuthUserAny } from "../middleware/requireAuth";
+import { emitSupportTicketCreated } from "../events/emitters/supportEmitter";
 
 const router = Router();
 
@@ -172,7 +173,9 @@ router.post("/submit", async (req, res) => {
 
   await ticketRef.set({
     ticketId: ticketRef.id,
-    status: "new",
+    // Admin lifecycle: open -> in_progress -> resolved/closed (legacy "new" reads as open).
+    status: "open",
+    history: [],
     source: "streamline_support_page",
     submittedAt: nowIso,
     createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -195,6 +198,23 @@ router.post("/submit", async (req, res) => {
       context,
     },
   });
+
+  // Notify Horizon / webhook subscribers (fire-and-forget; the message body
+  // and IP hash stay out of the event). There is no outbound email provider:
+  // the submitter gets no confirmation email.
+  try {
+    emitSupportTicketCreated({
+      entityId: ticketRef.id,
+      actor: {
+        userId: authUser?.uid || "anonymous",
+        username: email || "anonymous",
+        role: submitterMode === "user" ? "user" : "anonymous",
+      },
+      data: { subject, category, priority, status: "open", source: "streamline_support_page", submitterMode },
+    });
+  } catch (err: any) {
+    console.warn("[support] ticket created event failed:", err?.message || err);
+  }
 
   return res.status(201).json({ ok: true, ticketId: ticketRef.id });
 });

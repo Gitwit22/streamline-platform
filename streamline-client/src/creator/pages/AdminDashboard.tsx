@@ -15,6 +15,10 @@ import { PlanOverridePanel, type AdminPlanOverrideView } from "../components/adm
 import { SystemJobsPanel } from "../components/admin/SystemJobsPanel";
 import { DeleteAccountDialog, type DeleteTarget } from "../components/admin/DeleteAccountDialog";
 import { UsageCreditsPanel } from "../components/admin/UsageCreditsPanel";
+import { OperationsPanel } from "../components/admin/OperationsPanel";
+import { SupportTicketsPanel } from "../components/admin/SupportTicketsPanel";
+import { UserDetailDrawer } from "../components/admin/UserDetailDrawer";
+import { AdminNav } from "../components/admin/AdminGuard";
 
 // Normalize base so if you set VITE_API_BASE to ".../api" it won't double up.
 const API_BASE = (import.meta.env.VITE_API_BASE || "")
@@ -72,7 +76,10 @@ interface User {
   };
   /** Tri-state in Firestore; missing => ON (server normalizes to a boolean). */
   billingEnabled?: boolean;
+  /** Streaming minutes this (UTC) month. */
   minutesUsed?: number;
+  /** users.lastActiveAt (epoch ms). */
+  lastActiveAt?: number | null;
   /** LEGACY monthly bonus (migrated to one-time credits). */
   bonusMinutes?: number;
   /** Remaining one-time usage credit minutes (carry over month to month). */
@@ -96,8 +103,9 @@ interface UsageRecord {
   planId: PlanId;
   minutesUsed: number;
   bonusMinutes: number;
-  planLimit: number;
-  effectiveLimit: number;
+  /** null = unlimited, 0 = none. */
+  planLimit: number | null;
+  effectiveLimit: number | null;
   percentUsed: number;
   isBlocked: boolean;
 }
@@ -127,15 +135,24 @@ interface AdminStats {
   activeToday: number;
   activeThisWeek: number;
   activeThisMonth: number;
+  /** Streaming minutes this (UTC) month across all users. */
   totalMinutesUsed: number;
   averageMinutesPerUser: number;
+  averageMinutesPerActiveUser?: number;
+  planOverrides?: number;
+  deletedUsers?: number;
+  usersWithUsageThisMonth?: number;
+  monthKey?: string;
+  notes?: Record<string, string>;
 }
 
 interface Plan {
   id: string;
   name: string;
   description: string;
-  price: number;
+  /** Legacy price field; the product reads priceMonthly (falls back to price). */
+  price?: number;
+  priceMonthly?: number;
   visibility?: "public" | "hidden" | "admin";
   limits: {
     maxSessionMinutes: number;
@@ -383,7 +400,11 @@ function categorizeFeature(flag: FeatureFlag): { category: FeatureCategory; labe
 export default function AdminDashboard() {
   const navigate = useNavigate();
 
-  const [activeTab, setActiveTab] = useState<"overview" | "users" | "usage" | "features" | "plans" | "jobs">("overview");
+  const [activeTab, setActiveTab] = useState<"overview" | "users" | "usage" | "operations" | "support" | "features" | "plans" | "jobs">("overview");
+  // User detail drawer (users table, live rooms, support tickets).
+  const [detailUserId, setDetailUserId] = useState<string | null>(null);
+  // "Reset plan to defaults" confirmation with the server-side diff.
+  const [resetPreview, setResetPreview] = useState<{ plan: Plan; changes: Array<{ path: string; current: unknown; next: unknown }> } | null>(null);
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
 
   // Rename to match “updated admin” mental model
@@ -557,7 +578,8 @@ export default function AdminDashboard() {
   };
 
   const loadUsage = async () => {
-    const res = await apiFetch("/api/admin/usage?limit=100");
+    // counters=0: the Support Hub period counters are not shown here.
+    const res = await apiFetch("/api/admin/usage?limit=100&counters=0");
     if (res.ok) {
       const data = await res.json();
       setUsage(data.usage || []);
@@ -577,6 +599,44 @@ export default function AdminDashboard() {
     if (res.ok) {
       const data = await res.json();
       setPlans(data.plans || []);
+    }
+  };
+
+  // The user drawer can open from Operations / Support before plans load.
+  useEffect(() => {
+    if (detailUserId && plans.length === 0) void loadPlans();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailUserId]);
+
+  const planOptions = plans.length > 0 ? plans.map((p) => ({ id: p.id, name: p.name })) : [];
+
+  const formatPreviewValue = (v: unknown) => (v === null ? "Unlimited / none set" : v === undefined ? "—" : typeof v === "object" ? JSON.stringify(v) : String(v));
+
+  const previewPlanReset = async (plan: Plan) => {
+    const res = await apiFetch(`/api/admin/plans/${encodeURIComponent(plan.id)}/reset-preview`);
+    if (!res.ok) {
+      showToast(`Reset preview failed: ${await describeNonOkResponse(res)}`);
+      return;
+    }
+    const data = await res.json();
+    setResetPreview({ plan, changes: data.changes || [] });
+  };
+
+  const confirmPlanReset = async () => {
+    if (!resetPreview) return;
+    const { plan } = resetPreview;
+    const res = await apiFetch(`/api/admin/plans/${encodeURIComponent(plan.id)}/reset`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: "RESET" }),
+    });
+    if (res.ok) {
+      const data = await res.json().catch(() => ({}));
+      showToast(`${plan.name} reset to defaults (${data.count ?? 0} field(s) changed)`);
+      setResetPreview(null);
+      await loadPlans();
+    } else {
+      showToast(`Reset failed: ${await describeNonOkResponse(res)}`);
     }
   };
 
@@ -944,6 +1004,9 @@ export default function AdminDashboard() {
           <div>
             <h1 style={S.title}>⚙️ Admin Dashboard</h1>
             <p style={S.subtitle}>StreamLine Control Center</p>
+            <div style={{ marginTop: 6 }}>
+              <AdminNav current="dashboard" />
+            </div>
           </div>
           <div style={{ display: "flex", gap: 12 }}>
             <button onClick={() => navigate("/join")} style={S.ghostBtn}>
@@ -958,11 +1021,13 @@ export default function AdminDashboard() {
 
       {/* Nav */}
       <nav style={S.nav}>
-        {(["overview", "users", "usage", "features", "plans", "jobs"] as const).map((t) => (
+        {(["overview", "users", "usage", "operations", "support", "features", "plans", "jobs"] as const).map((t) => (
           <button key={t} onClick={() => setActiveTab(t)} style={{ ...S.tab, ...(activeTab === t ? S.tabActive : {}) }}>
             {t === "overview" && "📊 Overview"}
             {t === "users" && "👥 Users"}
             {t === "usage" && "📈 Usage"}
+            {t === "operations" && "🩺 Operations"}
+            {t === "support" && "🎫 Support"}
             {t === "features" && "🎛️ Features"}
             {t === "plans" && "💎 Plans"}
             {t === "jobs" && "🕒 System Jobs"}
@@ -987,8 +1052,8 @@ export default function AdminDashboard() {
                     { l: "Active Today", v: stats.activeToday, i: "🟢" },
                     { l: "Active Week", v: stats.activeThisWeek, i: "📅" },
                     { l: "Active Month", v: stats.activeThisMonth, i: "📆" },
-                    { l: "Total Minutes", v: stats.totalMinutesUsed.toLocaleString(), i: "⏱️" },
-                    { l: "Avg/User", v: stats.averageMinutesPerUser.toFixed(1), i: "📊" },
+                    { l: `Streaming min (${stats.monthKey || "this month"})`, v: Math.round(stats.totalMinutesUsed || 0).toLocaleString(), i: "⏱️" },
+                    { l: "Avg min / active user", v: Number(stats.averageMinutesPerActiveUser ?? stats.averageMinutesPerUser ?? 0).toFixed(1), i: "📊" },
                   ].map((s, i) => (
                     <div key={i} style={S.statCard}>
                       <div style={{ fontSize: 28 }}>{s.i}</div>
@@ -999,7 +1064,11 @@ export default function AdminDashboard() {
                 </div>
 
                 <div style={S.card}>
-                  <h3 style={{ margin: "0 0 16px" }}>Users by Plan</h3>
+                  <h3 style={{ margin: "0 0 4px" }}>Users by Base Plan</h3>
+                  <p style={{ margin: "0 0 16px", fontSize: 12, color: "#9ca3af" }}>
+                    {stats.notes?.usersByPlan || "Base plan (users.planId)."}
+                    {typeof stats.planOverrides === "number" ? ` ${stats.planOverrides} user(s) have an admin plan override.` : ""}
+                  </p>
                   {Object.entries(stats.usersByPlan).map(([p, c]) => {
                     const pct = stats.totalUsers > 0 ? ((c / stats.totalUsers) * 100).toFixed(1) : "0";
                     return (
@@ -1085,7 +1154,14 @@ export default function AdminDashboard() {
                             <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                               <div style={S.avatar}>{(u.displayName || u.email || "?")[0].toUpperCase()}</div>
                               <div>
-                                <div style={{ fontWeight: 500 }}>{u.displayName || "No Name"}</div>
+                                <button
+                                  type="button"
+                                  onClick={() => setDetailUserId(u.uid)}
+                                  style={{ background: "none", border: "none", padding: 0, color: "#e5e7eb", fontWeight: 500, cursor: "pointer", textAlign: "left" }}
+                                  title="Open user detail"
+                                >
+                                  {u.displayName || "No Name"}
+                                </button>
                                 <div style={{ fontSize: 11, color: "#6b7280" }}>{u.email}</div>
                               </div>
                             </div>
@@ -1105,11 +1181,11 @@ export default function AdminDashboard() {
             {p.name}
           </option>
         ))
-      : ["free", "basic", "starter", "pro", "enterprise", "internal_unlimited"].map((p) => (
-          <option key={p} value={p}>
-            {p === "internal_unlimited" ? "Internal Unlimited" : p}
-          </option>
-        ))}
+      : [
+          <option key={u.planId || "free"} value={u.planId || "free"}>
+            {u.planId || "free"}
+          </option>,
+        ]}
 </select>
                             {u.planOverride ? (
                               <div style={{ fontSize: 11, color: "#a5b4fc", marginTop: 4 }}>
@@ -1123,7 +1199,9 @@ export default function AdminDashboard() {
                           </td>
 
                           <td style={S.td}>
-                            <span style={S.blueBadge}>{u.minutesUsed || 0}m</span>
+                            <span style={S.blueBadge} title="Streaming minutes this month">
+                              {Math.round(u.minutesUsed || 0)}m
+                            </span>
                           </td>
                           <td style={S.td}>
                             <span style={S.greenBadge} title="Remaining one-time usage credit (carries over month to month)">
@@ -1152,7 +1230,10 @@ export default function AdminDashboard() {
 
                           <td style={S.td}>
                             <div style={{ display: "flex", gap: 8 }}>
-                              <button onClick={() => setSelectedUser(u)} style={S.actionBtn} title="Grant minutes">
+                              <button onClick={() => setDetailUserId(u.uid)} style={S.actionBtn} title="User detail (profile, usage, sessions, audit log)">
+                                🔎
+                              </button>
+                              <button onClick={() => setSelectedUser(u)} style={S.actionBtn} title="Credits & admin override">
                                 ⚡
                               </button>
                               <button onClick={() => resetPlanGuards(u.uid)} style={S.actionBtn} title="Reset plan-change limits">
@@ -1260,7 +1341,7 @@ export default function AdminDashboard() {
 
                       <div style={{ display: "flex", justifyContent: "space-between", fontSize: 13, marginBottom: 8 }}>
                         <span>
-                          {r.minutesUsed}m / {r.effectiveLimit}m
+                          {Math.round(r.minutesUsed)}m / {r.effectiveLimit === null ? "Unlimited" : `${r.effectiveLimit}m`}
                         </span>
                         <span
                           style={{
@@ -1394,6 +1475,12 @@ export default function AdminDashboard() {
               </div>
             )}
 
+            {/* OPERATIONS TAB (self-loading; see OperationsPanel) */}
+            {activeTab === "operations" && <OperationsPanel onOpenUser={setDetailUserId} />}
+
+            {/* SUPPORT TAB (self-loading; see SupportTicketsPanel) */}
+            {activeTab === "support" && <SupportTicketsPanel onMessage={showToast} onOpenUser={setDetailUserId} />}
+
             {/* SYSTEM JOBS TAB (self-loading; see SystemJobsPanel) */}
             {activeTab === "jobs" && <SystemJobsPanel onMessage={showToast} />}
 
@@ -1410,13 +1497,19 @@ export default function AdminDashboard() {
                   <button
                     disabled={seedingPlans}
                     onClick={async () => {
-                      if (!window.confirm("Seed / update ALL plans with canonical features, limits, and editing fields? Existing Stripe config is preserved.")) return;
+                      if (
+                        !window.confirm(
+                          "Add missing plans and missing fields from the built-in defaults?\n\nExisting values (your edits, Unlimited, 0) are never changed. Use “Reset to defaults” on a plan to overwrite it."
+                        )
+                      )
+                        return;
                       setSeedingPlans(true);
                       try {
                         const res = await apiFetch("/api/admin/plans/seed", { method: "POST" });
                         if (res.ok) {
                           const data = await res.json();
-                          showToast(`Plans seeded: ${data.created?.length || 0} created, ${data.updated?.length || 0} updated`);
+                          const filled = (data.updated || []).reduce((n: number, u: any) => n + (u.added?.length || 0), 0);
+                          showToast(`Plans: ${data.created?.length || 0} created, ${data.updated?.length || 0} filled (${filled} missing field(s)), nothing overwritten`);
                           await loadPlans();
                         } else {
                           showToast("Seed failed: " + (await describeNonOkResponse(res)));
@@ -1426,7 +1519,7 @@ export default function AdminDashboard() {
                     }}
                     style={{ padding: "8px 16px", background: "#4f46e5", color: "#fff", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: 600, fontSize: 13, opacity: seedingPlans ? 0.6 : 1, whiteSpace: "nowrap", alignSelf: "flex-start" }}
                   >
-                    {seedingPlans ? "⏳ Seeding…" : "🌱 Seed All Plans"}
+                    {seedingPlans ? "⏳ Adding…" : "🌱 Add missing plans/fields"}
                   </button>
                 </div>
 
@@ -1490,7 +1583,7 @@ export default function AdminDashboard() {
                           </div>
                           <div style={{ textAlign: "right" }}>
                             <div style={{ fontSize: 28, fontWeight: 700, color }}>
-                              ${plan.price}
+                              ${plan.priceMonthly ?? plan.price ?? 0}
                               <span style={{ fontSize: 12, color: "#9ca3af", fontWeight: 400 }}>/mo</span>
                             </div>
                           </div>
@@ -1520,8 +1613,6 @@ export default function AdminDashboard() {
                           {V2_FEATURE_FIELDS.filter((f) => plan.entitlements?.features?.[f.key]).map((f) => (
                             <FeaturePill key={f.key} enabled label={f.label} />
                           ))}
-                          {plan.editing?.ai?.autoCut && <FeaturePill enabled label="AI AutoCut" />}
-                          {plan.editing?.ai?.captions && <FeaturePill enabled label="AI Captions" />}
                         </div>
 
                         {/* Expand Toggle */}
@@ -1550,6 +1641,15 @@ export default function AdminDashboard() {
                                 marginBottom: 12,
                               }}
                             >
+                              <button
+                                type="button"
+                                onClick={() => previewPlanReset(plan)}
+                                disabled={isSaving}
+                                style={{ ...S.ghostBtn, padding: "8px 12px", fontSize: 13 }}
+                                title="Overwrite this plan with the built-in defaults (shows the changes first)"
+                              >
+                                ↺ Reset to defaults
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => savePlan(plan)}
@@ -1650,55 +1750,21 @@ export default function AdminDashboard() {
                               collapsed={getSectionCollapsed("✂️ Editing Suite", true)}
                               onToggle={(next) => setSectionCollapsedValue("✂️ Editing Suite", next)}
                             >
-                              {/* Editor access, projects and storage live in Features / Limits above. */}
+                              {/* Editor access, projects and storage live in Features / Limits above.
+                                  Exports/month, AI, transitions and export options are not enforced by
+                                  the product yet, so they are not editable here. */}
                               <EditRow label="Max Tracks" value={plan.editing?.maxTracks || 0} onChange={(v) => updatePlanField(plan.id, "editing.maxTracks", Number(v))} />
-                              <EditRow
-                                label="Exports/Month"
-                                value={plan.editing?.exportsPerMonth || 0}
-                                onChange={(v) => updatePlanField(plan.id, "editing.exportsPerMonth", Number(v))}
-                              />
-                              <ToggleRow
-                                label="Unlimited Exports"
-                                value={plan.editing?.unlimitedExports}
-                                onChange={(v) => updatePlanField(plan.id, "editing.unlimitedExports", v)}
-                              />
-                            </PlanSection>
-
-                            <PlanSection
-                              title="🤖 AI Features"
-                              defaultCollapsed
-                              collapsed={getSectionCollapsed("🤖 AI Features", true)}
-                              onToggle={(next) => setSectionCollapsedValue("🤖 AI Features", next)}
-                            >
-                              <ToggleRow label="AI AutoCut" value={plan.editing?.ai?.autoCut} onChange={(v) => updatePlanField(plan.id, "editing.ai.autoCut", v)} />
-                              <ToggleRow label="AI Captions" value={plan.editing?.ai?.captions} onChange={(v) => updatePlanField(plan.id, "editing.ai.captions", v)} />
-                              <ToggleRow label="AI Highlights" value={plan.editing?.ai?.highlights} onChange={(v) => updatePlanField(plan.id, "editing.ai.highlights", v)} />
-                            </PlanSection>
-
-                            <PlanSection
-                              title="🎬 Transitions"
-                              defaultCollapsed
-                              collapsed={getSectionCollapsed("🎬 Transitions", true)}
-                              onToggle={(next) => setSectionCollapsedValue("🎬 Transitions", next)}
-                            >
-                              <ToggleRow label="Basic Transitions" value={plan.editing?.transitions?.basic} onChange={(v) => updatePlanField(plan.id, "editing.transitions.basic", v)} />
-                              <ToggleRow label="Advanced Transitions" value={plan.editing?.transitions?.advanced} onChange={(v) => updatePlanField(plan.id, "editing.transitions.advanced", v)} />
-                            </PlanSection>
-
-                            <PlanSection
-                              title="📤 Export Options"
-                              defaultCollapsed
-                              collapsed={getSectionCollapsed("📤 Export Options", true)}
-                              onToggle={(next) => setSectionCollapsedValue("📤 Export Options", next)}
-                            >
-                              <ToggleRow label="Export Watermark" value={plan.editing?.export?.watermark} onChange={(v) => updatePlanField(plan.id, "editing.export.watermark", v)} />
-                              <ToggleRow label="Direct Upload" value={plan.editing?.export?.directUpload} onChange={(v) => updatePlanField(plan.id, "editing.export.directUpload", v)} />
-                              <ToggleRow label="Multi-Platform" value={plan.editing?.export?.multiPlatform} onChange={(v) => updatePlanField(plan.id, "editing.export.multiPlatform", v)} />
-                              <ToggleRow label="Priority Queue" value={plan.editing?.export?.priorityQueue} onChange={(v) => updatePlanField(plan.id, "editing.export.priorityQueue", v)} />
                             </PlanSection>
 
                             <PlanSection title="💰 Pricing" collapsible={false}>
-                              <EditRow label="Price ($/month)" value={plan.price} onChange={(v) => updatePlanField(plan.id, "price", Number(v))} />
+                              <EditRow
+                                label="Price ($/month, priceMonthly)"
+                                value={plan.priceMonthly ?? plan.price ?? 0}
+                                onChange={(v) => updatePlanField(plan.id, "priceMonthly", Number(v))}
+                              />
+                              <div style={{ fontSize: 12, color: "#9ca3af", margin: "0 0 8px" }}>
+                                Display price on the pricing page. Stripe prices are configured in Stripe (stripePriceId) and are not changed here.
+                              </div>
                               <div style={S.editRow}>
                                 <label style={S.editLabel}>Description</label>
                                 <input
@@ -1748,17 +1814,77 @@ export default function AdminDashboard() {
                 planOverride={selectedUser.planOverride ?? null}
                 decidedBy={selectedUser.decidedBy}
                 subscriptionBlockedReason={selectedUser.subscriptionBlockedReason}
-                planOptions={
-                  plans.length > 0
-                    ? plans.map((p) => ({ id: p.id, name: p.name }))
-                    : ["free", "basic", "starter", "pro", "enterprise", "internal_unlimited"].map((id) => ({ id }))
-                }
+                planOptions={planOptions}
                 onMessage={showToast}
                 onChanged={async () => {
                   setSelectedUser(null);
                   await loadUsers();
                 }}
               />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {detailUserId && (
+        <UserDetailDrawer
+          userId={detailUserId}
+          planOptions={planOptions}
+          onClose={() => setDetailUserId(null)}
+          onMessage={showToast}
+          onChanged={async () => {
+            if (activeTab === "users") await loadUsers();
+          }}
+        />
+      )}
+
+      {resetPreview && (
+        <div style={S.modalBg} onClick={() => setResetPreview(null)}>
+          <div style={{ ...S.modal, maxWidth: 640 }} onClick={(e) => e.stopPropagation()} role="dialog" aria-label="Reset plan to defaults">
+            <div style={S.modalHead}>
+              <span>Reset {resetPreview.plan.name} to defaults?</span>
+              <button onClick={() => setResetPreview(null)} style={S.closeBtn}>
+                ×
+              </button>
+            </div>
+            <div style={{ padding: 20 }}>
+              {resetPreview.changes.length === 0 ? (
+                <p style={{ margin: 0 }}>This plan already matches the built-in defaults. Nothing would change.</p>
+              ) : (
+                <>
+                  <p style={{ marginTop: 0, fontSize: 13, color: "#9ca3af" }}>
+                    These {resetPreview.changes.length} field(s) will be overwritten for every user on this plan. Stripe settings are kept.
+                  </p>
+                  <div style={{ maxHeight: 320, overflowY: "auto" }}>
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                      <thead>
+                        <tr>
+                          <th style={S.th}>Field</th>
+                          <th style={S.th}>Current</th>
+                          <th style={S.th}>Default</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {resetPreview.changes.map((c) => (
+                          <tr key={c.path}>
+                            <td style={S.td}>{c.path}</td>
+                            <td style={S.td}>{formatPreviewValue(c.current)}</td>
+                            <td style={S.td}>{formatPreviewValue(c.next)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+                <button onClick={() => setResetPreview(null)} style={S.ghostBtn}>
+                  Cancel
+                </button>
+                <button onClick={confirmPlanReset} style={S.redBtn} disabled={resetPreview.changes.length === 0}>
+                  Reset to defaults
+                </button>
+              </div>
             </div>
           </div>
         </div>

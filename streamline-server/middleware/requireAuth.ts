@@ -4,6 +4,7 @@ import jwt from "jsonwebtoken";
 import { auth as firebaseAuth } from "../firebaseAdmin";
 import { getUserAccount } from "../lib/userAccount";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { touchUserActivity } from "../lib/activityTracker";
 
 type AuthUser = { uid: string; iatSec?: number };
 
@@ -203,6 +204,11 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
         if (tokenIssuedAtMs < revokedAtMs) {
           return res.status(401).json({ error: "session_revoked" });
         }
+      }
+
+      // users.lastActiveAt (throttled: at most one write per uid per 10 min).
+      if (raw && typeof raw === "object" && Object.keys(raw).length > 0) {
+        touchUserActivity(user.uid, raw);
       }
     } catch (err) {
       console.error("[requireAuth] getUserAccount failed:", (err as any)?.message || err);

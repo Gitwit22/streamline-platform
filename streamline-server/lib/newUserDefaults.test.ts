@@ -14,6 +14,7 @@ test("buildNewUserDoc: billing defaults enabled", () => {
   });
 
   assert.equal(user.planId, "free");
+  assert.equal(user.emailLower, "test@example.com");
   assert.equal(user.billingEnabled, true);
   assert.equal(user.billingActive, false);
   assert.equal(user.billingStatus, "free");

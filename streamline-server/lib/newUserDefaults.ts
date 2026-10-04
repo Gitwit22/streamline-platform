@@ -19,6 +19,8 @@ export function buildNewUserDoc(input: NewUserDocInput) {
 
   const base = {
     email: input.email,
+    // Lower-cased copy for admin prefix search (GET /api/admin/usage?search=).
+    emailLower: String(input.email || "").trim().toLowerCase(),
     displayName: input.displayName ? String(input.displayName) : "",
     passwordHash: input.passwordHash,
 

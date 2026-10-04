@@ -8,6 +8,7 @@ import React, { useEffect, useRef, useState, useCallback } from "react";
 import { API_BASE } from "../../lib/apiBase";
 import { getFirebaseIdToken } from "../../lib/firebaseClient";
 import { apiFetchAuth } from "../../lib/api";
+import { AdminNav } from "../components/admin/AdminGuard";
 
 // ── Types ───────────────────────────────────────────────────────────────
 interface HorizonStatus {
@@ -117,7 +118,11 @@ export default function SupportDashboard() {
   // ── Render ──────────────────────────────────────────────────────────
   return (
     <div style={{ padding: 32, maxWidth: 720, margin: "0 auto", color: "#fff" }}>
-      <h1 style={{ fontSize: 24, marginBottom: 16 }}>Support Dashboard</h1>
+      <AdminNav current="support" />
+      <h1 style={{ fontSize: 24, margin: "16px 0" }}>Horizon Live Monitor</h1>
+      <p style={{ opacity: 0.7, fontSize: 13, marginTop: 0 }}>
+        Support tickets, service health and live rooms are in the Admin Dashboard (Support and Operations tabs).
+      </p>
 
       {error && (
         <div style={{ padding: 12, background: "#3a1c1c", borderRadius: 8, marginBottom: 16 }}>

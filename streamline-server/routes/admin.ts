@@ -7,7 +7,7 @@ console.log("✅ admin.ts loaded");
 import express from "express";
 
 import { firestore, auth as firebaseAuth } from "../firebaseAdmin";
-import { FieldValue } from "firebase-admin/firestore";
+import { FieldPath, FieldValue } from "firebase-admin/firestore";
 import { requireAdmin, logAdminAction } from "../middleware/adminAuth";
 import { computeUsageSummaryResult } from "./usageRoutes";
 import { getPlatformBillingEnabled, invalidatePlatformBillingCache } from "../lib/userAccount";
@@ -61,6 +61,10 @@ import {
   summarizeCredits,
 } from "../lib/usageCredits";
 import { activeCreditRemaining, validateCreditGrant } from "../lib/usageCreditsPure";
+import { computePeriodCounters, computePlatformStats, countQuery, listUsersPage } from "../lib/adminMetrics";
+import { normalizeUserListQuery } from "../lib/adminMetricsPure";
+import { planMissingFieldsPatch, planResetDiff, sanitizePlanMetaInput } from "../lib/planSeedPure";
+import adminSupportTicketsRoutes from "./adminSupportTickets";
 
 // Admin responses must never include credential material. Strip hashes and
 // replace reset/recovery state with their public views.
@@ -489,30 +493,57 @@ router.put("/plans/:planId", async (req, res) => {
       limits = converted.limits;
     }
 
-    const passthrough: Record<string, any> = {};
-    for (const [k, v] of Object.entries(body)) {
-      if (["id", "features", "limits", "limitsVersion", "caps", "createdAt", "entitlements"].includes(k)) continue;
-      const prev = existing[k];
-      const isPlainObject = (x: any) => !!x && typeof x === "object" && !Array.isArray(x);
-      // mergeFields replaces whole fields: keep untouched nested keys (e.g. editing.ai).
-      passthrough[k] = isPlainObject(v) && isPlainObject(prev) ? { ...prev, ...(v as any) } : v;
+    // Non-entitlement fields are validated (name, description, priceMonthly
+    // (`price` alias), visibility, editing.maxTracks). Unknown keys and the
+    // editor sub-options nothing enforces yet are ignored.
+    const { meta, errors: metaErrors } = sanitizePlanMetaInput(body);
+    if (metaErrors.length) {
+      return res.status(400).json({ error: "invalid_plan_fields", details: metaErrors });
     }
+    const { editing: editingMeta, ...metaTop } = meta as any;
     const updateData: Record<string, any> = {
-      ...passthrough,
+      ...metaTop,
       limitsVersion: PLAN_LIMITS_VERSION,
       features,
       limits,
       updatedAt: new Date().toISOString(),
     };
-
+    // editing.maxTracks is written as a field path so other editing keys stay.
+    const editingFields: Record<string, any> = {};
+    if (editingMeta && typeof editingMeta === "object") {
+      for (const [k, v] of Object.entries(editingMeta)) editingFields[`editing.${k}`] = v;
+    }
     if (!planSnap.exists) {
-      await planRef.set({ id: planId, ...updateData, createdAt: new Date().toISOString() });
+      await planRef.set({
+        id: planId,
+        ...updateData,
+        ...(editingMeta ? { editing: editingMeta } : {}),
+        createdAt: new Date().toISOString(),
+      });
     } else {
       // mergeFields: replace features/limits maps wholesale (no stale legacy keys).
-      await planRef.set(updateData, { mergeFields: Object.keys(updateData) });
+      const writeData: Record<string, any> = { ...updateData };
+      const mergeFields: Array<string | FieldPath> = Object.keys(updateData);
+      if (Object.keys(editingFields).length) {
+        writeData.editing = { ...(existing.editing || {}), ...(editingMeta || {}) };
+        for (const k of Object.keys(editingMeta || {})) mergeFields.push(new FieldPath("editing", k));
+      }
+      await planRef.set(writeData, { mergeFields });
     }
     invalidatePlanCache(planId);
-    await logAdminAction(req.adminUser!.uid, "update_plan", { planId, updateData });
+    // Audit: only what changed (entitlements compared on their v2 meaning).
+    const beforeV2 = toPlanDocV2(planId, planSnap.exists ? existing : getCatalogPlan(planId) || {});
+    const changes: Record<string, { from: any; to: any }> = {};
+    const cmp = (path: string, from: any, to: any) => {
+      if (JSON.stringify(from ?? null) !== JSON.stringify(to ?? null)) changes[path] = { from: from ?? null, to: to ?? null };
+    };
+    for (const k of Object.keys(features || {})) cmp(`features.${k}`, (beforeV2.features as any)[k], (features as any)[k]);
+    for (const k of Object.keys(limits || {})) cmp(`limits.${k}`, (beforeV2.limits as any)[k], (limits as any)[k]);
+    for (const [k, v] of Object.entries(metaTop)) {
+      cmp(k, k === "priceMonthly" ? existing.priceMonthly ?? existing.price : existing[k], v);
+    }
+    for (const [k, v] of Object.entries(editingMeta || {})) cmp(`editing.${k}`, existing.editing?.[k], v);
+    await logAdminAction(req.adminUser!.uid, "update_plan", { planId, created: !planSnap.exists, changes });
     res.json({ success: true, planId, updated: updateData, normalized: normalizePlanDoc(planId, { ...existing, ...updateData }) });
   } catch (error: any) {
     console.error("Failed to update plan:", error);
@@ -520,39 +551,110 @@ router.put("/plans/:planId", async (req, res) => {
   }
 });
 
-// ── Seed / ensure all canonical plan documents exist with full features+limits ──
+// ── Seed: add missing plans / missing fields ONLY (never overwrites) ──
+/**
+ * POST /api/admin/plans/seed
+ * Creates canonical plans that don't exist and fills fields a stored plan
+ * lacks. Existing values (admin edits, null = Unlimited, 0 = none) are never
+ * changed; a legacy (v1) doc is converted to v2 with the same meaning.
+ * Use POST /plans/:planId/reset to restore one plan to the catalog defaults.
+ */
 router.post("/plans/seed", async (req, res) => {
   try {
-    // Built-in v2 catalog (null = unlimited, 0 = none); same data as seed-plans.js.
-    const PLANS: Record<string, any> = PLAN_CATALOG_V2;
+    const results: {
+      created: string[];
+      updated: Array<{ planId: string; added: string[]; converted: boolean }>;
+      unchanged: string[];
+      errors: Array<{ planId: string; error: string }>;
+    } = { created: [], updated: [], unchanged: [], errors: [] };
 
-    const results: { created: string[]; updated: string[]; errors: Array<{ planId: string; error: string }> } = {
-      created: [], updated: [], errors: [],
-    };
-
-    for (const [planId, planData] of Object.entries(PLANS)) {
+    for (const [planId, canonical] of Object.entries(PLAN_CATALOG_V2)) {
       try {
         const docRef = firestore.collection("plans").doc(planId);
         const existingDoc = await docRef.get();
-        const payload: any = { ...planData, id: planId, updatedAt: new Date().toISOString() };
-        if (!existingDoc.exists) payload.createdAt = new Date().toISOString();
-        // mergeFields: replace features/limits maps wholesale (drops stale
-        // legacy keys) while preserving unrelated fields such as stripePriceId.
-        await docRef.set(payload, { mergeFields: Object.keys(payload) });
-        (existingDoc.exists ? results.updated : results.created).push(planId);
+        const existing = existingDoc.exists ? ((existingDoc.data() as any) || {}) : null;
+        const { patch, added, converted, created } = planMissingFieldsPatch(planId, existing, canonical);
+        const nowIso = new Date().toISOString();
+        if (created) {
+          await docRef.set({ ...patch, createdAt: nowIso, updatedAt: nowIso });
+          results.created.push(planId);
+        } else if (added.length || converted) {
+          if (converted) {
+            // Converted maps replace the legacy ones wholesale; everything else merges.
+            const { features: f, limits: l, limitsVersion: lv, ...rest } = patch as any;
+            await docRef.set({ ...rest, updatedAt: nowIso }, { merge: true });
+            await docRef.set({ features: f, limits: l, limitsVersion: lv }, { mergeFields: ["features", "limits", "limitsVersion"] });
+          } else {
+            await docRef.set({ ...patch, updatedAt: nowIso }, { merge: true });
+          }
+          results.updated.push({ planId, added, converted });
+        } else {
+          results.unchanged.push(planId);
+        }
       } catch (err: any) {
         results.errors.push({ planId, error: err?.message || String(err) });
       }
     }
 
     invalidatePlanCache();
-    await logAdminAction(req.adminUser!.uid, "seed_plans", { created: results.created, updated: results.updated, errors: results.errors.length });
-    res.json({ success: true, ...results });
+    await logAdminAction(req.adminUser!.uid, "seed_plans_missing_only", {
+      created: results.created,
+      updated: results.updated.map((u) => ({ planId: u.planId, added: u.added.slice(0, 50), converted: u.converted })),
+      errors: results.errors.length,
+    });
+    res.json({ success: true, mode: "missing_only", ...results });
   } catch (error: any) {
     console.error("Failed to seed plans:", error);
     res.status(500).json({ error: "Failed to seed plans", details: error.message });
   }
 });
+
+/**
+ * GET /api/admin/plans/:planId/reset-preview
+ * Field-by-field diff of what "Reset plan to defaults" would change.
+ */
+router.get("/plans/:planId/reset-preview", async (req, res) => {
+  try {
+    const { planId } = req.params;
+    const canonical = getCatalogPlan(planId);
+    if (!canonical) return res.status(404).json({ error: "no_catalog_defaults", planId });
+    const snap = await firestore.collection("plans").doc(planId).get();
+    const diff = planResetDiff(planId, snap.exists ? snap.data() : null, canonical);
+    res.json({ success: true, planId, exists: snap.exists, changes: diff, count: diff.length });
+  } catch (error: any) {
+    console.error("Failed to preview plan reset:", error);
+    res.status(500).json({ error: "Failed to preview plan reset" });
+  }
+});
+
+/**
+ * POST /api/admin/plans/:planId/reset   body: { confirm: "RESET" }
+ * Overwrites the plan's catalog fields (name, description, priceMonthly,
+ * visibility, features, limits) with the built-in defaults. Unrelated fields
+ * (e.g. Stripe price ids) are kept. Audit-logged with the full diff.
+ */
+router.post("/plans/:planId/reset", async (req, res) => {
+  try {
+    const { planId } = req.params;
+    if (req.body?.confirm !== "RESET") return res.status(400).json({ error: "confirm_required", expected: "RESET" });
+    const canonical = getCatalogPlan(planId);
+    if (!canonical) return res.status(404).json({ error: "no_catalog_defaults", planId });
+    const ref = firestore.collection("plans").doc(planId);
+    const snap = await ref.get();
+    const diff = planResetDiff(planId, snap.exists ? snap.data() : null, canonical);
+    const nowIso = new Date().toISOString();
+    const payload: any = { ...canonical, id: planId, updatedAt: nowIso };
+    if (!snap.exists) payload.createdAt = nowIso;
+    await ref.set(payload, { mergeFields: Object.keys(payload) });
+    invalidatePlanCache(planId);
+    await logAdminAction(req.adminUser!.uid, "reset_plan_to_defaults", { planId, changes: diff });
+    res.json({ success: true, planId, changes: diff, count: diff.length });
+  } catch (error: any) {
+    console.error("Failed to reset plan:", error);
+    res.status(500).json({ error: "Failed to reset plan" });
+  }
+});
+
 /**
  * GET /api/admin/users
  * List all users with usage information
@@ -577,6 +679,19 @@ router.get("/users", async (req, res) => {
 
     const now = Date.now();
     const planCtx = await loadAdminPlanContext();
+    // "Minutes" column: streaming minutes this month (same reader as the gate).
+    const monthKey = getCurrentMonthKey();
+    const usageByUid = new Map<string, any>();
+    if (snapshot.docs.length) {
+      try {
+        const usageSnaps = await firestore.getAll(
+          ...snapshot.docs.map((d) => firestore.collection("usageMonthly").doc(`${d.id}_${monthKey}`))
+        );
+        usageSnaps.forEach((u, i) => usageByUid.set(snapshot.docs[i].id, u.exists ? u.data() : {}));
+      } catch (e: any) {
+        console.warn("[admin/users] usage lookup failed:", e?.message || e);
+      }
+    }
 
     const users = await Promise.all(snapshot.docs.map(async (doc) => {
       const raw = doc.data() || {};
@@ -590,6 +705,9 @@ router.get("/users", async (req, res) => {
         uid: doc.id,
         ...toAdminSafeUser(raw),
         planId,
+        minutesUsed: readStreamingMinutes(usageByUid.get(doc.id) || {}),
+        streamingMinutesThisMonth: readStreamingMinutes(usageByUid.get(doc.id) || {}),
+        lastActiveAt: typeof (raw as any).lastActiveAt === "number" ? (raw as any).lastActiveAt : null,
         creditRemainingMinutes: creditSummary.remainingMinutes,
         // billingEnabled is tri-state in Firestore; missing => ON.
         billingEnabled: (raw as any).billingEnabled !== false,
@@ -718,6 +836,230 @@ router.post("/users/:userId/restore", async (req, res) => {
     res.status(500).json({ error: "Failed to restore user" });
   }
 });
+/**
+ * POST /api/admin/users/:userId/revoke-sessions   body: { reason? }
+ * Signs the user out everywhere: authRevokedAtMs = now (requireAuth /
+ * requireAdmin reject tokens issued earlier) + Firebase revokeRefreshTokens.
+ * Audit-logged.
+ */
+router.post("/users/:userId/revoke-sessions", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const adminUid = req.adminUser!.uid;
+    if (userId === adminUid) {
+      return res.status(400).json({ error: "Use 'log out everywhere' in your own account settings to revoke your own sessions" });
+    }
+    const ref = firestore.collection("users").doc(userId);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ error: "User not found" });
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim().slice(0, 500) : "";
+    const nowMs = Date.now();
+    await ref.set({ authRevokedAtMs: nowMs, updatedAt: nowMs }, { merge: true });
+    let firebaseRevoked: boolean | "no_firebase_user" = true;
+    try {
+      await firebaseAuth.revokeRefreshTokens(userId);
+    } catch (e: any) {
+      const code = String(e?.code || "");
+      if (code === "auth/user-not-found") firebaseRevoked = "no_firebase_user";
+      else {
+        firebaseRevoked = false;
+        console.warn("[admin] revokeRefreshTokens failed:", code || e?.message || e);
+      }
+    }
+    invalidateEntitlements(userId);
+    await logAdminAction(adminUid, "revoke_sessions", { userId, reason: reason || undefined, authRevokedAtMs: nowMs, firebaseRevoked });
+    await logAuthSecurityEvent({
+      event: "admin_sessions_revoked",
+      actorUserId: adminUid,
+      targetUserId: userId,
+      ip: req.ip || null,
+      details: { authRevokedAtMs: nowMs },
+    }).catch(() => undefined);
+    res.json({ success: true, userId, authRevokedAtMs: nowMs, firebaseRevoked });
+  } catch (error: any) {
+    console.error("Failed to revoke sessions:", error);
+    res.status(500).json({ error: "Failed to revoke sessions" });
+  }
+});
+
+function toMsLoose(v: any): number | null {
+  const ms = toMillis(v);
+  return ms === null ? null : ms;
+}
+
+/** adminLogs for one user (new targetUid field + legacy details.userId), newest first. */
+async function loadAdminLogsForUser(uid: string, limit = 20): Promise<any[]> {
+  const col = firestore.collection("adminLogs");
+  const run = async (field: string) => {
+    try {
+      const snap = await col.where(field, "==", uid).orderBy("timestamp", "desc").limit(limit).get();
+      return snap.docs;
+    } catch {
+      // Composite index missing: bounded unordered read, sorted in memory.
+      try {
+        const snap = await col.where(field, "==", uid).limit(100).get();
+        return snap.docs;
+      } catch (e: any) {
+        console.warn("[admin] adminLogs lookup failed:", field, e?.message || e);
+        return [];
+      }
+    }
+  };
+  const [a, b] = await Promise.all([run("targetUid"), run("details.userId")]);
+  const byId = new Map<string, any>();
+  [...a, ...b].forEach((d) => {
+    const x = (d.data() || {}) as any;
+    byId.set(d.id, {
+      id: d.id,
+      action: x.action || null,
+      adminId: x.adminId || null,
+      timestampMs: toMsLoose(x.timestamp),
+      details: x.details || {},
+    });
+  });
+  return Array.from(byId.values())
+    .sort((x, y) => Number(y.timestampMs || 0) - Number(x.timestampMs || 0))
+    .slice(0, limit);
+}
+
+/**
+ * GET /api/admin/users/:userId/detail
+ * Everything the admin user drawer shows, in one call with bounded queries:
+ * profile, plan sources + entitlements, usage this month, storage, rooms,
+ * recordings, billing state and the last 20 admin audit entries.
+ */
+router.get("/users/:userId/detail", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(userId)) return res.status(400).json({ error: "invalid_user_id" });
+    const userSnap = await firestore.collection("users").doc(userId).get();
+    if (!userSnap.exists) return res.status(404).json({ error: "User not found" });
+    const raw = (userSnap.data() || {}) as any;
+    const nowMs = Date.now();
+    const monthKey = getCurrentMonthKey();
+    const roomsQ = firestore.collection("rooms").where("ownerId", "==", userId);
+    const recQ = firestore.collection("recordings").where("userId", "==", userId);
+
+    const [status, ent, usageSnap, roomsCount, roomsSnap, recCount, recSnap, auditLog, platformBillingEnabled] = await Promise.all([
+      getStreamingUsageStatus(userId).catch((e: any) => {
+        console.warn("[admin/detail] usage status failed:", e?.message || e);
+        return null;
+      }),
+      getEffectiveEntitlements(userId, { fresh: true }),
+      firestore.collection("usageMonthly").doc(`${userId}_${monthKey}`).get(),
+      countQuery(roomsQ, "detail rooms"),
+      roomsQ.limit(50).get().catch(() => null),
+      countQuery(recQ, "detail recordings"),
+      recQ.limit(50).get().catch(() => null),
+      loadAdminLogsForUser(userId, 20),
+      getPlatformBillingEnabled().catch(() => true),
+    ]);
+
+    const usageDoc = usageSnap.exists ? ((usageSnap.data() || {}) as any) : {};
+    const usage = usageDoc.usage || {};
+    const storedOverride = readStoredPlanOverride(raw);
+    const billingTruth = normalizeBillingTruthFromUser({ ...raw, planId: raw.planId || "free" }, nowMs);
+
+    const recentRooms = (roomsSnap?.docs || [])
+      .map((d) => {
+        const x = (d.data() || {}) as any;
+        return {
+          roomId: d.id,
+          name: x.name || x.title || null,
+          status: x.status || null,
+          access: x.access || null,
+          createdAt: toMsLoose(x.createdAt),
+          lastLiveAt: x.viewerStats?.startedAt ?? null,
+        };
+      })
+      .sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
+      .slice(0, 10);
+    const recentRecordings = (recSnap?.docs || [])
+      .map((d) => {
+        const x = (d.data() || {}) as any;
+        return {
+          id: d.id,
+          roomId: x.roomId || null,
+          title: x.title || x.name || null,
+          status: x.status || null,
+          startedAt: toMsLoose(x.startedAt) ?? toMsLoose(x.createdAt),
+          durationMs: typeof x.durationMs === "number" ? x.durationMs : null,
+          billedMinutes: typeof x.billedMinutes === "number" ? x.billedMinutes : null,
+          sizeBytes: typeof x.sizeBytes === "number" ? x.sizeBytes : typeof x.fileSize === "number" ? x.fileSize : null,
+        };
+      })
+      .sort((a, b) => Number(b.startedAt || 0) - Number(a.startedAt || 0))
+      .slice(0, 10);
+
+    const deletedAtMs = getDeletedAtMs(raw);
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      success: true,
+      profile: {
+        uid: userId,
+        email: raw.email || null,
+        displayName: raw.displayName || null,
+        createdAt: toMsLoose(raw.createdAt),
+        lastActiveAt: toMsLoose(raw.lastActiveAt) ?? toMsLoose(raw.lastActive),
+        accountStatus: raw.accountStatus || "active",
+        deleted: isDeletedUserRecord(raw),
+        deletedAtMs,
+        deleteAfterMs: typeof raw.deleteAfterMs === "number" ? raw.deleteAfterMs : null,
+        isAdmin: Boolean(raw.admin?.isAdmin ?? raw.isAdmin),
+        authRevokedAtMs: typeof raw.authRevokedAtMs === "number" ? raw.authRevokedAtMs : null,
+        timeZone: raw.timeZone || null,
+        passwordReset: buildPublicPasswordResetState(raw.passwordReset),
+        recoveryConfigured: buildPublicRecoveryState(raw.recovery).configured,
+        canEnablePasswordReset: canAdminManagePasswordReset(req.adminUser!.uid, userId, raw),
+      },
+      plan: {
+        basePlanId: ent.source.basePlan,
+        stripePlanId: billingTruth.planId ?? null,
+        effectivePlanId: ent.planId,
+        effectivePlanName: ent.planName,
+        decidedBy: ent.source.decidedBy,
+        subscriptionBlockedReason: ent.source.subscription.blockedReason,
+        planOverride: storedOverride
+          ? { ...storedOverride, active: isOverrideActive(storedOverride, nowMs) }
+          : ent.source.adminOverride
+            ? { ...ent.source.adminOverride, active: true }
+            : null,
+      },
+      entitlements: serializeEntitlements(ent),
+      usage: {
+        monthKey,
+        streamingMinutes: readStreamingMinutes(usageDoc),
+        destinationMinutes: Number(usage.destinationMinutes ?? 0),
+        recordingMinutes: Number(usage.recordingMinutes ?? usage.minutes?.recording?.currentPeriod ?? 0),
+        hlsMinutes: Number(usage.outputMinutes?.hls ?? 0),
+        limitMinutes: status ? status.decision.limitMinutes : ent.limits.monthlyStreamingMinutes,
+        planAllowanceMinutes: ent.limits.monthlyStreamingMinutes,
+        creditRemainingMinutes: status ? status.credits.remainingMinutes : null,
+        creditConsumedThisMonth: status ? status.credits.consumedThisMonth : null,
+        isBlocked: status ? !status.decision.allowed : false,
+        storageUsedBytes: Number(raw.usage?.storageUsedBytes) || 0,
+        storageLimitBytes: ent.limits.storageBytes,
+        lifetimeStreamingMinutes: Number(raw.usage?.lifetime?.streamingMinutes || 0),
+      },
+      rooms: { count: roomsCount, recent: recentRooms },
+      recordings: { count: recCount, recent: recentRecordings },
+      billing: {
+        status: billingTruth.status,
+        stripeCustomerId: billingTruth.stripeCustomerId ?? null,
+        subscriptionId: billingTruth.subscriptionId ?? null,
+        billingEnabled: raw.billingEnabled !== false,
+        platformBillingEnabled,
+        pendingPlan: raw.pendingPlan ?? null,
+        billingTruth,
+      },
+      auditLog,
+    });
+  } catch (error: any) {
+    console.error("Failed to load user detail:", error);
+    res.status(500).json({ error: "Failed to load user detail" });
+  }
+});
+
 /**
  * GET /api/admin/users/:userId
  * Get detailed information about a specific user
@@ -1241,44 +1583,29 @@ router.post("/feature-flags/billing", async (req, res) => {
 
 /**
  * GET /api/admin/usage
- * Get usage statistics across all users
+ *   ?limit (1-200, default 50) &cursor (last userId of the previous page)
+ *   &search (email prefix; users.emailLower / email) &plan (base plan id)
+ *   &includeDeleted &counters=0 (skip the Support Hub period counters)
+ * Users are ordered by createdAt desc (search results: by email).
+ * Period counters (ticketsToday, activeUsers, ...) come from cached count()/
+ * sum() aggregates (see GET /usage/counters); they are kept in this response
+ * for the Support Hub.
  */
 router.get("/usage", async (req, res) => {
   try {
-    const limit = parseInt(req.query.limit as string) || 100;
-    const planFilter = req.query.plan as PlanId | undefined;
+    const listQuery = normalizeUserListQuery(req.query || {}, { limit: 50, maxLimit: 200 });
+    const { limit, includeDeleted } = listQuery;
     const { startMs, endMs } = parsePeriodRange(req.query || {});
     const activeProgramId = resolveProgramContext(req);
-    const includeDeleted = (() => {
-      const raw = String(req.query.includeDeleted || "").trim().toLowerCase();
-      return raw === "1" || raw === "true" || raw === "yes";
-    })();
+    const wantCounters = String(req.query.counters ?? "1") !== "0";
     const monthKey = getCurrentMonthKey();
 
     // Load platform billing flag once so the admin UI can accurately show
     // whether Stripe is globally enabled.
-    let platformBillingEnabled = true;
-    try {
-      const featuresSnap = await firestore.collection("config").doc("features").get();
-      const features = featuresSnap.exists ? (featuresSnap.data() as any) : {};
-      if (typeof features?.billingSystemEnabled === "boolean") {
-        platformBillingEnabled = features.billingSystemEnabled;
-      }
-    } catch {
-      // default true
-    }
+    const platformBillingEnabled = await getPlatformBillingEnabled().catch(() => true);
 
-    // Get all users
-    let usersQuery = firestore.collection("users");
-    if (planFilter) {
-      usersQuery = usersQuery.where("planId", "==", planFilter) as any;
-    }
-
-    const usersSnapshot = await usersQuery.limit(limit).get();
-
-    const userDocs = includeDeleted
-      ? usersSnapshot.docs
-      : usersSnapshot.docs.filter((doc) => !isDeletedUserRecord(doc.data()));
+    const page = await listUsersPage(listQuery);
+    const userDocs = includeDeleted ? page.docs : page.docs.filter((doc) => !isDeletedUserRecord(doc.data()));
 
     // Plans, flags, admins loaded once; each user resolved by the engine.
     const planCtx = await loadAdminPlanContext();
@@ -1377,163 +1704,38 @@ router.get("/usage", async (req, res) => {
           // Same decision as the start gate (bonus, override plan, overage opt-in).
           isBlocked: !gate.allowed,
           lastActive: userData.lastActive,
+          lastActiveAt: typeof userData.lastActiveAt === "number" ? userData.lastActiveAt : null,
         };
       })
     );
 
-    // Sort by percent used (most blocked users first)
+    // Sort by percent used within the page (most blocked users first)
     usageData.sort((a, b) => b.percentUsed - a.percentUsed);
 
-    const monthKeys = buildMonthKeys(startMs, endMs);
-
-    console.log("[admin/usage] period", {
-      startMs,
-      endMs,
-      startIso: new Date(startMs).toISOString(),
-      endIso: new Date(endMs).toISOString(),
-      activeProgramId,
-      monthKeys: Array.from(monthKeys),
-    });
-
-    // Period-scoped roomsCreated for Support Hub Usage card.
-    const roomsSnapshot = await firestore.collection("rooms").get();
-    let roomsCreatedSkippedProgram = 0;
-    let roomsCreatedSkippedTime = 0;
-    const roomsCreated = roomsSnapshot.docs.reduce((count, doc) => {
-      const data = doc.data();
-      if (!matchesProgramContext(data, activeProgramId)) { roomsCreatedSkippedProgram++; return count; }
-      const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
-      if (!isInRange(createdMs, startMs, endMs)) { roomsCreatedSkippedTime++; return count; }
-      return count + 1;
-    }, 0);
-    console.log("[admin/usage] rooms", {
-      total: roomsSnapshot.size,
-      skippedProgram: roomsCreatedSkippedProgram,
-      skippedTime: roomsCreatedSkippedTime,
-      roomsCreated,
-    });
-
-    const usersSnapshotAll = await firestore.collection("users").get();
-    const activeUsers = usersSnapshotAll.docs.reduce((count, doc) => {
-      const data = doc.data();
-      if (!includeDeleted && isDeletedUserRecord(data)) return count;
-      if (!matchesProgramContext(data, activeProgramId)) return count;
-      // Include createdAt as last-resort fallback for accounts that haven't yet
-      // received an explicit lastActive / lastActiveAt / updatedAt write.
-      const lastActiveMs = getDocMillis(data, ["lastActive", "lastActiveAt", "updatedAt", "createdAt"]);
-      return isInRange(lastActiveMs, startMs, endMs) ? count + 1 : count;
-    }, 0);
-    console.log("[admin/usage] activeUsers", { totalUsers: usersSnapshotAll.size, activeUsers });
-
-    const recordingsSnapshot = await firestore.collection("recordings").get();
-    let recordingsSkippedProgram = 0;
-    let recordingsSkippedTime = 0;
-    // Include "startedAt" because recordings started via /api/recordings/start
-    // are written with startedAt but no createdAt field.
-    const recordingsCreated = recordingsSnapshot.docs.reduce((count, doc) => {
-      const data = doc.data();
-      if (!matchesProgramContext(data, activeProgramId)) { recordingsSkippedProgram++; return count; }
-      const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at", "startedAt"]);
-      if (!isInRange(createdMs, startMs, endMs)) { recordingsSkippedTime++; return count; }
-      return count + 1;
-    }, 0);
-    console.log("[admin/usage] recordings", {
-      total: recordingsSnapshot.size,
-      skippedProgram: recordingsSkippedProgram,
-      skippedTime: recordingsSkippedTime,
-      recordingsCreated,
-    });
-
-    const usageMonthlySnap = await firestore.collection("usageMonthly").get();
-    let streamMinutes = 0;
-    let hlsMinutes = 0;
-    let apiRequests = 0;
-    let usageMonthlyMatched = 0;
-    usageMonthlySnap.docs.forEach((doc) => {
-      const data = doc.data() as any;
-      if (!matchesProgramContext(data, activeProgramId)) return;
-      const monthKey = String(data.monthKey || doc.id.split("_").pop() || "");
-      if (!monthKeys.has(monthKey)) return;
-      usageMonthlyMatched++;
-      const usage = data.usage || data.totals || {};
-      streamMinutes += readStreamingMinutes(data);
-      hlsMinutes += Number(usage.outputMinutes?.hls ?? 0) + Number(usage.hlsMinutes ?? 0);
-      apiRequests += Number(usage.apiRequests ?? usage.api_requests ?? 0);
-    });
-    console.log("[admin/usage] usageMonthly", {
-      total: usageMonthlySnap.size,
-      matched: usageMonthlyMatched,
-      streamMinutes,
-      hlsMinutes,
-      apiRequests,
-    });
-
-    let messagesSent = 0;
-    try {
-      const messageSnap = await firestore.collectionGroup("messages").get();
-      let messagesSkippedTime = 0;
-      let messagesSkippedProgram = 0;
-      messagesSent = messageSnap.docs.reduce((count, doc) => {
-        const data = doc.data() as any;
-        const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
-        if (!isInRange(createdMs, startMs, endMs)) { messagesSkippedTime++; return count; }
-        if (!activeProgramId) return count + 1;
-
-        const path = doc.ref.path.split("/");
-        const roomId = path.length >= 2 && path[0] === "rooms" ? path[1] : "";
-        if (!roomId) { messagesSkippedProgram++; return count; }
-        // When messages don't carry program fields, allow matching via roomId path token.
-        if (!roomId.includes(activeProgramId)) { messagesSkippedProgram++; return count; }
-        return count + 1;
-      }, 0);
-      console.log("[admin/usage] messages", {
-        total: messageSnap.size,
-        skippedTime: messagesSkippedTime,
-        skippedProgram: messagesSkippedProgram,
-        messagesSent,
-      });
-    } catch (msgErr: any) {
-      console.error("[admin/usage] collectionGroup('messages') failed:", msgErr?.message || msgErr);
-      messagesSent = 0;
-    }
-
-    let ticketsToday = 0;
-    try {
-      const ticketsSnapshot = await firestore.collection("supportTickets").get();
-      ticketsToday = ticketsSnapshot.docs.reduce((count, doc) => {
-        const data = doc.data();
-        if (!matchesProgramContext(data, activeProgramId)) return count;
-        const createdMs = getDocMillis(data, ["createdAt", "createdAtMs", "created", "created_at"]);
-        return isInRange(createdMs, startMs, endMs) ? count + 1 : count;
-      }, 0);
-    } catch (tickErr: any) {
-      console.error("[admin/usage] supportTickets query failed:", tickErr?.message || tickErr);
-      ticketsToday = 0;
-    }
-
-    console.log("[admin/usage] final counts", {
-      ticketsToday,
-      activeUsers,
-      roomsCreated,
-      messagesSent,
-      streamMinutes,
-      apiRequests,
-      recordingsCreated,
-      hlsMinutes,
-    });
+    const counters = wantCounters
+      ? await computePeriodCounters(startMs, endMs, activeProgramId).catch((e: any) => {
+          console.error("[admin/usage] counters failed:", e?.message || e);
+          return null;
+        })
+      : null;
 
     res.json({
-      ticketsToday: Number(ticketsToday || 0),
-      activeUsers: Number(activeUsers || 0),
-      roomsCreated: Number(roomsCreated || 0),
-      messagesSent: Number(messagesSent || 0),
-      streamMinutes: Number(streamMinutes || 0),
-      apiRequests: Number(apiRequests || 0),
-      recordingsCreated: Number(recordingsCreated || 0),
-      hlsMinutes: Number(hlsMinutes || 0),
+      ticketsToday: Number(counters?.ticketsToday || 0),
+      activeUsers: Number(counters?.activeUsers || 0),
+      roomsCreated: Number(counters?.roomsCreated || 0),
+      messagesSent: Number(counters?.messagesSent || 0),
+      streamMinutes: Number(counters?.streamMinutes || 0),
+      apiRequests: Number(counters?.apiRequests || 0),
+      recordingsCreated: Number(counters?.recordingsCreated || 0),
+      hlsMinutes: Number(counters?.hlsMinutes || 0),
+      countersIncluded: Boolean(counters),
       usage: usageData,
       total: usageData.length,
       limit,
+      nextCursor: page.nextCursor,
+      search: listQuery.search || null,
+      plan: listQuery.plan,
+      monthKey,
       period: {
         startMs,
         endMs,
@@ -1543,6 +1745,21 @@ router.get("/usage", async (req, res) => {
   } catch (error: any) {
     console.error("Failed to fetch usage stats:", error);
     res.status(500).json({ error: "Failed to fetch usage stats" });
+  }
+});
+
+/**
+ * GET /api/admin/usage/counters?period=today|7d|30d|month|90d|all&start=&end=
+ * Support Hub period counters via count()/sum() aggregates (cached 2 min).
+ */
+router.get("/usage/counters", async (req, res) => {
+  try {
+    const { startMs, endMs } = parsePeriodRange(req.query || {});
+    const counters = await computePeriodCounters(startMs, endMs, resolveProgramContext(req));
+    res.json({ success: true, ...counters });
+  } catch (error: any) {
+    console.error("Failed to compute usage counters:", error);
+    res.status(500).json({ error: "Failed to compute usage counters" });
   }
 });
 
@@ -1570,73 +1787,14 @@ router.get("/usage/summary", async (req, res) => {
 });
 
 /**
- * GET /api/admin/stats
- * Get overall platform statistics
+ * GET /api/admin/stats[?fresh=1]
+ * Platform statistics from count()/sum() aggregates (cached 60s):
+ * active users from users.lastActiveAt, streaming minutes this month from
+ * usageMonthly, users by base plan + override count.
  */
 router.get("/stats", async (req, res) => {
   try {
-    const usersSnapshot = await firestore.collection("users").get();
-    const includeDeleted = (() => {
-      const raw = String(req.query.includeDeleted || "").trim().toLowerCase();
-      return raw === "1" || raw === "true" || raw === "yes";
-    })();
-    
-    const now = new Date();
-    const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const weekStart = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-
-    let totalUsers = 0;
-    let usersByPlan: Record<string, number> = {};
-    for (const plan of PLAN_IDS) {
-      usersByPlan[plan] = 0;
-    }
-    let activeToday = 0;
-    let activeThisWeek = 0;
-    let activeThisMonth = 0;
-
-    usersSnapshot.docs.forEach((doc) => {
-      const data = doc.data();
-
-      if (!includeDeleted && isDeletedUserRecord(data)) {
-        return;
-      }
-
-      totalUsers++;
-      
-      const plan = (data.planId || "free");
-      if (isPlanId(plan)) {
-        usersByPlan[plan]++;
-      } else {
-        // Track unknown plans if needed
-        usersByPlan[plan] = (usersByPlan[plan] || 0) + 1;
-      }
-
-      const lastActive = data.lastActive?.toDate();
-      if (lastActive) {
-        if (lastActive >= dayStart) activeToday++;
-        if (lastActive >= weekStart) activeThisWeek++;
-        if (lastActive >= monthStart) activeThisMonth++;
-      }
-    });
-
-    // Get total minutes used
-    const usageSnapshot = await firestore.collection("usage").get();
-    const totalMinutesUsed = usageSnapshot.docs.reduce(
-      (sum, doc) => sum + (doc.data().minutes || 0),
-      0
-    );
-
-    const stats = {
-      totalUsers,
-      usersByPlan,
-      activeToday,
-      activeThisWeek,
-      activeThisMonth,
-      totalMinutesUsed,
-      averageMinutesPerUser: totalUsers > 0 ? totalMinutesUsed / totalUsers : 0,
-    };
-
+    const stats = await computePlatformStats({ fresh: String(req.query.fresh || "") === "1" });
     res.json(stats);
   } catch (error: any) {
     console.error("Failed to fetch stats:", error);
@@ -1749,8 +1907,10 @@ router.get("/features", async (req, res) => {
   }
 });
 
+// Support tickets (supportTickets collection): list / detail / status + notes
+router.use("/support/tickets", adminSupportTicketsRoutes);
 // Mount admin monitoring & operational awareness sub-routes
-// (monitoring/overview, monitoring/services, monitoring/webhooks, alerts, rooms/active, support/tickets)
+// (monitoring/overview, monitoring/services, monitoring/webhooks, alerts, rooms/active, rooms/:id/stream-summary)
 router.use(adminMonitoringRoutes);
 // System Jobs: GET /jobs, POST /jobs/:name/run (lib/jobs)
 router.use(adminJobsRoutes);
