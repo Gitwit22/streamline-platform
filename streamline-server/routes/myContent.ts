@@ -18,7 +18,7 @@ import { Router, Request, Response } from "express";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { uploadFileFromPath, deleteFile } from "../lib/storageClient";
-import { createDiskUpload, cleanupUploadedFile } from "../lib/diskUpload";
+import { createDiskUpload, cleanupUploadedFile, type UploadedDiskFile } from "../lib/diskUpload";
 import { reserveStorageIfAvailable, releaseReservedStorage, releaseStorageUsage } from "../usageHelper";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
@@ -90,7 +90,7 @@ router.delete("/:id", async (req: Request, res: Response) => {
     const userId = getAuthedUid(req);
     if (!userId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    const ref = db.collection("saved_videos").doc(req.params.id);
+    const ref = db.collection("saved_videos").doc(String(req.params.id ?? ""));
     const snap = await ref.get();
     if (!snap.exists) return res.status(404).json({ error: "Saved video not found" });
 
@@ -241,7 +241,7 @@ router.post(
   "/upload",
   upload.single("video") as any,
   async (req: Request, res: Response) => {
-    const file = (req as any).file as Express.Multer.File | undefined;
+    const file = (req as any).file as UploadedDiskFile | undefined;
     try {
       const userId = getAuthedUid(req);
       if (!userId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });

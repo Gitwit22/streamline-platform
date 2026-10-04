@@ -50,7 +50,7 @@ import { getSignedDownloadUrl, uploadFileFromPath, deleteFile } from "../lib/sto
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { reserveStorageIfAvailable, releaseReservedStorage } from "../usageHelper";
-import { createDiskUpload, cleanupUploadedFile, MAX_UPLOAD_BYTES } from "../lib/diskUpload";
+import { createDiskUpload, cleanupUploadedFile, MAX_UPLOAD_BYTES, type UploadedDiskFile } from "../lib/diskUpload";
 import { requireContentLibraryUploadsEnabled } from "./editing";
 
 const router = Router();
@@ -707,7 +707,7 @@ router.post(
   requireContentLibraryUploadsEnabled as any,
   upload.single("video") as any,
   async (req: any, res) => {
-  const file = req.file as Express.Multer.File | undefined;
+  const file = (req as any).file as UploadedDiskFile | undefined;
   try {
     const uid = getAuthUserId(req);
     if (!uid) return res.status(401).json({ error: "Unauthorized" });

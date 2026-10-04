@@ -1785,7 +1785,7 @@ router.get("/library", requireAuth, requireMyContentRecordingsEnabled as any, as
 router.get("/:id/storage-check", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
-    const recordingId = req.params.id;
+    const recordingId = String(req.params.id ?? "");
 
     const snap = await firestore.collection("recordings").doc(recordingId).get();
     if (!snap.exists) {
@@ -1818,7 +1818,7 @@ router.get("/:id/storage-check", requireAuth, requireMyContentRecordingsEnabled 
 router.get("/:id", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
-    const recordingId = req.params.id;
+    const recordingId = String(req.params.id ?? "");
 
     const snap = await firestore.collection("recordings").doc(recordingId).get();
     if (!snap.exists) {
@@ -1846,7 +1846,7 @@ router.get("/:id", requireAuth, requireMyContentRecordingsEnabled as any, async 
 router.delete("/:id", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
-    const recordingId = req.params.id;
+    const recordingId = String(req.params.id ?? "");
 
     const snap = await firestore.collection("recordings").doc(recordingId).get();
     if (!snap.exists) {
@@ -2043,7 +2043,7 @@ export async function buildRecordingDownloadLink(params: {
 router.get("/:id/download-link", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
-    const recordingId = req.params.id;
+    const recordingId = String(req.params.id ?? "");
 
     const snap = await firestore.collection("recordings").doc(recordingId).get();
     if (!snap.exists) {
@@ -2066,7 +2066,7 @@ router.get("/:id/download-link", requireAuth, requireMyContentRecordingsEnabled 
 router.post("/:id/report-download-issue", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
-    const recordingId = req.params.id;
+    const recordingId = String(req.params.id ?? "");
 
     const snap = await firestore.collection("recordings").doc(recordingId).get();
     if (!snap.exists) {
@@ -2102,7 +2102,7 @@ router.post("/:id/report-download-issue", requireAuth, requireMyContentRecording
 router.get("/:id/download", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
-    const recordingId = req.params.id;
+    const recordingId = String(req.params.id ?? "");
 
     const snap = await firestore.collection("recordings").doc(recordingId).get();
     if (!snap.exists) {

@@ -2,7 +2,7 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { Router, Request, Response } from "express";
 import { firestore as db } from "../firebaseAdmin";
 import { uploadVideo, uploadFileFromPath, getSignedDownloadUrl, deleteFile } from "../lib/storageClient";
-import { createDiskUpload, cleanupUploadedFile, MAX_UPLOAD_BYTES } from "../lib/diskUpload";
+import { createDiskUpload, cleanupUploadedFile, MAX_UPLOAD_BYTES, type UploadedDiskFile } from "../lib/diskUpload";
 import { getAllowedExportSourceHosts, validateExportSourceUrl } from "../lib/exportSourceUrl";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { reserveStorageIfAvailable, releaseReservedStorage, releaseStorageUsage, reserveStorageUsage, getCurrentStorageUsage } from "../usageHelper";
@@ -227,7 +227,7 @@ router.post(
   requireContentLibraryUploadsEnabled as any,
   upload.single('video') as any,
   async (req: Request, res: Response) => {
-    const file = (req as any).file as Express.Multer.File | undefined;
+    const file = (req as any).file as UploadedDiskFile | undefined;
     try {
       if (!file) {
         return res.status(400).json({ error: "No file uploaded" });
@@ -422,7 +422,7 @@ router.get("/listall", async (req: Request, res: Response) => {
 router.get("/assets/:id", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
-    const { id } = req.params;
+    const id = String(req.params.id ?? "");
 
     if (!userId) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
@@ -491,7 +491,7 @@ router.get("/assets/:id", async (req: Request, res: Response) => {
 router.delete("/assets/:id", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
-    const { id } = req.params;
+    const id = String(req.params.id ?? "");
 
     if (!userId) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
@@ -737,7 +737,7 @@ router.post("/projects", async (req: Request, res: Response) => {
 router.get("/projects/:id", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
-    const { id } = req.params;
+    const id = String(req.params.id ?? "");
     if (!userId) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
@@ -766,7 +766,7 @@ router.get("/projects/:id", async (req: Request, res: Response) => {
 router.patch("/projects/:id", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
-    const { id } = req.params;
+    const id = String(req.params.id ?? "");
     if (!userId) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
@@ -821,7 +821,7 @@ router.patch("/projects/:id", async (req: Request, res: Response) => {
 router.delete("/projects/:id", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
-    const { id } = req.params;
+    const id = String(req.params.id ?? "");
     if (!userId) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
@@ -856,7 +856,7 @@ router.delete("/projects/:id", async (req: Request, res: Response) => {
 router.post("/projects/:id/duplicate", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
-    const { id } = req.params;
+    const id = String(req.params.id ?? "");
     if (!userId) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
@@ -924,7 +924,7 @@ router.post("/projects/:id/duplicate", async (req: Request, res: Response) => {
 router.put("/projects/:id/timeline", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
-    const { id } = req.params;
+    const id = String(req.params.id ?? "");
     const { clips, tracks: rawTracks } = req.body as any;
 
     if (!userId) {
@@ -1179,7 +1179,7 @@ router.post("/export", async (req: Request, res: Response) => {
 router.get("/exports/:exportId", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
-    const { exportId } = req.params;
+    const exportId = String(req.params.exportId ?? "");
     if (!userId) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
@@ -1226,7 +1226,7 @@ router.get("/exports/:exportId", async (req: Request, res: Response) => {
 router.post("/exports/:exportId/cancel", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
-    const { exportId } = req.params;
+    const exportId = String(req.params.exportId ?? "");
     if (!userId) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
@@ -1258,7 +1258,7 @@ router.post("/exports/:exportId/cancel", async (req: Request, res: Response) => 
 // GET /api/editing/recordings/:id - Get recording details
 router.get("/recordings/:id", async (req: Request, res: Response) => {
   try {
-    const { id } = req.params;
+    const id = String(req.params.id ?? "");
     const userId = getAuthedUid(req);
 
     if (!userId) {
@@ -1424,7 +1424,7 @@ router.post("/save", async (req: Request, res: Response) => {
 // PUT /api/editing/:recordingId - Update recording metadata (duration, status, viewer count)
 router.put("/:recordingId", async (req: Request, res: Response) => {
   try {
-    const { recordingId } = req.params;
+    const recordingId = String(req.params.recordingId ?? "");
     const { duration, status, viewerCount, peakViewers } = req.body;
     const userId = getAuthedUid(req);
 
@@ -1816,7 +1816,7 @@ router.get("/processing/:jobId", async (req: Request, res: Response) => {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
-    const job = await getProcessingJob(req.params.jobId);
+    const job = await getProcessingJob(String(req.params.jobId ?? ""));
     if (!job || job.userId !== userId) {
       return res.status(404).json({ error: "Processing job not found" });
     }
@@ -1835,7 +1835,7 @@ router.get("/projects/:id/processing", async (req: Request, res: Response) => {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
-    const jobs = await listProjectProcessingJobs(req.params.id);
+    const jobs = await listProjectProcessingJobs(String(req.params.id ?? ""));
     // Filter to only this user's jobs
     const userJobs = jobs.filter((j) => j.userId === userId);
 
@@ -1960,7 +1960,7 @@ router.delete("/content-items/:id", async (req: Request, res: Response) => {
     const userId = getAuthedUid(req);
     if (!userId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    const docRef = db.collection("content_items").doc(req.params.id);
+    const docRef = db.collection("content_items").doc(String(req.params.id ?? ""));
     const snap = await docRef.get();
     if (!snap.exists) return res.status(404).json({ error: "Content item not found" });
     if ((snap.data() as any).userId !== userId) {

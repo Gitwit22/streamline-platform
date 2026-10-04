@@ -217,7 +217,7 @@ router.get("/events", requireAuth, async (req: Request, res: Response) => {
 // ---------------------------------------------------------------------------
 router.get("/events/:eventId", async (req: Request, res: Response) => {
   try {
-    const event = await getMonetizedEvent(req.params.eventId);
+    const event = await getMonetizedEvent(String(req.params.eventId ?? ""));
     if (!event) return res.status(404).json({ error: "event_not_found" });
 
     // Return public-safe subset

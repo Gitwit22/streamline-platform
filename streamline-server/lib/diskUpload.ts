@@ -11,6 +11,19 @@ import os from "os";
 import fs from "fs";
 import crypto from "crypto";
 
+/** Shape of a multer disk-storage file; declared locally so the build doesn't
+ * depend on @types/multer's global Express.Multer augmentation. */
+export interface UploadedDiskFile {
+  fieldname: string;
+  originalname: string;
+  encoding: string;
+  mimetype: string;
+  size: number;
+  destination: string;
+  filename: string;
+  path: string;
+}
+
 export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MB
 
 export function createDiskUpload(maxBytes: number = MAX_UPLOAD_BYTES) {
