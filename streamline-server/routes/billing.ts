@@ -2,6 +2,7 @@ import { Router } from "express";
 import type Stripe from "stripe";
 import type { DocumentReference } from "firebase-admin/firestore";
 import { stripe } from "../lib/stripe";
+import { getSubscriptionPeriodEnd, getSubscriptionPeriodStart } from "../lib/stripeFields";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
 import { PLAN_IDS, PlanId, isPlanId } from "../types/plan";
@@ -552,7 +553,7 @@ router.post("/checkout", requireAuth, async (req, res) => {
         const now = Date.now();
         const picked = pickPrimarySubscriptionItem(sub as any);
         const currentPriceId: string | undefined = picked?.priceId;
-        const currentPeriodEndSec = (sub as any).current_period_end as number | undefined;
+        const currentPeriodEndSec = getSubscriptionPeriodEnd(sub) ?? undefined;
         const currentPeriodEnd = typeof currentPeriodEndSec === "number" ? currentPeriodEndSec * 1000 : null;
 
         await userRef.set(
@@ -624,7 +625,7 @@ router.post("/checkout", requireAuth, async (req, res) => {
             },
           } as any);
 
-          const currentPeriodEndSec = (updated as any).current_period_end as number | undefined;
+          const currentPeriodEndSec = getSubscriptionPeriodEnd(updated) ?? undefined;
           const currentPeriodEnd = typeof currentPeriodEndSec === "number" ? currentPeriodEndSec * 1000 : null;
 
           const history = sanitizeHistory(userAtLock?.planChangeHistory);
@@ -679,9 +680,9 @@ router.post("/checkout", requireAuth, async (req, res) => {
             : await stripe.subscriptionSchedules.create({ from_subscription: subscriptionId } as any);
         } catch {}
 
-        const currentPeriodEndSec = (sub as any).current_period_end as number | undefined;
+        const currentPeriodEndSec = getSubscriptionPeriodEnd(sub) ?? undefined;
         let currentPeriodEnd = typeof currentPeriodEndSec === "number" ? currentPeriodEndSec : null;
-        const currentPeriodStartSec = (sub as any).current_period_start as number | undefined;
+        const currentPeriodStartSec = getSubscriptionPeriodStart(sub) ?? undefined;
         let currentPeriodStart = typeof currentPeriodStartSec === "number" ? currentPeriodStartSec : Math.floor(now / 1000);
 
         // Some Stripe states (and/or older stored subscription ids) can yield missing period fields.
@@ -1169,7 +1170,7 @@ router.post("/refresh", requireAuth, async (req, res) => {
     const nextPlan = planIdFromStripeSubscription(sub);
     const billingStatus = String(sub.status || "none");
     const billingActive = billingStatus === "active" || billingStatus === "trialing";
-    const currentPeriodEndSec = (sub as any).current_period_end as number | undefined;
+    const currentPeriodEndSec = getSubscriptionPeriodEnd(sub) ?? undefined;
     const currentPeriodEnd = typeof currentPeriodEndSec === "number" ? currentPeriodEndSec * 1000 : null;
     const priceId = sub?.items?.data?.[0]?.price?.id ?? null;
 
@@ -1357,8 +1358,8 @@ router.get("/pending-change", requireAuth, async (req, res) => {
     const sub = await stripe.subscriptions.retrieve(subscriptionId);
     const cancelAtPeriodEnd = !!(sub as any).cancel_at_period_end;
     const status = (sub as any).status as string | undefined;
-    const currentPeriodEnd = (sub as any).current_period_end
-      ? new Date((sub as any).current_period_end * 1000).toISOString()
+    const currentPeriodEnd = getSubscriptionPeriodEnd(sub)
+      ? new Date(getSubscriptionPeriodEnd(sub)! * 1000).toISOString()
       : null;
 
     let scheduledChange = false;
@@ -1441,8 +1442,8 @@ router.get("/status", requireAuth, async (req, res) => {
         status = (sub as any).status as string | undefined;
         billingActive = status === "active" || status === "trialing";
 
-        const currentPeriodEnd = (sub as any).current_period_end
-          ? new Date((sub as any).current_period_end * 1000).toISOString()
+        const currentPeriodEnd = getSubscriptionPeriodEnd(sub)
+          ? new Date(getSubscriptionPeriodEnd(sub)! * 1000).toISOString()
           : null;
 
         if (cancelAtPeriodEnd) {

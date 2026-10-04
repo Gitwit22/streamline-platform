@@ -17,6 +17,13 @@ import { setHlsIdle } from "../services/rooms";
 import Stripe from "stripe";
 import { firestore as db } from "../firebaseAdmin";
 import { stripe } from "../lib/stripe";
+import { claimStripeEvent, markStripeEventDone, releaseStripeEvent } from "../lib/stripeEventLog";
+import {
+  getSubscriptionPeriodEnd,
+  getInvoiceSubscriptionId,
+  getInvoiceSubscriptionMetadata,
+  isTerminalSubscriptionStatus,
+} from "../lib/stripeFields";
 import { getCurrentMonthKey } from "../lib/usageTracker";
 import { FieldValue } from "firebase-admin/firestore";
 import { createSavedVideoFromRecording } from "./myContent";
@@ -402,6 +409,117 @@ function mapBillingStatus(status: string) {
   return "past_due";
 }
 
+/**
+ * Webhook delivery order is not guaranteed (a late `updated` can arrive after
+ * `deleted`), so act on the subscription's current state in Stripe rather
+ * than the event payload.
+ */
+async function retrieveFreshSubscription(payload: any): Promise<any> {
+  const subId = typeof payload?.id === "string" ? payload.id : null;
+  if (!subId) return payload;
+  try {
+    return await stripe.subscriptions.retrieve(subId);
+  } catch (err: any) {
+    if (err?.statusCode === 404 || err?.code === "resource_missing") {
+      // Gone from Stripe: never let the payload resurrect it.
+      return { ...payload, status: "canceled" };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Monetization one-time payments (checkout.session.completed and
+ * checkout.session.async_payment_succeeded). Idempotent per checkout session:
+ * the purchase doc id is the session id and the access code id is the
+ * purchase id. Throws on failure so Stripe retries.
+ */
+async function handleMonetizationSession(session: Stripe.Checkout.Session): Promise<void> {
+  // Delayed payment methods complete checkout before funds settle;
+  // never issue access for an unpaid session.
+  if (session.payment_status !== "paid" && session.payment_status !== "no_payment_required") {
+    console.warn("[stripe-webhook] Monetization session not paid; skipping", {
+      sessionId: session.id,
+      paymentStatus: session.payment_status,
+    });
+    return;
+  }
+  try {
+    const {
+      createPurchase,
+      generateAccessCode,
+      hashAccessCode,
+      createAccessCode,
+      storeRawCode,
+      deleteRawCode,
+    } = await import("../lib/monetization.js");
+
+    const mEventId = session.metadata!.eventId;
+    const mType = session.metadata!.type as "access" | "donation";
+    const amountTotal = session.amount_total ?? 0;
+    const currency = session.currency || "usd";
+    const paymentIntentId =
+      typeof session.payment_intent === "string"
+        ? session.payment_intent
+        : null;
+    const payerEmail =
+      typeof session.customer_details?.email === "string"
+        ? session.customer_details.email
+        : null;
+
+    const purchase = await createPurchase({
+      eventId: mEventId,
+      type: mType,
+      amountCents: amountTotal,
+      currency,
+      stripeCheckoutSessionId: session.id,
+      stripePaymentIntentId: paymentIntentId,
+      payerEmail,
+    });
+
+    if (mType === "access") {
+      // Stash first: a retry after a partial failure reuses the stashed code,
+      // so the stored hash always matches the code the buyer receives.
+      const stash = await storeRawCode(session.id, generateAccessCode());
+      const issued = await createAccessCode({
+        eventId: mEventId,
+        purchaseId: purchase.id,
+        codeHash: hashAccessCode(stash.code),
+      });
+      if (!issued) {
+        // Code already issued (and likely already shown to the buyer); drop
+        // the unusable code this delivery just stashed.
+        if (stash.created) await deleteRawCode(session.id).catch(() => {});
+        console.log("[stripe-webhook] Monetization access code already issued (redelivery)", {
+          eventId: mEventId,
+          purchaseId: purchase.id,
+          sessionId: session.id,
+        });
+        return;
+      }
+      console.log("[stripe-webhook] Monetization access code issued", {
+        eventId: mEventId,
+        purchaseId: purchase.id,
+        sessionId: session.id,
+      });
+    } else {
+      console.log("[stripe-webhook] Monetization donation recorded", {
+        eventId: mEventId,
+        purchaseId: purchase.id,
+        amountCents: amountTotal,
+      });
+    }
+  } catch (mErr: any) {
+    console.error(
+      "[stripe-webhook] Monetization processing error:",
+      mErr?.message
+    );
+    // Rethrow so the handler returns 500 and Stripe retries; the
+    // purchase/code writes above are idempotent per session.
+    throw mErr;
+  }
+}
+
 // =============================================================================
 // LIVEKIT HELPERS
 // =============================================================================
@@ -471,25 +589,46 @@ router.post(
       timestamp: new Date().toISOString(),
     });
 
+    // ── Event idempotency: process each event.id once ──
+    let claimed = false;
+    try {
+      claimed = await claimStripeEvent(event.id, event.type);
+    } catch (err: any) {
+      console.error("[stripe-webhook] Failed to record event:", err?.message);
+      return res.status(500).send("Failed to record event");
+    }
+    if (!claimed) {
+      console.log("[stripe-webhook] Duplicate event; skipping", { eventId: event.id, eventType: event.type });
+      return res.status(200).json({ received: true, duplicate: true });
+    }
+
     try {
       switch (event.type) {
         case "customer.subscription.created":
         case "customer.subscription.updated":
         case "invoice.paid":
         case "customer.subscription.deleted": {
-          const sub: any = event.data.object;
-          const uid = sub?.metadata?.userId;
-          if (!uid) break;
-
-          let subscription = sub;
-          if (event.type === "invoice.paid" && sub.subscription) {
-            subscription = await stripe.subscriptions.retrieve(sub.subscription);
+          const obj: any = event.data.object;
+          let subscription: any;
+          let uid: string | undefined;
+          if (event.type === "invoice.paid") {
+            const invoiceSubId = getInvoiceSubscriptionId(obj);
+            if (!invoiceSubId) break;
+            subscription = await stripe.subscriptions.retrieve(invoiceSubId);
+            uid = subscription?.metadata?.userId || getInvoiceSubscriptionMetadata(obj)?.userId;
+          } else {
+            subscription = await retrieveFreshSubscription(obj);
+            uid = subscription?.metadata?.userId || obj?.metadata?.userId;
           }
+          if (!uid) break;
 
           const planVariant = subscription?.metadata?.planVariant;
           const canonicalPlan = canonicalPlanFromSubscription(subscription);
           const isActive =
             subscription.status === "active" || subscription.status === "trialing";
+          // Keep the paid plan while Stripe is still retrying (past_due);
+          // drop to free only once it gives up or the sub ends.
+          const keepsPlan = isActive || subscription.status === "past_due";
 
           const userSnap = await getUserRef(uid).get();
           const user = userSnap.exists ? userSnap.data() : {};
@@ -512,24 +651,25 @@ router.post(
 
           const currentPlan = user?.planId || "free";
           const history = sanitizeHistory((user as any)?.planChangeHistory);
+          const nextPlan = keepsPlan ? canonicalPlan : "free";
           const nextHistory =
-            currentPlan === canonicalPlan
+            currentPlan === nextPlan
               ? history
-              : [...history, { at: now, fromPlan: currentPlan, toPlan: canonicalPlan, source: "stripe_webhook" }].slice(-10);
+              : [...history, { at: now, fromPlan: currentPlan, toPlan: nextPlan, source: "stripe_webhook" }].slice(-10);
 
           console.log("[stripe-webhook] Processing subscription update:", {
             uid,
             eventType: event.type,
             subscriptionId: subscription.id,
             fromPlan: currentPlan,
-            toPlan: canonicalPlan,
+            toPlan: nextPlan,
             status: subscription.status,
             isActive,
           });
 
           await getUserRef(uid).set(
             {
-              planId: isActive ? canonicalPlan : "free",
+              planId: keepsPlan ? canonicalPlan : "free",
               pendingPlan: preservePendingPlan ? ((user as any)?.pendingPlan ?? null) : null,
               ...(shouldClearScheduledPlanChange ? { scheduledPlanChange: null } : {}),
               planChangeHistory: nextHistory,
@@ -546,10 +686,10 @@ router.post(
                 subscriptionId: subscription.id ?? null,
                 priceId: subscription.items?.data?.[0]?.price?.id ?? null,
                 cancelAtPeriodEnd: !!subscription.cancel_at_period_end,
-                currentPeriodEnd:
-                  typeof subscription.current_period_end === "number"
-                    ? subscription.current_period_end * 1000
-                    : null,
+                currentPeriodEnd: (() => {
+                  const sec = getSubscriptionPeriodEnd(subscription);
+                  return sec !== null ? sec * 1000 : null;
+                })(),
                 hasHadTrial:
                   user.billing?.hasHadTrial === true ||
                   planVariant === "starter_trial",
@@ -620,85 +760,7 @@ router.post(
 
           // ── Monetization one-time payments ──────────────────────────
           if (session.metadata?.source === "streamline_monetization") {
-            // Delayed payment methods complete checkout before funds settle;
-            // never issue access for an unpaid session.
-            if (session.payment_status !== "paid" && session.payment_status !== "no_payment_required") {
-              console.warn("[stripe-webhook] Monetization session not paid; skipping", {
-                sessionId: session.id,
-                paymentStatus: session.payment_status,
-              });
-              break;
-            }
-            try {
-              const {
-                createPurchase,
-                generateAccessCode,
-                hashAccessCode,
-                createAccessCode,
-                storeRawCode,
-              } = await import("../lib/monetization.js");
-
-              const mEventId = session.metadata.eventId;
-              const mType = session.metadata.type as "access" | "donation";
-              const amountTotal = session.amount_total ?? 0;
-              const currency = session.currency || "usd";
-              const paymentIntentId =
-                typeof session.payment_intent === "string"
-                  ? session.payment_intent
-                  : null;
-              const payerEmail =
-                typeof session.customer_details?.email === "string"
-                  ? session.customer_details.email
-                  : null;
-
-              const purchase = await createPurchase({
-                eventId: mEventId,
-                type: mType,
-                amountCents: amountTotal,
-                currency,
-                stripeCheckoutSessionId: session.id,
-                stripePaymentIntentId: paymentIntentId,
-                payerEmail,
-              });
-
-              if (mType === "access") {
-                const rawCode = generateAccessCode();
-                const codeHash = hashAccessCode(rawCode);
-                const issued = await createAccessCode({
-                  eventId: mEventId,
-                  purchaseId: purchase.id,
-                  codeHash,
-                });
-                if (!issued) {
-                  console.log("[stripe-webhook] Monetization access code already issued (redelivery)", {
-                    eventId: mEventId,
-                    purchaseId: purchase.id,
-                    sessionId: session.id,
-                  });
-                  break;
-                }
-                storeRawCode(session.id, rawCode);
-                console.log("[stripe-webhook] Monetization access code issued", {
-                  eventId: mEventId,
-                  purchaseId: purchase.id,
-                  sessionId: session.id,
-                });
-              } else {
-                console.log("[stripe-webhook] Monetization donation recorded", {
-                  eventId: mEventId,
-                  purchaseId: purchase.id,
-                  amountCents: amountTotal,
-                });
-              }
-            } catch (mErr: any) {
-              console.error(
-                "[stripe-webhook] Monetization processing error:",
-                mErr?.message
-              );
-              // Rethrow so the handler returns 500 and Stripe retries; the
-              // purchase/code writes above are idempotent per session.
-              throw mErr;
-            }
+            await handleMonetizationSession(session);
             break;
           }
 
@@ -736,13 +798,9 @@ router.post(
           const billingActive =
             billingStatus === "active" || billingStatus === "trialing";
 
-          const currentPeriodEndSec = (sub as any).current_period_end as
-            | number
-            | undefined;
+          const currentPeriodEndSec = getSubscriptionPeriodEnd(sub);
           const currentPeriodEnd =
-            typeof currentPeriodEndSec === "number"
-              ? currentPeriodEndSec * 1000
-              : null;
+            currentPeriodEndSec !== null ? currentPeriodEndSec * 1000 : null;
 
           const setHasHadTrial =
             planVariant === "starter_trial" ? { hasHadTrial: true } : {};
@@ -793,14 +851,48 @@ router.post(
           break;
         }
 
+        case "checkout.session.async_payment_succeeded": {
+          // Delayed payment methods (ACH, etc.) settle after checkout completes;
+          // issue monetization access now. Subscription checkouts are handled
+          // by the customer.subscription.* / invoice.paid events.
+          const session = event.data.object as Stripe.Checkout.Session;
+          if (session.metadata?.source === "streamline_monetization") {
+            await handleMonetizationSession(session);
+          }
+          break;
+        }
+
         case "invoice.payment_failed": {
           const invoice: any = event.data.object;
-          const subId = invoice?.subscription as string | undefined;
+          const subId = getInvoiceSubscriptionId(invoice);
           if (!subId) break;
 
+          // Stripe retries failed payments (smart retries / dunning); the
+          // subscription status says whether it has given up yet.
           const sub = await stripe.subscriptions.retrieve(subId);
-          const userId = (sub as any)?.metadata?.userId;
+          const userId =
+            (sub as any)?.metadata?.userId || getInvoiceSubscriptionMetadata(invoice)?.userId;
           if (!userId) break;
+
+          const status = String(sub.status || "");
+          if (!isTerminalSubscriptionStatus(status)) {
+            const billingActive = status === "active" || status === "trialing";
+            console.log("[stripe-webhook] Payment failed - Stripe still retrying; keeping plan:", {
+              userId,
+              subscriptionId: subId,
+              status,
+            });
+            await getUserRef(userId).set(
+              {
+                billingActive,
+                billingStatus: mapBillingStatus(status),
+                billing: { updatedAt: Date.now() },
+                updatedAt: Date.now(),
+              },
+              { merge: true }
+            );
+            break;
+          }
 
           const userSnap = await getUserRef(userId).get();
           const user = userSnap.exists ? userSnap.data() : {};
@@ -812,9 +904,10 @@ router.post(
               ? history
               : [...history, { at: now, fromPlan: currentPlan, toPlan: "free", source: "stripe_webhook" }].slice(-10);
 
-          console.log("[stripe-webhook] Payment failed - downgrading to free:", {
+          console.log("[stripe-webhook] Payment failed - subscription ended; downgrading to free:", {
             userId,
             subscriptionId: subId,
+            status,
             fromPlan: currentPlan,
           });
 
@@ -822,7 +915,7 @@ router.post(
             {
               planId: "free",
               billingActive: false,
-              billingStatus: "past_due",
+              billingStatus: status === "unpaid" ? "unpaid" : "canceled",
               planChangeHistory: nextHistory,
               planChangeCooldownUntil: null,
               planChangeLock: null,
@@ -928,12 +1021,19 @@ router.post(
         }
 
         default:
-          return res.status(200).json({ received: true });
+          break;
       }
 
+      await markStripeEventDone(event.id).catch((e: any) =>
+        console.warn("[stripe-webhook] Failed to mark event done:", e?.message)
+      );
       return res.json({ received: true });
     } catch (err: any) {
       console.error("[stripe] Webhook handler failed:", err?.message);
+      // Drop the marker so Stripe's retry of this event is processed.
+      await releaseStripeEvent(event.id).catch((e: any) =>
+        console.warn("[stripe-webhook] Failed to release event marker:", e?.message)
+      );
       return res.status(500).send(err?.message || "Webhook handler failed");
     }
   }

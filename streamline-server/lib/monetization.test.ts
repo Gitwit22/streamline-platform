@@ -1,7 +1,8 @@
 /**
  * Monetization library — unit tests
  *
- * Tests pure functions: code generation, hashing, and in-memory cache.
+ * Tests pure functions: code generation and hashing.
+ * Pending raw-code sealing / salt guard: see monetizationSecrets.test.ts.
  * These don't require Firebase and can run in CI without credentials.
  */
 import { describe, it } from "node:test";
@@ -34,29 +35,6 @@ function hashAccessCode(rawCode: string): string {
     .createHmac("sha256", salt)
     .update(rawCode.toUpperCase().trim())
     .digest("hex");
-}
-
-// In-memory raw-code cache (matches lib/monetization.ts implementation)
-const rawCodeCache = new Map<string, { code: string; expiresAt: number }>();
-const RAW_CODE_TTL_MS = 10 * 60 * 1000;
-
-function storeRawCode(sessionId: string, rawCode: string) {
-  rawCodeCache.set(sessionId, { code: rawCode, expiresAt: Date.now() + RAW_CODE_TTL_MS });
-}
-
-function peekRawCode(sessionId: string): string | null {
-  const entry = rawCodeCache.get(sessionId);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) { rawCodeCache.delete(sessionId); return null; }
-  return entry.code;
-}
-
-function retrieveAndDeleteRawCode(sessionId: string): string | null {
-  const entry = rawCodeCache.get(sessionId);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) { rawCodeCache.delete(sessionId); return null; }
-  rawCodeCache.delete(sessionId);
-  return entry.code;
 }
 
 describe("generateAccessCode", () => {
@@ -108,27 +86,5 @@ describe("hashAccessCode", () => {
     const h1 = hashAccessCode("AAAA2222BBBB");
     const h2 = hashAccessCode("CCCC3333DDDD");
     assert.notEqual(h1, h2);
-  });
-});
-
-describe("rawCodeCache", () => {
-  it("stores and retrieves a code via peek", () => {
-    storeRawCode("sess_1", "TESTCODE1234");
-    const code = peekRawCode("sess_1");
-    assert.equal(code, "TESTCODE1234");
-  });
-
-  it("retrieveAndDeleteRawCode removes the entry", () => {
-    storeRawCode("sess_2", "CODE_DELETE");
-    const code = retrieveAndDeleteRawCode("sess_2");
-    assert.equal(code, "CODE_DELETE");
-    // Second call should return null
-    const code2 = retrieveAndDeleteRawCode("sess_2");
-    assert.equal(code2, null);
-  });
-
-  it("returns null for unknown session", () => {
-    assert.equal(peekRawCode("unknown_session"), null);
-    assert.equal(retrieveAndDeleteRawCode("unknown_session"), null);
   });
 });

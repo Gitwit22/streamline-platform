@@ -15,6 +15,13 @@
 import crypto from "crypto";
 import { firestore as db } from "../firebaseAdmin";
 import { FieldValue } from "firebase-admin/firestore";
+import {
+  getCodeSalt,
+  sealPendingCode,
+  openPendingCode,
+  isPendingCodeExpired,
+  PENDING_CODE_TTL_MS,
+} from "./monetizationSecrets";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -95,10 +102,6 @@ function accessCodesCol(eventId: string) {
 
 const CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0,O,1,I
 const CODE_LENGTH = 12;
-
-function getCodeSalt(): string {
-  return process.env.MONETIZATION_CODE_SALT || "streamline-monetization-salt";
-}
 
 export function generateAccessCode(): string {
   // Use rejection sampling to avoid modulo bias.
@@ -382,42 +385,78 @@ export async function findClaimedCodeForDevice(
 }
 
 // ---------------------------------------------------------------------------
-// Temporary raw-code store (short TTL, keyed by checkoutSessionId)
+// Pending raw-code store (short TTL, keyed by checkoutSessionId)
 // ---------------------------------------------------------------------------
-// In-memory cache — safe because codes are transient and the webhook +
-// success-page poll happen within seconds on the same server instance.
-// For multi-instance deployments, replace with Redis/Firestore TTL doc.
+// Persisted in Firestore (monetizationPendingCodes/{checkoutSessionId}) so it
+// survives restarts and works across instances. The raw code is encrypted
+// with AES-256-GCM (lib/crypto.ts); only its HMAC lives on the access code.
 
-const rawCodeCache = new Map<string, { code: string; expiresAt: number }>();
-const RAW_CODE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-
-export function storeRawCode(checkoutSessionId: string, rawCode: string) {
-  rawCodeCache.set(checkoutSessionId, {
-    code: rawCode,
-    expiresAt: Date.now() + RAW_CODE_TTL_MS,
-  });
+function pendingCodesCol() {
+  return db.collection("monetizationPendingCodes");
 }
 
-export function retrieveAndDeleteRawCode(
+/**
+ * Stash the raw code for this checkout session and return the code that is
+ * actually stored. Call this BEFORE createAccessCode: if a previous delivery
+ * already stashed a (still valid) code, that code is returned and reused so a
+ * retried webhook never hashes a code different from the one the buyer gets.
+ */
+export async function storeRawCode(
+  checkoutSessionId: string,
+  rawCode: string
+): Promise<{ code: string; created: boolean }> {
+  const ref = pendingCodesCol().doc(checkoutSessionId);
+  const now = Date.now();
+  const doc = {
+    sealed: sealPendingCode(rawCode),
+    createdAt: now,
+    expiresAt: now + PENDING_CODE_TTL_MS,
+    // Date field so a Firestore TTL policy can purge abandoned docs.
+    ttlAt: new Date(now + PENDING_CODE_TTL_MS),
+  };
+  try {
+    await ref.create(doc);
+    return { code: rawCode, created: true };
+  } catch (err: any) {
+    if (!isAlreadyExists(err)) throw err;
+  }
+  const existing = await readPendingCode(checkoutSessionId);
+  if (existing) return { code: existing.code, created: false };
+  await ref.set(doc);
+  return { code: rawCode, created: true };
+}
+
+export async function deleteRawCode(checkoutSessionId: string): Promise<void> {
+  await pendingCodesCol().doc(checkoutSessionId).delete();
+}
+
+async function readPendingCode(
   checkoutSessionId: string
-): string | null {
-  const entry = rawCodeCache.get(checkoutSessionId);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    rawCodeCache.delete(checkoutSessionId);
+): Promise<{ ref: FirebaseFirestore.DocumentReference; code: string } | null> {
+  const ref = pendingCodesCol().doc(checkoutSessionId);
+  const snap = await ref.get();
+  if (!snap.exists) return null;
+  const data = snap.data() as any;
+  if (isPendingCodeExpired(data?.expiresAt)) {
+    await ref.delete().catch(() => {});
     return null;
   }
-  rawCodeCache.delete(checkoutSessionId);
+  const code = openPendingCode(data?.sealed);
+  if (!code) return null;
+  return { ref, code };
+}
+
+export async function retrieveAndDeleteRawCode(
+  checkoutSessionId: string
+): Promise<string | null> {
+  const entry = await readPendingCode(checkoutSessionId);
+  if (!entry) return null;
+  await entry.ref.delete();
   return entry.code;
 }
 
 /** Peek without deleting (for polling before the viewer is ready to consume). */
-export function peekRawCode(checkoutSessionId: string): string | null {
-  const entry = rawCodeCache.get(checkoutSessionId);
-  if (!entry) return null;
-  if (Date.now() > entry.expiresAt) {
-    rawCodeCache.delete(checkoutSessionId);
-    return null;
-  }
-  return entry.code;
+export async function peekRawCode(checkoutSessionId: string): Promise<string | null> {
+  const entry = await readPendingCode(checkoutSessionId);
+  return entry ? entry.code : null;
 }

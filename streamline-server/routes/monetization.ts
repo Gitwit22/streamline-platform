@@ -25,7 +25,7 @@ import {
   findAccessCodeByHash,
   claimAccessCode,
   findClaimedCodeForDevice,
-  peekRawCode,
+  retrieveAndDeleteRawCode,
   type MonetizationMode,
   type CreateEventInput,
 } from "../lib/monetization";
@@ -333,7 +333,8 @@ router.get("/code", async (req: Request, res: Response) => {
     if (!sessionId || typeof sessionId !== "string") {
       return res.status(400).json({ error: "missing_session_id" });
     }
-    const code = peekRawCode(sessionId);
+    // Single read: the pending code is deleted once handed to the buyer.
+    const code = await retrieveAndDeleteRawCode(sessionId);
     if (!code) {
       return res.json({ ok: true, ready: false });
     }
