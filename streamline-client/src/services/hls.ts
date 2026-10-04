@@ -67,14 +67,38 @@ export async function stopHls(roomId: string, roomAccessToken?: string) {
   return data as { roomId: string; hls: HlsStatusResponse };
 }
 
+/**
+ * Read-only HLS status poll. This runs in the background, so it must never
+ * trigger the global "session expired" flow (sl:unauthorized / token wipe):
+ * a 401/403 here only means this user can't manage the stream. Errors carry
+ * `status` so pollers can stop on 401/403 instead of retrying forever.
+ */
 export async function getHlsStatus(roomId: string, roomAccessToken?: string) {
   const url = `${API_BASE}/api/hls/status/${encodeURIComponent(roomId)}`;
-  const res = await apiFetchAuth(url, { headers: buildAuthHeaders(roomAccessToken) }, { allowNonOk: true });
+  let res: Response;
+  try {
+    res = await apiFetchAuth(
+      url,
+      { headers: buildAuthHeaders(roomAccessToken) },
+      { allowNonOk: true, suppressAuthSideEffects: true },
+    );
+  } catch (err: any) {
+    if (err?.name === "ApiUnauthorizedError" || err?.status === 401) {
+      throw Object.assign(new Error("status_failed_401:unauthorized"), { status: 401 });
+    }
+    throw err;
+  }
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`status_failed_${res.status}:${text}`);
+    throw Object.assign(new Error(`status_failed_${res.status}:${text}`), { status: res.status });
   }
   return (await res.json()) as HlsStatusResponse;
+}
+
+/** True for errors that mean "stop polling" (no access), not "try again". */
+export function isHlsAuthError(err: unknown): boolean {
+  const status = (err as any)?.status;
+  return status === 401 || status === 403;
 }
 
 export async function getPublicHls(roomId: string) {

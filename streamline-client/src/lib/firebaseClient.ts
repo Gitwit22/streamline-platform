@@ -90,6 +90,40 @@ export async function getFirebaseIdToken(opts?: { forceRefresh?: boolean }): Pro
   }
 }
 
+/**
+ * Like getFirebaseIdToken, but first waits (bounded) for Firebase to restore a
+ * persisted session. On a fresh page load `auth.currentUser` is null until
+ * persistence has been read, which would otherwise make a signed-in user look
+ * anonymous to code that runs on mount.
+ */
+export async function getFirebaseIdTokenWhenReady(opts?: { timeoutMs?: number }): Promise<string | null> {
+  let auth: Auth;
+  try {
+    auth = getFirebaseAuth();
+  } catch {
+    return null;
+  }
+  try {
+    const ready = (auth as any).authStateReady;
+    if (typeof ready === "function" && !auth.currentUser) {
+      const timeoutMs = opts?.timeoutMs ?? 3000;
+      await Promise.race([
+        ready.call(auth),
+        new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
+      ]);
+    }
+  } catch {
+    // ignore; fall through to whatever currentUser is now
+  }
+  try {
+    const user = auth.currentUser;
+    if (!user) return null;
+    return await user.getIdToken(false);
+  } catch {
+    return null;
+  }
+}
+
 export async function firebaseSignInWithCustomToken(customToken: string) {
   const auth = getFirebaseAuth();
   return signInWithCustomToken(auth, customToken);

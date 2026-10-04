@@ -25,10 +25,29 @@ import {
   apiStopRecording,
   apiFetch,
   apiFetchAuth,
-  getAuthToken,
+  apiFetchOptionalAuth,
+  hasAuthSession,
 } from "../../lib/api";
-import { logTelemetry, markTiming, measureTiming } from "../../lib/telemetry";
+import { logTelemetry, markTiming, measureTiming, postGuestPresence } from "../../lib/telemetry";
+import {
+  classifyDisconnect,
+  hasRoomPermission,
+  isAccessDeniedCode,
+  joinPagePillText,
+  nextMintRetryDelayMs,
+  normalizePublicRoomInfo,
+  parseJoinPagePresence,
+  presenceDowngradeNotice,
+  readShareToken,
+  resolveRoomPermissions,
+  storeShareToken,
+  type DisconnectKind,
+  type JoinPagePresence,
+  type PublicRoomInfo,
+  type RoomPermissions,
+} from "../../lib/roomJoin";
 import RoleOverlay from "../components/RoleOverlay";
+import { JoinGateLayout, RoomUnavailableCard, WaitingForHostCard } from "../components/RoomJoinGate";
 import StreamSetupModalV2 from "../components/StreamSetupModal";
 import { ErrorBoundary } from "../../components/ErrorBoundary";
 import { RoleChangeToast } from "../components/RoleChangeToast";
@@ -696,8 +715,6 @@ function ReconnectCommandListener() {
 type StreamStatus = "idle" | "starting" | "live" | "stopping";
 type RecordingStatus = "idle" | "recording" | "stopping" | "stopped" | "error";
 
-type GuestStatus = "viewing_join" | "entered_room" | null;
-
 function extractApiErrorCode(payload: any): string | null {
   const code = payload?.error ?? payload?.code ?? payload?.data?.error ?? payload?.data?.code;
   return typeof code === "string" && code.trim() ? code.trim() : null;
@@ -756,16 +773,6 @@ function getGuestSessionToken(roomId: string | null): string | null {
   return null;
 }
 
-type RoomPermissions = {
-  canStream: boolean;
-  canRecord: boolean;
-  canDestinations: boolean;
-  canModerate: boolean;
-  canLayout: boolean;
-  canScreenShare: boolean;
-  canInvite: boolean;
-  canAnalytics: boolean;
-};
 type EffectiveControls = {
   // Media/presence controls
   canPublishAudio: boolean;
@@ -791,7 +798,18 @@ type EffectiveControls = {
   stageRole?: RoomRole | null;
 };
 
-function ThankYouScreen({ showHomeButton = false, onHome }: { showHomeButton?: boolean; onHome?: () => void }) {
+function ThankYouScreen({
+  showHomeButton = false,
+  onHome,
+  onRejoin,
+  message,
+}: {
+  showHomeButton?: boolean;
+  onHome?: () => void;
+  /** Guests go back to their own room/invite page, never the host /join page. */
+  onRejoin?: () => void;
+  message?: string | null;
+}) {
   useEffect(() => {
     const timer = setTimeout(() => {
       try {
@@ -863,9 +881,28 @@ function ThankYouScreen({ showHomeButton = false, onHome }: { showHomeButton?: b
         <h1 style={{ fontSize: "1.875rem", marginBottom: "1rem", fontWeight: '600' }}>
           Thank you for joining StreamLine
         </h1>
-        <p style={{ maxWidth: 400, opacity: 0.9, fontSize: '1.125rem', lineHeight: 1.6, marginBottom: showHomeButton ? '1.5rem' : '0' }}>
-          Your session has ended. You can now close this app or tab.
+        <p style={{ maxWidth: 400, opacity: 0.9, fontSize: '1.125rem', lineHeight: 1.6, marginBottom: showHomeButton || onRejoin ? '1.5rem' : '0' }}>
+          {message || "Your session has ended. You can now close this app or tab."}
         </p>
+        {onRejoin && (
+          <button
+            type="button"
+            onClick={onRejoin}
+            style={{
+              padding: '12px 24px',
+              background: 'rgba(255, 255, 255, 0.08)',
+              color: '#ffffff',
+              border: '1px solid rgba(255, 255, 255, 0.2)',
+              borderRadius: '10px',
+              fontSize: '14px',
+              fontWeight: '600',
+              cursor: 'pointer',
+              marginRight: showHomeButton && onHome ? 8 : 0,
+            }}
+          >
+            Rejoin room
+          </button>
+        )}
         {showHomeButton && onHome && (
           <button
             onClick={onHome}
@@ -1205,7 +1242,13 @@ type LiveKitShellProps = {
   dashboardOverlaysEnabled: boolean;
   dashboardRole: "host" | "moderator" | "participant";
   onLeaveRequested?: () => void;
-  onDisconnected: () => void;
+  /** LiveKit Disconnected (reason is a DisconnectReason value when known). */
+  onDisconnected: (reason?: number) => void;
+  /** Connect failed before the room was ever connected. */
+  onConnectError?: (error: Error) => void;
+  onConnected?: () => void;
+  /** Host or cohost with canLayout: show the broadcast layout picker. */
+  canLayout?: boolean;
   onActiveSharerChange?: (name: string | null) => void;
   audioMixerEnabled: boolean;
   advancedScreenShareEnabled: boolean;
@@ -1246,6 +1289,9 @@ function LiveKitShell({
   dashboardRole,
   onLeaveRequested,
   onDisconnected,
+  onConnectError,
+  onConnected,
+  canLayout = false,
   onActiveSharerChange,
   audioMixerEnabled,
   advancedScreenShareEnabled,
@@ -1257,10 +1303,28 @@ function LiveKitShell({
   controlsVideoBlocked = false,
   onPublishPermissionChange,
 }: LiveKitShellProps) {
-  const [guestStatus, setGuestStatus] = useState<GuestStatus>(null);
+  const [joinPagePresence, setJoinPagePresence] = useState<JoinPagePresence | null>(null);
   const [roomPreviewPreset, setRoomPreviewPreset] = useState<StudioLayoutPresetId | null>(null);
-  const statusRef = useRef<GuestStatus>(null);
   const mediaRootRef = useRef<HTMLDivElement | null>(null);
+
+  // Stable LiveKitRoom callbacks: useLiveKitRoom re-runs its connect effect
+  // when onError changes identity, so never pass fresh closures.
+  const callbacksRef = useRef({ onDisconnected, onConnectError, onConnected });
+  callbacksRef.current = { onDisconnected, onConnectError, onConnected };
+  const connectedOnceRef = useRef(false);
+  const handleLkDisconnected = React.useCallback((reason?: number) => {
+    console.log("[Room] LiveKit disconnected", { reason });
+    callbacksRef.current.onDisconnected(typeof reason === "number" ? reason : undefined);
+  }, []);
+  const handleLkError = React.useCallback((error: Error) => {
+    console.error("[Room] ❌ LiveKit error:", { error, message: error?.message });
+    if (!connectedOnceRef.current) callbacksRef.current.onConnectError?.(error);
+  }, []);
+  const handleLkConnected = React.useCallback(() => {
+    connectedOnceRef.current = true;
+    console.log("[Room] 🔗 LiveKit onConnected callback fired");
+    callbacksRef.current.onConnected?.();
+  }, []);
 
   // Media permission error state and handlers
   const [mediaPermissionError, setMediaPermissionError] = useState<{
@@ -1312,43 +1376,51 @@ function LiveKitShell({
     }
   }, []);
 
+  // Join-page presence for the host/cohost pill: who is sitting on the guest
+  // join gate right now (server expires entries ~60s after the last ping).
+  const canSeeJoinPage = (isHost || canModerate) && !isViewer;
   useEffect(() => {
-    if (!isHost || !roomId) return;
+    if (!canSeeJoinPage || !roomId) {
+      setJoinPagePresence(null);
+      return;
+    }
 
     let cancelled = false;
+    let failures = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
 
     const poll = async () => {
       try {
-        const res = await fetch(
-          `${API_BASE}/api/invites/room-status?roomId=${encodeURIComponent(roomId)}`,
-          {
-            credentials: "include",
-          },
+        const res = await apiFetchOptionalAuth(
+          `/api/invites/room-status?roomId=${encodeURIComponent(roomId)}`,
+          { headers: roomAccessToken ? { "x-room-access-token": roomAccessToken } : {} },
         );
-        if (!res.ok) return;
-        const data = await res.json();
-        let nextStatus: GuestStatus = null;
-        if (data?.hasEnteredRoom) {
-          nextStatus = "entered_room";
-        } else if (data?.hasJoinPageView) {
-          nextStatus = "viewing_join";
+        if (cancelled) return;
+        if (res.status === 401 || res.status === 403) {
+          // Not allowed to see it: stop quietly.
+          setJoinPagePresence(null);
+          return;
         }
-        if (!cancelled && statusRef.current !== nextStatus) {
-          statusRef.current = nextStatus;
-          setGuestStatus(nextStatus);
+        if (res.ok) {
+          failures = 0;
+          const data = await res.json().catch(() => null);
+          if (!cancelled) setJoinPagePresence(parseJoinPagePresence(data));
+        } else {
+          failures++;
         }
       } catch {
-        // ignore
+        failures++;
       }
+      if (!cancelled) timer = setTimeout(poll, failures > 3 ? 30000 : 7000);
     };
 
-    poll();
-    const id = setInterval(poll, 7000);
+    void poll();
     return () => {
       cancelled = true;
-      clearInterval(id);
+      if (timer) clearTimeout(timer);
     };
-  }, [isHost, roomId]);
+  }, [canSeeJoinPage, roomId, roomAccessToken]);
+  const joinPagePill = joinPagePillText(joinPagePresence);
 
   // Prevent double-audio playback from LiveKit DOM:
   // in some browser/component combinations, audio can play via both an <audio>
@@ -1403,24 +1475,9 @@ function LiveKitShell({
       video={!isAudience && !controlsVideoBlocked}
       options={ROOM_OPTIONS}
       connectOptions={undefined}
-      onConnected={() => {
-        console.log('[Room] 🔗 LiveKit onConnected callback fired', { 
-          isViewer, 
-          isHost,
-          roomId,
-          wantsAudio: !isAudience && !controlsAudioBlocked,
-          wantsVideo: !isAudience && !controlsVideoBlocked,
-        });
-      }}
-      onDisconnected={onDisconnected}
-      onError={(error) => {
-        console.error('[Room] ❌ LiveKit error:', {
-          error,
-          message: error?.message,
-          isViewer,
-          isHost,
-        });
-      }}
+      onConnected={handleLkConnected}
+      onDisconnected={handleLkDisconnected}
+      onError={handleLkError}
       style={{
         width: "100%",
         height: "calc(100vh - 60px)",
@@ -1448,7 +1505,7 @@ function LiveKitShell({
         <TileVisibilityEnforcer rootRef={mediaRootRef} hideLocal={subjectToControls && !controlsTileVisible} />
         {audioMixerEnabled && <MixerBridge />}
         {advancedScreenShareEnabled && <ScreenSharePopout mode={screenShareMode} onActiveSharerChange={onActiveSharerChange} />}
-        {isHost && roomId && roomAccessToken && (
+        {(isHost || canLayout) && roomId && roomAccessToken && (
           <LayoutPickerPanel
             roomId={roomId}
             roomAccessToken={roomAccessToken}
@@ -1457,14 +1514,16 @@ function LiveKitShell({
             onActivePresetChange={setRoomPreviewPreset}
           />
         )}
-        {isHost && !isViewer && (
+        {canSeeJoinPage && (
           <div
+            data-testid="join-page-pill"
+            aria-hidden={!joinPagePill}
             style={{
               position: "absolute",
               top: 10,
               left: "50%",
               transform:
-                guestStatus === "viewing_join"
+                joinPagePill
                   ? "translateX(-50%) translateY(0)"
                   : "translateX(-50%) translateY(-6px)",
               padding: "6px 12px",
@@ -1474,12 +1533,12 @@ function LiveKitShell({
               fontSize: 12,
               color: "#bfdbfe",
               zIndex: 20,
-              opacity: guestStatus === "viewing_join" ? 1 : 0,
+              opacity: joinPagePill ? 1 : 0,
               pointerEvents: "none",
               transition: "opacity 0.35s ease-in-out, transform 0.35s ease-in-out",
             }}
           >
-            Guest is viewing the join page.
+            {joinPagePill}
           </div>
         )}
         {/* When host is invisible, hide their local video tile completely */}
@@ -1688,6 +1747,31 @@ function RoomPage() {
   });
   const [roomGateStatus, setRoomGateStatus] = useState<"unknown" | "idle" | "live" | "blocked">("unknown");
   const roomGatePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Bumped to re-run the token mint effect (room went live, Retry, rejoin).
+  const [mintAttempt, setMintAttempt] = useState(0);
+  const mintRetryCountRef = useRef(0);
+  const requestMint = React.useCallback(() => setMintAttempt((n) => n + 1), []);
+  // Role from the last successful /token mint (authoritative over local hints).
+  const mintedRoleRef = useRef<string | null>(null);
+  // Pending mint retry timer (409 backoff / network error).
+  const mintRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Remount key for LiveKitShell so Retry builds a fresh LiveKit Room.
+  const [connectAttempt, setConnectAttempt] = useState(0);
+  // Unintended disconnect / failed connect: shown as a banner with Retry.
+  const [connectionIssue, setConnectionIssue] = useState<{ kind: DisconnectKind | "connect_failed"; message: string } | null>(null);
+  // Set by Exit Room / Leave before the leave flow runs, so the resulting
+  // LiveKit disconnect is not mistaken for a network failure.
+  const explicitLeaveRef = useRef(false);
+  const [goodbyeMessage, setGoodbyeMessage] = useState<string | null>(null);
+  // 403 not_allowed from /token: no access (not an auth problem).
+  const [accessDenied, setAccessDenied] = useState<string | null>(null);
+  const [presenceNotice, setPresenceNotice] = useState<string | null>(null);
+  // Public room info for the guest join gate (GET /api/rooms/:id/info).
+  const [publicRoomInfo, setPublicRoomInfo] = useState<PublicRoomInfo | null>(null);
+  const waitStartRef = useRef<number | null>(null);
+  const [waitStartedAt, setWaitStartedAt] = useState<number | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+  const STALE_WAIT_MS = 15 * 60 * 1000;
   const hostToolsHydratedKeyRef = useRef<string | null>(null);
   const [controlsPanelOpen, setControlsPanelOpen] = useState(false);
   const [effectiveControls, setEffectiveControls] = useState<EffectiveControls>(() => ({
@@ -1753,15 +1837,12 @@ function RoomPage() {
     }
 
     try {
-      const res = await apiFetch(
-        `/api/rooms/${encodeURIComponent(roomId)}/controls`,
-        {
-          method: "PATCH",
-          headers: { "x-room-access-token": roomAccessToken },
-          body: JSON.stringify(patch),
-        },
-        { allowNonOk: true },
-      );
+      // Authorization when signed in (host/cohost session) plus the RAT.
+      const res = await apiFetchOptionalAuth(`/api/rooms/${encodeURIComponent(roomId)}/controls`, {
+        method: "PATCH",
+        headers: { "x-room-access-token": roomAccessToken },
+        body: JSON.stringify(patch),
+      });
 
       if (res.ok) {
         const data = await res.json().catch(() => null);
@@ -1897,44 +1978,46 @@ function RoomPage() {
     );
   }, []);
 
-  const can = (key: keyof RoomPermissions) => !needsReauth && (isHost || !!roomPermissions?.[key]);
   // What the server will actually accept: the roomAccessToken's permissions
   // (from the /token response, or decoded from the RAT itself). SSE controls
   // alone are not enough — showing a button the RAT can't back leads to a
   // 401/403 and a bogus "Session expired" banner.
   const ratPermissions: RoomAccessPermissions | null = useMemo(
-    () => (roomPermissions as RoomAccessPermissions | null) ?? getRoomAccessPermissions(roomAccessToken),
-    [roomPermissions, roomAccessToken],
+    () => getRoomAccessPermissions(roomAccessToken),
+    [roomAccessToken],
   );
-  const ratAllows = (key: keyof RoomAccessPermissions) => !!ratPermissions?.[key];
+  // Host, or the /token `permissions`, or the RAT claims (co-hosts get their
+  // stream/record/moderation abilities from these, not from isHost).
+  const can = (key: keyof RoomPermissions) =>
+    hasRoomPermission(key, { isHost, needsReauth, roomPermissions, ratPermissions });
+  const isCohost = !isHost && normalizeRoomRole(userRole) === "cohost";
+  // Co-hosts' scopes come from their minted permissions; other roles also
+  // need the host to have granted the scope via room controls.
+  const scopeGranted = (controlFlag: boolean | undefined) => isCohost || !!controlFlag;
   const canInviteLinks =
-    !needsReauth && !isViewer && (isHost || (!!effectiveControls.canInviteLinks && ratAllows("canInvite")));
+    !needsReauth && !isViewer && (isHost || (scopeGranted(effectiveControls.canInviteLinks) && can("canInvite")));
   const canManageStream =
     !needsReauth &&
     !isViewer &&
     (isHost ||
-      (!!effectiveControls.canStartStopStream && ratAllows("canStream")) ||
-      (!!effectiveControls.canStartStopRecording && ratAllows("canRecord")) ||
-      (!!effectiveControls.canManageDestinations && ratAllows("canDestinations")));
+      (scopeGranted(effectiveControls.canStartStopStream) && can("canStream")) ||
+      (scopeGranted(effectiveControls.canStartStopRecording) && can("canRecord")) ||
+      (scopeGranted(effectiveControls.canManageDestinations) && can("canDestinations")));
   const canMuteGuestsUi =
-    !needsReauth &&
-    !isViewer &&
-    isHost &&
-    (!!effectiveControls.canMuteGuests || can("canModerate"));
+    !needsReauth && !isViewer && (isHost || can("canMuteGuests") || can("canModerate"));
 
   const canRemoveGuestsUi =
-    !needsReauth &&
-    !isViewer &&
-    isHost &&
-    (!!effectiveControls.canRemoveGuests || can("canModerate"));
+    !needsReauth && !isViewer && (isHost || can("canRemoveGuests") || can("canModerate"));
 
-  const canModerateUi =
-    !needsReauth &&
-    !isViewer &&
-    isHost &&
-    (can("canModerate") ||
-      !!effectiveControls.canRemoveGuests ||
-      !!effectiveControls.canMuteGuests);
+  const canModerateUi = !needsReauth && !isViewer && (isHost || can("canModerate"));
+  const canLayoutUi = !needsReauth && !isViewer && (isHost || can("canLayout"));
+  // Co-hosts with moderation rights get the host dashboard (minus co-host
+  // assignment and removing the owner, handled inside RoleOverlay).
+  const dashboardRole: "host" | "moderator" | "participant" = isHost
+    ? "host"
+    : canModerateUi || canMuteGuestsUi || canRemoveGuestsUi
+      ? "moderator"
+      : "participant";
 
   // Audience (subscribe-only) detection. Live LiveKit permissions win once
   // known (so "Bring on stage" / "Move to audience" apply without reload);
@@ -1988,24 +2071,27 @@ function RoomPage() {
     }
     // Broadcast via room controls PATCH
     if (roomId && roomAccessToken) {
-      apiFetch(
-        `/api/rooms/${encodeURIComponent(roomId)}/controls`,
-        {
-          method: "PATCH",
-          headers: { "x-room-access-token": roomAccessToken },
-          body: JSON.stringify({ screenShareLayout: mode }),
-        },
-        { allowNonOk: true },
-      ).catch((err: unknown) => {
-        console.warn("[Room] screenShareLayout broadcast failed", err);
-      });
+      apiFetchOptionalAuth(`/api/rooms/${encodeURIComponent(roomId)}/controls`, {
+        method: "PATCH",
+        headers: { "x-room-access-token": roomAccessToken },
+        body: JSON.stringify({ screenShareLayout: mode }),
+      })
+        .then((res) => {
+          if (!res.ok) console.warn("[Room] screenShareLayout broadcast rejected", res.status);
+        })
+        .catch((err: unknown) => {
+          console.warn("[Room] screenShareLayout broadcast failed", err);
+        });
     }
   };
 
+  // Host HLS status is only meaningful (and only authorized) for people who
+  // can manage the stream; guests/viewers must not poll it.
   const { data: hlsStatusData } = useHlsStatus({
     apiBase: API_BASE,
     roomId: roomId || "",
     roomAccessToken: roomAccessToken || "",
+    enabled: !!token && (isHost || can("canStream") || canManageStream),
   });
 
   useEffect(() => {
@@ -2074,6 +2160,11 @@ function RoomPage() {
       }
     })();
 
+    // Once the server has minted a role, it wins over these local hints.
+    if (mintedRoleRef.current) {
+      setIsHost(mintedRoleRef.current === "host");
+      return;
+    }
     const willBeHost = createdRooms.includes(candidateKey) || localIsAdmin;
     setIsHost(willBeHost);
     const nextRole = willBeHost ? "host" : "guest";
@@ -2334,6 +2425,9 @@ function RoomPage() {
             // APIs (HLS, status, etc.). /api/rooms/:roomId/token will return a refreshed
             // token which will overwrite this state when available.
             setRoomAccessToken(t);
+            // stripQueryParams drops `t` after the first mint; keep the share
+            // token for status checks and re-mints (refresh_token, Retry).
+            storeShareToken(resolvedRoomId || routeRoomId, t);
           }
           return;
         }
@@ -2566,6 +2660,8 @@ function RoomPage() {
     // disconnects, while still allowing a fresh token on initial join.
     if (token && serverUrl) return;
     if (roomTokenMintInFlightRef.current) return;
+    // Left the room (goodbye screen) or no access: don't mint.
+    if (showGoodbye || accessDenied) return;
     // Role used to mint the LiveKit token + roomAccessToken.
     // IMPORTANT: Hosts must request role="host" so /api/hls/start isn't rejected as insufficient_role.
     const requestedRole = isHost ? "host" : "participant";
@@ -2602,9 +2698,12 @@ function RoomPage() {
               if (parsed.roomAccessToken) setRoomAccessToken(parsed.roomAccessToken);
               if (typeof parsed.isViewer === "boolean") setIsViewer(parsed.isViewer);
               if (typeof parsed.role === "string" && parsed.role) {
+                mintedRoleRef.current = parsed.role;
                 setUserRole(parsed.role);
-                if (parsed.role === "viewer") setIsHost(false);
+                setIsHost(parsed.role === "host");
               }
+              mintRetryCountRef.current = 0;
+              setRoomGateStatus("live");
               
               // Clear the cached token after use to prevent stale data
               sessionStorage.removeItem(`sl_lk_token:${roomId}`);
@@ -2619,7 +2718,11 @@ function RoomPage() {
         }
         
         console.log(`[Room] Fetching room token (role=${role || "host"})...`);
-        const bearerToken = getAuthToken();
+        // Signed-in users (Firebase or legacy JWT) mint with Authorization so
+        // the server sees their account (host/cohost/admin), not a guest.
+        const bearerToken = await hasAuthSession();
+        const urlT = String(new URLSearchParams(window.location.search).get("t") || "").trim() || null;
+        const shareToken = readShareToken(roomId) || readShareToken(routeRoomId);
         // Force invite mode when a token is present in the URL and we are not authed.
         // This matches the legacy participant join flow: /room/<roomId>?t=<inviteToken>
         // Also fall back to any locally-stored invite token for backward compatibility.
@@ -2632,7 +2735,8 @@ function RoomPage() {
           isHost,
           isViewer
         });
-        const inviteTokenFromUrl = new URLSearchParams(window.location.search).get("t");
+        // A share-link `t` is a roomAccessToken, not an invite.
+        const inviteTokenFromUrl = urlT && urlT !== shareToken ? urlT : null;
         // Forward the invite whenever there's no usable guest session (expired
         // sessions are already filtered out), and always for signed-in users
         // so a cohost invite link is honored even next to an old session.
@@ -2710,19 +2814,27 @@ function RoomPage() {
             setRoomName(data.roomName.trim());
           }
 
-          if (data?.permissions && typeof data.permissions === "object") {
-            setRoomPermissions({
-              canStream: !!data.permissions.canStream,
-              canRecord: !!data.permissions.canRecord,
-              canDestinations: !!data.permissions.canDestinations,
-              canModerate: !!data.permissions.canModerate,
-              canLayout: !!data.permissions.canLayout,
-              canScreenShare: !!data.permissions.canScreenShare,
-              canInvite: !!data.permissions.canInvite,
-              canAnalytics: !!data.permissions.canAnalytics,
-            });
-          } else {
-            setRoomPermissions(null);
+          // `permissions` from the response; falls back to the RAT claims
+          // when an older server omits the field.
+          setRoomPermissions(
+            resolveRoomPermissions(
+              data?.permissions,
+              typeof data?.roomAccessToken === "string" ? data.roomAccessToken : null,
+            ),
+          );
+          // Invisible joins can be downgraded server-side (e.g. not allowed
+          // for this role): follow the server and tell the user.
+          if (data?.presenceMode === "normal" || data?.presenceMode === "invisible" || data?.presenceMode === "silent") {
+            const granted = data.presenceMode === "normal" ? "normal" : "invisible";
+            setPresenceNotice(presenceDowngradeNotice(presenceMode, data.presenceMode));
+            setPresenceMode(granted);
+            if (granted === "normal") {
+              try {
+                localStorage.removeItem("sl_presence_mode");
+              } catch {
+                // ignore
+              }
+            }
           }
           if (data.effectiveEntitlements || data.platformFlags) {
             applyEntitlementsAndPlatform(data.effectiveEntitlements, data.platformFlags || {});
@@ -2776,14 +2888,24 @@ function RoomPage() {
           if (typeof data?.isViewer === "boolean") {
             setIsViewer(data.isViewer);
           }
-          if (typeof data?.effectiveRoleKey === "string") {
-            setUserRole(data.effectiveRoleKey);
-            if (data.effectiveRoleKey === "viewer") setIsHost(false);
-            if (data.effectiveRoleKey === "host") setIsHost(true);
-          } else if (typeof data?.role === "string") {
-            setUserRole(data.role);
-            if (data.role === "viewer") setIsHost(false);
-            if (data.role === "host") setIsHost(true);
+          // The minted role is authoritative: a stale sl_created_rooms entry
+          // or a local admin flag must not grant host UI (or the host-only
+          // remove-all on exit) unless the server minted host.
+          const mintedRole =
+            typeof data?.effectiveRoleKey === "string" && data.effectiveRoleKey
+              ? data.effectiveRoleKey
+              : typeof data?.role === "string" && data.role
+                ? data.role
+                : null;
+          if (mintedRole) {
+            mintedRoleRef.current = mintedRole;
+            setUserRole(mintedRole);
+            setIsHost(mintedRole === "host");
+            try {
+              localStorage.setItem("sl_current_role", mintedRole);
+            } catch {
+              // ignore
+            }
           }
           if (!lkToken || !finalServerUrl) {
             console.error("[Room] Missing token or serverUrl", { token: lkToken, serverUrl: serverUrlFromApi });
@@ -2793,18 +2915,49 @@ function RoomPage() {
           // Credentials are stored now; drop them from the address bar so
           // they aren't shared or bookmarked with the room URL.
           stripQueryParams(["gst", "t"]);
+          mintRetryCountRef.current = 0;
+          setRoomGateStatus("live");
+          setAccessDenied(null);
+          setConnectionIssue(null);
           return true;
         };
 
         const { endpoint, payload } = buildRoomTokenRequest();
 
         const mode: "auth" | "invite" = bearerToken ? "auth" : payload.inviteToken ? "invite" : "auth";
-        const tokenRes = bearerToken
-          ? await apiFetchAuth(
+        // Share-link guests: present the share token on every (re-)mint.
+        const shareHeader: Record<string, string> = shareToken || (urlT && !inviteTokenFromUrl)
+          ? { "x-room-access-token": (shareToken || urlT) as string }
+          : {};
+        const anonymousMint = () =>
+          apiFetch(
+            endpoint,
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...shareHeader,
+                ...(inviteTokenForJoin ? { "x-invite-token": inviteTokenForJoin } : {}),
+                ...(guestSessionToken ? { "x-guest-session": guestSessionToken } : {}),
+              },
+              body: JSON.stringify(
+                guestSessionToken && !payload.guestSessionToken ? { ...payload, guestSessionToken } : payload,
+              ),
+            },
+            { allowNonOk: true },
+          );
+        let tokenRes: Response;
+        if (bearerToken) {
+          try {
+            // allowNonOk + suppressAuthSideEffects: a 401 comes back to us
+            // (guest-session retry, mapped message, re-auth banner) instead of
+            // throwing / wiping the session.
+            tokenRes = await apiFetchAuth(
               endpoint,
               {
                 method: "POST",
                 headers: {
+                  ...shareHeader,
                   ...(selectedOwnerContext.ownerUid ? { "x-owner-context-uid": selectedOwnerContext.ownerUid } : {}),
                   ...(inviteTokenForJoin ? { "x-invite-token": inviteTokenForJoin } : {}),
                   // Logged-in invitees: forward the room's guest session so the
@@ -2813,21 +2966,16 @@ function RoomPage() {
                 },
                 body: JSON.stringify(payload),
               },
-              { allowNonOk: true },
-            )
-          : await apiFetch(
-              endpoint,
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  ...(inviteTokenForJoin ? { "x-invite-token": inviteTokenForJoin } : {}),
-                  ...(guestSessionToken ? { "x-guest-session": guestSessionToken } : {}),
-                },
-                body: JSON.stringify(payload),
-              },
-              { allowNonOk: true }
+              { allowNonOk: true, suppressAuthSideEffects: true },
             );
+          } catch (err: any) {
+            if (err?.name !== "ApiUnauthorizedError") throw err;
+            // Session disappeared between the check and the request.
+            tokenRes = await anonymousMint();
+          }
+        } else {
+          tokenRes = await anonymousMint();
+        }
 
         const attempt = { res: tokenRes, mode };
 
@@ -2868,8 +3016,17 @@ function RoomPage() {
           const mapped = mapJoinErrorMessage(errCode);
 
           if (res.status === 409) {
+            // Not live yet: show the waiting screen and try again on a
+            // backoff timer (the status/info polls also re-request as soon
+            // as the room turns live).
             setRoomGateStatus("idle");
             if (mapped) setReauthBannerText(mapped);
+            if (mintRetryTimerRef.current) clearTimeout(mintRetryTimerRef.current);
+            const delay = nextMintRetryDelayMs(mintRetryCountRef.current++);
+            mintRetryTimerRef.current = setTimeout(() => {
+              mintRetryTimerRef.current = null;
+              requestMint();
+            }, delay);
             return;
           }
 
@@ -2924,6 +3081,18 @@ function RoomPage() {
           }
 
           if (res.status === 403) {
+            if (errCode === "login_required") {
+              setNeedsReauth(true);
+              setAuthStatus("guest");
+              setReauthBannerText(mapped || "This room requires an account to join. Please sign in.");
+              return;
+            }
+            if (isAccessDeniedCode(errCode)) {
+              // Re-auth can't fix this; say so plainly.
+              setNeedsReauth(false);
+              setAccessDenied(mapped || "You don't have access to this room.");
+              return;
+            }
             setNeedsReauth(true);
             setAuthStatus("guest");
             setReauthBannerText(mapped || "Not allowed to join this room.");
@@ -2938,13 +3107,26 @@ function RoomPage() {
         applyTokenResponse(data);
       } catch (err) {
         console.error("[Room] fetchToken error:", err);
+        // Network failure reaching the API: offer Retry and keep trying.
+        setConnectionIssue({ kind: "connect_failed", message: "Couldn't reach the server to join this room." });
+        if (mintRetryTimerRef.current) clearTimeout(mintRetryTimerRef.current);
+        mintRetryTimerRef.current = setTimeout(() => {
+          mintRetryTimerRef.current = null;
+          requestMint();
+        }, nextMintRetryDelayMs(mintRetryCountRef.current++));
       } finally {
         roomTokenMintInFlightRef.current = false;
       }
     };
 
     fetchToken();
-  }, [displayName, roomId, effectiveRoomName, inviteToken, userRole, isHost, hostCheckReady, token, serverUrl]);
+  }, [displayName, roomId, effectiveRoomName, inviteToken, userRole, isHost, hostCheckReady, token, serverUrl, mintAttempt, showGoodbye, accessDenied]);
+
+  useEffect(() => {
+    return () => {
+      if (mintRetryTimerRef.current) clearTimeout(mintRetryTimerRef.current);
+    };
+  }, []);
   // REMOVED: roomGateStatus dependency - guests no longer wait for "live" status
 
   
@@ -2955,76 +3137,54 @@ function RoomPage() {
     }
   }, [isViewer, showStreamSetup]);
 
-  // Guest flow: Poll room status for INFORMATIONAL purposes only (not auth gating).
-  // This updates UI hints but does NOT block token fetching or LiveKit connection.
-  // Guests connect to LiveKit immediately; LiveKit's participant events drive the real UX.
+  // Waiting room: after /token answered 409 room_not_live, poll the room
+  // status (Authorization when signed in, else the room access / guest
+  // session / invite token) and re-request /token as soon as it turns live.
+  // Once a token exists LiveKit drives the UX, so polling stops.
+  const waitingForLive = !isHost && !token && !tokenRefreshPending && roomGateStatus === "idle";
   useEffect(() => {
-    if (!roomId) return;
-
-    // Host can proceed immediately.
-    if (isHost) {
-      setRoomGateStatus("live");
-      return;
-    }
+    if (!roomId || !waitingForLive) return;
 
     let cancelled = false;
 
     const poll = async () => {
       try {
         const guestSessionToken = getGuestSessionToken(roomId);
-        console.log('[Room] Guest polling room status (informational only, non-blocking)', { 
-          roomId, 
-          hasGuestToken: !!guestSessionToken, 
-          hasInviteToken: !!inviteToken 
-        });
-        const res = await apiFetch(
-          `/api/rooms/${encodeURIComponent(roomId)}/status`,
-          {
-            headers: {
-              ...(!guestSessionToken && inviteToken ? { "x-invite-token": inviteToken } : {}),
-              ...(guestSessionToken ? { "x-guest-session": guestSessionToken } : {}),
-            },
+        const shareToken = readShareToken(roomId);
+        const ratForStatus = shareToken || roomAccessToken;
+        const res = await apiFetchOptionalAuth(`/api/rooms/${encodeURIComponent(roomId)}/status`, {
+          headers: {
+            ...(ratForStatus ? { "x-room-access-token": ratForStatus } : {}),
+            ...(guestSessionToken ? { "x-guest-session": guestSessionToken } : {}),
+            ...(!guestSessionToken && inviteToken ? { "x-invite-token": inviteToken } : {}),
           },
-          { allowNonOk: true }
-        );
+        });
         if (cancelled) return;
 
-        if (res.status === 401 || res.status === 403) {
-          const body = await res.json().catch(() => null);
-          const errCode = extractApiErrorCode(body);
-          const mapped = mapJoinErrorMessage(errCode);
-          setRoomGateStatus("blocked");
-          setNeedsReauth(true);
-          setReauthBannerText(
-            mapped || "This room requires an account to join. Please sign in or ask the host to enable guest access."
-          );
-          return;
+        if (res.ok) {
+          const data = await res.json().catch(() => null);
+          if (cancelled) return;
+          if (data?.status === "live") {
+            console.log("[Room] Room is live — re-requesting token");
+            if (mintRetryTimerRef.current) {
+              clearTimeout(mintRetryTimerRef.current);
+              mintRetryTimerRef.current = null;
+            }
+            requestMint();
+            return;
+          }
         }
-
-        if (!res.ok) {
-          setRoomGateStatus("blocked");
-          return;
-        }
-
-        const data = await res.json().catch(() => null);
-        const status = data?.status === "live" ? "live" : "idle";
-        console.log('[Room] Guest room status (informational):', status);
-        setRoomGateStatus(status);
-
-        if (status === "idle") {
-          // Continue polling for informational UI updates
-          roomGatePollRef.current = setTimeout(poll, 1500);
-        } else {
-          console.log('[Room] Room status is live (guest already connected via LiveKit)');
-        }
+        // 401/403/5xx here are informational only: the /token request is
+        // authoritative and keeps retrying on its own backoff.
+        roomGatePollRef.current = setTimeout(poll, res.ok ? 3000 : 8000);
       } catch {
         if (!cancelled) {
-          roomGatePollRef.current = setTimeout(poll, 2000);
+          roomGatePollRef.current = setTimeout(poll, 5000);
         }
       }
     };
 
-    poll();
+    roomGatePollRef.current = setTimeout(poll, 1500);
 
     return () => {
       cancelled = true;
@@ -3033,7 +3193,113 @@ function RoomPage() {
         roomGatePollRef.current = null;
       }
     };
-  }, [roomId, isHost, inviteToken]);
+  }, [roomId, waitingForLive, inviteToken, roomAccessToken, requestMint]);
+
+  // Join gate: public room info (no auth) for the name/waiting screens.
+  // Polls every 5s while the room isn't live (slower once the link looks
+  // stale); stops when live, ended or not found, and once in the room.
+  const onJoinGate = !isHost && !token && !tokenRefreshPending && !showGoodbye && !accessDenied;
+  const displayNameRef = useRef(displayName);
+  displayNameRef.current = displayName;
+  useEffect(() => {
+    if (!roomId || !onJoinGate) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    if (!waitStartRef.current) waitStartRef.current = Date.now();
+    setWaitStartedAt((prev) => prev ?? waitStartRef.current);
+
+    const fetchInfo = async () => {
+      let next: PublicRoomInfo | null = null;
+      try {
+        const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/info`, {}, { allowNonOk: true });
+        if (cancelled) return;
+        if (res.ok || res.status === 404) {
+          const data = res.status === 404 ? null : await res.json().catch(() => null);
+          if (cancelled) return;
+          next = normalizePublicRoomInfo(res.status, data);
+          setPublicRoomInfo(next);
+          if (next.roomName) setRoomName((prev) => prev || next!.roomName || prev);
+        }
+      } catch {
+        // non-critical — the join gate still works without this
+      }
+      if (cancelled) return;
+      const st = next?.status;
+      if (st === "live") {
+        // Became live while waiting with a name already chosen: join now.
+        if (displayNameRef.current && roomGateStatus === "idle") {
+          if (mintRetryTimerRef.current) {
+            clearTimeout(mintRetryTimerRef.current);
+            mintRetryTimerRef.current = null;
+          }
+          requestMint();
+        }
+        return;
+      }
+      if (st === "ended" || st === "not_found") return;
+      const waited = Date.now() - (waitStartRef.current || Date.now());
+      timer = setTimeout(fetchInfo, waited >= STALE_WAIT_MS ? 30000 : 5000);
+    };
+
+    void fetchInfo();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [roomId, onJoinGate, roomGateStatus, requestMint, STALE_WAIT_MS]);
+
+  // Elapsed-wait clock for the waiting screen.
+  const showingWaitScreen = onJoinGate && (!displayName || roomGateStatus === "idle");
+  useEffect(() => {
+    if (!showingWaitScreen) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [showingWaitScreen]);
+
+  // Join-page presence: while a guest sits on the join/waiting gate, ping
+  // every 20s so the host sees them; "entered_room" once connected and
+  // "left" on leave/unload.
+  const presenceCtxRef = useRef<{ roomId: string | null; identity: string | null; name: string }>({
+    roomId: null,
+    identity: null,
+    name: "",
+  });
+  presenceCtxRef.current = {
+    roomId,
+    identity: participantIdentity,
+    name: displayName || pendingName || "",
+  };
+  const presenceStageRef = useRef<"join_page" | "entered_room" | "left" | null>(null);
+  const sendPresence = React.useCallback((stage: "join_page" | "entered_room" | "left", beacon = false) => {
+    const ctx = presenceCtxRef.current;
+    if (!ctx.roomId) return;
+    presenceStageRef.current = stage;
+    postGuestPresence(
+      {
+        roomId: ctx.roomId,
+        stage,
+        identity: ctx.identity,
+        displayName: ctx.name,
+        guestSessionToken: readStoredGuestSession(ctx.roomId),
+      },
+      { beacon },
+    );
+  }, []);
+  const gateRoomClosed = publicRoomInfo?.status === "ended" || publicRoomInfo?.status === "not_found";
+  useEffect(() => {
+    if (!roomId || !onJoinGate || gateRoomClosed) return;
+    sendPresence("join_page");
+    const id = setInterval(() => sendPresence("join_page"), 20000);
+    return () => clearInterval(id);
+  }, [roomId, onJoinGate, gateRoomClosed, sendPresence]);
+  useEffect(() => {
+    if (!roomId || isHost) return;
+    const onPageHide = () => {
+      if (presenceStageRef.current && presenceStageRef.current !== "left") sendPresence("left", true);
+    };
+    window.addEventListener("pagehide", onPageHide);
+    return () => window.removeEventListener("pagehide", onPageHide);
+  }, [roomId, isHost, sendPresence]);
 
   // Load effective entitlements + media presets only when the user explicitly opens host tools.
   // (Nuclear option 2: avoid background /me calls after connect.)
@@ -3450,7 +3716,16 @@ function RoomPage() {
     }
   };
 
+  // Explicit leave only (Exit Room / LiveKit Leave). Never called for a
+  // network drop or failed connect — see handleLiveKitDisconnected.
   const handleLeftRoom = () => {
+    explicitLeaveRef.current = true;
+    if (mintRetryTimerRef.current) {
+      clearTimeout(mintRetryTimerRef.current);
+      mintRetryTimerRef.current = null;
+    }
+    setConnectionIssue(null);
+    if (!isHost) sendPresence("left");
     sendUsageOnExit();
     // Drop elevated cohost roles on leave; a fresh invite
     // (or host/participant flow) must re-establish them on rejoin.
@@ -3484,7 +3759,80 @@ function RoomPage() {
       }
     }
 
-    nav('/join', { replace: true });
+    if (isHost) {
+      nav('/join', { replace: true });
+      return;
+    }
+    // Guests / participants / co-hosts: thank-you screen on this page (with
+    // Rejoin), never the host /join page.
+    setGoodbyeMessage(null);
+    setShowGoodbye(true);
+  };
+
+  // LiveKit Disconnected. Only an explicit leave runs the leave flow (and
+  // that already ran before the disconnect); anything else is surfaced as a
+  // banner with Retry — no navigation, no usage post, no remove-all.
+  const handleLiveKitDisconnected = (reason?: number) => {
+    const kind = classifyDisconnect(reason, explicitLeaveRef.current);
+    console.log("[Room] disconnect classified", { reason, kind });
+    if (kind === "explicit" || kind === "client") return;
+    if ((kind === "removed" || kind === "ended") && !isHost) {
+      explicitLeaveRef.current = true;
+      sendPresence("left");
+      setGoodbyeMessage(
+        kind === "removed" ? "You were removed from the room by the host." : "The host has ended this session.",
+      );
+      setShowGoodbye(true);
+      return;
+    }
+    setConnectionIssue({
+      kind,
+      message:
+        kind === "duplicate"
+          ? "You joined this room from another tab or device, so this tab was disconnected."
+          : kind === "removed" || kind === "ended"
+            ? "The server closed your connection to this room."
+            : "Lost connection to the live room.",
+    });
+  };
+
+  const handleLiveKitConnectError = (error: Error) => {
+    if (explicitLeaveRef.current) return;
+    console.warn("[Room] LiveKit connect failed", error?.message);
+    setConnectionIssue({ kind: "connect_failed", message: "Couldn't connect to the live room." });
+  };
+
+  const handleLiveKitConnected = () => {
+    setConnectionIssue(null);
+    if (!isHost) sendPresence("entered_room");
+  };
+
+  // Retry after a drop / failed connect: re-mint and build a fresh LiveKit room.
+  const retryConnection = () => {
+    setConnectionIssue(null);
+    explicitLeaveRef.current = false;
+    mintRetryCountRef.current = 0;
+    if (mintRetryTimerRef.current) {
+      clearTimeout(mintRetryTimerRef.current);
+      mintRetryTimerRef.current = null;
+    }
+    try {
+      if (roomId) sessionStorage.removeItem(`sl_lk_token:${roomId}`);
+    } catch {
+      // ignore
+    }
+    setTokenRefreshPending(false);
+    setToken(null);
+    setConnectAttempt((n) => n + 1);
+    requestMint();
+  };
+
+  // Goodbye screen → back into this same room (guests' own room page).
+  const handleRejoin = () => {
+    explicitLeaveRef.current = false;
+    setShowGoodbye(false);
+    setGoodbyeMessage(null);
+    retryConnection();
   };
 
   const handleHomeClick = () => {
@@ -3982,70 +4330,100 @@ function RoomPage() {
     })();
   };
 
-  const copyViewerLink = async () => {
-    if (!roomId) {
-      alert("Viewer link is unavailable until roomId is known");
-      return;
-    }
-    const base = APP_BASE || window.location.origin;
-    const url = `${base}/live/${encodeURIComponent(roomId)}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      alert(`Viewer link copied!\n${url}`);
-    } catch (err) {
-      console.error("copy viewer link failed", err);
-      alert("Copy failed");
-    }
-  };
+  // (The HLS viewer link lives in Stream Setup, bound to the active saved
+  // embed; /live/<roomId> is not a valid viewer route.)
 
   // ==================== RENDER ====================
 
-  if (!displayName) {
+  const gateRoomName = publicRoomInfo?.roomName || roomName || routeRoomId || "this room";
+  const gateStatus = publicRoomInfo?.status ?? "unknown";
+  const gateIsLive = gateStatus === "live";
+  const goHomeFromGate = () => nav("/");
+  const goBackFromGate = () => {
+    try {
+      if (window.history.length > 1) {
+        nav(-1);
+        return;
+      }
+    } catch {
+      // ignore
+    }
+    nav("/");
+  };
+  const waitedMs = waitStartedAt ? Math.max(0, nowTick - waitStartedAt) : 0;
+  const waitIsStale = waitedMs >= STALE_WAIT_MS;
+  const checkNow = () => {
+    mintRetryCountRef.current = 0;
+    if (mintRetryTimerRef.current) {
+      clearTimeout(mintRetryTimerRef.current);
+      mintRetryTimerRef.current = null;
+    }
+    if (displayName) requestMint();
+    // Refresh the public room info immediately as well.
+    void (async () => {
+      if (!roomId) return;
+      try {
+        const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/info`, {}, { allowNonOk: true });
+        if (res.ok || res.status === 404) {
+          const data = res.status === 404 ? null : await res.json().catch(() => null);
+          setPublicRoomInfo(normalizePublicRoomInfo(res.status, data));
+        }
+      } catch {
+        // ignore
+      }
+    })();
+  };
+
+  // No access (403 not_allowed): re-auth can't fix it.
+  if (accessDenied) {
     return (
-      <div style={{
-        minHeight: '100vh',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        background: '#000000',
-        color: '#ffffff',
-        padding: '1.5rem',
-        position: 'relative',
-        overflow: 'hidden'
-      }}>
-        <div style={{
-          position: 'absolute',
-          top: '20%',
-          left: '15%',
-          width: '200px',
-          height: '200px',
-          borderRadius: '50%',
-          background: 'linear-gradient(135deg, #dc2626, #ef4444)',
-          opacity: 0.1,
-          filter: 'blur(30px)',
-          animation: 'float 7s ease-in-out infinite'
-        }} />
-        <div style={{
-          position: 'absolute',
-          bottom: '25%',
-          right: '20%',
-          width: '150px',
-          height: '150px',
-          borderRadius: '50%',
-          background: 'linear-gradient(135deg, #ef4444, #dc2626)',
-          opacity: 0.08,
-          filter: 'blur(25px)',
-          animation: 'float 9s ease-in-out infinite reverse'
-        }} />
-
-        <style>{`
-          @keyframes float {
-            0%, 100% { transform: translateY(0px) rotate(0deg); }
-            50% { transform: translateY(-15px) rotate(180deg); }
+      <JoinGateLayout roomName={gateRoomName} hostName={publicRoomInfo?.hostName}>
+        <RoomUnavailableCard
+          testId="room-access-denied"
+          title="You don't have access to this room"
+          message={
+            accessDenied === "You don't have access to this room."
+              ? "Ask the host for an invite link, or check that you're signed in with the right account."
+              : accessDenied
           }
-        `}</style>
+          actionLabel="Go back"
+          onAction={goBackFromGate}
+        />
+      </JoinGateLayout>
+    );
+  }
 
+  // Guest join gate status cards (hosts never wait on their own room).
+  const gateUnavailable =
+    !isHost && !token && (gateStatus === "not_found" || gateStatus === "ended") ? (
+      <RoomUnavailableCard
+        testId={gateStatus === "not_found" ? "room-not-found" : "room-ended"}
+        title={gateStatus === "not_found" ? "Room not found" : "This stream has ended"}
+        message={
+          gateStatus === "not_found"
+            ? "This link doesn't match an active room. Check the link with your host."
+            : "The host has ended this session. Thanks for stopping by!"
+        }
+        actionLabel="Return home"
+        onAction={goHomeFromGate}
+      />
+    ) : null;
+
+  if (!displayName) {
+    const showWaiting = !isHost && !gateUnavailable && gateStatus === "idle";
+    return (
+      <JoinGateLayout roomName={gateRoomName} hostName={publicRoomInfo?.hostName} isLive={gateIsLive}>
+        {gateUnavailable}
+        {showWaiting && (
+          <WaitingForHostCard
+            elapsedMs={waitedMs}
+            stale={waitIsStale}
+            hasName={false}
+            onCheckNow={checkNow}
+            onHome={goHomeFromGate}
+          />
+        )}
+        {!gateUnavailable && (
         <form
           style={{
             background: 'rgba(39, 39, 42, 0.5)',
@@ -4097,7 +4475,7 @@ function RoomPage() {
             }}
             onFocus={(e) => (e.target as HTMLInputElement).style.borderColor = '#dc2626'}
             onBlur={(e) => (e.target as HTMLInputElement).style.borderColor = 'rgba(75, 85, 99, 0.5)'}
-            placeholder={`Enter your name to join "${roomName}"`}
+            placeholder={`Enter your name to join "${gateRoomName}"`}
             value={pendingName}
             onChange={(e) => setPendingName(e.target.value)}
             autoFocus
@@ -4121,10 +4499,12 @@ function RoomPage() {
               opacity: !pendingName.trim() ? 0.6 : 1,
             }}
           >
-            Join Room
+            {showWaiting ? "Join when live" : "Join Room"}
           </button>
         </form>
+        )}
 
+        {!gateUnavailable && (
         <p style={{
           fontSize: '0.875rem',
           textAlign: 'center',
@@ -4137,18 +4517,38 @@ function RoomPage() {
         }}>
           When you enter the room, tap the microphone and camera icons to enable audio and video.
         </p>
-
-        <img
-          src="/logosmall.png"
-          alt="StreamLine Logo"
-          className="mt-6 w-40 opacity-90"
-        />
-      </div>
+        )}
+      </JoinGateLayout>
     );
   }
 
   if (showGoodbye) {
-    return <ThankYouScreen showHomeButton={isHost} onHome={handleHomeClick} />;
+    return (
+      <ThankYouScreen
+        showHomeButton={isHost}
+        onHome={handleHomeClick}
+        onRejoin={isHost ? undefined : handleRejoin}
+        message={goodbyeMessage}
+      />
+    );
+  }
+
+  // Name chosen but the room isn't open: ended / not found, or waiting for
+  // the host (409 room_not_live) — re-requests /token automatically.
+  if (!isHost && !token && (gateUnavailable || roomGateStatus === "idle")) {
+    return (
+      <JoinGateLayout roomName={gateRoomName} hostName={publicRoomInfo?.hostName} isLive={gateIsLive}>
+        {gateUnavailable || (
+          <WaitingForHostCard
+            elapsedMs={waitedMs}
+            stale={waitIsStale}
+            hasName
+            onCheckNow={checkNow}
+            onHome={goHomeFromGate}
+          />
+        )}
+      </JoinGateLayout>
+    );
   }
 
   const guestCapLabel = typeof maxGuestsAllowed === "number" && maxGuestsAllowed > 0 ? `${maxGuestsAllowed}` : "—";
@@ -4223,6 +4623,46 @@ function RoomPage() {
       )}
       {/* REMOVED: Old "Not started yet" banner - guests now connect immediately to LiveKit.
           WaitingForHostBanner (inside LiveKitRoom) shows real-time participant status instead. */}
+      {connectionIssue && (
+        <div
+          role="alert"
+          data-testid="connection-issue-banner"
+          className="w-full bg-red-700 text-white text-sm font-semibold px-4 py-2 flex items-center justify-between gap-3"
+        >
+          <span>{connectionIssue.message}</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <button
+              onClick={retryConnection}
+              className="px-3 py-1.5 bg-white/10 hover:bg-white/20 rounded text-sm font-semibold"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      )}
+      {presenceNotice && (
+        <div
+          role="status"
+          className="w-full bg-amber-500 text-black text-sm font-semibold px-4 py-2 flex items-center justify-between gap-3"
+        >
+          <span>{presenceNotice}</span>
+          <button
+            onClick={() => setPresenceNotice(null)}
+            className="px-2 py-1 rounded text-sm font-semibold"
+            aria-label="Dismiss"
+          >
+            ✕
+          </button>
+        </div>
+      )}
+      {adminOverride && (
+        <div
+          role="status"
+          className="w-full bg-indigo-700 text-white text-xs font-semibold px-4 py-1.5"
+        >
+          Admin override: you're in this room with admin access. Leaving won't end the session for others.
+        </div>
+      )}
       {!isViewer && needsReauth && (
         <div className="w-full bg-red-600 text-white text-sm font-semibold px-4 py-2 flex items-center justify-between gap-3">
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -4532,7 +4972,7 @@ function RoomPage() {
               </button>
             )}
 
-            {isHost && (
+            {canLayoutUi && (
               <button
                 onClick={() => setShowLayoutPicker(v => !v)}
                 data-tour="layout-controls"
@@ -4639,11 +5079,15 @@ function RoomPage() {
           effectivePermissionsMode={effectivePermissionsMode}
           dashboardGreenroomEnabled={dashboardGreenroomEnabled}
           dashboardOverlaysEnabled={dashboardOverlaysEnabled}
-          dashboardRole={isHost ? "host" : "participant"}
+          key={connectAttempt}
+          dashboardRole={dashboardRole}
+          canLayout={canLayoutUi}
           onLeaveRequested={() => {
             void handleEndStream();
           }}
-          onDisconnected={handleLeftRoom}
+          onDisconnected={handleLiveKitDisconnected}
+          onConnectError={handleLiveKitConnectError}
+          onConnected={handleLiveKitConnected}
           onActiveSharerChange={setActiveSharerName}
           audioMixerEnabled={featureAccess.audioMixer.allowed}
           advancedScreenShareEnabled={featureAccess.advancedScreenShare.allowed}

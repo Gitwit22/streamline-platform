@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from "react";
-import { apiFetchAuth, clearAuthStorage, getAuthToken } from "../lib/api";
+import { apiFetchAuth, clearAuthStorage, hasAuthSession } from "../lib/api";
 
 export interface AuthUser {
   id?: string;
@@ -34,17 +34,16 @@ if (typeof window !== "undefined" && cachedUser === undefined) {
 async function fetchAuthMeFresh(): Promise<AuthUser | null> {
   if (inFlight) return inFlight;
 
-  // If there is no auth token the caller is a guest (e.g. joined via invite
-  // link).  Return null immediately so apiFetchAuth never fires the
-  // sl:unauthorized event, which would redirect guests to /login and wipe
-  // their guest session tokens.
-  if (!getAuthToken()) {
-    cachedUser = null;
-    return null;
-  }
-
   inFlight = (async () => {
     try {
+      // No sign-in session (neither a Firebase user nor a legacy header
+      // token): the caller is a guest (e.g. joined via invite link). Return
+      // null so apiFetchAuth never fires the sl:unauthorized event, which
+      // would redirect guests to /login and wipe their guest session tokens.
+      if (!(await hasAuthSession())) {
+        cachedUser = null;
+        return null;
+      }
       // Use the canonical auth endpoint which exposes plan + billing + admin flags
       const res = await apiFetchAuth("/api/auth/me");
       const data = (await res.json()) as AuthUser;

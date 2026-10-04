@@ -1,6 +1,6 @@
 
 import { API_BASE } from "./apiBase";
-import { getFirebaseIdToken } from "./firebaseClient";
+import { getFirebaseIdToken, getFirebaseIdTokenWhenReady } from "./firebaseClient";
 
 /**
  * Read the auth token from localStorage for header-based auth fallback.
@@ -21,6 +21,52 @@ export function clearAuthToken() {
   try {
     window.localStorage.removeItem("authToken");
   } catch {}
+}
+
+/**
+ * Best available bearer token for the current user, or null when anonymous.
+ * Unlike getAuthToken() (legacy localStorage only, which is cleared after a
+ * Firebase login), this also considers the Firebase ID token and waits briefly
+ * for Firebase to restore a persisted session on page load.
+ */
+export async function getOptionalAuthToken(): Promise<string | null> {
+  if (typeof window === "undefined") return null;
+  try {
+    const fb = await getFirebaseIdTokenWhenReady();
+    if (fb && looksLikeJwt(fb)) return fb;
+  } catch {
+    // ignore
+  }
+  const legacy = getAuthToken();
+  return legacy && looksLikeJwt(legacy) ? legacy : null;
+}
+
+/** True when the user has a usable sign-in session (Firebase or legacy JWT). */
+export async function hasAuthSession(): Promise<boolean> {
+  return !!(await getOptionalAuthToken());
+}
+
+/** `{ Authorization: "Bearer …" }` when signed in, otherwise `{}`. */
+export async function optionalAuthHeaders(): Promise<Record<string, string>> {
+  const token = await getOptionalAuthToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+/**
+ * Fetch that sends Authorization when the user is signed in and plain
+ * credentials otherwise. Never emits global unauthorized side effects and
+ * always returns the response (including 401/403) to the caller.
+ */
+export async function apiFetchOptionalAuth(path: string, init: RequestInit = {}): Promise<Response> {
+  if (await hasAuthSession()) {
+    try {
+      return await apiFetchAuth(path, init, { allowNonOk: true, suppressAuthSideEffects: true });
+    } catch (err) {
+      if (!(err instanceof ApiUnauthorizedError)) throw err;
+      // Session vanished between the check and the request: fall through.
+    }
+  }
+  return apiFetch(path, init, { allowNonOk: true });
 }
 
 function logClearedStaleHeaderTokenOnce() {
@@ -183,6 +229,7 @@ export async function apiFetchAuth(
   }
 
   if (res.status === 401) {
+    let last401Res: Response = res;
     // A retry that gets past 401 is returned (or thrown as a normal HTTP error)
     // outside the try/catch blocks so a 403/500 isn't mistaken for a logout.
     let recoveredRes: Response | null = null;
@@ -210,6 +257,8 @@ export async function apiFetchAuth(
           const retryRes = await apiFetch(path, { ...init, headers: retryHeaders }, { allowNonOk: true });
           if (retryRes.status !== 401) {
             recoveredRes = retryRes;
+          } else {
+            last401Res = retryRes;
           }
         }
       } catch {
@@ -229,12 +278,22 @@ export async function apiFetchAuth(
           const retryRes = await apiFetch(path, { ...init, headers: retryHeaders }, { allowNonOk: true });
           if (retryRes.status !== 401) {
             recoveredRes = retryRes;
+          } else {
+            last401Res = retryRes;
           }
         }
       } catch {
         // ignore retry failures; fall through to unauthorized handling
       }
       if (recoveredRes) return finishRecovered(recoveredRes);
+    }
+
+    // Callers that opt into both allowNonOk and suppressAuthSideEffects
+    // handle 401 themselves (e.g. the room token request maps error codes,
+    // retries with a guest session, or shows a re-auth banner). Hand them the
+    // response instead of throwing, and leave stored tokens alone.
+    if (options?.allowNonOk && suppressAuthSideEffects) {
+      return last401Res;
     }
 
     if (!suppressAuthSideEffects) {

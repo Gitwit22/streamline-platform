@@ -1,42 +1,46 @@
-import { useEffect, useRef, useState } from "react";
-import { getHlsStatus, type HlsStatusResponse } from "../../services/hls";
+import { useEffect, useState } from "react";
+import { getHlsStatus, isHlsAuthError, type HlsStatusResponse } from "../../services/hls";
 
 type UseHlsStatusArgs = {
   apiBase: string;
   roomId: string;
   roomAccessToken: string;
+  /**
+   * Only poll when the user can manage the stream (host / canStream). Guests
+   * and viewers have no business calling the host HLS status endpoint.
+   */
+  enabled?: boolean;
 };
 
-export function useHlsStatus({ apiBase, roomId, roomAccessToken }: UseHlsStatusArgs) {
+export function useHlsStatus({ apiBase, roomId, roomAccessToken, enabled = true }: UseHlsStatusArgs) {
   const [data, setData] = useState<HlsStatusResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [pollError, setPollError] = useState<string | null>(null);
 
-  const backoffMsRef = useRef<number>(2000); // starts small
-  const stoppedRef = useRef<boolean>(false);
-
   useEffect(() => {
-    stoppedRef.current = false;
-    backoffMsRef.current = 2000;
+    // Per-run state so a re-run never resurrects the previous loop.
+    let stopped = false;
+    let timer: number | null = null;
+    let backoffMs = 2000; // starts small
     setLoading(true);
     setPollError(null);
 
-    if (!apiBase || !roomId || !roomAccessToken) return;
-
-    const fetchOnce = async () => {
-      return await getHlsStatus(roomId, roomAccessToken);
-    };
+    if (!enabled || !apiBase || !roomId || !roomAccessToken) {
+      setLoading(false);
+      return;
+    }
 
     const schedule = (ms: number) => {
-      if (stoppedRef.current) return;
-      window.setTimeout(loop, ms);
+      if (stopped) return;
+      timer = window.setTimeout(loop, ms);
     };
 
     const loop = async () => {
-      if (stoppedRef.current) return;
+      if (stopped) return;
 
       try {
-        const next = await fetchOnce();
+        const next = await getHlsStatus(roomId, roomAccessToken);
+        if (stopped) return;
         setData(next);
         setLoading(false);
         setPollError(null);
@@ -47,47 +51,53 @@ export function useHlsStatus({ apiBase, roomId, roomAccessToken }: UseHlsStatusA
         // Polling strategy:
         // - starting => poll fast (2s)
         // - live but no playlist => exponential backoff up to 10s
-        // - live with playlist => poll slower (8s) or you can stop polling later
+        // - live with playlist => poll slower (8s)
         // - idle => poll slower (6s)
         if (s === "starting") {
-          backoffMsRef.current = 2000;
+          backoffMs = 2000;
           schedule(2000);
           return;
         }
 
         if ((s === "live" || s === "active") && !hasPlaylist) {
-          // backoff up to 10s
-          backoffMsRef.current = Math.min(backoffMsRef.current * 1.5, 10000);
-          schedule(backoffMsRef.current);
+          backoffMs = Math.min(backoffMs * 1.5, 10000);
+          schedule(backoffMs);
           return;
         }
 
         if (s === "error") {
           // keep a gentle poll so user can recover if host restarts
-          backoffMsRef.current = 5000;
+          backoffMs = 5000;
           schedule(5000);
           return;
         }
 
-        // stable states
-        schedule((s === "live" || s === "active") ? 8000 : 6000);
+        schedule(s === "live" || s === "active" ? 8000 : 6000);
       } catch (e: any) {
+        if (stopped) return;
         setLoading(false);
         setPollError(e?.message || "status_poll_failed");
 
-        // On errors, back off a bit so we don't hammer
-        backoffMsRef.current = Math.min(backoffMsRef.current * 1.5, 12000);
-        schedule(backoffMsRef.current);
+        // No access: stop instead of retrying forever.
+        if (isHlsAuthError(e)) {
+          stopped = true;
+          return;
+        }
+
+        // On other errors, back off a bit so we don't hammer
+        backoffMs = Math.min(backoffMs * 1.5, 12000);
+        schedule(backoffMs);
       }
     };
 
     // start immediately
-    loop();
+    void loop();
 
     return () => {
-      stoppedRef.current = true;
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
     };
-  }, [apiBase, roomId, roomAccessToken]);
+  }, [apiBase, roomId, roomAccessToken, enabled]);
 
   return { data, loading, pollError };
 }

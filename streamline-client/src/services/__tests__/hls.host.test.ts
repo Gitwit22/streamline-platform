@@ -84,4 +84,34 @@ describe("services/hls (host-only)", () => {
 
     await expect(getHlsStatus("room_bad")).rejects.toThrow("status_failed_500:boom");
   });
+
+  it("getHlsStatus suppresses global auth side effects", async () => {
+    apiFetchAuthMock.mockReset();
+    apiFetchAuthMock.mockResolvedValueOnce(makeRes({ ok: true, status: 200, json: { status: "idle" } }));
+
+    const { getHlsStatus } = await import("../hls");
+    await getHlsStatus("room_ok", "rat");
+
+    const [, , options] = apiFetchAuthMock.mock.calls[0];
+    expect(options).toMatchObject({ allowNonOk: true, suppressAuthSideEffects: true });
+  });
+
+  it("getHlsStatus marks 401/403 (and missing session) as auth errors", async () => {
+    const { getHlsStatus, isHlsAuthError } = await import("../hls");
+
+    apiFetchAuthMock.mockReset();
+    apiFetchAuthMock.mockResolvedValueOnce(makeRes({ ok: false, status: 403, text: "insufficient_role" }));
+    const e403 = await getHlsStatus("r").catch((e) => e);
+    expect(isHlsAuthError(e403)).toBe(true);
+
+    apiFetchAuthMock.mockReset();
+    apiFetchAuthMock.mockRejectedValueOnce(Object.assign(new Error("unauthorized"), { name: "ApiUnauthorizedError", status: 401 }));
+    const e401 = await getHlsStatus("r").catch((e) => e);
+    expect(isHlsAuthError(e401)).toBe(true);
+
+    apiFetchAuthMock.mockReset();
+    apiFetchAuthMock.mockResolvedValueOnce(makeRes({ ok: false, status: 502, text: "bad" }));
+    const e502 = await getHlsStatus("r").catch((e) => e);
+    expect(isHlsAuthError(e502)).toBe(false);
+  });
 });

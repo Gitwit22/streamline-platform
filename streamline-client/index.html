@@ -7,7 +7,9 @@
     <title>streamline-client</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
-      tailwind.config = {
+      // Guarded: if the Tailwind CDN is blocked (adblock, CSP, offline) the
+      // global is missing and an unguarded assignment would throw.
+      try { if (window.tailwind) window.tailwind.config = {
         theme: {
           extend: {
             colors: {
@@ -34,7 +36,7 @@
             borderRadius: { lg: 'var(--radius)', md: 'calc(var(--radius) - 2px)', sm: 'calc(var(--radius) - 4px)' },
           },
         },
-      }
+      } } catch (e) { /* tailwind unavailable */ }
     </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

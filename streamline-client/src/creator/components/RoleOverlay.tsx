@@ -58,6 +58,25 @@ function isAudienceParticipant(p: any): boolean {
   return role === "viewer";
 }
 
+/**
+ * Best-effort "is this the room owner/host" check from participant metadata
+ * (role "host" / rolePresetId "host"). Used to keep co-hosts from removing or
+ * muting the owner; the server enforces this independently.
+ */
+function isOwnerParticipant(p: any): boolean {
+  let meta: any = p?.metadata;
+  if (typeof meta === "string") {
+    try {
+      meta = JSON.parse(meta);
+    } catch {
+      meta = null;
+    }
+  }
+  const attrs = p?.attributes && typeof p.attributes === "object" ? p.attributes : {};
+  const role = String(meta?.role || meta?.rolePresetId || attrs.role || "").toLowerCase();
+  return role === "host" || role === "owner" || meta?.isHost === true;
+}
+
 export default function RoleOverlay({
   open,
   onClose,
@@ -120,7 +139,7 @@ export default function RoleOverlay({
         }}>
           <div>
             <div style={{ fontWeight: '700', fontSize: '0.95rem', color: '#ef4444', letterSpacing: '0.5px' }}>
-              {role === 'host' ? 'DASHBOARD' : role.toUpperCase()}
+              {role === 'host' ? 'DASHBOARD' : role === 'moderator' ? 'CO-HOST DASHBOARD' : role.toUpperCase()}
             </div>
           </div>
           <button
@@ -178,6 +197,7 @@ export default function RoleOverlay({
               advancedRolesEnabled={advancedRolesEnabled}
               greenroomEnabled={greenroomEnabled}
               overlaysEnabled={overlaysEnabled}
+              cohostView={role === "moderator"}
             />
           )}
           {role === "participant" && (
@@ -200,6 +220,7 @@ function HostPanel({
   advancedRolesEnabled,
   greenroomEnabled,
   overlaysEnabled,
+  cohostView = false,
 }: {
   roomName: string;
   roomId: string;
@@ -210,6 +231,8 @@ function HostPanel({
   advancedRolesEnabled?: boolean;
   greenroomEnabled?: boolean;
   overlaysEnabled?: boolean;
+  /** Co-host moderating: no co-host assignment, can't remove/mute the owner. */
+  cohostView?: boolean;
 }) {
   const parts = useParticipants();
   const { localParticipant } = useLocalParticipant();
@@ -351,11 +374,8 @@ function HostPanel({
     if (!roomName || !roomAccessToken) return;
     setBusy(true);
     try {
+      // The server skips the caller and the host, so no follow-up unmute.
       await apiMuteAll(roomName, true, roomAccessToken);
-      const hostId = localParticipant?.identity;
-      if (hostId) {
-        await apiMute(roomName, hostId, false, roomAccessToken);
-      }
     } catch (e) {
       console.error("mute-all-except-host failed", e);
       alert("Failed to mute all participants");
@@ -531,7 +551,9 @@ function HostPanel({
           canMuteGuests={canMuteGuests}
           canRemoveGuests={canRemoveGuests}
           canChangeRoles={!!roomId && !!roomAccessToken}
-          onChangeRole={handleChangeRole}
+          onChangeRole={cohostView ? undefined : handleChangeRole}
+          hideRoleSelect={cohostView}
+          protectOwner={cohostView}
           roleByIdentity={roleByIdentity}
           roleStatus={roleStatus}
           onStageChange={handleStageChange}
@@ -549,6 +571,7 @@ function HostPanel({
               onRemove={(id) => apiRemove(roomName, id, roomAccessToken)}
               localIdentity={localParticipant?.identity || null}
               canRemoveGuests={canRemoveGuests}
+              protectOwner={cohostView}
             />
           );
         })()}
@@ -593,61 +616,10 @@ function HostPanel({
       )}
 
       {overlaysEnabled && (
-        <Section title="Overlays (MVP)">
-          <div style={{ display: 'flex', gap: '0.5rem' }}>
-            <button
-              style={{
-                borderRadius: '0.375rem',
-                border: '1px solid rgba(220, 38, 38, 0.5)',
-                padding: '0.375rem 0.75rem',
-                fontSize: '0.75rem',
-                background: 'linear-gradient(135deg, #dc2626, #b91c1c)',
-                color: '#ffffff',
-                cursor: 'pointer',
-                transition: 'all 0.3s ease',
-                fontWeight: '600'
-              }}
-              onMouseEnter={(e) => {
-                const target = e.target as HTMLButtonElement;
-                target.style.background = 'linear-gradient(135deg, #b91c1c, #991b1b)';
-                target.style.boxShadow = '0 0 10px rgba(220, 38, 38, 0.3)';
-              }}
-              onMouseLeave={(e) => {
-                const target = e.target as HTMLButtonElement;
-                target.style.background = 'linear-gradient(135deg, #dc2626, #b91c1c)';
-                target.style.boxShadow = 'none';
-              }}
-              onClick={() => alert("Show lower-third (stub)")}
-            >
-              Show Lower Third
-            </button>
-            <button
-              style={{
-                borderRadius: '0.375rem',
-                border: '1px solid rgba(75, 85, 99, 0.5)',
-                padding: '0.375rem 0.75rem',
-                fontSize: '0.75rem',
-                background: 'rgba(75, 85, 99, 0.2)',
-                color: '#ffffff',
-                cursor: 'pointer',
-                transition: 'all 0.3s ease',
-                fontWeight: '600'
-              }}
-              onMouseEnter={(e) => {
-                const target = e.target as HTMLButtonElement;
-                target.style.background = 'rgba(75, 85, 99, 0.4)';
-                target.style.borderColor = 'rgba(75, 85, 99, 0.8)';
-              }}
-              onMouseLeave={(e) => {
-                const target = e.target as HTMLButtonElement;
-                target.style.background = 'rgba(75, 85, 99, 0.2)';
-                target.style.borderColor = 'rgba(75, 85, 99, 0.5)';
-              }}
-              onClick={() => alert("Hide lower-third (stub)")}
-            >
-              Hide
-            </button>
-          </div>
+        <Section title="Overlays (Coming Soon)">
+          <p style={{ fontSize: '0.875rem', opacity: 0.7, color: 'rgba(255, 255, 255, 0.7)', lineHeight: 1.5 }}>
+            Lower thirds and on-screen graphics are on the way.
+          </p>
         </Section>
       )}
 
@@ -1336,12 +1308,14 @@ function HiddenAttendeesSection({
   onRemove,
   localIdentity,
   canRemoveGuests,
+  protectOwner = false,
 }: {
   participants: ReturnType<typeof useParticipants>;
   canModerate?: boolean;
   onRemove?: (identity: string) => void;
   localIdentity?: string | null;
   canRemoveGuests?: boolean;
+  protectOwner?: boolean;
 }) {
   const [expanded, setExpanded] = React.useState(false);
   if (!participants.length) return null;
@@ -1399,7 +1373,7 @@ function HiddenAttendeesSection({
                     </div>
                   )}
                 </div>
-                {canRemoveGuests !== false && localIdentity && p.identity !== localIdentity && (
+                {canRemoveGuests !== false && localIdentity && p.identity !== localIdentity && !(protectOwner && isOwnerParticipant(p)) && (
                   <button
                     style={{
                       borderRadius: '0.25rem',
@@ -1441,8 +1415,12 @@ function ParticipantList({
   roleStatus,
   onStageChange,
   stageBusy,
+  hideRoleSelect = false,
+  protectOwner = false,
 }: {
   participants: ReturnType<typeof useParticipants>;
+  hideRoleSelect?: boolean;
+  protectOwner?: boolean;
   onStageChange?: (identity: string, direction: "promote" | "demote") => void;
   stageBusy?: Record<string, boolean>;
   canModerate?: boolean;
@@ -1472,11 +1450,13 @@ function ParticipantList({
           const currentRole: RolePresetId = (stableRole || metaRole || "participant") as RolePresetId;
           const inAudience = isAudienceParticipant(p as any);
           const isSelf = !!localIdentity && p.identity === localIdentity;
+          const isProtectedOwner = protectOwner && isOwnerParticipant(p as any);
           const showStage =
             !!onStageChange &&
             !!canChangeRoles &&
             !isSelf &&
             !p.identity.startsWith("producer:") &&
+            !isProtectedOwner &&
             (inAudience || currentRole !== "cohost");
           const stageIsBusy = !!stageBusy?.[p.identity];
 
@@ -1522,7 +1502,7 @@ function ParticipantList({
                 justifyContent: 'center',
               }}
             >
-                {localIdentity && p.identity !== localIdentity && (
+                {!hideRoleSelect && localIdentity && p.identity !== localIdentity && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.35rem', marginBottom: '0.15rem' }}>
                     <select
                       className="sl-role-select"
@@ -1600,7 +1580,7 @@ function ParticipantList({
                     Reconnect
                   </button>
                 )}
-                {canMuteGuests !== false && (() => {
+                {canMuteGuests !== false && !isProtectedOwner && (() => {
                   const micEnabled = (p as any).isMicrophoneEnabled as boolean | undefined;
                   const isMuted = micEnabled === false;
                   const nextMuted = !isMuted; // true to mute, false to unmute
@@ -1629,7 +1609,7 @@ function ParticipantList({
                     </button>
                   );
                 })()}
-                {canRemoveGuests !== false && (
+                {canRemoveGuests !== false && !isProtectedOwner && (
                   <button
                     style={{
                       borderRadius: '0.25rem',
