@@ -82,12 +82,14 @@ export async function addUsageForUser(
     // Check if over limit (optional warning)
     const isOverLimit = hoursStreamedThisMonth > maxHoursPerMonth;
 
-    // Update Firestore
+    // Update Firestore. Counters use FieldValue.increment so concurrent
+    // callers cannot lose each other's updates (the locals above are only
+    // the best-effort values returned to the caller).
     await userRef.update({
-      "usage.hoursStreamedThisMonth": hoursStreamedThisMonth,
-      "usage.hoursStreamedToday": hoursStreamedToday,
-      "usage.ytdHours": ytdHours,
-      "usage.guestCountToday": guestCountToday,
+      "usage.hoursStreamedThisMonth": FieldValue.increment(durationHours),
+      "usage.hoursStreamedToday": FieldValue.increment(durationHours),
+      "usage.ytdHours": FieldValue.increment(durationHours),
+      "usage.guestCountToday": FieldValue.increment(options?.guestCount || 0),
       "usage.periodStart": periodStart,
       "usage.resetDate": resetDate,
       "usage.lastUsageUpdate": now,
@@ -248,26 +250,38 @@ export async function applyStorageUsageDelta(
 
   const userRef = firestore.collection("users").doc(userId);
 
-  // Atomic increment (works for both positive and negative values)
-  await userRef.set(
-    {
-      usage: {
-        storageUsedBytes: FieldValue.increment(deltaBytes),
-        lastStorageUpdate: new Date(),
+  if (deltaBytes > 0) {
+    // Atomic increment: no floor needed for positive deltas.
+    await userRef.set(
+      {
+        usage: {
+          storageUsedBytes: FieldValue.increment(deltaBytes),
+          lastStorageUpdate: new Date(),
+        },
       },
-    },
-    { merge: true },
-  );
-
-  // Floor at zero: if we decremented, the counter may have gone negative.
-  // Read-then-conditionally-fix is acceptable here because negative values
-  // are a consistency concern, not a correctness hot-path.
-  if (deltaBytes < 0) {
-    const snap = await userRef.get();
-    const current = (snap.data() as any)?.usage?.storageUsedBytes;
-    if (typeof current === "number" && current < 0) {
-      await userRef.update({ "usage.storageUsedBytes": 0 });
-      console.warn(`[storage] Floored storageUsedBytes to 0 for user ${userId} (was ${current})`, context);
+      { merge: true },
+    );
+  } else {
+    // Decrement + floor-at-zero in ONE transaction. The previous
+    // increment-then-read-then-reset sequence could clobber a concurrent
+    // increment that landed between the read and the reset write.
+    const floored = await firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(userRef);
+      const raw = Number((snap.data() as any)?.usage?.storageUsedBytes);
+      const current = Number.isFinite(raw) ? raw : 0;
+      const next = Math.max(0, current + deltaBytes);
+      tx.set(
+        userRef,
+        { usage: { storageUsedBytes: next, lastStorageUpdate: new Date() } },
+        { merge: true },
+      );
+      return current + deltaBytes < 0 ? current : null;
+    });
+    if (floored !== null) {
+      console.warn(
+        `[storage] Floored storageUsedBytes to 0 for user ${userId} (was ${floored}, delta ${deltaBytes})`,
+        context,
+      );
     }
   }
 

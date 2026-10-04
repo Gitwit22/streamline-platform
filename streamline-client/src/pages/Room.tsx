@@ -3329,32 +3329,26 @@ function RoomPage() {
       return;
     }
     const seconds = lastElapsedRef.current;
-    if (!seconds || seconds <= 0) {
-      console.log("[usage] skip post: no elapsed seconds", { seconds });
+    // The server computes billable minutes from its own egress session
+    // timestamps, so we only need to tell it which room ended. Post whenever
+    // this session went live (even if the local timer was lost to a reload).
+    if ((!seconds || seconds <= 0) && !didStreamThisSession) {
+      console.log("[usage] skip post: did not stream this session", { seconds });
+      return;
+    }
+    if (!roomId) {
+      console.log("[usage] skip post: no roomId");
       return;
     }
 
-    const minutes = Math.max(1, Math.round(seconds / 60));
     usagePostedRef.current = true;
 
-    console.log("[usage] preparing post", { seconds, minutes });
-
-    const payload: Record<string, any> = { minutes };
-    try {
-      const raw = localStorage.getItem("sl_user");
-      if (raw) {
-        try {
-          const parsed = JSON.parse(raw);
-          const uid = parsed?.id || parsed?.uid;
-          if (uid) payload.uid = uid;
-        } catch {}
-      }
-      if (!payload.uid) {
-        payload.uid = getOrCreateUid();
-      }
-    } catch {
-      payload.uid = getOrCreateUid();
-    }
+    // `minutes` is informational only (server logs large discrepancies);
+    // the user is identified by the auth token, not the body.
+    const payload: Record<string, any> = {
+      roomId,
+      minutes: seconds > 0 ? Math.max(1, Math.round(seconds / 60)) : 0,
+    };
 
     console.log("[usage] sending streamEnded", payload);
 

@@ -48,6 +48,8 @@ import { getCurrentMonthKey } from "./lib/usageTracker";
 import { getEffectiveEntitlements } from "./lib/effectiveEntitlements";
 import { evaluateUsageGate } from "./lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "./lib/usageOveragesWriter";
+import { billLiveStreamMinutes, LiveUsageUserNotFoundError, type LiveUsageResult } from "./lib/liveStreamUsage";
+import { isLargeMinutesDiscrepancy } from "./lib/liveSessionMinutes";
 import admin from "firebase-admin";
 import hlsRoutes from "./routes/hls";
 import publicHlsRoutes from "./routes/publicHls";
@@ -845,206 +847,120 @@ app.get("/api/health", (_req, res) => {
 // NOTE: /api/usage/summary is implemented in routes/usageRoutes.ts
 // and is requireAuth-protected with a stable payload.
 
+// Live usage minutes are computed SERVER-SIDE from egressSessions start/end
+// timestamps (see lib/liveStreamUsage.ts). Client-supplied `minutes` /
+// `transcodeMinutes` are ignored for billing (logged only on large drift).
+// Transcode minutes are billed per egress by stop-multistream / egress_ended.
 app.post("/api/usage/streamEnded", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid as string | undefined;
-    const { minutes, guestCount } = req.body as {
-      minutes?: number;
-      guestCount?: number;
-      transcodeMinutes?: number;
-    };
-
     if (!uid) {
       return res.status(401).json({ error: "authentication required" });
     }
 
-    console.log("[usage] streamEnded start", {
-      uid,
-      minutes,
-      guestCount,
-      transcodeMinutes: (req.body as any)?.transcodeMinutes,
-    });
-
-    const participantMinutes = Math.max(1, Math.round(Number(minutes || 0)));
-    const transcodeMinutes = Math.max(0, Math.round(Number((req.body as any)?.transcodeMinutes || 0)));
-    if (!participantMinutes) {
-      return res.status(400).json({ error: "minutes required" });
+    const body = (req.body || {}) as {
+      roomId?: unknown;
+      minutes?: unknown;
+      guestCount?: unknown;
+      transcodeMinutes?: unknown;
+    };
+    const roomId = typeof body.roomId === "string" ? body.roomId.trim() : "";
+    if (!roomId) {
+      return res.status(400).json({ error: "roomId required" });
     }
 
-    const userRef = db.collection("users").doc(uid);
-    const userSnap = await userRef.get();
-
-    if (!userSnap.exists) {
-      return res.status(404).json({ error: "user not found" });
+    // Caller must own the room, be an admin, or be a delegated producer with
+    // destination (streaming) permission — same gate as start/stop-multistream.
+    let ownerUid: string;
+    try {
+      const ctx = await assertRoomPerm(req as any, roomId, "canDestinations");
+      ownerUid = String((ctx.room as any)?.ownerId || "").trim() || uid;
+    } catch (err) {
+      if (err instanceof RoomPermissionError) {
+        return res.status(err.status).json({ error: err.code });
+      }
+      throw err;
     }
 
-    const userData = userSnap.data() || {};
-    const usage = (userData.usage || {}) as any;
-    const now = new Date();
+    let result: LiveUsageResult;
+    try {
+      result = await billLiveStreamMinutes({
+        db,
+        ownerUid,
+        roomId,
+        guestCount: Number(body.guestCount || 0),
+      });
+    } catch (err) {
+      if (err instanceof LiveUsageUserNotFoundError) {
+        return res.status(404).json({ error: "user not found" });
+      }
+      throw err;
+    }
 
-    const durationMinutes = participantMinutes;
-    const durationHours = durationMinutes / 60;
-
-    console.log("[usage] calculated durations", {
-      uid,
-      participantMinutes,
-      transcodeMinutes,
-      durationHours,
-    });
-
-    // Handle monthly reset
-    const resetDate: Date | null =
-      usage.resetDate && usage.resetDate.toDate
-        ? usage.resetDate.toDate()
-        : null;
-
-    if (resetDate && resetDate < now) {
-      const nextReset = new Date();
-      nextReset.setMonth(nextReset.getMonth() + 1);
-
-      usage.hoursStreamedThisMonth = 0;
-      usage.periodStart = now;
-      usage.resetDate = nextReset;
-
-      await userRef.update({
-        "usage.hoursStreamedThisMonth": 0,
-        "usage.periodStart": now,
-        "usage.resetDate": nextReset,
+    if (isLargeMinutesDiscrepancy(body.minutes, result.minutes)) {
+      console.warn("[usage] streamEnded client/server minutes discrepancy", {
+        uid,
+        ownerUid,
+        roomId,
+        clientMinutes: body.minutes,
+        clientTranscodeMinutes: body.transcodeMinutes,
+        serverMinutes: result.minutes,
       });
     }
 
-    const hoursStreamedToday =
-      (usage.hoursStreamedToday || 0) + durationHours;
-    const hoursStreamedThisMonth =
-      (usage.hoursStreamedThisMonth || 0) + durationHours;
-    const ytdHours = (usage.ytdHours || 0) + durationHours;
-    const guestCountToday = (usage.guestCountToday || 0) + (guestCount || 0);
-
-    console.log("[usage] updating legacy usage", {
+    console.log("[usage] streamEnded server-computed", {
       uid,
-      hoursStreamedToday,
-      hoursStreamedThisMonth,
-      ytdHours,
-      guestCountToday,
+      ownerUid,
+      roomId,
+      minutes: result.minutes,
+      sessionsCounted: result.sessionsCounted.map((s) => s.id),
+      skipped: result.skipped,
     });
-
-    await userRef.update({
-      "usage.hoursStreamedToday": hoursStreamedToday,
-      "usage.hoursStreamedThisMonth": hoursStreamedThisMonth,
-      "usage.ytdHours": ytdHours,
-      "usage.guestCountToday": guestCountToday,
-      "usage.lastUsageUpdate": now,
-    });
-
-    // Also track canonical usageMonthly participant/transcode minutes
-    const monthKey = getCurrentMonthKey();
-    const usageDocId = `${uid}_${monthKey}`;
-    const usageRef = db.collection("usageMonthly").doc(usageDocId);
-    const usageSnap = await usageRef.get();
-    const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
-
-    const prevUsage = existing.usage || {};
-    const prevYtd = existing.ytd || {};
-    const prevMinutes = prevUsage.minutes || {};
-    const prevYtdMinutes = prevYtd.minutes || {};
-
-    const nextUsage = {
-      participantMinutes: Number(prevUsage.participantMinutes || 0) + durationMinutes,
-      transcodeMinutes: Number(prevUsage.transcodeMinutes || 0) + transcodeMinutes,
-      // Preserve any existing HLS minutes; HLS-specific updates occur in the HLS stop handler.
-      hlsMinutes: Number(prevUsage.hlsMinutes || 0),
-      minutes: {
-        live: {
-          currentPeriod: Number(prevMinutes.live?.currentPeriod || 0) + durationMinutes,
-          lifetime:
-            Number(
-              prevMinutes.live?.lifetime ||
-              prevYtdMinutes.live?.lifetime ||
-              0
-            ) + durationMinutes,
-        },
-        recording: {
-          currentPeriod: Number(prevMinutes.recording?.currentPeriod || 0),
-          lifetime: Number(prevMinutes.recording?.lifetime || prevYtdMinutes.recording?.lifetime || 0),
-        },
-      },
-    };
-
-    const nextYtd = {
-      participantMinutes: Number(prevYtd.participantMinutes || 0) + durationMinutes,
-      transcodeMinutes: Number(prevYtd.transcodeMinutes || 0) + transcodeMinutes,
-      // Preserve any existing HLS minutes.
-      hlsMinutes: Number(prevYtd.hlsMinutes || 0),
-      minutes: {
-        live: {
-          lifetime:
-            Number(prevYtdMinutes.live?.lifetime || prevMinutes.live?.lifetime || 0) + durationMinutes,
-        },
-        recording: {
-          lifetime: Number(prevYtdMinutes.recording?.lifetime || prevMinutes.recording?.lifetime || 0),
-        },
-      },
-    };
-
-    await usageRef.set(
-      {
-        uid,
-        monthKey,
-        usage: nextUsage,
-        ytd: nextYtd,
-        createdAt: existing.createdAt || new Date(),
-        updatedAt: new Date(),
-      },
-      { merge: true }
-    );
 
     // Pro-only: compute and persist overage totals when the user is over limit.
     // Best-effort: do not fail streamEnded if this bookkeeping write fails.
-    try {
-      const entitlements = await getEffectiveEntitlements(uid);
-      const decision = evaluateUsageGate({
-        allowsOverages: !!(entitlements.features as any).allowsOverages,
-        limits: {
-          participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
-          transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
-        },
-        usage: {
-          participantMinutes: Number(nextUsage.participantMinutes || 0),
-          transcodeMinutes: Number(nextUsage.transcodeMinutes || 0),
-        },
-        checkParticipant: true,
-        checkTranscode: true,
-      });
-
-      if (decision.shouldLogOverages && decision.overageTotals) {
-        await upsertUsageMonthlyOverageTotals({
-          uid,
-          monthKey,
-          totals: decision.overageTotals,
+    if (result.minutes > 0 && result.totals) {
+      try {
+        const entitlements = await getEffectiveEntitlements(ownerUid);
+        const decision = evaluateUsageGate({
+          allowsOverages: !!(entitlements.features as any).allowsOverages,
+          limits: {
+            participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
+            transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
+          },
+          usage: {
+            participantMinutes: Number(result.totals.participantMinutes || 0),
+            transcodeMinutes: Number(result.totals.transcodeMinutes || 0),
+          },
+          checkParticipant: true,
+          checkTranscode: true,
         });
-      }
-    } catch (e) {
-      console.error("[usage] failed to update overage totals", e);
-    }
 
-    console.log("[usage] updated usageMonthly", {
-      uid,
-      monthKey,
-      usageDocId,
-      nextUsage,
-      nextYtd,
-    });
+        if (decision.shouldLogOverages && decision.overageTotals) {
+          await upsertUsageMonthlyOverageTotals({
+            uid: ownerUid,
+            monthKey: result.monthKey,
+            totals: decision.overageTotals,
+          });
+        }
+      } catch (e) {
+        console.error("[usage] failed to update overage totals", e);
+      }
+    }
 
     return res.json({
       ok: true,
-      durationHours,
-      hoursStreamedThisMonth,
-      ytdHours,
+      serverComputed: true,
+      minutes: result.minutes,
+      durationHours: result.minutes / 60,
+      sessionsCounted: result.sessionsCounted.length,
+      alreadyCounted: result.minutes === 0 && result.skipped.some((s) => s.reason === "already_counted"),
+      hoursStreamedThisMonth: result.totals?.hoursStreamedThisMonth ?? null,
+      ytdHours: result.totals?.ytdHours ?? null,
       usageMonthly: {
-        id: usageDocId,
-        usage: nextUsage,
-        ytd: nextYtd,
-        monthKey,
+        id: result.usageDocId,
+        monthKey: result.monthKey,
+        totals: result.totals,
       },
     });
   } catch (err) {
