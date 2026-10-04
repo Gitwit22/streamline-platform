@@ -55,7 +55,6 @@ import { recordingEvents } from "../../lib/recordingEvents";
 import { detectInAppBrowser } from "../../lib/detectInAppBrowser";
 import {
   getRoomAccessPermissions,
-  isEphemeralGuestIdentity,
   normalizeRoomRole,
   type RoomAccessPermissions,
   type RoomRole,
@@ -1867,12 +1866,9 @@ function RoomPage() {
   const tokenRefreshCtxRef = useRef<{ roomId: string | null; identity: string | null }>({ roomId: null, identity: null });
   tokenRefreshCtxRef.current = { roomId, identity: participantIdentity };
   const requestRoomTokenRefresh = React.useCallback(() => {
-    const { roomId: rid, identity } = tokenRefreshCtxRef.current;
-    if (isEphemeralGuestIdentity(identity)) {
-      // Re-minting would assign a new random identity; LiveKit permissions
-      // were already updated server-side, so skip.
-      return;
-    }
+    // Guest identities are pinned in the guest session, so a re-mint keeps
+    // the same LiveKit identity for invite guests too.
+    const { roomId: rid } = tokenRefreshCtxRef.current;
     if (roomTokenMintInFlightRef.current) return;
     try {
       if (rid) sessionStorage.removeItem(`sl_lk_token:${rid}`);

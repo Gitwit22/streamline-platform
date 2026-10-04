@@ -23,7 +23,7 @@ import {
   type InviteAcceptance,
 } from "../lib/inviteAcceptance";
 import { ROLE_PERMISSIONS, intersectPermissionsWithEntitlements } from "../lib/rolePermissions";
-import { roleToParticipantPermission, applyPresenceModeToGrant } from "../lib/livekitPermissions";
+import { roleToParticipantPermission, applyPresenceModeToGrant, toLiveKitTrackSourceNumber } from "../lib/livekitPermissions";
 import { isValidPresenceMode, normalizePresenceMode, buildPresenceMetadata, type PresenceMode } from "../lib/presenceMode";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { isAdmin } from "../middleware/adminAuth";
@@ -351,8 +351,9 @@ function roleGrant(role: MintRole, presenceMode?: PresenceMode) {
   // protobuf TrackSource enum values (it converts them to strings in toJwt).
   const canPublishSources = effectivePerm.canPublish
     ? effectivePerm.canPublishSources
-        .map((src) => LIVEKIT_TRACK_SOURCE_ENUM[src])
-        .filter((n): n is number => typeof n === "number")
+        .map((src) => toLiveKitTrackSourceNumber(src))
+        // 0 (UNKNOWN) can't be serialized into the JWT grant.
+        .filter((n): n is number => typeof n === "number" && n > 0)
     : [];
 
   return {
@@ -365,13 +366,6 @@ function roleGrant(role: MintRole, presenceMode?: PresenceMode) {
   } as const;
 }
 
-// livekit.TrackSource protobuf values (@livekit/protocol).
-const LIVEKIT_TRACK_SOURCE_ENUM: Record<string, number> = {
-  camera: 1,
-  microphone: 2,
-  screen_share: 3,
-  screen_share_audio: 4,
-};
 
 const router = Router();
 
@@ -1124,7 +1118,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // Determine LiveKit role based on authentication
     // - Authenticated users: host (if owner) or participant
     // - Guest sessions: "guest" (RTC participant with mic/cam)
-    const lkRole: MintRole = user
+    let lkRole: MintRole = user
       ? (isPrivilegedProducer ? "host" : isCohost ? "cohost" : authedSubscribeOnly ? "viewer" : "participant")
       : shareViewerOnly
         ? "viewer"
@@ -1155,6 +1149,30 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     }
     if (!livekitRoomName) {
       return res.status(500).json({ code: "internal_error", error: "invalid_livekit_room_name" });
+    }
+
+    // Host stage decisions (Bring on stage / Move to audience / role preset)
+    // live in rooms/{roomId}/controls/{identity}. Honor them here so a token
+    // re-mint after a role change doesn't undo it. Owners/delegates are never
+    // affected; cohost is only granted to signed-in users (anonymous guests get
+    // participant-level publish instead).
+    if (lkRole !== "host") {
+      try {
+        const docId = String(identity).includes("/") ? "" : String(identity).slice(0, 128);
+        if (docId) {
+          const ctlSnap = await firestore.collection("rooms").doc(roomId).collection("controls").doc(docId).get();
+          const hostRole = String((ctlSnap.data() as any)?.role || "").trim().toLowerCase();
+          if (hostRole === "viewer") {
+            lkRole = "viewer";
+          } else if (hostRole === "participant") {
+            lkRole = "participant";
+          } else if (hostRole === "cohost") {
+            lkRole = user ? "cohost" : "participant";
+          }
+        }
+      } catch (err: any) {
+        console.warn("[roomGuestAccess] controls role lookup failed", err?.message || err);
+      }
     }
 
     // When host joins, flip room live.
