@@ -44,12 +44,28 @@ async function main() {
   if (key) headers["x-maintenance-key"] = key;
 
   const resp = await postJson(url, headers);
+  let failed = false;
   if (resp.status < 200 || resp.status >= 300) {
     console.error("cron call failed", { status: resp.status, body: resp.body });
-    process.exit(1);
+    failed = true;
+  } else {
+    console.log(resp.body);
   }
 
-  console.log(resp.body);
+  // Optional: streaming meter sweep (bills running outputs, closes outputs
+  // that ended without a stop call, enforces monthly/session caps).
+  const meterUrl = process.env.MAINTENANCE_METER_URL;
+  if (meterUrl) {
+    const meterResp = await postJson(meterUrl, headers);
+    if (meterResp.status < 200 || meterResp.status >= 300) {
+      console.error("meter sweep call failed", { status: meterResp.status, body: meterResp.body });
+      failed = true;
+    } else {
+      console.log(meterResp.body);
+    }
+  }
+
+  if (failed) process.exit(1);
 }
 
 main().catch((e) => {

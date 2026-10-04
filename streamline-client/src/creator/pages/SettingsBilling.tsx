@@ -15,7 +15,14 @@ import RoomMonetizationSetup from "./settings/RoomMonetizationSetup";
 import { getMeCached, clearMeCache } from "../../lib/meCache";
 import { clearPlatformFlagsCache } from "../../lib/platformFlagsCache";
 import { isFeatureAvailable, isPlatformEnabled } from "../../lib/featureAvailability";
-import { getUsageGating, usageLabels, usageTooltips } from "../../lib/usageLabels";
+import { usageLabels, usageTooltips } from "../../lib/usageLabels";
+import {
+  formatMinutesOfLimit,
+  formatUsageResetDate,
+  parseUsageSummary,
+  usagePercent,
+  type UsageSummaryModel,
+} from "../../lib/usageSummary";
 import { type CollaboratorsPayload } from "../../lib/producerDelegation";
 import { DEFAULT_MEDIA_PRESET_ID, mediaPresetLabel, toPresetOptions, type PresetOption } from "../../lib/mediaPresetLabels";
 
@@ -156,16 +163,6 @@ const DEFAULT_ENTITLEMENTS = {
   transcodeMinutes: 0,
 };
 
-const DEFAULT_USAGE = {
-  inRoomMinutes: { used: 0, limit: 0, lifetime: 0 },
-  broadcastMinutes: { used: 0, limit: 0, lifetime: 0 },
-  recordingMinutes: { used: 0, lifetime: 0 },
-  overages: { participantMinutes: 0, transcodeMinutes: 0 },
-  rtmpDestinations: { used: 0, limit: 0 },
-  storage: { used: 0, limit: 0 },
-  projects: { used: 0, limit: 0 },
-};
-
 const DEFAULT_MEDIA_PREFS = {
   defaultPresetId: "standard_720p30",
   defaultLayout: "speaker" as "speaker" | "grid",
@@ -276,7 +273,7 @@ export default function SettingsBilling() {
 
   const [plans, setPlans] = useState<any[]>([]);
   const [entitlements, setEntitlements] = useState<typeof DEFAULT_ENTITLEMENTS>(DEFAULT_ENTITLEMENTS);
-  const [usage, setUsage] = useState<typeof DEFAULT_USAGE | null>(null);
+  const [usage, setUsage] = useState<UsageSummaryModel | null>(null);
 
   const [platformHlsEnabled, setPlatformHlsEnabled] = useState<boolean>(true);
   const [platformTranscodeEnabled, setPlatformTranscodeEnabled] = useState<boolean>(true);
@@ -369,7 +366,6 @@ export default function SettingsBilling() {
   const [testModeLoading, setTestModeLoading] = useState(false);
 
   const [showManagePicker, setShowManagePicker] = useState(false);
-  const [showLifetimeDetails, setShowLifetimeDetails] = useState(false);
 
   const [overagesToggleSaving, setOveragesToggleSaving] = useState(false);
   const [overagesToggleMessage, setOveragesToggleMessage] = useState<string | null>(null);
@@ -894,83 +890,10 @@ export default function SettingsBilling() {
     try {
       const res = await apiFetchAuth("/api/usage/me");
       const data = await res.json();
-      const limits = data?.plan?.limits || {};
-
-      const usageMonthly = data?.usageMonthly || {};
-      const usageInner = usageMonthly.usage || {};
-      const overages = usageMonthly.overages || {};
-      const usageWrapper = data?.usage || {};
-      const usageMinutes = usageWrapper.minutes || usageInner.minutes || {};
-      const ytdMinutes = usageMonthly?.ytd?.minutes || {};
-      // Fallback to legacy hours on user.usage if monthly doc not present
-      const legacyHours = Number(data?.user?.usage?.hoursStreamedThisMonth || 0);
-      const legacyMinutes = Math.max(0, Math.round(legacyHours * 60));
-      const participantUsed = Number(usageMonthly.participantMinutes ?? usageInner.participantMinutes ?? legacyMinutes ?? 0);
-      const transcodeUsed = Number(usageMonthly.transcodeMinutes ?? usageInner.transcodeMinutes ?? 0);
-
-      const inRoomCurrent = Number(usageMinutes.inRoom?.currentPeriod ?? participantUsed);
-      const inRoomLifetime = Number(
-        usageMinutes.inRoom?.lifetime ??
-          ytdMinutes.inRoom?.lifetime ??
-          usageMonthly?.ytd?.participantMinutes ??
-          participantUsed
-      );
-
-      const broadcastCurrent = Number(usageMinutes.broadcast?.currentPeriod ?? usageMinutes.transcode?.currentPeriod ?? transcodeUsed);
-      const broadcastLifetime = Number(
-        usageMinutes.broadcast?.lifetime ??
-          usageMinutes.transcode?.lifetime ??
-          ytdMinutes.broadcast?.lifetime ??
-          ytdMinutes.transcode?.lifetime ??
-          usageMonthly?.ytd?.transcodeMinutes ??
-          0
-      );
-      const recordingCurrent = Number(
-        usageMinutes.recording?.currentPeriod ?? usageInner.minutes?.recording?.currentPeriod ?? 0
-      );
-      const recordingLifetime = Number(
-        usageMinutes.recording?.lifetime ??
-        ytdMinutes?.recording?.lifetime ??
-        usageInner.minutes?.recording?.lifetime ??
-        0
-      );
-
-      setUsage({
-        inRoomMinutes: {
-          used: inRoomCurrent,
-          limit: Number(limits.participantMinutes ?? 0) || (data?.plan?.id === "pro" ? 1200 : data?.plan?.id === "starter" ? 300 : 60),
-          lifetime: inRoomLifetime,
-        },
-        broadcastMinutes: {
-          used: broadcastCurrent,
-          limit: Number(limits.transcodeMinutes ?? 0),
-          lifetime: broadcastLifetime,
-        },
-        recordingMinutes: {
-          used: recordingCurrent,
-          lifetime: recordingLifetime,
-        },
-        overages: {
-          participantMinutes: Number(overages.participantMinutes ?? 0),
-          transcodeMinutes: Number(overages.transcodeMinutes ?? 0),
-        },
-        rtmpDestinations: {
-          used: 0,
-          // Destination caps are resolved on the server; 0 = "no numeric cap".
-          limit: Number(limits.maxDestinations ?? 0),
-        },
-        storage: {
-          used: Number(data?.storageUsedGB ?? 0),
-          limit: Number(limits.storageGB ?? data?.storageLimitGB ?? 0) || (data?.plan?.id === "pro" ? 100 : data?.plan?.id === "starter" ? 10 : 1),
-        },
-        projects: {
-          used: 0,
-          limit: Number(limits.maxProjects ?? 0) || (data?.plan?.id === "pro" ? 50 : data?.plan?.id === "starter" ? 5 : 1),
-        },
-      });
+      setUsage(parseUsageSummary(data));
     } catch (err) {
-      console.warn("loadUsage failed; using defaults", err);
-      setUsage(DEFAULT_USAGE);
+      console.warn("loadUsage failed", err);
+      setUsage(parseUsageSummary({}));
     }
   };
 
@@ -3408,11 +3331,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
           <div style={{ ...S.card, opacity: isBlocked ? 0.6 : 1 }}>
             <div style={S.cardHeader}>
               <h2 style={S.cardTitle}>📊 Usage This Month</h2>
-              {user?.billing?.currentPeriodEnd && (
-                <span style={S.resetDate}>
-                  Resets {formatDate(user.billing.currentPeriodEnd)}
-                </span>
-              )}
+              <span style={S.resetDate}>{formatUsageResetDate(usage.resetDate)}</span>
             </div>
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, marginTop: 4 }}>
@@ -3463,66 +3382,65 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 entitlements.maxDestinations !== 0
               )}
               {renderEntitlementPill(
-                "Monthly minutes",
-                `${formatLimitLabel(entitlements.participantMinutes, "min")}${entitlements.participantMinutes > 0 ? "/mo" : ""}`,
-                entitlements.participantMinutes !== 0
+                usageLabels.streamingMinutes,
+                usage.streaming.unlimited
+                  ? "Unlimited"
+                  : `${Number(usage.streaming.limit || 0).toLocaleString("en-US")} min/mo`,
+                true
               )}
             </div>
 
             <div style={{ marginTop: 8, marginBottom: 12, padding: 12, border: "1px solid rgba(255,255,255,0.06)", borderRadius: 12, background: "rgba(255,255,255,0.02)" }}>
-              <div style={{ fontWeight: 700, color: "#e5e7eb", marginBottom: 6 }}>Minutes Used (This Month)</div>
-              <div style={{ color: "#cbd5e1", marginBottom: 4 }}>
-                {usageLabels.inRoomMinutes}: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.inRoomMinutes.used}</span> min
+              <div
+                style={{ fontWeight: 700, color: "#e5e7eb", marginBottom: 6 }}
+                title={usageTooltips.streamingMinutes}
+              >
+                {usageLabels.streamingMinutes} (this month)
               </div>
-              {getUsageGating(user).canShowBroadcastMinutes && (
-                <div style={{ color: "#cbd5e1", marginBottom: 4 }}>
-                  {usageLabels.broadcastMinutes}: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.broadcastMinutes.used}</span> min
+              <div style={{ color: "#fff", fontWeight: 700, fontSize: 18, marginBottom: 4 }}>
+                {formatMinutesOfLimit(usage.streaming.used, usage.streaming.limit)}
+              </div>
+              {!usage.streaming.unlimited && (
+                <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 8 }}>
+                  {usage.streaming.bonus > 0
+                    ? `Includes ${usage.streaming.bonus.toLocaleString("en-US")} bonus min. `
+                    : ""}
+                  {usage.streaming.overLimit
+                    ? usage.streaming.overagesActive
+                      ? "Over your monthly minutes - overage billing applies."
+                      : "Monthly minutes used up - new streams are blocked until the reset."
+                    : `${Number(usage.streaming.remaining || 0).toLocaleString("en-US")} min remaining.`}
                 </div>
               )}
-              <div style={{ color: "#cbd5e1", marginBottom: 6 }}>
-                Recording: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.recordingMinutes.used}</span> min
-              </div>
-              <div style={{ color: "#cbd5e1", marginBottom: 6 }}>
-                <div style={{ fontWeight: 700, color: "#e5e7eb", marginBottom: 2 }}>Overage (this month)</div>
-                <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 4 }}>
-                  Minutes used beyond the plan’s included limits.
-                </div>
-                <span style={{ color: "#fff", fontWeight: 700 }}>
-                  {Number(usage.overages?.participantMinutes ?? 0) + Number(usage.overages?.transcodeMinutes ?? 0)}
+              <div style={{ color: "#94a3b8", fontSize: 12, marginBottom: 8 }}>{usageTooltips.streamingMinutes}</div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr auto", rowGap: 4, columnGap: 12, color: "#cbd5e1", fontSize: 13 }}>
+                <span title="RTMP multistream outputs (YouTube, Facebook, Twitch, custom RTMP, Instagram)">Output time: RTMP multistream</span>
+                <span style={{ color: "#fff", fontWeight: 600 }}>{usage.streaming.rtmpMinutes.toLocaleString("en-US")} min</span>
+                <span title="Streamline HLS (live page / embeds) output">Output time: HLS</span>
+                <span style={{ color: "#fff", fontWeight: 600 }}>{usage.streaming.hlsMinutes.toLocaleString("en-US")} min</span>
+                <span title={usageTooltips.destinationMinutes}>{usageLabels.destinationMinutes}</span>
+                <span style={{ color: "#fff", fontWeight: 600 }}>{usage.streaming.destinationMinutes.toLocaleString("en-US")} min</span>
+                <span title={usageTooltips.recordingMinutes}>{usageLabels.recordingMinutes}</span>
+                <span style={{ color: "#fff", fontWeight: 600 }}>{usage.recordingMinutes.toLocaleString("en-US")} min</span>
+                <span>Storage</span>
+                <span style={{ color: "#fff", fontWeight: 600 }}>
+                  {usage.storage.usedGB} GB{usage.storage.limitGB !== null ? ` / ${usage.storage.limitGB} GB` : " / Unlimited"}
                 </span>
-                {" "}min
-                <span style={{ color: "#94a3b8", fontSize: 12 }}>
-                  {" "}(in-room: {Number(usage.overages?.participantMinutes ?? 0)} / broadcast: {Number(usage.overages?.transcodeMinutes ?? 0)})
-                </span>
+                {usage.streaming.overageMinutes > 0 && (
+                  <>
+                    <span>Overage (this month)</span>
+                    <span style={{ color: "#fdba74", fontWeight: 600 }}>{usage.streaming.overageMinutes.toLocaleString("en-US")} min</span>
+                  </>
+                )}
               </div>
-              <div style={{ color: "#94a3b8", fontSize: 12 }}>
-                {usageTooltips.inRoomMinutes} {usageTooltips.broadcastMinutes}
+              <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 8 }}>
+                Overlapping outputs count once, and sending to several destinations does not multiply your minutes.
+                Recording minutes and destination minutes are shown for reference and do not count toward your monthly streaming minutes.
               </div>
-              <div style={{ color: "#94a3b8", fontSize: 12 }}>Recording minutes are included in your total usage.</div>
-              <div style={{ marginTop: 8 }}>
-                <button
-                  type="button"
-                  onClick={() => setShowLifetimeDetails((prev) => !prev)}
-                  style={{
-                    background: "transparent",
-                    border: "1px solid rgba(255,255,255,0.15)",
-                    color: "#cbd5e1",
-                    padding: "6px 10px",
-                    borderRadius: 8,
-                    cursor: "pointer",
-                    fontSize: 12,
-                  }}
-                >
-                  {showLifetimeDetails ? "Hide lifetime details" : "Show lifetime details"}
-                </button>
-              </div>
-              {showLifetimeDetails && (
-                <div style={{ marginTop: 8, color: "#cbd5e1", fontSize: 13 }}>
-                  <div>Lifetime in-room minutes: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.inRoomMinutes.lifetime ?? 0}</span> min</div>
-                  {getUsageGating(user).canShowBroadcastMinutes && (
-                    <div>Lifetime broadcast minutes: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.broadcastMinutes.lifetime ?? 0}</span> min</div>
-                  )}
-                  <div>Lifetime recording minutes: <span style={{ color: "#fff", fontWeight: 700 }}>{usage.recordingMinutes.lifetime}</span> min</div>
+              {usage.lifetime.streamingMinutes > 0 && (
+                <div style={{ color: "#94a3b8", fontSize: 12, marginTop: 6 }}>
+                  All-time streaming minutes: {usage.lifetime.streamingMinutes.toLocaleString("en-US")} min
                 </div>
               )}
             </div>
@@ -3561,7 +3479,7 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                   </label>
 
                   <div style={{ marginTop: 6, color: "#94a3b8", fontSize: 12 }}>
-                    Applies to in-room minutes over your plan limit.
+                    Applies to streaming minutes over your monthly limit.
                   </div>
 
                   {overagesToggleMessage && (
@@ -3583,53 +3501,17 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
 
             <div style={S.usageGrid}>
               <UsageBar
-                label={usageLabels.inRoomMinutes}
-                used={usage.inRoomMinutes.used}
-                limit={
-                  usage.inRoomMinutes.limit ||
-                  currentPlan.limits?.monthlyMinutesIncluded ||
-                  0
-                }
-                unit="min"
+                label={usageLabels.streamingMinutes}
+                used={usage.streaming.used}
+                limit={usage.streaming.limit}
+                unit=" min"
               />
-              {getUsageGating(user).canShowBroadcastMinutes && (
-                <UsageBar
-                  label={usageLabels.broadcastMinutes}
-                  used={usage.broadcastMinutes.used}
-                  limit={
-                    usage.broadcastMinutes.limit ||
-                    0
-                  }
-                  unit="min"
-                />
-              )}
               <UsageBar
-                label="Stream Destinations"
-                used={usage.rtmpDestinations.used}
-                limit={
-                  entitlements.maxDestinations ??
-                  usage.rtmpDestinations.limit ??
-                  currentPlan.limits?.rtmpDestinationsMax ??
-                  0
-                }
-                unit=""
+                label="Storage"
+                used={usage.storage.usedGB}
+                limit={usage.storage.limitGB}
+                unit=" GB"
               />
-              {(isPaidValid || usage.storage.limit > 0) && (
-                <UsageBar
-                  label="Storage"
-                  used={usage.storage.used}
-                  limit={usage.storage.limit || currentPlan.editing?.maxStorageGB || 0}
-                  unit="GB"
-                />
-              )}
-              {(isPaidValid || usage.projects.limit > 0) && (
-                <UsageBar
-                  label="Projects"
-                  used={usage.projects.used}
-                  limit={usage.projects.limit || currentPlan.editing?.maxProjects || 0}
-                  unit=""
-                />
-              )}
             </div>
 
             <div style={{ marginTop: 16, padding: 12, border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, background: "rgba(255,255,255,0.02)" }}>
@@ -4011,8 +3893,8 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
 // SUB-COMPONENTS
 // ============================================================================
 
-function UsageBar({ label, used, limit, unit }: { label: string; used: number; limit: number; unit: string }) {
-  const percent = limit > 0 ? Math.min(100, (used / limit) * 100) : 0;
+function UsageBar({ label, used, limit, unit }: { label: string; used: number; limit: number | null; unit: string }) {
+  const percent = usagePercent(used, limit);
   const isWarning = percent > 80;
   const isDanger = percent > 95;
 
@@ -4021,7 +3903,7 @@ function UsageBar({ label, used, limit, unit }: { label: string; used: number; l
       <div style={S.usageHeader}>
         <span style={S.usageLabel}>{label}</span>
         <span style={S.usageValue}>
-          {used}{unit} / {limit}{unit}
+          {limit !== null && limit > 0 ? `${used}${unit} / ${limit}${unit}` : `${used}${unit} / Unlimited`}
         </span>
       </div>
       <div style={S.usageTrack}>

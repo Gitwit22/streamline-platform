@@ -26,12 +26,21 @@ interface UsageData {
   billingEnabled?: boolean;
   platformBillingEnabled?: boolean;
   effectiveBillingEnabled?: boolean;
+  /** Monthly streaming minutes (union of output time). */
   minutesUsed: number;
+  streamingMinutes?: number;
+  /** Analytics only (duration x destinations). */
+  destinationMinutes?: number;
+  recordingMinutes?: number;
+  effectivePlanId?: string;
+  unlimited?: boolean;
+  overageStreamingMinutes?: number;
   overageParticipantMinutes?: number;
   overageTranscodeMinutes?: number;
   overageMinutesTotal?: number;
   bonusMinutes: number;
   planLimit: number;
+  /** plan + bonus; 0 = unlimited */
   effectiveLimit: number;
   percentUsed: number;
   isBlocked: boolean;
@@ -384,14 +393,19 @@ export default function AdminUsage() {
                   <th className="px-4 py-3 text-left text-sm font-semibold">User</th>
                   <th className="px-4 py-3 text-left text-sm font-semibold">Plan</th>
                   <th className="px-4 py-3 text-left text-sm font-semibold">Billing</th>
-                  <th className="px-4 py-3 text-right text-sm font-semibold">Usage</th>
+                  <th className="px-4 py-3 text-right text-sm font-semibold">
+                    <div>Streaming min (this month)</div>
+                    <div className="text-xs font-normal text-gray-400">
+                      Output time; overlaps count once. Resets on the 1st (UTC).
+                    </div>
+                  </th>
                   <th className="px-4 py-3 text-right text-sm font-semibold">
                     <div>Overage (this month)</div>
                     <div className="text-xs font-normal text-gray-400">
-                      Minutes used beyond the plan’s included limits.
+                      Billable minutes beyond limit (overages opted in).
                     </div>
                   </th>
-                  <th className="px-4 py-3 text-right text-sm font-semibold">Limit</th>
+                  <th className="px-4 py-3 text-right text-sm font-semibold">Limit (incl. bonus)</th>
                   <th className="px-4 py-3 text-right text-sm font-semibold">Bonus</th>
                   <th className="px-4 py-3 text-center text-sm font-semibold">Status</th>
                   <th className="px-4 py-3 text-center text-sm font-semibold">Actions</th>
@@ -426,16 +440,19 @@ export default function AdminUsage() {
                       </div>
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {user.minutesUsed} min
-                    </td>
-                    <td className="px-4 py-3 text-right font-mono text-orange-300">
-                      {user.overageMinutesTotal ?? 0} min
-                      <div className="text-xs text-orange-200/80">
-                        P:{user.overageParticipantMinutes ?? 0} / T:{user.overageTranscodeMinutes ?? 0}
+                      {user.streamingMinutes ?? user.minutesUsed} min
+                      <div className="text-xs text-gray-400" title="Destination minutes are analytics only">
+                        dest: {user.destinationMinutes ?? 0} · rec: {user.recordingMinutes ?? 0}
                       </div>
                     </td>
+                    <td className="px-4 py-3 text-right font-mono text-orange-300">
+                      {user.overageStreamingMinutes ?? user.overageMinutesTotal ?? 0} min
+                    </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {user.effectiveLimit} min
+                      {user.unlimited || !(user.effectiveLimit > 0) ? "Unlimited" : `${user.effectiveLimit} min`}
+                      {user.effectivePlanId && user.effectivePlanId !== user.planId && (
+                        <div className="text-xs text-gray-400">override: {user.effectivePlanId}</div>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-green-400">
                       +{user.bonusMinutes}

@@ -1,19 +1,13 @@
 // server/routes/usageRoutes.ts
 import express from "express";
 import { requireAuth } from "../middleware/requireAuth";
-import { Timestamp } from "firebase-admin/firestore";
 import { firestore } from "../firebaseAdmin";
-import { getCurrentMonthKey } from "../lib/usageTracker";
+import { getNextUsageResetDate } from "../lib/usageTracker";
 import { resolveMaxDestinations } from "../lib/planLimits";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { getCurrentStorageUsage, resolveMaxStorageBytesFromPlan } from "../usageHelper";
-
-// Helper function to get the next reset date (start of next month)
-function getNextResetDate(): Date {
-  const now = new Date();
-  return new Date(now.getFullYear(), now.getMonth() + 1, 1, 0, 0, 0, 0);
-}
+import { getStreamingUsageStatus, readOveragesEnabled } from "../lib/streamingMeter";
 
 const router = express.Router();
 
@@ -29,137 +23,22 @@ export type UsageSummaryResult = {
 };
 
 export async function computeUsageSummaryResult(uid: string): Promise<UsageSummaryResult> {
-  // 1) User doc (planId + overages setting)
-  const userRef = firestore.collection("users").doc(uid);
-  const userSnap = await userRef.get();
-
+  // Read-only: this endpoint never writes or resets usage. The month window
+  // is the UTC calendar month (usageMonthly/{uid}_{YYYY-MM}); it rolls over on
+  // the 1st at 00:00 UTC by key change alone.
+  const userSnap = await firestore.collection("users").doc(uid).get();
   if (!userSnap.exists) {
-    // Not a limit error, leave as is
     return { status: 404, body: { success: false, error: "user not found" } };
   }
 
-  const userData = userSnap.data() || {};
-  const entitlements = await getEffectiveEntitlements(uid);
+  const status = await getStreamingUsageStatus(uid);
+  const { decision, monthKey, entitlements } = status;
+  const userData = status.userDoc || {};
+  const usageMonthly = status.usageDoc || {};
   const plan = entitlements.plan;
   const planId = entitlements.planId;
-  const overagesEnabled =
-    (userData as any)?.billingSettings?.overagesEnabled === true ||
-    (userData as any)?.billing?.overagesEnabled === true ||
-    (userData as any)?.overagesEnabled === true;
-
   const features = plan.features;
   const limits = plan.limits as any;
-
-  // 3) Usage monthly doc (source of truth)
-  const monthKey = getCurrentMonthKey();
-  const usageDocId = `${uid}_${monthKey}`;
-
-  const usageRef = firestore.collection("usageMonthly").doc(usageDocId);
-  const usageSnap = await usageRef.get();
-
-  // If missing, do NOT fail—return a zeroed shape so the UI is stable.
-  const legacyUsage = userData.usage || {};
-
-  // ── Billing-period boundary check ──
-  // If billing.currentPeriodEnd is in the past the billing period has rolled
-  // over. Legacy hours should NOT seed the new period and any existing
-  // usageMonthly doc needs its currentPeriod counters zeroed (safety net in
-  // case the Stripe invoice.paid webhook was delayed or missed).
-  const billingPeriodEnd = (userData as any)?.billing?.currentPeriodEnd;
-  const billingPeriodExpired =
-    typeof billingPeriodEnd === "number" && billingPeriodEnd > 0 && billingPeriodEnd < Date.now();
-
-  // Legacy hours are no longer used to seed new monthly docs (the monthKey
-  // change is the period reset), but the billing-period-expired flag is still
-  // used by the lazy-reset path for existing docs.
-  let usageMonthly: any;
-  if (usageSnap.exists) {
-    usageMonthly = usageSnap.data() as any;
-
-    // Lazy reset: if the billing period has expired and we haven't already
-    // reset this doc for that period, zero out the currentPeriod counters now.
-    const lastReset = usageMonthly.lastBillingReset ?? 0;
-    if (billingPeriodExpired && lastReset < billingPeriodEnd) {
-      const prevMinutes = usageMonthly.usage?.minutes || {};
-      const prevYtd = usageMonthly.ytd || {};
-
-      const resetPatch: any = {
-        usage: {
-          ...(usageMonthly.usage || {}),
-          participantMinutes: 0,
-          transcodeMinutes: 0,
-          hlsMinutes: 0,
-          minutes: {
-            ...prevMinutes,
-            live: {
-              currentPeriod: 0,
-              lifetime: Number(prevMinutes.live?.lifetime || prevYtd.minutes?.live?.lifetime || 0),
-            },
-            transcode: {
-              currentPeriod: 0,
-              lifetime: Number(prevMinutes.transcode?.lifetime || prevYtd.minutes?.transcode?.lifetime || 0),
-            },
-            recording: {
-              currentPeriod: 0,
-              lifetime: Number(prevMinutes.recording?.lifetime || prevYtd.minutes?.recording?.lifetime || 0),
-            },
-          },
-        },
-        lastBillingReset: Date.now(),
-        updatedAt: Timestamp.now(),
-      };
-
-      await usageRef.set(resetPatch, { merge: true });
-      // Reflect the reset in the local copy we'll use for the response
-      usageMonthly = { ...usageMonthly, ...resetPatch };
-      console.log(
-        `[usage] Lazy billing-period reset for uid=${uid}, monthKey=${monthKey}`
-      );
-    }
-  } else {
-    // New monthly doc: the monthKey change IS the period reset, so
-    // currentPeriod counters must start at 0. Legacy hoursStreamedThisMonth
-    // is not reliably reset at month boundaries and must NOT seed the new
-    // period (this was the bug that caused in-room minutes to carry over
-    // while broadcast minutes correctly started at 0).
-    const legacyYtdMinutes = Math.max(0, Math.round(Number(legacyUsage.ytdHours || 0) * 60));
-    usageMonthly = {
-      uid,
-      monthKey,
-      usage: {
-        participantMinutes: 0,
-        transcodeMinutes: 0,
-        hlsMinutes: 0,
-        minutes: {
-          live: {
-            currentPeriod: 0,
-            lifetime: legacyYtdMinutes,
-          },
-          recording: {
-            currentPeriod: 0,
-            lifetime: 0,
-          },
-        },
-      },
-      ytd: {
-        participantMinutes: legacyYtdMinutes,
-        transcodeMinutes: 0,
-        hlsMinutes: 0,
-        minutes: {
-          live: {
-            lifetime: legacyYtdMinutes,
-          },
-          recording: {
-            lifetime: 0,
-          },
-        },
-      },
-      createdAt: Timestamp.now(),
-      updatedAt: Timestamp.now(),
-    };
-    // Persist seeded doc so subsequent calls don't lose legacy hours
-    await usageRef.set(usageMonthly, { merge: true });
-  }
 
   const toNumber = (value: any) => {
     const num = Number(value);
@@ -167,52 +46,29 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
   };
 
   const usage = usageMonthly.usage || {};
-  const ytd = usageMonthly.ytd || {};
   const usageMinutes = usage.minutes || {};
-  const ytdMinutes = ytd.minutes || {};
   const overages = usageMonthly.overages || {};
+  const outputMinutes = usage.outputMinutes || {};
 
-  const participantUsed = toNumber(usage.participantMinutes);
-  const transcodeUsed = toNumber(usage.transcodeMinutes);
+  // Gated monthly streaming minutes (union of output time; never multiplied by destinations).
+  const streamingUsed = decision.usedMinutes;
+  const streamingLimit = decision.limitMinutes; // null = unlimited (includes bonus minutes)
+  const includedMinutes = toNumber(entitlements.limits.monthlyMinutes);
+  const bonusMinutes = Math.max(0, toNumber(userData.bonusMinutes));
 
-  const hlsCurrent = toNumber(usage.hlsMinutes);
-  const hlsLifetime = toNumber(ytd.hlsMinutes);
+  const byOutput = {
+    multistream: toNumber(outputMinutes.multistream),
+    instagram: toNumber(outputMinutes.instagram),
+    // Months metered before the streaming meter recorded HLS under usage.hlsMinutes.
+    hls: toNumber(outputMinutes.hls) + toNumber(usage.hlsMinutes),
+  };
+  const rtmpOutputMinutes = byOutput.multistream + byOutput.instagram;
+  const destinationMinutes = toNumber(usage.destinationMinutes);
+  const recordingMinutes = toNumber(usage.recordingMinutes ?? usageMinutes.recording?.currentPeriod);
 
-  const liveCurrentBase = toNumber(usageMinutes.live?.currentPeriod ?? participantUsed);
-  const liveLifetimeBase = toNumber(
-    usageMinutes.live?.lifetime ?? ytdMinutes.live?.lifetime ?? ytd.participantMinutes
-  );
+  const lifetime = ((userData.usage || {}) as any).lifetime || {};
 
-  const liveCurrent = liveCurrentBase + hlsCurrent;
-  const liveLifetime = liveLifetimeBase + hlsLifetime;
-  const recordingCurrent = toNumber(usageMinutes.recording?.currentPeriod);
-  const recordingLifetime = toNumber(
-    usageMinutes.recording?.lifetime ?? ytdMinutes.recording?.lifetime
-  );
-
-  const transcodeCurrent = toNumber(usageMinutes.transcode?.currentPeriod ?? usage.transcodeMinutes);
-  const transcodeLifetime = toNumber(ytdMinutes.transcode?.lifetime ?? ytd.transcodeMinutes);
-
-  // Canonical aliases (match /api/account/me)
-  const inRoomCurrent = liveCurrentBase;
-  const inRoomLifetime = liveLifetimeBase;
-  const broadcastCurrent = transcodeCurrent;
-  const broadcastLifetime = transcodeLifetime;
-
-  const participantLimit = Number(plan.limits.monthlyMinutes || 0); // 0 = unlimited
-  const transcodeLimit = Number(plan.limits.transcodeMinutes || 0); // 0 = unlimited
-
-  const isOverParticipant = participantLimit > 0 ? participantUsed >= participantLimit : false;
-  const isOverTranscode = transcodeLimit > 0 ? transcodeUsed >= transcodeLimit : false;
-  const isOverLimit = isOverParticipant || isOverTranscode;
-
-  const remainingParticipantMinutes =
-    participantLimit > 0 ? Math.max(0, participantLimit - participantUsed) : null;
-
-  const remainingTranscodeMinutes =
-    transcodeLimit > 0 ? Math.max(0, transcodeLimit - transcodeUsed) : null;
-
-  const resetDateISO = getNextResetDate().toISOString();
+  const resetDateISO = getNextUsageResetDate().toISOString();
 
   // ── Storage accounting ──
   const storageUsedBytes = await getCurrentStorageUsage(uid);
@@ -221,6 +77,8 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
   const storageUsedGB = Math.round((storageUsedBytes / GB) * 100) / 100;
   const storageLimitGB = Math.round((maxStorageBytes / GB) * 100) / 100;
 
+  const billableOverage = toNumber(overages.streamingMinutes ?? overages.participantMinutes);
+
   return {
     status: 200,
     body: {
@@ -228,8 +86,37 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
       uid,
       monthKey,
       resetDate: resetDateISO,
-      participantMinutes: participantUsed,
-      transcodeMinutes: transcodeUsed,
+      resetTimezone: "UTC",
+
+      // Canonical streaming meter block.
+      streaming: {
+        usedMinutes: streamingUsed,
+        includedMinutes: includedMinutes > 0 ? includedMinutes : null,
+        bonusMinutes,
+        limitMinutes: streamingLimit,
+        unlimited: decision.unlimited,
+        remainingMinutes: decision.remainingMinutes,
+        overLimit: decision.overLimit,
+        allowed: decision.allowed,
+        overagesActive: decision.overagesActive,
+        overageMinutes: billableOverage,
+        rtmpOutputMinutes,
+        byOutput,
+        // Analytics only (duration x destinations); never gated.
+        destinationMinutes,
+      },
+      recording: {
+        minutes: recordingMinutes,
+      },
+      lifetime: {
+        streamingMinutes: toNumber(lifetime.streamingMinutes),
+        destinationMinutes: toNumber(lifetime.destinationMinutes),
+        recordingMinutes: toNumber(lifetime.recordingMinutes),
+      },
+
+      // Back-compat aliases (= streaming minutes).
+      participantMinutes: streamingUsed,
+      transcodeMinutes: streamingUsed,
 
       // Storage accounting fields (bytes are source of truth, GB for display)
       storageUsedBytes,
@@ -238,7 +125,7 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
       storageLimitGB,
 
       billing: {
-        overagesEnabled,
+        overagesEnabled: readOveragesEnabled(userData),
         pendingPlan: (userData as any).pendingPlan ?? null,
       },
 
@@ -252,93 +139,55 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
           allowsOverages: !!(features as any).allowsOverages,
         },
         limits: {
-          maxDestinations: resolveMaxDestinations(plan.raw?.limits || limits),
-          participantMinutes: participantLimit,
-          transcodeMinutes: transcodeLimit,
+          maxDestinations: resolveMaxDestinations(entitlements.limits),
+          // Monthly streaming minutes incl. bonus (0 = unlimited). Legacy name.
+          participantMinutes: streamingLimit ?? 0,
+          monthlyMinutes: streamingLimit ?? 0,
+          // Broadcast/transcode is no longer a separate bucket.
+          transcodeMinutes: 0,
+          maxSessionMinutes: toNumber(limits.maxSessionMinutes),
           maxGuests: Number(plan.limits.maxGuests || 0),
           storageGB: storageLimitGB,
         },
       },
 
       usageMonthly: {
-        id: usageDocId,
+        id: `${uid}_${monthKey}`,
         usage: {
-          participantMinutes: participantUsed,
-          transcodeMinutes: transcodeUsed,
-          hlsMinutes: hlsCurrent,
-          participantHours: Math.round((participantUsed / 60) * 100) / 100,
-          transcodeHours: Math.round((transcodeUsed / 60) * 100) / 100,
+          streamingMinutes: streamingUsed,
+          destinationMinutes,
+          outputMinutes: byOutput,
+          recordingMinutes,
+          // Legacy aliases (= streaming minutes) for older clients.
+          participantMinutes: streamingUsed,
+          transcodeMinutes: streamingUsed,
+          hlsMinutes: byOutput.hls,
           minutes: {
-            live: {
-              currentPeriod: liveCurrent,
-              lifetime: liveLifetime,
-            },
-            // Bucketed transcode minutes (broadcast/egress)
-            transcode: {
-              currentPeriod: transcodeCurrent,
-              lifetime: transcodeLifetime,
-            },
-            // Canonical aliases
-            inRoom: {
-              currentPeriod: inRoomCurrent,
-              lifetime: inRoomLifetime,
-            },
-            broadcast: {
-              currentPeriod: broadcastCurrent,
-              lifetime: broadcastLifetime,
-            },
-            recording: {
-              currentPeriod: recordingCurrent,
-              lifetime: recordingLifetime,
-            },
-            hls: {
-              currentPeriod: hlsCurrent,
-              lifetime: hlsLifetime,
-            },
+            streaming: { currentPeriod: streamingUsed },
+            inRoom: { currentPeriod: streamingUsed },
+            live: { currentPeriod: streamingUsed },
+            broadcast: { currentPeriod: streamingUsed },
+            transcode: { currentPeriod: streamingUsed },
+            recording: { currentPeriod: recordingMinutes },
+            hls: { currentPeriod: byOutput.hls },
           },
         },
-        ytd: {
-          participantMinutes: Number(ytd.participantMinutes || 0),
-          transcodeMinutes: Number(ytd.transcodeMinutes || 0),
-          hlsMinutes: Number(ytd.hlsMinutes || 0),
-          minutes: {
-            live: {
-              lifetime: toNumber(ytdMinutes.live?.lifetime ?? liveLifetime),
-            },
-            transcode: {
-              lifetime: transcodeLifetime,
-            },
-            inRoom: {
-              lifetime: inRoomLifetime,
-            },
-            broadcast: {
-              lifetime: broadcastLifetime,
-            },
-            recording: {
-              lifetime: toNumber(ytdMinutes.recording?.lifetime ?? recordingLifetime),
-            },
-            hls: {
-              lifetime: hlsLifetime,
-            },
-          },
-        },
-
-        // Logged overage totals (Pro-only behavior). These are totals for the month.
-        // When missing, treat as 0 for display.
         overages: {
-          participantMinutes: toNumber(overages.participantMinutes),
-          transcodeMinutes: toNumber(overages.transcodeMinutes),
+          streamingMinutes: billableOverage,
+          participantMinutes: billableOverage,
+          transcodeMinutes: 0,
           updatedAt: overages.updatedAt || null,
         },
       },
 
       computed: {
-        isOverLimit,
-        isOverParticipant,
-        isOverTranscode,
+        isOverLimit: decision.overLimit,
+        isOverParticipant: decision.overLimit,
+        isOverTranscode: false,
         remaining: {
-          participantMinutes: remainingParticipantMinutes, // null = unlimited
-          transcodeMinutes: remainingTranscodeMinutes, // null = unlimited
+          streamingMinutes: decision.remainingMinutes, // null = unlimited
+          participantMinutes: decision.remainingMinutes, // legacy alias
+          transcodeMinutes: null,
         },
       },
     },

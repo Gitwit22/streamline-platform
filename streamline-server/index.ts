@@ -45,12 +45,8 @@ import path from "path";
 import fs from "fs";
 import { getLiveKitSdk } from "./lib/livekit"; // adjust path
 import type { RoomServiceClient } from "livekit-server-sdk";
-import { getCurrentMonthKey } from "./lib/usageTracker";
-import { getEffectiveEntitlements } from "./lib/effectiveEntitlements";
-import { evaluateUsageGate } from "./lib/usageOverages";
-import { upsertUsageMonthlyOverageTotals } from "./lib/usageOveragesWriter";
-import { billLiveStreamMinutes, LiveUsageUserNotFoundError, type LiveUsageResult } from "./lib/liveStreamUsage";
-import { isLargeMinutesDiscrepancy } from "./lib/liveSessionMinutes";
+import { getStreamingUsageStatus } from "./lib/streamingMeter";
+import { startStreamingMeterSweep, stopStreamingMeterSweep } from "./services/streamingMeterService";
 import admin from "firebase-admin";
 import hlsRoutes from "./routes/hls";
 import publicHlsRoutes from "./routes/publicHls";
@@ -896,10 +892,10 @@ app.get("/api/health", (_req, res) => {
 // NOTE: /api/usage/summary is implemented in routes/usageRoutes.ts
 // and is requireAuth-protected with a stable payload.
 
-// Live usage minutes are computed SERVER-SIDE from egressSessions start/end
-// timestamps (see lib/liveStreamUsage.ts). Client-supplied `minutes` /
-// `transcodeMinutes` are ignored for billing (logged only on large drift).
-// Transcode minutes are billed per egress by stop-multistream / egress_ended.
+// Compat endpoint: older clients POST here on Leave. Streaming minutes are now
+// metered entirely server-side (lib/streamingMeter.ts: output intervals are
+// closed + billed on stop / egress_ended / sweep), so this call NEVER bills.
+// It returns the room owner's current month totals for display.
 app.post("/api/usage/streamEnded", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid as string | undefined;
@@ -907,19 +903,12 @@ app.post("/api/usage/streamEnded", requireAuth, async (req, res) => {
       return res.status(401).json({ error: "authentication required" });
     }
 
-    const body = (req.body || {}) as {
-      roomId?: unknown;
-      minutes?: unknown;
-      guestCount?: unknown;
-      transcodeMinutes?: unknown;
-    };
-    const roomId = typeof body.roomId === "string" ? body.roomId.trim() : "";
+    const roomId = typeof (req.body || {}).roomId === "string" ? String(req.body.roomId).trim() : "";
     if (!roomId) {
       return res.status(400).json({ error: "roomId required" });
     }
 
-    // Caller must own the room, be an admin, or be a delegated producer with
-    // destination (streaming) permission — same gate as start/stop-multistream.
+    // Same access gate as before (owner / admin / delegated producer).
     let ownerUid: string;
     try {
       const ctx = await assertRoomPerm(req as any, roomId, "canDestinations");
@@ -931,89 +920,20 @@ app.post("/api/usage/streamEnded", requireAuth, async (req, res) => {
       throw err;
     }
 
-    let result: LiveUsageResult;
-    try {
-      result = await billLiveStreamMinutes({
-        db,
-        ownerUid,
-        roomId,
-        guestCount: Number(body.guestCount || 0),
-      });
-    } catch (err) {
-      if (err instanceof LiveUsageUserNotFoundError) {
-        return res.status(404).json({ error: "user not found" });
-      }
-      throw err;
-    }
-
-    if (isLargeMinutesDiscrepancy(body.minutes, result.minutes)) {
-      console.warn("[usage] streamEnded client/server minutes discrepancy", {
-        uid,
-        ownerUid,
-        roomId,
-        clientMinutes: body.minutes,
-        clientTranscodeMinutes: body.transcodeMinutes,
-        serverMinutes: result.minutes,
-      });
-    }
-
-    console.log("[usage] streamEnded server-computed", {
-      uid,
-      ownerUid,
-      roomId,
-      minutes: result.minutes,
-      sessionsCounted: result.sessionsCounted.map((s) => s.id),
-      skipped: result.skipped,
-    });
-
-    // Pro-only: compute and persist overage totals when the user is over limit.
-    // Best-effort: do not fail streamEnded if this bookkeeping write fails.
-    if (result.minutes > 0 && result.totals) {
-      try {
-        const entitlements = await getEffectiveEntitlements(ownerUid);
-        const decision = evaluateUsageGate({
-          allowsOverages: !!(entitlements.features as any).allowsOverages,
-          limits: {
-            participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
-            transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
-          },
-          usage: {
-            participantMinutes: Number(result.totals.participantMinutes || 0),
-            transcodeMinutes: Number(result.totals.transcodeMinutes || 0),
-          },
-          checkParticipant: true,
-          checkTranscode: true,
-        });
-
-        if (decision.shouldLogOverages && decision.overageTotals) {
-          await upsertUsageMonthlyOverageTotals({
-            uid: ownerUid,
-            monthKey: result.monthKey,
-            totals: decision.overageTotals,
-          });
-        }
-      } catch (e) {
-        console.error("[usage] failed to update overage totals", e);
-      }
-    }
-
+    const status = await getStreamingUsageStatus(ownerUid);
+    const usage = (status.usageDoc && status.usageDoc.usage) || {};
     return res.json({
       ok: true,
       serverComputed: true,
-      minutes: result.minutes,
-      durationHours: result.minutes / 60,
-      sessionsCounted: result.sessionsCounted.length,
-      alreadyCounted: result.minutes === 0 && result.skipped.some((s) => s.reason === "already_counted"),
-      hoursStreamedThisMonth: result.totals?.hoursStreamedThisMonth ?? null,
-      ytdHours: result.totals?.ytdHours ?? null,
-      usageMonthly: {
-        id: result.usageDocId,
-        monthKey: result.monthKey,
-        totals: result.totals,
-      },
+      billed: false,
+      minutes: 0,
+      monthKey: status.monthKey,
+      streamingMinutes: status.decision.usedMinutes,
+      streamingLimitMinutes: status.decision.limitMinutes,
+      destinationMinutes: Number(usage.destinationMinutes || 0),
     });
   } catch (err) {
-    console.error("[usage] streamEnded error", err);
+    console.error("[usage] streamEnded (compat) error", err);
     return res.status(500).json({ error: "internal error" });
   }
 });
@@ -1081,6 +1001,10 @@ const server = app.listen(PORT, () => {
   // Deletes recordings older than 24 hours from R2 and Firestore.
   // Set RECORDING_CLEANUP_DRY_RUN=1 to preview deletions without actually removing files.
   startRecordingCleanup();
+
+  // Server-owned streaming meter: bills running outputs, closes outputs that
+  // ended without a stop call, enforces monthly / session caps.
+  startStreamingMeterSweep();
 });
 
 // Attach Horizon WebSocket (authenticated admin-only WS)
@@ -1110,6 +1034,7 @@ function gracefulShutdown(signal: string) {
 
   // Stop background work so nothing new starts while connections drain.
   stopRecordingCleanup();
+  stopStreamingMeterSweep();
   import("./lib/renderWorker.js")
     .then(({ stopExportWorker }) => stopExportWorker())
     .catch((err) => {

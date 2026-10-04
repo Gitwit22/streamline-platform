@@ -27,10 +27,12 @@ import {
   getInvoiceSubscriptionMetadata,
   isTerminalSubscriptionStatus,
 } from "../lib/stripeFields";
-import { getCurrentMonthKey } from "../lib/usageTracker";
 import { FieldValue } from "firebase-admin/firestore";
 import { createSavedVideoFromRecording } from "./myContent";
 import { reserveStorageUsage } from "../usageHelper";
+import { billOutputInterval } from "../lib/streamingMeter";
+import { countRecordingMinutes, recordingBillingUid } from "../lib/recordingUsage";
+import { toEpochMs } from "../lib/streamingMeterPure";
 import {
   S3Client,
   HeadObjectCommand,
@@ -64,249 +66,6 @@ function getR2Config() {
     ? `https://${accountId}.r2.cloudflarestorage.com`
     : mustGetEnv("R2_ENDPOINT");
   return { bucket, accessKeyId, secretAccessKey, endpoint };
-}
-
-function toNumber(value: any): number {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : 0;
-}
-
-function coerceDate(value: any): Date | null {
-  if (!value) return null;
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
-  if (typeof value?.toDate === "function") {
-    try {
-      const d = value.toDate();
-      return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
-    } catch {
-      return null;
-    }
-  }
-  if (typeof value === "number") {
-    const d = new Date(value);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
-  if (typeof value === "string") {
-    const d = new Date(value);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
-  return null;
-}
-
-function computeBilledMinutes(start: Date | null, end: Date): number {
-  if (!start) return 0;
-  const durationMs = Math.max(0, end.getTime() - start.getTime());
-  if (!durationMs) return 0;
-  return Math.max(1, Math.ceil(durationMs / 60_000));
-}
-
-async function incrementTranscodeMinutes(params: {
-  uid: string;
-  billedMinutes: number;
-  now: Date;
-}): Promise<void> {
-  const safeMinutes = Math.max(0, Math.round(params.billedMinutes));
-  if (!params.uid || safeMinutes <= 0) return;
-
-  const monthKey = getCurrentMonthKey();
-  const usageDocId = `${params.uid}_${monthKey}`;
-  const usageRef = db.collection("usageMonthly").doc(usageDocId);
-
-  await db.runTransaction(async (tx) => {
-    const snap = await tx.get(usageRef);
-    const existing = snap.exists ? (snap.data() as any) : {};
-    const usage = existing.usage || {};
-    const ytd = existing.ytd || {};
-    const minutes = usage.minutes || {};
-    const ytdMinutes = ytd.minutes || {};
-
-    const prevCurrent = toNumber(minutes.transcode?.currentPeriod ?? usage.transcodeMinutes);
-    const prevLifetime = toNumber(minutes.transcode?.lifetime ?? ytdMinutes.transcode?.lifetime ?? ytd.transcodeMinutes);
-
-    const nextCurrent = prevCurrent + safeMinutes;
-    const nextLifetime = prevLifetime + safeMinutes;
-
-    tx.set(
-      usageRef,
-      {
-        uid: params.uid,
-        monthKey,
-        usage: {
-          ...usage,
-          transcodeMinutes: toNumber(usage.transcodeMinutes) + safeMinutes,
-          minutes: {
-            ...minutes,
-            transcode: {
-              currentPeriod: nextCurrent,
-              lifetime: nextLifetime,
-            },
-          },
-        },
-        ytd: {
-          ...ytd,
-          transcodeMinutes: toNumber(ytd.transcodeMinutes) + safeMinutes,
-          minutes: {
-            ...ytdMinutes,
-            transcode: {
-              lifetime: nextLifetime,
-            },
-          },
-        },
-        createdAt: existing.createdAt || params.now,
-        updatedAt: params.now,
-      },
-      { merge: true }
-    );
-  });
-}
-
-async function incrementHlsMinutes(params: {
-  uid: string;
-  billedMinutes: number;
-  now: Date;
-}): Promise<void> {
-  const safeMinutes = Math.max(0, Math.round(params.billedMinutes));
-  if (!params.uid || safeMinutes <= 0) return;
-
-  const monthKey = getCurrentMonthKey();
-  const usageDocId = `${params.uid}_${monthKey}`;
-  const usageRef = db.collection("usageMonthly").doc(usageDocId);
-  const snap = await usageRef.get();
-  const existing = snap.exists ? (snap.data() as any) : {};
-  const prevUsage = existing.usage || {};
-  const prevYtd = existing.ytd || {};
-
-  await usageRef.set(
-    {
-      uid: params.uid,
-      monthKey,
-      usage: {
-        ...prevUsage,
-        hlsMinutes: toNumber(prevUsage.hlsMinutes) + safeMinutes,
-        // HLS is billed as transcode/egress time.
-        transcodeMinutes: toNumber(prevUsage.transcodeMinutes) + safeMinutes,
-      },
-      ytd: {
-        ...prevYtd,
-        hlsMinutes: toNumber(prevYtd.hlsMinutes) + safeMinutes,
-        transcodeMinutes: toNumber(prevYtd.transcodeMinutes) + safeMinutes,
-      },
-      createdAt: existing.createdAt || params.now,
-      updatedAt: params.now,
-    },
-    { merge: true }
-  );
-}
-
-async function maybeCountRecordingUsage(params: {
-  recordingRef: FirebaseFirestore.DocumentReference;
-  recordingData: any;
-  now: Date;
-}): Promise<{ counted: boolean; billedMinutes: number }>{
-  const uid = String(params.recordingData?.uid || "").trim();
-  if (!uid) return { counted: false, billedMinutes: 0 };
-
-  const startedAt = coerceDate(params.recordingData?.startedAt);
-  const billedMinutes = computeBilledMinutes(startedAt, params.now);
-  if (billedMinutes <= 0) return { counted: false, billedMinutes: 0 };
-
-  const usageType = typeof params.recordingData?.usageType === "string" ? params.recordingData.usageType : "recording_only";
-
-  const monthKey = getCurrentMonthKey();
-  const usageRef = db.collection("usageMonthly").doc(`${uid}_${monthKey}`);
-
-  let didCount = false;
-
-  await db.runTransaction(async (tx) => {
-    const recSnap = await tx.get(params.recordingRef);
-    if (!recSnap.exists) return;
-    const recData = recSnap.data() || {};
-    if (recData.usageCounted === true) return;
-
-    const usageSnap = await tx.get(usageRef);
-    const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
-    const usage = existing.usage || {};
-    const ytd = existing.ytd || {};
-    const minutes = usage.minutes || {};
-    const ytdMinutes = ytd.minutes || {};
-
-    const liveCurrent = toNumber(minutes.live?.currentPeriod);
-    const liveLifetime = toNumber(minutes.live?.lifetime ?? ytdMinutes.live?.lifetime);
-    const recCurrentPrev = toNumber(minutes.recording?.currentPeriod);
-    const recLifetimePrev = toNumber(minutes.recording?.lifetime ?? ytdMinutes.recording?.lifetime);
-    const totalCurrentPrev = toNumber(minutes.total?.currentPeriod);
-    const totalLifetimePrev = toNumber(minutes.total?.lifetime ?? ytdMinutes.total?.lifetime);
-
-    const byUsageTypePrev = minutes.byUsageType || {};
-    const byUsageTypeYtd = ytdMinutes.byUsageType || {};
-    const typePrev = byUsageTypePrev[usageType] || {};
-    const typeLifetimePrev = toNumber(typePrev.lifetime ?? byUsageTypeYtd[usageType]?.lifetime);
-
-    const nextMinutes = {
-      ...minutes,
-      live: {
-        currentPeriod: liveCurrent,
-        lifetime: liveLifetime,
-      },
-      recording: {
-        currentPeriod: recCurrentPrev + billedMinutes,
-        lifetime: recLifetimePrev + billedMinutes,
-      },
-      total: {
-        currentPeriod: totalCurrentPrev + billedMinutes,
-        lifetime: totalLifetimePrev + billedMinutes,
-      },
-      byUsageType: {
-        ...byUsageTypePrev,
-        [usageType]: {
-          currentPeriod: toNumber(typePrev.currentPeriod) + billedMinutes,
-          lifetime: typeLifetimePrev + billedMinutes,
-        },
-      },
-    };
-
-    const nextYtdMinutes = {
-      ...ytdMinutes,
-      live: { lifetime: liveLifetime },
-      recording: { lifetime: recLifetimePrev + billedMinutes },
-      total: { lifetime: totalLifetimePrev + billedMinutes },
-      byUsageType: {
-        ...byUsageTypeYtd,
-        [usageType]: { lifetime: typeLifetimePrev + billedMinutes },
-      },
-    };
-
-    tx.update(params.recordingRef, {
-      usageCounted: true,
-      usageCountedAt: params.now,
-      billedMinutes: recData.billedMinutes ?? billedMinutes,
-      durationMs: recData.durationMs ?? (startedAt ? Math.max(0, params.now.getTime() - startedAt.getTime()) : 0),
-      updatedAt: params.now,
-    });
-
-    tx.set(
-      usageRef,
-      {
-        uid,
-        monthKey,
-        usage: {
-          ...usage,
-          minutes: nextMinutes,
-        },
-        ytd: {
-          ...ytd,
-          minutes: nextYtdMinutes,
-        },
-        createdAt: existing.createdAt || params.now,
-        updatedAt: params.now,
-      },
-      { merge: true }
-    );
-
-    didCount = true;
-  });
-
-  return { counted: didCount, billedMinutes };
 }
 
 // Lazy S3 client for R2
@@ -703,58 +462,8 @@ router.post(
             { merge: true }
           );
 
-          // ── Reset usage counters on invoice.paid (new billing period) ──
-          if (event.type === "invoice.paid" && isActive) {
-            const monthKey = getCurrentMonthKey();
-            const usageDocId = `${uid}_${monthKey}`;
-            const usageRef = db.collection("usageMonthly").doc(usageDocId);
-            const usageSnap = await usageRef.get();
-
-            if (usageSnap.exists) {
-              const existing = usageSnap.data() as any;
-              const prevUsage = existing?.usage || {};
-              const prevYtd = existing?.ytd || {};
-              const prevMinutes = prevUsage.minutes || {};
-
-              // Zero out currentPeriod counters; preserve lifetime/ytd totals
-              await usageRef.set(
-                {
-                  usage: {
-                    participantMinutes: 0,
-                    transcodeMinutes: 0,
-                    hlsMinutes: 0,
-                    minutes: {
-                      live: {
-                        currentPeriod: 0,
-                        lifetime: Number(prevMinutes.live?.lifetime || prevYtd.minutes?.live?.lifetime || 0),
-                      },
-                      transcode: {
-                        currentPeriod: 0,
-                        lifetime: Number(prevMinutes.transcode?.lifetime || prevYtd.minutes?.transcode?.lifetime || 0),
-                      },
-                      recording: {
-                        currentPeriod: 0,
-                        lifetime: Number(prevMinutes.recording?.lifetime || prevYtd.minutes?.recording?.lifetime || 0),
-                      },
-                    },
-                  },
-                  lastBillingReset: Date.now(),
-                  updatedAt: Date.now(),
-                },
-                { merge: true }
-              );
-            }
-
-            // Also reset legacy usage field so it doesn't seed stale data
-            await getUserRef(uid).update({
-              "usage.hoursStreamedThisMonth": 0,
-              "usage.hoursStreamedToday": 0,
-            });
-
-            console.log(
-              `[stripe-webhook] Reset usage counters for uid=${uid}, monthKey=${monthKey}`
-            );
-          }
+          // NOTE: usage is metered per UTC calendar month (usageMonthly doc
+          // keyed by YYYY-MM), so a renewal never zeroes usage counters.
           break;
         }
 
@@ -1174,7 +883,19 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     }
 
     const now = new Date();
-    const endedAt = coerceDate(egressInfo?.endedAt) || now;
+    // LiveKit reports endedAt in ns; never trust a future value.
+    const egressEndedMs = toEpochMs(egressInfo?.endedAt);
+    const endedAt = egressEndedMs ? new Date(Math.min(egressEndedMs, now.getTime())) : now;
+
+    // Streaming meter: close + bill the output interval (multistream,
+    // Instagram or HLS). Idempotent with stop routes and the sweep.
+    let meterHandled = false;
+    try {
+      const billed = await billOutputInterval(egressId, { close: true, endedAt, reason: "egress_ended", now });
+      meterHandled = !!billed;
+    } catch (e: any) {
+      console.error("[livekit-webhook] streaming meter close failed", { egressId, error: e?.message || e });
+    }
 
     // If this egressId belongs to an HLS session (rooms.hls.egressId), do an
     // immediate best-effort cleanup so segments don't linger after the stream ends.
@@ -1189,18 +910,6 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
         const roomDoc = roomSnap.docs[0];
         const roomData = (roomDoc.data() || {}) as any;
         const prefix = String(roomData?.hls?.prefix || `hls/${roomDoc.id}/`).trim();
-
-        // Count HLS usage for cases where the app did not call /api/hls/stop.
-        try {
-          const startedAt = coerceDate(roomData?.hls?.startedAt);
-          const billedMinutes = computeBilledMinutes(startedAt, endedAt);
-          const usageUid = String(roomData?.ownerId || "").trim();
-          if (usageUid && billedMinutes > 0) {
-            await incrementHlsMinutes({ uid: usageUid, billedMinutes, now });
-          }
-        } catch (e: any) {
-          console.warn("[livekit-webhook] HLS usage increment failed", { roomId: roomDoc.id, error: e?.message || e });
-        }
 
         try {
           await deletePrefix(prefix);
@@ -1261,91 +970,10 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     }
 
     if (!recordingDoc) {
-      // Not HLS, and not a recording: treat as other egress types (e.g., RTMP multistream).
-      try {
-        const sessionRef = db.collection("egressSessions").doc(egressId);
-        const sessionSnap = await sessionRef.get();
-        if (sessionSnap.exists) {
-          const session = sessionSnap.data() as any;
-          const kind = String(session?.kind || "").toLowerCase();
-          const usageUid = String(session?.uid || "").trim();
-          const startedAt = coerceDate(session?.startedAt);
-          const billedMinutes = computeBilledMinutes(startedAt, endedAt);
-
-          if (usageUid && billedMinutes > 0) {
-            await db.runTransaction(async (tx) => {
-              const s = await tx.get(sessionRef);
-              const sData = s.exists ? (s.data() as any) : null;
-              if (!sData) return;
-              if (sData.countedAt) return;
-
-              const monthKey = getCurrentMonthKey();
-              const usageRef = db.collection("usageMonthly").doc(`${usageUid}_${monthKey}`);
-              const usageSnap = await tx.get(usageRef);
-              const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
-              const usage = existing.usage || {};
-              const ytd = existing.ytd || {};
-              const minutes = usage.minutes || {};
-              const ytdMinutes = ytd.minutes || {};
-
-              const prevCurrent = toNumber(minutes.transcode?.currentPeriod ?? usage.transcodeMinutes);
-              const prevLifetime = toNumber(
-                minutes.transcode?.lifetime ?? ytdMinutes.transcode?.lifetime ?? ytd.transcodeMinutes
-              );
-
-              const nextCurrent = prevCurrent + billedMinutes;
-              const nextLifetime = prevLifetime + billedMinutes;
-
-              tx.set(
-                usageRef,
-                {
-                  uid: usageUid,
-                  monthKey,
-                  usage: {
-                    ...usage,
-                    transcodeMinutes: toNumber(usage.transcodeMinutes) + billedMinutes,
-                    minutes: {
-                      ...minutes,
-                      transcode: {
-                        currentPeriod: nextCurrent,
-                        lifetime: nextLifetime,
-                      },
-                    },
-                  },
-                  ytd: {
-                    ...ytd,
-                    transcodeMinutes: toNumber(ytd.transcodeMinutes) + billedMinutes,
-                    minutes: {
-                      ...ytdMinutes,
-                      transcode: {
-                        lifetime: nextLifetime,
-                      },
-                    },
-                  },
-                  createdAt: existing.createdAt || now,
-                  updatedAt: now,
-                },
-                { merge: true }
-              );
-
-              tx.set(
-                sessionRef,
-                {
-                  endedAt: endedAt,
-                  billedMinutes,
-                  kind: kind || "multistream",
-                  countedAt: now,
-                  updatedAt: now,
-                },
-                { merge: true }
-              );
-            });
-          }
-
-          return res.status(200).json({ ok: true, handled: "egress_session", egressId, kind: kind || "multistream" });
-        }
-      } catch (e: any) {
-        console.warn("[livekit-webhook] egressSessions lookup failed", e?.message || e);
+      // Not HLS, and not a recording: other egress types (RTMP multistream /
+      // Instagram) were closed + billed by the streaming meter above.
+      if (meterHandled) {
+        return res.status(200).json({ ok: true, handled: "egress_session", egressId });
       }
 
       console.log(`[livekit-webhook] No handler found for egressId: ${egressId}; ignoring`);
@@ -1366,7 +994,7 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       console.log(`[livekit-webhook] Recording ${recordingId} already ready, skipping`);
       // Still ensure minutes are counted (webhook may arrive when stop endpoint wasn't called).
       if (recordingData.usageCounted !== true) {
-        await maybeCountRecordingUsage({ recordingRef, recordingData, now });
+        await countRecordingMinutes(recordingRef, { endedAt, now });
       }
       return res.status(200).json({ ok: true, alreadyReady: true, recordingId });
     }
@@ -1374,7 +1002,7 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       console.log(`[livekit-webhook] Recording ${recordingId} already failed, skipping`);
       // Do not count failed recordings twice; only count if not already counted.
       if (recordingData.usageCounted !== true) {
-        await maybeCountRecordingUsage({ recordingRef, recordingData, now });
+        await countRecordingMinutes(recordingRef, { endedAt, now });
       }
       return res.status(200).json({ ok: true, alreadyFailed: true, recordingId });
     }
@@ -1510,7 +1138,8 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       }
     }
     if (storageClaimed) {
-      const recUserId = typeof recordingData.userId === "string" ? recordingData.userId : "";
+      // Storage is billed to the room owner (billingUid/ownerUid), not the actor.
+      const recUserId = recordingBillingUid(recordingData) || "";
       if (recUserId) {
         try {
           await reserveStorageUsage(recUserId, fileSize, {
@@ -1556,7 +1185,8 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     // Ensure recording minutes are counted even if /recordings/stop wasn't called.
     if (recordingData.usageCounted !== true) {
       try {
-        await maybeCountRecordingUsage({ recordingRef, recordingData, now });
+        // Bill [startedAt, egress endedAt] to the room owner (not processing time).
+        await countRecordingMinutes(recordingRef, { endedAt, now });
       } catch (e: any) {
         console.warn("[livekit-webhook] failed to count recording usage", { recordingId, error: e?.message || e });
       }

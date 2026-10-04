@@ -8,8 +8,9 @@ import { releaseStorageUsage } from "../usageHelper";
 import { stopEgress } from "../services/livekitEgress";
 import { setHlsIdleIfRun } from "../services/rooms";
 import { onHlsIdle } from "../lib/viewerStats";
-import { incrementHlsUsageMinutes } from "./hls";
-import { advanceablePrefixLength, computeHlsBilledMinutes, hlsLastSeenMs, isHlsSessionStale } from "../lib/mediaPure";
+import { advanceablePrefixLength, hlsLastSeenMs, isHlsSessionStale } from "../lib/mediaPure";
+import { closeOutputIntervals, sweepStreamingMeter } from "../lib/streamingMeter";
+import { releaseRecordingStorageOnce } from "../lib/recordingUsage";
 
 const router = Router();
 
@@ -99,19 +100,12 @@ async function expireEmergencyRecordings(now: Date): Promise<{ deletedCount: num
         await deletePrefix(prefix);
       }
 
-      // Release storage quota for the deleted recording
+      // Release storage quota for the deleted recording (billing uid, once)
       if (uid && recordingId) {
         try {
-          const recSnap = await firestore.collection("recordings").doc(recordingId).get();
-          const recData = recSnap.exists ? (recSnap.data() || {}) as any : {};
-          const fileSize = typeof recData.fileSize === "number" ? recData.fileSize : 0;
-          const storageReleased = recData.storageReleased === true;
-          if (fileSize > 0 && !storageReleased) {
-            await releaseStorageUsage(uid, fileSize, {
-              caller: "maintenance.expireEmergencyRecordings",
-              recordingId,
-            });
-          }
+          await releaseRecordingStorageOnce(firestore.collection("recordings").doc(recordingId), {
+            caller: "maintenance.expireEmergencyRecordings",
+          });
         } catch (e: any) {
           console.warn("[maintenance/expire-emergency-recordings] storage release failed", {
             uid, recordingId, error: e?.message || e,
@@ -191,29 +185,15 @@ async function purgeDeletedAccounts(now: Date): Promise<{ purgedCount: number }>
           .where("userId", "==", uid)
           .limit(500)
           .get();
-        let totalBytes = 0;
         for (const recDoc of recSnap.docs) {
           const recData = (recDoc.data() || {}) as any;
-          const fs = typeof recData.fileSize === "number" ? recData.fileSize : 0;
-          const released = recData.storageReleased === true;
-          if (fs > 0 && !released) {
-            totalBytes += fs;
-          }
           try {
             await deleteRecordingStorage(recData);
+            // Release from the recording's billing uid (room owner) exactly once.
+            await releaseRecordingStorageOnce(recDoc.ref, { caller: "maintenance.purgeDeletedAccounts" });
             await recDoc.ref.set({ status: "deleted", storageReleased: true, deletedAt: now, updatedAt: now }, { merge: true });
           } catch (e: any) {
             console.warn("[maintenance/purge-deleted-accounts] recording cleanup failed", { uid, recordingId: recDoc.id, error: e?.message || e });
-          }
-        }
-        if (totalBytes > 0) {
-          try {
-            await releaseStorageUsage(uid, totalBytes, {
-              caller: "maintenance.purgeDeletedAccounts",
-              recordingCount: recSnap.size,
-            });
-          } catch (e: any) {
-            console.warn("[maintenance/purge-deleted-accounts] storage release failed", { uid, totalBytes, error: e?.message || e });
           }
         }
       } catch (e: any) {
@@ -342,29 +322,19 @@ async function purgeExpiredRecordings(now: Date, opts?: { limit?: number }): Pro
       continue;
     }
 
-    // Capture file size and userId before deletion for storage accounting
-    const fileSize = typeof data.fileSize === "number" ? data.fileSize : 0;
-    const userId = typeof data.userId === "string" ? data.userId : null;
-    const storageReleased = data.storageReleased === true;
-
     try {
       await deleteRecordingStorage(data);
     } catch (e: any) {
       console.warn("[maintenance/purge-expired-recordings] deleteRecordingStorage failed", { recordingId: doc.id, error: e?.message || e });
     }
 
-    // Release storage quota after R2 bytes are removed
-    if (userId && fileSize > 0 && !storageReleased) {
-      try {
-        await releaseStorageUsage(userId, fileSize, {
-          caller: "maintenance.purgeExpiredRecordings",
-          recordingId: doc.id,
-        });
-      } catch (e: any) {
-        console.warn("[maintenance/purge-expired-recordings] storage release failed", {
-          userId, recordingId: doc.id, fileSize, error: e?.message || e,
-        });
-      }
+    // Release counted storage from the billing uid exactly once (transactional).
+    try {
+      await releaseRecordingStorageOnce(doc.ref, { caller: "maintenance.purgeExpiredRecordings" });
+    } catch (e: any) {
+      console.warn("[maintenance/purge-expired-recordings] storage release failed", {
+        recordingId: doc.id, error: e?.message || e,
+      });
     }
 
     try {
@@ -457,19 +427,11 @@ async function purgeStaleHls(now: Date, opts?: { ttlMinutes?: number; limit?: nu
         console.warn("[maintenance/purge-stale-hls] setHlsIdle failed", { roomId, error: e?.message || e });
       }
 
-      // Bill the egress time like /api/hls/stop does. The egress kept running
-      // (and costing transcode) until we stopped it now.
-      if (flipped && egressId && status === "live") {
-        const minutes = computeHlsBilledMinutes(hls.startedAt, nowMs);
-        const usageUid = String(data.ownerId || "").trim();
-        if (minutes > 0 && usageUid) {
-          try {
-            await incrementHlsUsageMinutes(usageUid, minutes);
-            billedMinutesTotal += minutes;
-          } catch (e: any) {
-            console.error("[maintenance/purge-stale-hls] failed to bill HLS minutes", { roomId, usageUid, minutes, error: e?.message || e });
-          }
-        }
+      // Close + bill the HLS meter interval (idempotent: exactly once no
+      // matter which of stop / auto-stop / webhook / purge / sweep runs first).
+      if (egressId) {
+        const billed = await closeOutputIntervals([egressId], { endedAt: now, reason: "stale_hls_purge", now });
+        billedMinutesTotal += billed.reduce((sum, r) => sum + r.streamingMinutesDelta, 0);
       }
 
       if (flipped) {
@@ -557,6 +519,24 @@ router.post("/purge-stale-hls", async (req, res) => {
   const result = await purgeStaleHls(now, { ttlMinutes, limit });
   return res.json(result);
 });
+
+// Streaming meter sweep (cron-friendly; also runs in-process every few
+// minutes). Bills running outputs, closes/bills outputs that ended without
+// being billed (egress no longer active per LiveKit, or older than 24h) and
+// stops outputs over the monthly limit / plan maxSessionMinutes.
+// POST/GET /api/maintenance/streaming-meter-sweep?limit=500
+async function handleStreamingMeterSweep(req: any, res: any) {
+  try {
+    const limit = req.query.limit ? Number(req.query.limit) : undefined;
+    const result = await sweepStreamingMeter({ now: new Date(), limit });
+    return res.json(result);
+  } catch (e: any) {
+    console.error("[maintenance/streaming-meter-sweep] failed", e?.message || e);
+    return res.status(500).json({ ok: false, error: "streaming_meter_sweep_failed" });
+  }
+}
+router.get("/streaming-meter-sweep", handleStreamingMeterSweep);
+router.post("/streaming-meter-sweep", handleStreamingMeterSweep);
 
 // ---------------------------------------------------------------------------
 // 24-hour recording retention
@@ -669,8 +649,6 @@ export async function purgeOldRecordings(
         continue;
       }
 
-      const fileSize = typeof data.fileSize === "number" ? data.fileSize : 0;
-      const userId = typeof data.userId === "string" ? data.userId : null;
       const storageReleased = data.storageReleased === true;
 
       let storageDeleted = false;
@@ -681,15 +659,12 @@ export async function purgeOldRecordings(
         console.warn(`[maintenance/purge-old-recordings] Failed to delete recording: ${doc.id}`, e?.message || e);
       }
 
-      if (storageDeleted && userId && fileSize > 0 && !storageReleased) {
+      if (storageDeleted) {
         try {
-          await releaseStorageUsage(userId, fileSize, {
-            caller: "maintenance.purgeOldRecordings",
-            recordingId: doc.id,
-          });
+          await releaseRecordingStorageOnce(doc.ref, { caller: "maintenance.purgeOldRecordings" });
         } catch (e: any) {
           console.warn("[maintenance/purge-old-recordings] storage release failed", {
-            userId, recordingId: doc.id, fileSize, error: e?.message || e,
+            recordingId: doc.id, error: e?.message || e,
           });
         }
       }

@@ -45,6 +45,18 @@ services:
       - key: MAINTENANCE_KEY
         sync: false
 
+      # Streaming meter (server-owned monthly streaming minutes).
+      # ISO timestamp; output time before it is never billed by the meter.
+      # Set to the deploy time of the meter release so streams running across
+      # the deploy are not double-billed (old-model billed sessions are always
+      # skipped). Empty = no cutover.
+      - key: STREAMING_METER_CUTOVER_ISO
+        sync: false
+      # In-process meter sweep interval in ms (default 120000; "0" disables
+      # and relies on the cron hitting /api/maintenance/streaming-meter-sweep).
+      - key: STREAMING_METER_SWEEP_MS
+        sync: false
+
       # Firebase (if you use it server-side)
       - key: GOOGLE_APPLICATION_CREDENTIALS
         sync: false
@@ -116,6 +128,9 @@ services:
     command: npm run cron:expire-emergency
     envVars:
       - key: MAINTENANCE_EXPIRE_URL
+        sync: false
+      # Optional: https://<backend>/api/maintenance/streaming-meter-sweep
+      - key: MAINTENANCE_METER_URL
         sync: false
       - key: MAINTENANCE_KEY
         sync: false

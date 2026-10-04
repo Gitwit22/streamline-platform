@@ -13,6 +13,9 @@ import { invalidatePlatformBillingCache } from "../lib/userAccount";
 
 import type { UserUsageSummary } from "../types/admin.types";
 import { getCurrentMonthKey } from "../lib/usageTracker";
+import { normalizePlan } from "../lib/normalizePlan";
+import { evaluateStreamingGate, readStreamingMinutes } from "../lib/streamingMeterPure";
+import { getStreamingUsageStatus, readOveragesEnabled } from "../lib/streamingMeter";
 import { PLAN_IDS, PlanId, isPlanId, getAllPlanIds } from "../types/plan";
 import {
   buildAdminPasswordResetState,
@@ -642,47 +645,12 @@ router.get("/users/:userId", async (req, res) => {
 
     const userData = userDoc.data();
 
-    // Get usage for current month
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-
-    const usageSnapshot = await firestore
-      .collection("usage")
-      .where("userId", "==", userId)
-      .where("timestamp", ">=", monthStart)
-      .orderBy("timestamp", "desc")
-      .get();
-
-    const currentMonthUsage = usageSnapshot.docs.reduce(
-      (sum, doc) => sum + (doc.data().minutes || 0),
-      0
-    );
-
-    // Get all-time usage
-    const allUsageSnapshot = await firestore
-      .collection("usage")
-      .where("userId", "==", userId)
-      .get();
-
-    const allTimeUsage = allUsageSnapshot.docs.reduce(
-      (sum, doc) => sum + (doc.data().minutes || 0),
-      0
-    );
-
-    const recentActivity = usageSnapshot.docs.slice(0, 10).map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    }));
-
-    // ---- Fetch plan limits live from Firestore ----
-    const planId = (userData?.planId || userData?.plan || "free").toLowerCase();
-    const planSnap = await firestore.collection("plans").doc(planId).get();
-    const planData = planSnap.exists ? (planSnap.data() as any) : null;
-    // Safe fallback if plan doc missing. Prefer canonical participant/monthly minutes fields.
-    const includedMinutes =
-      Number(planData?.limits?.participantMinutes ?? 0) ||
-      Number(planData?.limits?.monthlyMinutes ?? 0) ||
-      Number(planData?.limits?.monthlyMinutesIncluded ?? 60);
+    // Current month streaming minutes vs the effective plan (+ bonus),
+    // evaluated exactly like the start gate.
+    const status = await getStreamingUsageStatus(userId);
+    const currentMonthUsage = status.decision.usedMinutes;
+    const planLimit = status.decision.limitMinutes ?? 0; // 0 = unlimited
+    const lifetime = ((userData as any)?.usage?.lifetime || {}) as any;
 
     const userSummary: UserUsageSummary = {
       user: {
@@ -690,11 +658,11 @@ router.get("/users/:userId", async (req, res) => {
         ...userData,
       } as any,
       currentMonthUsage,
-      allTimeUsage,
-      planLimit: includedMinutes,
-      percentUsed: Math.round((currentMonthUsage / includedMinutes) * 100),
-      isBlocked: currentMonthUsage >= includedMinutes,
-      recentActivity: recentActivity as any,
+      allTimeUsage: Number(lifetime.streamingMinutes || 0),
+      planLimit,
+      percentUsed: planLimit > 0 ? Math.round((currentMonthUsage / planLimit) * 100) : 0,
+      isBlocked: !status.decision.allowed,
+      recentActivity: [],
     };
 
     res.json(userSummary);
@@ -1173,27 +1141,35 @@ router.get("/usage", async (req, res) => {
         const usageDocId = `${userId}_${monthKey}`;
         const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
         const usageData = usageSnap.exists ? (usageSnap.data() as any) : {};
-        const usage = usageData.usage || usageData.totals || {};
-        const minutesUsed = Number(
-          usage.participantMinutes ?? usage.streamMinutes ?? usage.minutes ?? 0
-        );
+        const usage = usageData.usage || {};
+        // Monthly streaming minutes (union of output time), same reader as the gate.
+        const minutesUsed = readStreamingMinutes(usageData);
+        const destinationMinutes = Number(usage.destinationMinutes ?? 0);
+        const recordingMinutes = Number(usage.recordingMinutes ?? usage.minutes?.recording?.currentPeriod ?? 0);
 
         const overages = (usageData.overages || {}) as any;
-        const overageParticipantMinutes = Number(overages.participantMinutes ?? 0);
-        const overageTranscodeMinutes = Number(overages.transcodeMinutes ?? 0);
-        const overageMinutesTotal = overageParticipantMinutes + overageTranscodeMinutes;
+        const overageStreamingMinutes = Number(overages.streamingMinutes ?? overages.participantMinutes ?? 0);
+        const overageParticipantMinutes = overageStreamingMinutes;
+        const overageTranscodeMinutes = 0;
+        const overageMinutesTotal = overageStreamingMinutes;
 
         const planIdRaw = userData.planId || "free";
         // Canonicalize planId using isPlanId
         const planId: PlanId | string = isPlanId(planIdRaw) ? planIdRaw : planIdRaw;
-        const planData = plansMap[planId] || {};
-        const planLimit = Number(
-          planData.limits?.participantMinutes ??
-          planData.limits?.monthlyMinutesIncluded ??
-          0
-        );
-        const bonusMinutes = userData.bonusMinutes || 0;
-        const effectiveLimit = planLimit + bonusMinutes;
+        // Effective plan for limits (admin override respected, like the gate).
+        const override = typeof userData.adminOverridePlanId === "string" ? userData.adminOverridePlanId.trim() : "";
+        const effectivePlanId = override || String(planId);
+        const effectivePlan = normalizePlan(effectivePlanId, plansMap[effectivePlanId] || {});
+        const planLimit = Number(effectivePlan.limits.monthlyMinutes || 0); // 0 = unlimited
+        const bonusMinutes = Math.max(0, Number(userData.bonusMinutes || 0));
+        const gate = evaluateStreamingGate({
+          usedMinutes: minutesUsed,
+          includedMinutes: planLimit,
+          bonusMinutes,
+          planAllowsOverages: !!effectivePlan.features.allowsOverages,
+          overagesEnabled: readOveragesEnabled(userData),
+        });
+        const effectiveLimit = gate.limitMinutes ?? 0; // 0 = unlimited
 
         // billingEnabled is tri-state in Firestore; missing => true.
         const billingEnabled = userData.billingEnabled === false ? false : true;
@@ -1219,6 +1195,12 @@ router.get("/usage", async (req, res) => {
           platformBillingEnabled,
           effectiveBillingEnabled,
           minutesUsed,
+          streamingMinutes: minutesUsed,
+          destinationMinutes,
+          recordingMinutes,
+          effectivePlanId,
+          unlimited: gate.unlimited,
+          overageStreamingMinutes,
           overageParticipantMinutes,
           overageTranscodeMinutes,
           overageMinutesTotal,
@@ -1226,7 +1208,8 @@ router.get("/usage", async (req, res) => {
           planLimit,
           effectiveLimit,
           percentUsed: effectiveLimit > 0 ? (minutesUsed / effectiveLimit) * 100 : 0,
-          isBlocked: effectiveLimit > 0 ? minutesUsed >= effectiveLimit : false,
+          // Same decision as the start gate (bonus, override plan, overage opt-in).
+          isBlocked: !gate.allowed,
           lastActive: userData.lastActive,
         };
       })
@@ -1307,8 +1290,8 @@ router.get("/usage", async (req, res) => {
       if (!monthKeys.has(monthKey)) return;
       usageMonthlyMatched++;
       const usage = data.usage || data.totals || {};
-      streamMinutes += Number(usage.participantMinutes ?? usage.streamMinutes ?? usage.minutes ?? 0);
-      hlsMinutes += Number(usage.hlsMinutes ?? 0);
+      streamMinutes += readStreamingMinutes(data);
+      hlsMinutes += Number(usage.outputMinutes?.hls ?? 0) + Number(usage.hlsMinutes ?? 0);
       apiRequests += Number(usage.apiRequests ?? usage.api_requests ?? 0);
     });
     console.log("[admin/usage] usageMonthly", {

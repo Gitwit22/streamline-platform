@@ -1,148 +1,19 @@
 /**
- * Usage tracking and enforcement utilities
+ * Usage month window helpers.
+ *
+ * Usage is metered per UTC calendar month: usageMonthly docs are keyed
+ * `${uid}_${YYYY-MM}` and "reset" simply by the month key changing on the
+ * 1st at 00:00 UTC. Nothing zeroes a month doc in place (no Stripe-driven or
+ * lazy resets).
  */
+import { monthKeyUTC, nextMonthlyResetUTC } from "./streamingMeterPure";
 
-import type {
-  PlanDoc,
-  UserOveragesSetting,
-  UsageSnapshot,
-  GateResult,
-  CanStartStreamParams,
-} from "./usageTypes";
-import { resolveMaxDestinations } from "./planLimits";
-import { LIMIT_ERRORS } from "./limitErrors";
-
-/**
- * Get current month key in YYYY-MM format
- */
-export function getCurrentMonthKey(): string {
-  const now = new Date();
-  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+/** Current usage month key in YYYY-MM format (UTC). */
+export function getCurrentMonthKey(now: Date = new Date()): string {
+  return monthKeyUTC(now);
 }
 
-/**
- * Check if user can start a stream based on plan limits and current usage
- */
-export function canStartStream(params: CanStartStreamParams): GateResult {
-  const {
-    uid,
-    plan,
-    userOverages,
-    selectedDestinationsCount,
-    wantsRecording,
-    wantsRTMP,
-    currentUsage,
-  } = params;
-
-  const maxDestinations = resolveMaxDestinations((plan.limits as any) || {});
-
-  // 1) Check if plan allows any RTMP destinations at all.
-  // Under the new model, the numeric cap (rtmpDestinationsMax/maxDestinations)
-  // is the primary capability flag: 0 = disabled, >0 = enabled.
-  if (wantsRTMP && maxDestinations <= 0) {
-    return {
-      allowed: false,
-      reason: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
-      requiresUpgrade: true,
-    };
-  }
-
-  // 2) Check if destinations count exceeds plan limit (only when enabled).
-  if (maxDestinations > 0 && selectedDestinationsCount > maxDestinations) {
-    return {
-      allowed: false,
-      reason: LIMIT_ERRORS.LIMIT_EXCEEDED,
-      requiresUpgrade: true,
-    };
-  }
-
-  // 3) Check if plan allows recording
-  if (wantsRecording && !plan.features.recording) {
-    return {
-      allowed: false,
-      reason: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
-      requiresUpgrade: true,
-    };
-  }
-
-  // 4) Check participant minutes usage
-  const participantLimit = plan.limits.participantMinutes;
-  if (currentUsage.participantMinutes >= participantLimit) {
-    // Check if overages are allowed
-    if (plan.features.overagesAllowed && userOverages.overagesEnabled) {
-      // Allow with overage billing
-      console.log(`⚠️ User ${uid} starting stream with overages enabled`);
-      return { allowed: true };
-    } else if (plan.features.overagesAllowed && !userOverages.overagesEnabled) {
-      return {
-        allowed: false,
-        reason: LIMIT_ERRORS.USAGE_EXHAUSTED,
-        requiresOveragesEnabled: true,
-      };
-    } else {
-      return {
-        allowed: false,
-        reason: LIMIT_ERRORS.USAGE_EXHAUSTED,
-        requiresUpgrade: true,
-      };
-    }
-  }
-
-  // 5) Check transcode minutes usage
-  const transcodeLimit = plan.limits.transcodeMinutes;
-  if (currentUsage.transcodeMinutes >= transcodeLimit) {
-    if (plan.features.overagesAllowed && userOverages.overagesEnabled) {
-      console.log(`⚠️ User ${uid} starting stream with transcode overages`);
-      return { allowed: true };
-    } else if (plan.features.overagesAllowed && !userOverages.overagesEnabled) {
-      return {
-        allowed: false,
-        reason: LIMIT_ERRORS.USAGE_EXHAUSTED,
-        requiresOveragesEnabled: true,
-      };
-    } else {
-      return {
-        allowed: false,
-        reason: LIMIT_ERRORS.USAGE_EXHAUSTED,
-        requiresUpgrade: true,
-      };
-    }
-  }
-
-  // All checks passed
-  return { allowed: true };
-}
-
-/**
- * Calculate next reset date based on anniversary day
- */
-export function calculateNextResetDate(anniversaryDay: number): Date {
-  const now = new Date();
-  const currentDay = now.getDate();
-  
-  // If we haven't reached this month's anniversary day yet
-  if (currentDay < anniversaryDay) {
-    return new Date(now.getFullYear(), now.getMonth(), anniversaryDay);
-  }
-  
-  // Otherwise, next reset is next month's anniversary day
-  return new Date(now.getFullYear(), now.getMonth() + 1, anniversaryDay);
-}
-
-/**
- * Format minutes into human-readable duration
- */
-export function formatDuration(minutes: number): string {
-  if (minutes < 60) {
-    return `${minutes}m`;
-  }
-  
-  const hours = Math.floor(minutes / 60);
-  const mins = minutes % 60;
-  
-  if (mins === 0) {
-    return `${hours}h`;
-  }
-  
-  return `${hours}h ${mins}m`;
+/** Next usage reset (1st of next month, 00:00 UTC). */
+export function getNextUsageResetDate(now: Date = new Date()): Date {
+  return nextMonthlyResetUTC(now);
 }

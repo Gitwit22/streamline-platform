@@ -17,10 +17,9 @@ import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
-import { getCurrentMonthKey } from "../lib/usageTracker";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
-import { evaluateUsageGate } from "../lib/usageOverages";
-import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
+import { resolveMaxDestinations } from "../lib/planLimits";
+import { checkStreamingStartGate, closeOutputIntervals, openOutputInterval, streamingGateErrorBody } from "../lib/streamingMeter";
 import { OUTPUT_FORMAT_DIMENSIONS } from "../lib/roomLayout";
 import { logDelegatedRoomAction } from "../lib/collaborators";
 import { FieldValue } from "firebase-admin/firestore";
@@ -33,52 +32,6 @@ async function getLiveKitSdk() {
   if (_lkMod) return _lkMod;
   _lkMod = await import("livekit-server-sdk");
   return _lkMod;
-}
-
-function toNumber(value: any): number {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : 0;
-}
-
-function coerceDate(value: any): Date | null {
-  if (!value) return null;
-  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : value;
-  if (typeof value?.toDate === "function") {
-    try {
-      const d = value.toDate();
-      return d instanceof Date && !Number.isNaN(d.getTime()) ? d : null;
-    } catch {
-      return null;
-    }
-  }
-  if (typeof value === "number") {
-    const d = new Date(value);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
-  if (typeof value === "string") {
-    const d = new Date(value);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
-  return null;
-}
-
-function computeBilledMinutes(start: Date | null, end: Date): number {
-  if (!start) return 0;
-  const durationMs = Math.max(0, end.getTime() - start.getTime());
-  if (!durationMs) return 0;
-  return Math.max(1, Math.ceil(durationMs / 60_000));
-}
-
-async function getPlanLimit(uid: string, field: string): Promise<number | undefined> {
-  const userSnap = await firestore.collection("users").doc(uid).get();
-  const planId = String((userSnap.data() || {}).planId || "free");
-  const planSnap = await firestore.collection("plans").doc(planId).get();
-  if (!planSnap.exists) return undefined;
-  const limits = (planSnap.data() || {}).limits || {};
-  const raw = limits[field];
-  if (raw === undefined || raw === null) return undefined;
-  const num = Number(raw);
-  return Number.isFinite(num) ? num : undefined;
 }
 
 const router = Router();
@@ -241,52 +194,13 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       });
     }
 
-    // Monthly usage gate: block non-overage plans; allow Pro and log totals.
-    try {
-      const entitlements = await getEffectiveEntitlements(ownerUid);
-      const monthKey = getCurrentMonthKey();
-      const usageDocId = `${ownerUid}_${monthKey}`;
-      const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
-      const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
-      const usage = existing.usage || {};
-
-      const decision = evaluateUsageGate({
-        allowsOverages: !!(entitlements.features as any).allowsOverages,
-        limits: {
-          participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
-          transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
-        },
-        usage: {
-          participantMinutes: Number(usage.participantMinutes || 0),
-          transcodeMinutes: Number(usage.transcodeMinutes || 0),
-        },
-        checkParticipant: true,
-        checkTranscode: true,
-      });
-
-      if (!decision.allowed) {
-        return res.status(403).json({ error: decision.reason || LIMIT_ERRORS.USAGE_EXHAUSTED });
-      }
-
-      if (decision.shouldLogOverages && decision.overageTotals) {
-        await upsertUsageMonthlyOverageTotals({
-          uid: ownerUid,
-          monthKey,
-          totals: decision.overageTotals,
-        });
-      }
-    } catch (e) {
-      // Do not block multistream start on bookkeeping failures.
-      console.error("[multistream:start] usage gate failed", e);
+    // Monthly streaming-minutes gate (owner's effective plan + bonus minutes;
+    // overage opt-in respected). Fails open on infrastructure errors.
+    const gate = await checkStreamingStartGate({ ownerUid, roomId, actorUid: uid, route: "multistream:start" });
+    if (gate.allowed === false) {
+      return res.status(403).json(streamingGateErrorBody(gate.decision));
     }
 
-    // Destination cap enforcement (plan-based)
-    const maxDestinations = await getPlanLimit(ownerUid, "maxDestinations");
-    if (maxDestinations !== undefined && maxDestinations > 0 && destIds.length > maxDestinations) {
-      // Canonicalize: use a local constant for now, or add to LIMIT_ERRORS if desired
-      const DESTINATION_LIMIT_EXCEEDED = "destination_limit_exceeded";
-      return res.status(403).json({ error: DESTINATION_LIMIT_EXCEEDED, limit: maxDestinations });
-    }
 
     // Build RTMP URLs for each platform and any stored destinations.
     // IMPORTANT: LiveKit applies a single encoding config per egress job,
@@ -411,6 +325,28 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
     if (urls.length === 0 && instagramUrls.length === 0) {
       return res.status(400).json({ error: "At least one stream key is required" });
     }
+    // Destination cap (owner's effective plan): counts every resolved output
+    // URL - direct platform keys, saved destinations, standalone session keys
+    // and Instagram.
+    try {
+      const capEntitlements = await getEffectiveEntitlements(ownerUid);
+      const maxDestinations = resolveMaxDestinations(capEntitlements.limits);
+      const requestedDestinations = urls.length + instagramUrls.length;
+      if (maxDestinations > 0 && requestedDestinations > maxDestinations) {
+        return res.status(403).json({
+          error: "destination_limit_exceeded",
+          limit: maxDestinations,
+          requested: requestedDestinations,
+        });
+      }
+    } catch (e: any) {
+      console.error("[multistream:start] destination cap lookup failed; failing open", {
+        ownerUid,
+        roomId,
+        error: e?.message || e,
+      });
+    }
+
     console.log("[multistream:start] RTMP URLs (masked):", logEntries);
     if (instagramLogEntries.length > 0) {
       console.log("[multistream:start] Instagram RTMP URLs (masked):", instagramLogEntries);
@@ -654,38 +590,33 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         egressIds,
       });
 
-      // Persist durable egress session records so we can attribute usage on
-      // egress_ended webhooks even if the activeStreams doc is deleted.
-      try {
-        const sessionRows = [
-          { id: egressIds?.normal || primaryEgressId, group: "normal", destinationCount: urls.length },
-          { id: egressIds?.instagram, group: "instagram", destinationCount: instagramUrls.length },
-        ].filter((row): row is { id: string; group: "normal" | "instagram"; destinationCount: number } =>
-          typeof row.id === "string" && row.id.trim().length > 0
-        );
-
-        for (const row of sessionRows) {
-          await firestore
-            .collection("egressSessions")
-            .doc(String(row.id))
-            .set(
-              {
-                egressId: String(row.id),
-                uid: ownerUid,
-                roomId,
-                roomName,
-                kind: "multistream",
-                group: row.group,
-                destinationCount: row.destinationCount,
-                startedAt: new Date(startedAt),
-                createdAt: new Date(),
-                updatedAt: new Date(),
-              },
-              { merge: true }
-            );
+      // Open one meter interval per output (server-owned streaming meter:
+      // closed + billed on stop / egress_ended webhook / maintenance sweep).
+      const intervals = [
+        { id: egressIds.normal, kind: "multistream" as const, destinations: logEntries.map((e) => e.platform) },
+        { id: egressIds.instagram, kind: "instagram" as const, destinations: instagramLogEntries.map((e) => e.platform) },
+      ];
+      for (const row of intervals) {
+        if (!row.id) continue;
+        try {
+          await openOutputInterval({
+            egressId: row.id,
+            kind: row.kind,
+            roomId,
+            roomName,
+            ownerUid,
+            startedByUid: uid,
+            startedAt: new Date(startedAt),
+            destinations: row.destinations,
+          });
+        } catch (e: any) {
+          console.error("[multistream:start] failed to open streaming meter interval", {
+            egressId: row.id,
+            ownerUid,
+            roomId,
+            error: e?.message || e,
+          });
         }
-      } catch (e) {
-        console.warn("[multistream:start] failed to write egressSessions", (e as any)?.message || e);
       }
 
       if (ownerUid !== uid) {
@@ -888,93 +819,12 @@ router.post("/:roomId/stop-multistream", requireAuth, requireRoomAccessToken as 
       }
     }
 
-    const now = new Date();
-
-    // Best-effort: attribute broadcast (transcode/egress) minutes even if
-    // LiveKit webhooks are not configured or are delayed.
-    const countUsageForEgress = async (id: string) => {
-      try {
-        const sessionRef = firestore.collection("egressSessions").doc(String(id));
-        await firestore.runTransaction(async (tx) => {
-          const s = await tx.get(sessionRef);
-          if (!s.exists) return;
-          const session = s.data() as any;
-          if (session?.countedAt) return;
-
-          const startedAt = coerceDate(session?.startedAt);
-          const billedMinutes = computeBilledMinutes(startedAt, now);
-          if (billedMinutes <= 0) return;
-
-          const monthKey = getCurrentMonthKey();
-          const usageRef = firestore.collection("usageMonthly").doc(`${ownerUid}_${monthKey}`);
-          const usageSnap = await tx.get(usageRef);
-          const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
-          const usage = existing.usage || {};
-          const ytd = existing.ytd || {};
-          const minutes = usage.minutes || {};
-          const ytdMinutes = ytd.minutes || {};
-
-          const prevCurrent = toNumber(minutes.transcode?.currentPeriod ?? usage.transcodeMinutes);
-          const prevLifetime = toNumber(
-            minutes.transcode?.lifetime ?? ytdMinutes.transcode?.lifetime ?? ytd.transcodeMinutes
-          );
-
-          const nextCurrent = prevCurrent + billedMinutes;
-          const nextLifetime = prevLifetime + billedMinutes;
-
-          tx.set(
-            usageRef,
-            {
-              uid: ownerUid,
-              monthKey,
-              usage: {
-                ...usage,
-                transcodeMinutes: toNumber(usage.transcodeMinutes) + billedMinutes,
-                minutes: {
-                  ...minutes,
-                  transcode: {
-                    currentPeriod: nextCurrent,
-                    lifetime: nextLifetime,
-                  },
-                },
-              },
-              ytd: {
-                ...ytd,
-                transcodeMinutes: toNumber(ytd.transcodeMinutes) + billedMinutes,
-                minutes: {
-                  ...ytdMinutes,
-                  transcode: {
-                    lifetime: nextLifetime,
-                  },
-                },
-              },
-              createdAt: existing.createdAt || now,
-              updatedAt: now,
-            },
-            { merge: true }
-          );
-
-          tx.set(
-            sessionRef,
-            {
-              endedAt: now,
-              billedMinutes,
-              countedAt: now,
-              updatedAt: now,
-            },
-            { merge: true }
-          );
-        });
-      } catch (e: any) {
-        console.warn("[multistream:stop] failed to count usage", e?.message || e);
-      }
-    };
-
-    for (const r of stopResults) {
-      if (r.status === "stopped" || r.status === "not_running") {
-        await countUsageForEgress(r.egressId);
-      }
-    }
+    // Close + bill the meter intervals of every egress that is no longer
+    // running (idempotent with the egress_ended webhook and the sweep).
+    await closeOutputIntervals(
+      stopResults.filter((r) => r.status === "stopped" || r.status === "not_running").map((r) => r.egressId),
+      { endedAt: new Date(), reason: "stop_multistream" }
+    );
 
     const anyHardError = stopResults.some((r) => r.status === "error");
     if (!anyHardError) {

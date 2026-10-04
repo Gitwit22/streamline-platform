@@ -8,14 +8,18 @@ import { requireAuth } from "../middleware/requireAuth";
 import { startHlsEgress, HlsPresetId, stopEgress } from "../services/livekitEgress";
 import { getPresetPlanContext, resolveHlsPreset } from "../lib/mediaPresets";
 import { firestore } from "../firebaseAdmin";
-import { getCurrentMonthKey } from "../lib/usageTracker";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { canAccessFeature } from "./featureAccess";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { logDelegatedRoomAction } from "../lib/collaborators";
-import { evaluateUsageGate } from "../lib/usageOverages";
-import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
+import {
+  checkStreamingStartGate,
+  closeOutputIntervals,
+  openOutputInterval,
+  streamingGateErrorBody,
+  tickRoomMeter,
+} from "../lib/streamingMeter";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { deletePrefix } from "../lib/storageClient";
 import { roomHasActivePaidEvent } from "../lib/monetization";
@@ -25,49 +29,6 @@ const router = Router();
 
 /** How often /status polling refreshes hls.heartbeatAt while live (purge uses its age). */
 const HLS_HEARTBEAT_INTERVAL_MS = 60_000;
-
-export async function incrementHlsUsageMinutes(uid: string, minutes: number) {
-  const safeMinutes = Math.max(0, Math.round(Number(minutes || 0)));
-  if (!uid || !safeMinutes) return;
-
-  const monthKey = getCurrentMonthKey();
-  const usageDocId = `${uid}_${monthKey}`;
-  const usageRef = firestore.collection("usageMonthly").doc(usageDocId);
-
-  // Use transaction for atomic increment (safe for concurrent requests)
-  await firestore.runTransaction(async (tx) => {
-    const usageSnap = await tx.get(usageRef);
-    const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
-
-    const prevUsage = existing.usage || {};
-    const prevYtd = existing.ytd || {};
-
-    const nextUsage = {
-      ...prevUsage,
-      hlsMinutes: Number(prevUsage.hlsMinutes || 0) + safeMinutes,
-      transcodeMinutes: Number(prevUsage.transcodeMinutes || 0) + safeMinutes,
-    };
-
-    const nextYtd = {
-      ...prevYtd,
-      hlsMinutes: Number(prevYtd.hlsMinutes || 0) + safeMinutes,
-      transcodeMinutes: Number(prevYtd.transcodeMinutes || 0) + safeMinutes,
-    };
-
-    tx.set(
-      usageRef,
-      {
-        uid,
-        monthKey,
-        usage: nextUsage,
-        ytd: nextYtd,
-        createdAt: existing.createdAt || FieldValue.serverTimestamp(),
-        updatedAt: FieldValue.serverTimestamp(),
-      },
-      { merge: true }
-    );
-  });
-}
 
 function getHlsPublicBaseUrl(): string {
   const raw = process.env.HLS_PUBLIC_BASE_URL;
@@ -184,48 +145,11 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
       });
     }
 
-    // Monthly usage gate (HLS consumes transcode):
-    // - Non-overage plans are blocked when over limit
-    // - Pro continues and (when exceeded) logs overage totals
-    try {
-      const entitlements = await getEffectiveEntitlements(ownerUid);
-      const monthKey = getCurrentMonthKey();
-      const usageDocId = `${ownerUid}_${monthKey}`;
-      const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
-      const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
-      const usage = existing.usage || {};
-
-      const decision = evaluateUsageGate({
-        allowsOverages: !!(entitlements.features as any).allowsOverages,
-        limits: {
-          participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
-          transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
-        },
-        usage: {
-          participantMinutes: Number(usage.participantMinutes || 0),
-          transcodeMinutes: Number(usage.transcodeMinutes || 0),
-        },
-        checkParticipant: true,
-        checkTranscode: true,
-      });
-
-      if (!decision.allowed) {
-        return res.status(403).json({
-          error: decision.reason || LIMIT_ERRORS.USAGE_EXHAUSTED,
-          reason: "Monthly usage limit reached",
-        });
-      }
-
-      if (decision.shouldLogOverages && decision.overageTotals) {
-        await upsertUsageMonthlyOverageTotals({
-          uid: ownerUid,
-          monthKey,
-          totals: decision.overageTotals,
-        });
-      }
-    } catch (e) {
-      // Do not block HLS start on bookkeeping failures.
-      console.error("[hls] usage gate failed", e);
+    // Monthly streaming-minutes gate (HLS output counts as streaming time;
+    // overlapping outputs count once). Fails open on infrastructure errors.
+    const gate = await checkStreamingStartGate({ ownerUid, roomId, actorUid: uid, route: "hls:start" });
+    if (gate.allowed === false) {
+      return res.status(403).json(streamingGateErrorBody(gate.decision));
     }
 
     if (room.roomType !== "rtc") return res.status(400).json({ error: "roomType must be rtc" });
@@ -312,6 +236,30 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
       await setHlsLive(roomRef, { egressId, playlistUrl, runId: claim.runId });
       // Viewer counting: HLS going live starts (or joins) the live session.
       void onHlsLive(roomId);
+
+      // Streaming meter: HLS output time starts now (closed + billed on stop,
+      // auto-stop, egress_ended webhook, stale purge or the meter sweep).
+      try {
+        await openOutputInterval({
+          egressId,
+          kind: "hls",
+          roomId,
+          roomName: livekitRoomName,
+          ownerUid,
+          startedByUid: uid,
+          startedAt: new Date(),
+          destinations: ["streamline_hls"],
+          hlsRunId: claim.runId,
+          hlsPrefix: prefix,
+        });
+      } catch (meterErr: any) {
+        console.error("[hls] failed to open streaming meter interval", {
+          roomId,
+          ownerUid,
+          egressId,
+          error: meterErr?.message || meterErr,
+        });
+      }
 
       // 4) If this room is bound to a Saved Embed, keep the
       // embed's activeRoomId in sync so /live/:savedEmbedId
@@ -452,32 +400,9 @@ router.get("/status/:roomId", requireAuth as any, requireRoomAccessToken as any,
         // Best-effort: delete playlist + segments immediately.
         await cleanupHlsArtifacts({ roomId, prefix: (hls as any).prefix });
 
-        // Compute and track usage against the room owner when available.
-        let durationMinutes = 0;
-        const startedAt: any = hls.startedAt;
-        try {
-          const startedDate: Date | null = startedAt
-            ? startedAt.toDate
-              ? startedAt.toDate()
-              : new Date(startedAt)
-            : null;
-          if (startedDate && !Number.isNaN(startedDate.getTime())) {
-            const diffMs = Date.now() - startedDate.getTime();
-            if (diffMs > 0) {
-              durationMinutes = Math.max(1, Math.round(diffMs / (60 * 1000)));
-            }
-          }
-        } catch (e) {
-          console.error("[hls] failed to compute HLS duration (auto-stop)", e);
-        }
-
-        const usageUid = (room as any).ownerId || uid;
-        if (durationMinutes > 0 && usageUid) {
-          try {
-            await incrementHlsUsageMinutes(usageUid, durationMinutes);
-          } catch (e) {
-            console.error("[hls] failed to increment HLS usage (auto-stop)", e);
-          }
+        // Bill exactly once via the meter interval (idempotent close).
+        if (hls.egressId) {
+          await closeOutputIntervals([hls.egressId], { endedAt: new Date(), reason: "hls_session_cap" });
         }
 
         await setHlsIdle(roomRef);
@@ -488,6 +413,21 @@ router.get("/status/:roomId", requireAuth as any, requireRoomAccessToken as any,
           playlistUrl: null,
           egressId: null,
           error: null,
+        });
+      }
+    }
+
+    // Streaming meter tick (throttled per room): bills running outputs and
+    // stops them when the owner is past the monthly limit without overage
+    // opt-in, or past plan maxSessionMinutes.
+    if ((hls.status || "idle") === "live" && hls.egressId) {
+      const stopped = await tickRoomMeter(roomId);
+      if (stopped.includes(hls.egressId)) {
+        return res.json({
+          status: "idle",
+          playlistUrl: null,
+          egressId: null,
+          error: "usage_limit_reached",
         });
       }
     }
@@ -562,34 +502,12 @@ router.post("/stop/:roomId", requireAuth as any, requireRoomAccessToken as any, 
     // Best-effort: remove playlist + segments from storage.
     await cleanupHlsArtifacts({ roomId, prefix: (hls as any).prefix });
 
-    let durationMinutes = 0;
-    const startedAt: any = hls.startedAt;
-    try {
-      const startedDate: Date | null = startedAt
-        ? startedAt.toDate
-          ? startedAt.toDate()
-          : new Date(startedAt)
-        : null;
-      if (startedDate && !Number.isNaN(startedDate.getTime())) {
-        const diffMs = Date.now() - startedDate.getTime();
-        if (diffMs > 0) {
-          durationMinutes = Math.max(1, Math.round(diffMs / (60 * 1000)));
-        }
-      }
-    } catch (e) {
-      console.error("[hls] failed to compute HLS duration", e);
-    }
-
     await setHlsIdle(roomRef);
     void onHlsIdle(roomId, room);
 
-    const usageUid = (room as any).ownerId || uid;
-    if (durationMinutes > 0 && usageUid) {
-      try {
-        await incrementHlsUsageMinutes(usageUid, durationMinutes);
-      } catch (e) {
-        console.error("[hls] failed to increment HLS usage", e);
-      }
+    // Bill exactly once via the meter interval (idempotent close).
+    if (egressId) {
+      await closeOutputIntervals([egressId], { endedAt: new Date(), reason: "hls_stop" });
     }
 
     const updated = {

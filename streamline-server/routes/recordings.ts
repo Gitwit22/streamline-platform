@@ -27,7 +27,6 @@ import { clampRecordingPreset, getPresetPlanContext, resolveRequestedPresetId, t
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { Timestamp } from "firebase-admin/firestore";
-import { getCurrentMonthKey } from "../lib/usageTracker";
 import type { DocumentSnapshot } from "firebase-admin/firestore";
 import {
   S3Client,
@@ -37,14 +36,13 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
-import { evaluateUsageGate } from "../lib/usageOverages";
-import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
 import { logDelegatedRoomAction } from "../lib/collaborators";
 import { deleteFiles, deletePrefix } from "../lib/storageClient";
 import { resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { createSavedVideoFromRecording } from "./myContent";
-import { releaseStorageUsage, reserveStorageUsage } from "../usageHelper";
+import { getCurrentStorageUsage, reserveStorageUsage, resolveMaxStorageBytesFromPlan } from "../usageHelper";
+import { countRecordingMinutes, recordingBillingUid, releaseRecordingStorageOnce } from "../lib/recordingUsage";
 import { requireAdmin } from "../middleware/adminAuth";
 import { DOWNLOAD_LINK_TTL_SECONDS, evaluateDownloadRules, shouldClaimStorageCount } from "../lib/mediaPure";
 import { compositorUrl, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
@@ -249,103 +247,6 @@ function getS3Client(): S3Client {
 
 const DEFAULT_RETENTION_MINUTES = 30;
 
-function toNumber(value: any): number {
-  const num = Number(value);
-  return Number.isFinite(num) ? num : 0;
-}
-
-async function incrementRecordingUsage(uid: string, minutes: number) {
-  if (!minutes || minutes < 0) return;
-
-  const monthKey = getCurrentMonthKey();
-  const usageDocId = `${uid}_${monthKey}`;
-  const usageRef = firestore.collection("usageMonthly").doc(usageDocId);
-
-  let alertContext: {
-    liveCurrent: number;
-    liveLifetime: number;
-    recordingCurrent: number;
-    recordingLifetime: number;
-    added: number;
-  } | null = null;
-
-  await firestore.runTransaction(async (tx) => {
-    const snap = await tx.get(usageRef);
-    const existing = snap.exists ? (snap.data() as any) : {};
-    const usage = existing.usage || {};
-    const ytd = existing.ytd || {};
-
-    const prevMinutes = usage.minutes || {};
-    const prevYtdMinutes = ytd.minutes || {};
-
-    const liveCurrent = toNumber(prevMinutes.live?.currentPeriod);
-    const liveLifetime = toNumber(prevMinutes.live?.lifetime ?? prevYtdMinutes.live?.lifetime);
-    const recCurrent = toNumber(prevMinutes.recording?.currentPeriod);
-    const recLifetime = toNumber(prevMinutes.recording?.lifetime ?? prevYtdMinutes.recording?.lifetime);
-
-    const nextUsage = {
-      ...usage,
-      participantMinutes: toNumber(usage.participantMinutes) + minutes,
-      transcodeMinutes: toNumber(usage.transcodeMinutes),
-      minutes: {
-        live: {
-          currentPeriod: liveCurrent,
-          lifetime: liveLifetime,
-        },
-        recording: {
-          currentPeriod: recCurrent + minutes,
-          lifetime: recLifetime + minutes,
-        },
-      },
-    };
-
-    const nextYtd = {
-      ...ytd,
-      participantMinutes: toNumber(ytd.participantMinutes) + minutes,
-      transcodeMinutes: toNumber(ytd.transcodeMinutes),
-      minutes: {
-        live: {
-          lifetime: toNumber(prevYtdMinutes.live?.lifetime ?? liveLifetime),
-        },
-        recording: {
-          lifetime: recLifetime + minutes,
-        },
-      },
-    };
-
-    tx.set(
-      usageRef,
-      {
-        uid,
-        monthKey,
-        usage: nextUsage,
-        ytd: nextYtd,
-        createdAt: existing.createdAt || new Date(),
-        updatedAt: new Date(),
-      },
-      { merge: true }
-    );
-
-    alertContext = {
-      liveCurrent: nextUsage.minutes.live.currentPeriod,
-      liveLifetime: nextYtd.minutes.live.lifetime,
-      recordingCurrent: nextUsage.minutes.recording.currentPeriod,
-      recordingLifetime: nextYtd.minutes.recording.lifetime,
-      added: minutes,
-    };
-  });
-
-  if (alertContext) {
-    const ratio = 3;
-    if (alertContext.recordingCurrent > alertContext.liveCurrent * ratio) {
-      console.warn("[usage][recording] recording minutes high vs live", { uid, ...alertContext, ratio });
-    }
-    if (minutes >= 240) {
-      console.warn("[usage][recording] long single recording detected", { uid, minutes });
-    }
-  }
-}
-
 function mapRecordingDoc(id: string, data: any) {
   const status = String(data.status || "unknown").toLowerCase();
   // downloadReady should mean the file is actually ready to download.
@@ -474,7 +375,6 @@ async function stopRecordingInternal(options: {
     : data.startedAt || null;
   const durationMs = startedAt ? Math.max(0, now.getTime() - startedAt.getTime()) : 0;
   const durationSeconds = Math.floor(durationMs / 1000);
-  const billedMinutes = durationMs > 0 ? Math.max(1, Math.ceil(durationMs / 60000)) : 0;
 
   // Stop LiveKit egress using stored egressId (best-effort)
   const egressId = data.egressId;
@@ -498,130 +398,23 @@ async function stopRecordingInternal(options: {
     console.warn("[recordings/stopInternal] No egressId to stop for:", recordingId);
   }
 
-  // Update recording doc and usage in a single transaction (idempotent)
-  let usageCountedAlready = false;
-
-  const toNumber = (value: any) => {
-    const num = Number(value);
-    return Number.isFinite(num) ? num : 0;
-  };
-
-  const usageType = typeof data.usageType === "string" ? data.usageType : "recording_only";
-
-  await firestore.runTransaction(async (tx) => {
-    const recSnap = await tx.get(recordingRef);
-    if (!recSnap.exists) throw new Error("recording_missing");
-    const recData = recSnap.data() || {};
-
-    const monthKey = getCurrentMonthKey();
-    const usageRef = firestore.collection("usageMonthly").doc(`${uid}_${monthKey}`);
-    const usageSnap = await tx.get(usageRef);
-    const existingUsage = usageSnap.exists ? (usageSnap.data() as any) : {};
-    const usage = existingUsage.usage || {};
-    const ytd = existingUsage.ytd || {};
-    const minutes = usage.minutes || {};
-    const ytdMinutes = ytd.minutes || {};
-
-    const liveCurrent = toNumber(minutes.live?.currentPeriod);
-    const liveLifetime = toNumber(minutes.live?.lifetime ?? ytdMinutes.live?.lifetime);
-    const recCurrentPrev = toNumber(minutes.recording?.currentPeriod);
-    const recLifetimePrev = toNumber(minutes.recording?.lifetime ?? ytdMinutes.recording?.lifetime);
-    const totalCurrentPrev = toNumber(minutes.total?.currentPeriod);
-    const totalLifetimePrev = toNumber(minutes.total?.lifetime ?? ytdMinutes.total?.lifetime);
-
-    const byUsageTypePrev = minutes.byUsageType || {};
-    const byUsageTypeYtd = ytdMinutes.byUsageType || {};
-    const typePrev = byUsageTypePrev[usageType] || {};
-    const typeLifetimePrev = toNumber(typePrev.lifetime ?? byUsageTypeYtd[usageType]?.lifetime);
-
-    if (recData.usageCounted === true) {
-      usageCountedAlready = true;
-      tx.update(recordingRef, {
-        status: "processing",
-        stoppedAt: recData.stoppedAt || now,
-        endedAt: recData.endedAt || now,
-        duration: recData.duration ?? durationSeconds,
-        durationSeconds: recData.durationSeconds ?? durationSeconds,
-        durationMs: recData.durationMs ?? durationMs,
-        billedMinutes: recData.billedMinutes ?? billedMinutes,
-        stopReason: recData.stopReason || reason,
-        updatedAt: now,
-        downloadReady: false,
-        downloadPath: recData.objectKey || recData.downloadPath || null,
-      });
-      return;
-    }
-
-    const billed = billedMinutes;
-
-    const nextMinutes = {
-      ...minutes,
-      live: {
-        currentPeriod: liveCurrent,
-        lifetime: liveLifetime,
-      },
-      recording: {
-        currentPeriod: recCurrentPrev + billed,
-        lifetime: recLifetimePrev + billed,
-      },
-      total: {
-        currentPeriod: totalCurrentPrev + billed,
-        lifetime: totalLifetimePrev + billed,
-      },
-      byUsageType: {
-        ...byUsageTypePrev,
-        [usageType]: {
-          currentPeriod: toNumber(typePrev.currentPeriod) + billed,
-          lifetime: typeLifetimePrev + billed,
-        },
-      },
-    };
-
-    const nextYtdMinutes = {
-      ...ytdMinutes,
-      live: { lifetime: liveLifetime },
-      recording: { lifetime: recLifetimePrev + billed },
-      total: { lifetime: totalLifetimePrev + billed },
-      byUsageType: {
-        ...byUsageTypeYtd,
-        [usageType]: { lifetime: typeLifetimePrev + billed },
-      },
-    };
-
-    tx.update(recordingRef, {
+  // Update the recording doc and count recording minutes [startedAt, stop]
+  // to the room owner in one transaction (idempotent via usageCounted).
+  await countRecordingMinutes(recordingRef, {
+    endedAt: now,
+    now,
+    patch: (recData) => ({
       status: "processing",
-      stoppedAt: now,
-      endedAt: now,
-      duration: durationSeconds,
-      durationSeconds,
-      durationMs,
-      billedMinutes: billed,
-      usageCounted: true,
-      usageCountedAt: now,
+      stoppedAt: recData.stoppedAt || now,
+      endedAt: recData.endedAt || now,
+      duration: recData.usageCounted === true ? recData.duration ?? durationSeconds : durationSeconds,
+      durationSeconds: recData.usageCounted === true ? recData.durationSeconds ?? durationSeconds : durationSeconds,
+      durationMs: recData.usageCounted === true ? recData.durationMs ?? durationMs : durationMs,
       stopReason: recData.stopReason || reason,
       updatedAt: now,
       downloadReady: false,
-      downloadPath: data.objectKey || null,
-    });
-
-    tx.set(
-      usageRef,
-      {
-        uid,
-        monthKey,
-        usage: {
-          ...usage,
-          minutes: nextMinutes,
-        },
-        ytd: {
-          ...ytd,
-          minutes: nextYtdMinutes,
-        },
-        createdAt: existingUsage.createdAt || now,
-        updatedAt: now,
-      },
-      { merge: true }
-    );
+      downloadPath: recData.objectKey || recData.downloadPath || null,
+    }),
   });
 
   console.log(`[recordings/stopInternal] Recording ${recordingId} now processing`);
@@ -819,65 +612,35 @@ router.post(
     const planId = entitlements.planId;
     const plan = entitlements.plan.raw || {};
 
-    // Monthly usage gate: block non-overage plans; allow Pro and log totals.
+    // Recordings are NOT gated by monthly streaming minutes (recording
+    // minutes are tracked separately). They are gated by the owner's storage:
+    // refuse to start when the owner is already at/over the plan storage cap.
+    // Fails open on lookup errors (logged) so a Firestore hiccup never blocks.
     try {
-      const monthKey = getCurrentMonthKey();
-      const usageDocId = `${ownerUid}_${monthKey}`;
-      const usageSnap = await firestore.collection("usageMonthly").doc(usageDocId).get();
-      const existing = usageSnap.exists ? (usageSnap.data() as any) : {};
-      const usage = existing.usage || {};
-
-      const decision = evaluateUsageGate({
-        allowsOverages: !!(entitlements.features as any).allowsOverages,
-        limits: {
-          participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
-          transcodeMinutes: Number(entitlements.limits.transcodeMinutes || 0),
-        },
-        usage: {
-          participantMinutes: Number(usage.participantMinutes || 0),
-          transcodeMinutes: Number(usage.transcodeMinutes || 0),
-        },
-        checkParticipant: true,
-        checkTranscode: true,
+      const storageLimitBytes = resolveMaxStorageBytesFromPlan(plan);
+      if (storageLimitBytes > 0) {
+        const storageUsedBytes = await getCurrentStorageUsage(ownerUid);
+        if (storageUsedBytes >= storageLimitBytes) {
+          console.warn(`[recordings/start] storage full ownerUid=${ownerUid} actorUid=${uid} roomId=${roomId}`, {
+            storageUsedBytes,
+            storageLimitBytes,
+          });
+          return res.status(403).json({
+            success: false,
+            error: "storage_limit_exceeded",
+            reason: "Storage is full. Delete recordings or upgrade to record more.",
+            storageUsedBytes,
+            storageLimitBytes,
+          });
+        }
+      }
+    } catch (e: any) {
+      console.error("[recordings/start] storage gate failed; failing open", {
+        ownerUid,
+        actorUid: uid,
+        roomId,
+        error: e?.message || e,
       });
-
-      if (!decision.allowed) {
-        console.warn(`[recordings/start] usage gate blocked uid=${uid} planId=${planId}`, {
-          participantUsed: Number(usage.participantMinutes || 0),
-          participantLimit: Number(entitlements.limits.monthlyMinutes || 0),
-          transcodeUsed: Number(usage.transcodeMinutes || 0),
-          transcodeLimit: Number(entitlements.limits.transcodeMinutes || 0),
-          allowsOverages: !!(entitlements.features as any).allowsOverages,
-          decision,
-        });
-        return res.status(403).json({
-          success: false,
-          error: decision.reason || LIMIT_ERRORS.USAGE_EXHAUSTED,
-          reason: "Monthly usage limit reached",
-          _diag: {
-            planId,
-            monthKey,
-            participantUsed: Number(usage.participantMinutes || 0),
-            participantLimit: Number(entitlements.limits.monthlyMinutes || 0),
-            transcodeUsed: Number(usage.transcodeMinutes || 0),
-            transcodeLimit: Number(entitlements.limits.transcodeMinutes || 0),
-            allowsOverages: !!(entitlements.features as any).allowsOverages,
-            isOverParticipant: decision.isOverParticipant,
-            isOverTranscode: decision.isOverTranscode,
-          },
-        });
-      }
-
-      if (decision.shouldLogOverages && decision.overageTotals) {
-        await upsertUsageMonthlyOverageTotals({
-          uid: ownerUid,
-          monthKey,
-          totals: decision.overageTotals,
-        });
-      }
-    } catch (e) {
-      // Do not block recording start on bookkeeping failures.
-      console.error("[recordings/start] usage gate failed", e);
     }
 
     const dualAllowed = !!(plan?.features?.dualRecording || plan?.features?.dual_recording);
@@ -1010,7 +773,11 @@ router.post(
     // =========================================================================
     const initialDoc: Record<string, any> = {
       id: recordingId,
+      // userId = actor (ownership/UI compatibility); usage + storage are billed
+      // to the room owner.
       userId: uid,
+      ownerUid,
+      billingUid: ownerUid,
       ...(orgId ? { orgId } : {}),
       roomId,
       roomName: roomAccess.roomName || roomId,
@@ -1061,6 +828,7 @@ router.post(
       stopReason: null,
       usageCounted: false,
       usageCountedAt: null,
+      storageCounted: false,
     };
 
     let previousEmergency: EmergencyCurrentDoc | null = null;
@@ -1148,6 +916,16 @@ router.post(
           } else if (oldPrefix) {
             await deletePrefix(oldPrefix);
           }
+
+          // Release the replaced recording's counted storage (billing uid, once).
+          await releaseRecordingStorageOnce(firestore.collection("recordings").doc(oldRecordingId), {
+            caller: "recordings.start.replaceEmergency",
+          }).catch((e: any) =>
+            console.error("[recordings/start] storage release failed for replaced emergency recording", {
+              recordingId: oldRecordingId,
+              error: e?.message || e,
+            })
+          );
 
           await firestore
             .collection("recordings")
@@ -1483,7 +1261,6 @@ router.post(
       : data.startedAt || null;
     const durationMs = startedAt ? Math.max(0, now.getTime() - startedAt.getTime()) : 0;
     const durationSeconds = Math.floor(durationMs / 1000);
-    const billedMinutes = durationMs > 0 ? Math.max(1, Math.ceil(durationMs / 60000)) : 0;
 
     // =========================================================================
     // Stop LiveKit egress using stored egressId
@@ -1511,130 +1288,30 @@ router.post(
     }
 
     // =========================================================================
-    // Update recording doc and usage in a single transaction (idempotent)
+    // Update the recording doc and count recording minutes [startedAt, stop]
+    // to the room owner in one transaction (idempotent via usageCounted).
     // =========================================================================
-    let usageCountedAlready = false;
-
-    // Account against the recording's owner (who started it and holds the
-    // activeRecordings lock), not whoever pressed stop (e.g. a cohost).
+    // activeRecordings lock + My Content stay keyed by the actor who started
+    // it (userId); usage + storage are billed to the room owner.
     const accountUid: string = typeof (data as any).userId === "string" && (data as any).userId.trim()
       ? (data as any).userId.trim()
       : uid;
+    const billingUid = recordingBillingUid(data, accountUid) || accountUid;
 
-    const usageType = typeof data.usageType === "string" ? data.usageType : "recording_only";
-
-    await firestore.runTransaction(async (tx) => {
-      const recSnap = await tx.get(recordingRef);
-      if (!recSnap.exists) throw new Error("recording_missing");
-      const recData = recSnap.data() || {};
-
-      const monthKey = getCurrentMonthKey();
-      const usageRef = firestore.collection("usageMonthly").doc(`${accountUid}_${monthKey}`);
-      const usageSnap = await tx.get(usageRef);
-      const existingUsage = usageSnap.exists ? (usageSnap.data() as any) : {};
-      const usage = existingUsage.usage || {};
-      const ytd = existingUsage.ytd || {};
-      const minutes = usage.minutes || {};
-      const ytdMinutes = ytd.minutes || {};
-
-      const liveCurrent = toNumber(minutes.live?.currentPeriod);
-      const liveLifetime = toNumber(minutes.live?.lifetime ?? ytdMinutes.live?.lifetime);
-      const recCurrentPrev = toNumber(minutes.recording?.currentPeriod);
-      const recLifetimePrev = toNumber(minutes.recording?.lifetime ?? ytdMinutes.recording?.lifetime);
-      const totalCurrentPrev = toNumber(minutes.total?.currentPeriod);
-      const totalLifetimePrev = toNumber(minutes.total?.lifetime ?? ytdMinutes.total?.lifetime);
-
-      const byUsageTypePrev = minutes.byUsageType || {};
-      const byUsageTypeYtd = ytdMinutes.byUsageType || {};
-      const typePrev = byUsageTypePrev[usageType] || {};
-      const typeLifetimePrev = toNumber(typePrev.lifetime ?? byUsageTypeYtd[usageType]?.lifetime);
-
-      if (recData.usageCounted === true) {
-        usageCountedAlready = true;
-        tx.update(recordingRef, {
-          status: "processing",
-          stoppedAt: recData.stoppedAt || now,
-          endedAt: recData.endedAt || now,
-          duration: recData.duration ?? durationSeconds,
-          durationSeconds: recData.durationSeconds ?? durationSeconds,
-          durationMs: recData.durationMs ?? durationMs,
-          billedMinutes: recData.billedMinutes ?? billedMinutes,
-          updatedAt: now,
-          downloadReady: false,
-          downloadPath: recData.objectKey || recData.downloadPath || null,
-        });
-        return;
-      }
-
-      const billed = billedMinutes;
-
-      const nextMinutes = {
-        ...minutes,
-        live: {
-          currentPeriod: liveCurrent,
-          lifetime: liveLifetime,
-        },
-        recording: {
-          currentPeriod: recCurrentPrev + billed,
-          lifetime: recLifetimePrev + billed,
-        },
-        total: {
-          currentPeriod: totalCurrentPrev + billed,
-          lifetime: totalLifetimePrev + billed,
-        },
-        byUsageType: {
-          ...byUsageTypePrev,
-          [usageType]: {
-            currentPeriod: toNumber(typePrev.currentPeriod) + billed,
-            lifetime: typeLifetimePrev + billed,
-          },
-        },
-      };
-
-      const nextYtdMinutes = {
-        ...ytdMinutes,
-        live: { lifetime: liveLifetime },
-        recording: { lifetime: recLifetimePrev + billed },
-        total: { lifetime: totalLifetimePrev + billed },
-        byUsageType: {
-          ...byUsageTypeYtd,
-          [usageType]: { lifetime: typeLifetimePrev + billed },
-        },
-      };
-
-      tx.update(recordingRef, {
+    await countRecordingMinutes(recordingRef, {
+      endedAt: now,
+      now,
+      patch: (recData) => ({
         status: "processing",
-        stoppedAt: now,
-        endedAt: now,
-        duration: durationSeconds,
-        durationSeconds,
-        durationMs,
-        billedMinutes: billed,
-        usageCounted: true,
-        usageCountedAt: now,
+        stoppedAt: recData.stoppedAt || now,
+        endedAt: recData.endedAt || now,
+        duration: recData.usageCounted === true ? recData.duration ?? durationSeconds : durationSeconds,
+        durationSeconds: recData.usageCounted === true ? recData.durationSeconds ?? durationSeconds : durationSeconds,
+        durationMs: recData.usageCounted === true ? recData.durationMs ?? durationMs : durationMs,
         updatedAt: now,
         downloadReady: false,
-        downloadPath: data.objectKey || null,
-      });
-
-      tx.set(
-        usageRef,
-        {
-          uid: accountUid,
-          monthKey,
-          usage: {
-            ...usage,
-            minutes: nextMinutes,
-          },
-          ytd: {
-            ...ytd,
-            minutes: nextYtdMinutes,
-          },
-          createdAt: existingUsage.createdAt || now,
-          updatedAt: now,
-        },
-        { merge: true }
-      );
+        downloadPath: recData.objectKey || recData.downloadPath || null,
+      }),
     });
 
     console.log(`[recordings/stop] Recording ${recordingId} now processing`);
@@ -1699,16 +1376,16 @@ router.post(
             console.log(`[recordings/stop] ✅ File confirmed via head-check: ${objectKey} (${size} bytes)`);
 
             // Count storage for this recording (only if this call flipped storageCounted)
-            if (!alreadyCounted && accountUid) {
+            if (!alreadyCounted && billingUid) {
               try {
-                await reserveStorageUsage(accountUid, size, {
+                await reserveStorageUsage(billingUid, size, {
                   caller: "recordings.stop.headcheck",
                   recordingId,
                   objectKey,
                 });
               } catch (e: any) {
                 console.error("[recordings/stop] storage accounting failed:", {
-                  userId: accountUid, recordingId, size, error: e?.message || e,
+                  userId: billingUid, recordingId, size, error: e?.message || e,
                 });
               }
             }
@@ -1876,24 +1553,18 @@ router.delete("/:id", requireAuth, requireMyContentRecordingsEnabled as any, asy
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
-    // Capture file size before deletion for storage accounting
-    const fileSize = typeof data.fileSize === "number" ? data.fileSize : 0;
-    const storageReleased = data.storageReleased === true;
-
     const storage = await deleteRecordingStorage(data);
 
-    // Release storage quota after R2 bytes are removed (guard against double-release)
-    if (fileSize > 0 && !storageReleased) {
-      try {
-        await releaseStorageUsage(uid, fileSize, {
-          caller: "recordings.DELETE",
-          recordingId,
-        });
-      } catch (e: any) {
-        console.error("[recordings] storage release failed:", {
-          userId: uid, recordingId, fileSize, error: e?.message || e,
-        });
-      }
+    // Release counted storage from the billing uid exactly once (transactional,
+    // gated on storageCounted / storageReleased).
+    try {
+      await releaseRecordingStorageOnce(firestore.collection("recordings").doc(recordingId), {
+        caller: "recordings.DELETE",
+      });
+    } catch (e: any) {
+      console.error("[recordings] storage release failed:", {
+        userId: uid, recordingId, error: e?.message || e,
+      });
     }
 
     // Best-effort: if the room pointer points to this recording, clear it.

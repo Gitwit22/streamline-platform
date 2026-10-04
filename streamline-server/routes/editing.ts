@@ -6,6 +6,7 @@ import { createDiskUpload, cleanupUploadedFile, MAX_UPLOAD_BYTES, type UploadedD
 import { getAllowedExportSourceHosts, validateExportSourceUrl } from "../lib/exportSourceUrl";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { reserveStorageIfAvailable, releaseReservedStorage, releaseStorageUsage, reserveStorageUsage, getCurrentStorageUsage } from "../usageHelper";
+import { releaseRecordingStorageOnce } from "../lib/recordingUsage";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
@@ -513,26 +514,16 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
         return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
       }
 
-      // Capture file size before deletion
-      const fileSize = typeof data?.fileSize === "number" ? data.fileSize : 0;
-
       const storage = await deleteRecordingStorage(data);
 
-      // Release storage quota after R2 bytes are removed. Skip when another
-      // path (recordings DELETE, retention purge) already released it, or the
-      // doc is soft-deleted; otherwise the bytes are subtracted twice.
-      const alreadyReleased = data?.storageReleased === true || data?.status === "deleted";
-      if (fileSize > 0 && !alreadyReleased) {
-        try {
-          await releaseStorageUsage(userId, fileSize, {
-            caller: "editing.DELETE.recording",
-            docId: id,
-          });
-        } catch (e: any) {
-          console.error("[editing] storage release failed for recording asset:", {
-            userId, docId: id, fileSize, error: e?.message || e,
-          });
-        }
+      // Release counted storage from the recording's billing uid (room owner)
+      // exactly once; transactional and gated on storageCounted/storageReleased.
+      try {
+        await releaseRecordingStorageOnce(recordingSnap.ref, { caller: "editing.DELETE.recording" });
+      } catch (e: any) {
+        console.error("[editing] storage release failed for recording asset:", {
+          userId, docId: id, error: e?.message || e,
+        });
       }
 
       // Delete from Firestore
