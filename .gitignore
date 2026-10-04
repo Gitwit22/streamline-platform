@@ -27,3 +27,6 @@ out/
 
 # Secrets / credentials (do not commit)
 **/firebaseServiceAccount*.json
+
+# Claude Code agent worktrees (temporary)
+.claude/worktrees/
