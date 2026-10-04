@@ -420,16 +420,16 @@ export async function getPresetPlanContext(uid: string): Promise<PresetPlanConte
     return { planId: "free", maxPresetId: resolvePlanMaxPreset("free"), defaultPresetId: null };
   }
   const data = (snap.data() as any) || {};
-  let planId = String(data.adminOverridePlanId || data.planId || data.plan || "free");
-  let planRaw: any = null;
+  let planId = String(data.planId || data.plan || "free");
+  let maxPresetId: MediaPresetId = resolvePlanMaxPreset(planId);
   try {
+    // Effective plan (admin override / platform admin / base plan).
     const ent = await getEffectiveEntitlements(uid);
     planId = ent.planId;
-    planRaw = ent.plan?.raw ?? null;
+    maxPresetId = normalizePresetId(ent.limits.maxPresetId) || resolvePlanMaxPreset(planId, ent.plan?.raw ?? null);
   } catch (e: any) {
     console.warn("[mediaPresets] entitlements lookup failed; using user doc plan", e?.message || e);
   }
-  const maxPresetId = resolvePlanMaxPreset(planId, planRaw);
   const saved = normalizePresetId(data?.mediaPrefs?.defaultPresetId);
   const defaultPresetId = saved ? clampPresetToMax(maxPresetId, saved).effectiveId : null;
   return { planId, maxPresetId, defaultPresetId };

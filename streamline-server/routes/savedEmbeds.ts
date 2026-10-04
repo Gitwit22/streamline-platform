@@ -8,45 +8,27 @@ import { asOptionalBoolean, asOptionalEnum, asTrimmedString } from "../lib/input
 import { isAdmin } from "../middleware/adminAuth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { checkFeature } from "../lib/entitlements";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 
 const router = Router();
 
-async function getPlatformHlsEnabled(): Promise<boolean> {
-  try {
-    const snap = await db.collection("featureFlags").doc("hlsSettingsTab").get();
-    const data = snap.exists ? snap.data() || {} : {};
-    const hlsEnabled = (data as any).hlsEnabled;
-    const enabled = (data as any).enabled;
-    if (typeof hlsEnabled === "boolean") return hlsEnabled;
-    if (typeof enabled === "boolean") return enabled;
-    return true;
-  } catch {
-    return true;
-  }
-}
-
+/**
+ * HLS page customization gate: the caller's EFFECTIVE plan must include
+ * hlsCustomization and the HLS platform switch must be on (engine features
+ * already AND both).
+ */
 async function assertHlsSetupAllowed(req: any, res: any, uid: string): Promise<boolean> {
-  const platformEnabled = await getPlatformHlsEnabled();
-  if (!platformEnabled) {
-    res.status(403).json({ error: LIMIT_ERRORS.FEATURE_DISABLED });
-    return false;
-  }
-
   const entitlements = await getEffectiveEntitlements(req.account || uid);
-  const features: any = entitlements?.features || {};
-  const canCustomize =
-    typeof features.hlsCustomizationEnabled === "boolean"
-      ? features.hlsCustomizationEnabled
-      : typeof features.canCustomizeHlsPage === "boolean"
-        ? features.canCustomizeHlsPage
-        : !!(features.hls ?? features.hlsEnabled ?? features.canHls);
-
-  if (!canCustomize) {
-    res.status(403).json({ error: "hls_not_in_plan" });
+  const check = checkFeature(entitlements, "hlsCustomization");
+  if (!check.allowed) {
+    if (check.code === LIMIT_ERRORS.FEATURE_DISABLED) {
+      res.status(403).json({ error: LIMIT_ERRORS.FEATURE_DISABLED });
+    } else {
+      res.status(403).json({ error: "hls_not_in_plan" });
+    }
     return false;
   }
-
   return true;
 }
 

@@ -109,10 +109,16 @@ test("canReserveStorage rejects when already at limit", () => {
   assert.equal(result.allowed, false);
 });
 
-test("canReserveStorage allows when limit is 0 (unlimited)", () => {
-  // 0 limit means unlimited
-  const result = canReserveStorage(999 * GB, 100 * GB, 0);
+test("canReserveStorage allows when limit is null (unlimited)", () => {
+  const result = canReserveStorage(999 * GB, 100 * GB, null);
   assert.equal(result.allowed, true);
+  assert.equal(result.limitBytes, null);
+});
+
+test("canReserveStorage rejects when limit is 0 (plan includes no storage)", () => {
+  const result = canReserveStorage(0, 1, 0);
+  assert.equal(result.allowed, false);
+  assert.equal(result.limitBytes, 0);
 });
 
 test("canReserveStorage rejects requestedBytes <= 0", () => {

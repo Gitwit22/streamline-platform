@@ -1,5 +1,6 @@
 import admin from "firebase-admin";
 import { firestore } from "../firebaseAdmin";
+import { getPlatformFlag } from "./entitlements";
 
 export type CollaboratorInviteStatus = "pending" | "accepted" | "declined" | "revoked";
 
@@ -50,29 +51,9 @@ export const DEFAULT_COLLABORATOR_PERMISSIONS: CollaboratorPermissions = {
   manageStreaming: true,
 };
 
-let cachedCollaboratorDelegationEnabled: boolean | null = null;
-let cachedCollaboratorDelegationEnabledAt = 0;
-const COLLABORATOR_FLAG_TTL_MS = 30_000;
-
+/** featureFlags/collaboratorDelegationEnabled via the single platform-flag resolver (opt-in, default off). */
 export async function getCollaboratorDelegationEnabled(): Promise<boolean> {
-  const now = Date.now();
-  if (
-    cachedCollaboratorDelegationEnabled !== null &&
-    now - cachedCollaboratorDelegationEnabledAt < COLLABORATOR_FLAG_TTL_MS
-  ) {
-    return cachedCollaboratorDelegationEnabled;
-  }
-
-  try {
-    const snap = await firestore.collection("featureFlags").doc("collaboratorDelegationEnabled").get();
-    const data = snap.exists ? ((snap.data() as any) || {}) : {};
-    cachedCollaboratorDelegationEnabled = data.enabled === true;
-  } catch {
-    cachedCollaboratorDelegationEnabled = false;
-  }
-
-  cachedCollaboratorDelegationEnabledAt = now;
-  return cachedCollaboratorDelegationEnabled;
+  return getPlatformFlag("collaboratorDelegationEnabled");
 }
 
 function normalizeBoolean(value: any, fallback: boolean): boolean {

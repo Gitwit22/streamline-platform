@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetchAuth } from "../../lib/api";
 import { ResetCodeDialog, type IssuedResetCode } from "../components/ResetCodeDialog";
+import { PlanOverridePanel, type AdminPlanOverrideView } from "../components/admin/PlanOverridePanel";
 
 interface UsageData {
   userId: string;
@@ -32,16 +33,23 @@ interface UsageData {
   /** Analytics only (duration x destinations). */
   destinationMinutes?: number;
   recordingMinutes?: number;
+  /** Plan every feature reads (override > platform admin > base). */
   effectivePlanId?: string;
+  /** Stripe/billing base plan (users.planId). */
+  basePlanId?: string;
+  planOverride?: AdminPlanOverrideView;
+  decidedBy?: string;
+  subscriptionBlockedReason?: string | null;
   unlimited?: boolean;
   overageStreamingMinutes?: number;
   overageParticipantMinutes?: number;
   overageTranscodeMinutes?: number;
   overageMinutesTotal?: number;
   bonusMinutes: number;
-  planLimit: number;
-  /** plan + bonus; 0 = unlimited */
-  effectiveLimit: number;
+  /** Plan monthly streaming minutes; null = unlimited, 0 = none. */
+  planLimit: number | null;
+  /** plan + bonus; null = unlimited, 0 = none */
+  effectiveLimit: number | null;
   percentUsed: number;
   isBlocked: boolean;
   lastActive?: Date;
@@ -165,6 +173,13 @@ export default function AdminUsage() {
 
   const handleChangePlan = async () => {
     if (!selectedUser) return;
+    if (
+      !window.confirm(
+        `Set the BASE (Stripe/billing) plan of ${selectedUser.email} to "${newPlan}"?\n\nPaid base plans without a Stripe subscription are billing-blocked (user gets Free). Use the Admin Override above to grant a plan without billing.`
+      )
+    ) {
+      return;
+    }
 
     try {
       const res = await apiFetchAuth(`${API_BASE}/api/admin/users/${selectedUser.userId}/change-plan`, {
@@ -181,7 +196,7 @@ export default function AdminUsage() {
         throw new Error("Failed to change plan");
       }
 
-      alert(`Successfully changed ${selectedUser.email} to ${newPlan} plan`);
+      alert(`Base plan of ${selectedUser.email} set to ${newPlan}`);
       setShowPlanModal(false);
       setPlanChangeReason("");
       fetchData(); // Refresh data
@@ -426,6 +441,16 @@ export default function AdminUsage() {
                       >
                         {user.planId.toUpperCase()}
                       </span>
+                      <div className="text-[11px] text-gray-500 mt-1">Stripe/base plan</div>
+                      {user.planOverride && (
+                        <div className="text-xs text-indigo-300">
+                          Override: {user.planOverride.planId}
+                          {user.planOverride.active === false ? " (inactive)" : ""}
+                        </div>
+                      )}
+                      {user.effectivePlanId && user.effectivePlanId !== user.planId && (
+                        <div className="text-xs text-green-300">Effective: {user.effectivePlanId}</div>
+                      )}
                     </td>
                     <td className="px-4 py-3">
                       <div className="flex flex-col gap-1">
@@ -449,10 +474,7 @@ export default function AdminUsage() {
                       {user.overageStreamingMinutes ?? user.overageMinutesTotal ?? 0} min
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {user.unlimited || !(user.effectiveLimit > 0) ? "Unlimited" : `${user.effectiveLimit} min`}
-                      {user.effectivePlanId && user.effectivePlanId !== user.planId && (
-                        <div className="text-xs text-gray-400">override: {user.effectivePlanId}</div>
-                      )}
+                      {user.unlimited || user.effectiveLimit === null ? "Unlimited" : `${user.effectiveLimit} min`}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-green-400">
                       +{user.bonusMinutes}
@@ -501,9 +523,9 @@ export default function AdminUsage() {
                             setShowPlanModal(true);
                           }}
                           className="px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded text-xs transition"
-                          title="Change plan"
+                          title="Admin override / base plan"
                         >
-                          Change Plan
+                          Plan / Override
                         </button>
                         <button
                           onClick={() => handleToggleBilling(user)}
@@ -600,30 +622,47 @@ export default function AdminUsage() {
       {/* Change Plan Modal */}
       {showPlanModal && selectedUser && (
         <Modal
-          title="Change User Plan"
+          title="Plan: Admin Override / Base Plan"
           onClose={() => setShowPlanModal(false)}
           onConfirm={handleChangePlan}
+          confirmLabel="Set base plan"
         >
           <div className="space-y-4">
             <div>
               <label className="block text-sm font-medium mb-2">User</label>
               <div className="text-gray-400">{selectedUser.email}</div>
-              <div className="text-sm text-gray-500">
-                Current plan: <span className="font-semibold">{selectedUser.planId}</span>
-              </div>
             </div>
             <div>
-              <label className="block text-sm font-medium mb-2">New Plan</label>
+              <label className="block text-sm font-medium mb-2">Admin Override (recommended)</label>
+              <PlanOverridePanel
+                userId={selectedUser.userId}
+                basePlanId={selectedUser.basePlanId || selectedUser.planId}
+                effectivePlanId={selectedUser.effectivePlanId}
+                planOverride={selectedUser.planOverride ?? null}
+                decidedBy={selectedUser.decidedBy}
+                subscriptionBlockedReason={selectedUser.subscriptionBlockedReason}
+                planOptions={["free", "basic", "starter", "pro", "enterprise", "internal_unlimited"].map((id) => ({ id }))}
+                onChanged={async () => {
+                  setShowPlanModal(false);
+                  await fetchData();
+                }}
+              />
+            </div>
+            <div className="border-t border-gray-800 pt-4">
+              <div className="text-sm text-gray-500 mb-2">
+                Base plan (owned by Stripe/billing): <span className="font-semibold">{selectedUser.planId}</span>
+              </div>
+              <label className="block text-sm font-medium mb-2">Set base plan (no Stripe)</label>
               <select
                 value={newPlan}
                 onChange={(e) => setNewPlan(e.target.value)}
                 className="w-full px-4 py-2 bg-gray-800 border border-gray-700 rounded text-white"
               >
-                <option value="free">Free (60 min)</option>
+                <option value="free">Free</option>
                 <option value="basic">Basic</option>
-                <option value="starter">Starter (300 min)</option>
-                <option value="pro">Pro (1200 min)</option>
-                <option value="enterprise">Enterprise (Unlimited)</option>
+                <option value="starter">Starter</option>
+                <option value="pro">Pro</option>
+                <option value="enterprise">Enterprise</option>
               </select>
             </div>
             <div>
@@ -662,15 +701,17 @@ function Modal({
   children,
   onClose,
   onConfirm,
+  confirmLabel = "Confirm",
 }: {
   title: string;
   children: React.ReactNode;
   onClose: () => void;
   onConfirm: () => void;
+  confirmLabel?: string;
 }) {
   return (
     <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4">
-      <div className="bg-gray-900 rounded-lg max-w-md w-full p-6 border border-gray-800">
+      <div className="bg-gray-900 rounded-lg max-w-2xl w-full p-6 border border-gray-800 max-h-[90vh] overflow-y-auto">
         <h2 className="text-xl font-bold mb-4">{title}</h2>
         {children}
         <div className="flex gap-3 mt-6">
@@ -684,7 +725,7 @@ function Modal({
             onClick={onConfirm}
             className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-500 rounded transition font-semibold"
           >
-            Confirm
+            {confirmLabel}
           </button>
         </div>
       </div>

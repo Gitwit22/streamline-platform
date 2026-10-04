@@ -46,44 +46,24 @@ export async function intersectPermissionsWithEntitlements(
   if (!uid) return perms;
   try {
     const ent = await getEffectiveEntitlements(uid);
-    const planFeatures = ent.features;
-    const rawFeatures = (ent.plan.raw?.features || {}) as any;
+    // Effective features (plan AND platform switches) from the entitlement
+    // engine: the single source of truth for multistream / recording / HLS.
+    const features = ent.features;
 
     const next: Record<string, boolean> = { ...perms };
 
     if (Object.prototype.hasOwnProperty.call(next, "canRecord")) {
-      next.canRecord = !!next.canRecord && !!planFeatures.recording;
+      next.canRecord = !!next.canRecord && !!features.recording;
     }
 
     if (Object.prototype.hasOwnProperty.call(next, "canDestinations")) {
-      // RTMP / Stream Destinations are effectively enabled when the plan
-      // allows at least one destination. We still honor legacy feature
-      // flags as a fallback so older plans behave sensibly, but the
-      // numeric cap is the primary source of truth.
-      const maxFromLimits = Number(ent.limits?.rtmpDestinationsMax ?? 0) || 0;
-      const rtmpEnabledByLimit = maxFromLimits > 0;
-      const rtmpEnabledByFlags = Boolean(
-        planFeatures.multistream ||
-        planFeatures.rtmp ||
-        rawFeatures.rtmpMultistream ||
-        rawFeatures.multistream ||
-        (ent.plan.raw as any)?.multistreamEnabled
-      );
-      const rtmpEnabled = rtmpEnabledByLimit || rtmpEnabledByFlags;
-      next.canDestinations = !!next.canDestinations && rtmpEnabled;
+      // features.multistream is false whenever limits.destinations is 0.
+      next.canDestinations = !!next.canDestinations && !!features.multistream;
     }
 
     if (Object.prototype.hasOwnProperty.call(next, "canStream")) {
       // Streaming = HLS broadcast or RTMP/multistream output.
-      const streamEnabled = Boolean(
-        planFeatures.hlsEnabled ||
-        planFeatures.canHls ||
-        planFeatures.hls ||
-        planFeatures.rtmp ||
-        planFeatures.multistream ||
-        Number(ent.limits?.rtmpDestinationsMax ?? 0) > 0
-      );
-      next.canStream = !!next.canStream && streamEnabled;
+      next.canStream = !!next.canStream && !!(features.hls || features.multistream);
     }
 
     return next;

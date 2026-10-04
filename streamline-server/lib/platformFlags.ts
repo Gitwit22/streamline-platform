@@ -1,20 +1,15 @@
 import type { Response } from "express";
+import { readTranscodeEnabledEnv } from "./entitlements/flags";
 
-function parseEnvBoolean(value: string | undefined, defaultValue: boolean): boolean {
-  if (value === undefined || value === null) return defaultValue;
-  const normalized = String(value).trim().toLowerCase();
-  if (["false", "0", "off", "no", "disabled"].includes(normalized)) return false;
-  if (["true", "1", "on", "yes", "enabled"].includes(normalized)) return true;
-  return defaultValue;
-}
-
-// Global platform-level switch for transcoding/export features.
-// Defaults to true when unset so older deployments are not bricked.
+// Global platform-level switch for transcoding/export features
+// (PLATFORM_TRANSCODE_ENABLED). Defaults to true when unset so older
+// deployments are not bricked. Firestore-backed platform flags live in
+// lib/entitlements/flags.ts (single defaults table).
 export function getPlatformTranscodeEnabled(): boolean {
-  return parseEnvBoolean(process.env.PLATFORM_TRANSCODE_ENABLED, true);
+  return readTranscodeEnabledEnv();
 }
 
-// Guard helper for transcode/export API entrypoints.
+// Guard helper for transcode/export CREATE entrypoints (never for cleanup).
 // Returns true when transcoding is allowed; when disabled, sends a friendly
 // JSON error response and returns false so callers can early-return.
 export function assertPlatformTranscodeEnabled(res: Response): boolean {

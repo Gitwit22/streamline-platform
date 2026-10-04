@@ -411,9 +411,9 @@ export async function getStreamingUsageStatus(uid: string, now: Date = new Date(
   const usageDoc = usageSnap.exists ? ((usageSnap.data() || {}) as any) : {};
   const decision = evaluateStreamingGate({
     usedMinutes: readStreamingMinutes(usageDoc),
-    includedMinutes: num(entitlements.limits.monthlyMinutes),
+    includedMinutes: entitlements.limits.monthlyStreamingMinutes, // null = unlimited
     bonusMinutes: num(userDoc.bonusMinutes),
-    planAllowsOverages: !!(entitlements.features as any).allowsOverages,
+    planAllowsOverages: !!entitlements.features.overages,
     overagesEnabled: readOveragesEnabled(userDoc),
   });
   return { uid, monthKey, decision, usageDoc, userDoc, entitlements };
@@ -690,8 +690,8 @@ export async function sweepStreamingMeter(opts: {
       for (const s of sessions) toStop.set(s.id, "monthly_limit");
     }
 
-    const maxSessionMinutes = num(status.entitlements.limits.maxSessionMinutes);
-    if (maxSessionMinutes > 0) {
+    const maxSessionMinutes = status.entitlements.limits.maxSessionMinutes; // null = no cap
+    if (maxSessionMinutes !== null) {
       const byRoom = new Map<string, Array<{ id: string; data: any }>>();
       for (const s of sessions) {
         const rid = String(s.data.roomId || "");

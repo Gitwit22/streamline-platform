@@ -11,6 +11,7 @@ import { useNavigate } from "react-router-dom";
 import { clearMeCache } from "../../lib/meCache";
 import { clearPlatformFlagsCache } from "../../lib/platformFlagsCache";
 import { ResetCodeDialog, type IssuedResetCode } from "../components/ResetCodeDialog";
+import { PlanOverridePanel, type AdminPlanOverrideView } from "../components/admin/PlanOverridePanel";
 
 // Normalize base so if you set VITE_API_BASE to ".../api" it won't double up.
 const API_BASE = (import.meta.env.VITE_API_BASE || "")
@@ -69,6 +70,12 @@ interface User {
   billingEnabled?: boolean;
   minutesUsed?: number;
   bonusMinutes?: number;
+  // Stripe/base plan vs admin override vs EFFECTIVE plan (server engine).
+  basePlanId?: string;
+  effectivePlanId?: string;
+  planOverride?: AdminPlanOverrideView;
+  decidedBy?: string;
+  subscriptionBlockedReason?: string | null;
 }
 
 interface UsageRecord {
@@ -176,35 +183,59 @@ interface Plan {
     };
   };
   multistreamEnabled: boolean;
+  /**
+   * v2 entitlement view from GET /api/admin/plans (null = unlimited, 0 = none).
+   * The editor edits these; saving writes the plan as limitsVersion 2.
+   */
+  entitlements?: {
+    storedLimitsVersion?: number;
+    features: Record<string, boolean>;
+    limits: Record<string, number | string | null>;
+  };
 }
 
-function resolvePlanMaxDestinations(limits: Plan["limits"]): number {
-  if (!limits) return 0;
-  return (
-    limits.maxDestinations ??
-    limits.rtmpDestinationsMax ??
-    limits.rtmpDestinations ??
-    0
-  );
-}
+const V2_LIMIT_FIELDS: Array<{ key: string; label: string; unit?: string; scale?: number }> = [
+  { key: "monthlyStreamingMinutes", label: "Monthly streaming minutes", unit: "min" },
+  { key: "destinations", label: "Stream destinations" },
+  { key: "guests", label: "Max guests" },
+  { key: "maxSessionMinutes", label: "Max session length", unit: "min" },
+  { key: "recordingMinutesPerClip", label: "Recording cap per clip", unit: "min" },
+  { key: "hlsMaxMinutesPerSession", label: "HLS max minutes per session", unit: "min" },
+  { key: "projects", label: "Max projects" },
+  { key: "storageBytes", label: "Storage", unit: "GB", scale: 1024 * 1024 * 1024 },
+];
 
-function resolvePlanMonthlyMinutes(limits: Plan["limits"]): number {
-  if (!limits) return 0;
-  const raw =
-    (limits as any).monthlyMinutesIncluded ??
-    (limits as any).monthlyMinutes ??
-    (limits as any).participantMinutes ??
-    0;
-  const n = Number(raw);
+const V2_FEATURE_FIELDS: Array<{ key: string; label: string }> = [
+  { key: "multistream", label: "Stream destinations (multistream)" },
+  { key: "recording", label: "Recording" },
+  { key: "dualRecording", label: "Dual recording" },
+  { key: "hls", label: "HLS broadcast" },
+  { key: "hlsCustomization", label: "HLS branded viewer page" },
+  { key: "editing", label: "Editor" },
+  { key: "projects", label: "Projects" },
+  { key: "contentLibrary", label: "Content library" },
+  { key: "monetization", label: "Monetization" },
+  { key: "payPerView", label: "Pay-per-view" },
+  { key: "invisibleHost", label: "Invisible host" },
+  { key: "overages", label: "Overages allowed" },
+  { key: "watermark", label: "Watermark recordings" },
+];
+
+const V2_PRESET_OPTIONS = ["", "standard_720p30", "hd_1080p30", "sports_1080p60", "pro_1440p30", "ultra_4k30"];
+
+function entLimit(plan: Plan, key: string): number | null {
+  const v = plan.entitlements?.limits?.[key];
+  if (v === null) return null;
+  const n = Number(v);
   return Number.isFinite(n) ? n : 0;
 }
 
-function computeMaxHoursPerMonthFromMinutes(minutes: number): number {
-  const mins = Number(minutes);
-  if (!Number.isFinite(mins) || mins <= 0) return 0;
-  // Use ceil so hour-based caps never undercut the minute-based cap.
-  return Math.ceil(mins / 60);
+function formatEntLimit(v: number | null, unit?: string, scale?: number): string {
+  if (v === null) return "Unlimited";
+  const n = scale ? Math.round((v / scale) * 100) / 100 : v;
+  return unit ? `${n} ${unit}` : String(n);
 }
+
 const PLAN_COLORS: Record<string, string> = {
   free: "#6b7280",
   basic: "#3b82f6",
@@ -608,14 +639,24 @@ export default function AdminDashboard() {
     }
   };
 
+  // Sets the BASE plan (normally owned by Stripe). A paid base plan without a
+  // subscription is billing-blocked; use the Admin Override instead to grant
+  // a plan without billing.
   const changePlan = async (userId: string, newPlan: string) => {
+    if (
+      !window.confirm(
+        `Set the BASE (Stripe/billing) plan to "${newPlan}"?\n\nPaid base plans without a Stripe subscription are billing-blocked (user gets Free). To grant a plan without billing, use "Admin Override" in the user actions (⚡) instead.`
+      )
+    ) {
+      return;
+    }
     const res = await apiFetch(`/api/admin/users/${userId}/change-plan`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ newPlan }),
     });
     if (res.ok) {
-      showToast(`Plan changed to ${newPlan}`);
+      showToast(`Base plan set to ${newPlan}`);
       await loadUsers();
     } else {
       showToast(`Plan change failed: ${await describeNonOkResponse(res)}`);
@@ -737,40 +778,26 @@ export default function AdminDashboard() {
         }
         obj[keys[keys.length - 1]] = value;
 
-        // Keep minute fields in sync. These keys have been renamed over time,
-        // and mismatches here can make the admin editor and pricing cards
-        // appear inconsistent.
-        if (
-          path === "limits.monthlyMinutesIncluded" ||
-          path === "limits.monthlyMinutes" ||
-          path === "limits.participantMinutes"
-        ) {
-          const mins = Number(value);
-          if (Number.isFinite(mins)) {
-            updated.limits.monthlyMinutesIncluded = mins;
-            (updated.limits as any).monthlyMinutes = mins;
-            (updated.limits as any).participantMinutes = mins;
-            updated.limits.maxHoursPerMonth = computeMaxHoursPerMonthFromMinutes(mins);
-          }
-        }
-
-        // Keep destination cap fields in sync. normalizePlan checks
-        // rtmpDestinationsMax first, so we must write all three aliases
-        // to avoid stale values from seeding/migration winning.
-        if (
-          path === "limits.maxDestinations" ||
-          path === "limits.rtmpDestinationsMax" ||
-          path === "limits.rtmpDestinations"
-        ) {
-          const n = Number(value);
-          if (Number.isFinite(n)) {
-            (updated.limits as any).rtmpDestinationsMax = n;
-            (updated.limits as any).maxDestinations = n;
-            (updated.limits as any).rtmpDestinations = n;
-          }
-        }
-
+        // Entitlement fields (features / limits) are edited through
+        // updatePlanEnt in v2 form; this helper only edits other plan fields.
         return updated;
+      })
+    );
+  };
+
+  // v2 entitlement edits (null = unlimited, 0 = none).
+  const updatePlanEnt = (planId: string, kind: "features" | "limits", key: string, value: any) => {
+    setPlans((prevPlans) =>
+      prevPlans.map((p) => {
+        if (p.id !== planId) return p;
+        const ent = p.entitlements || { features: {}, limits: {} };
+        return {
+          ...p,
+          entitlements: {
+            ...ent,
+            [kind]: { ...(ent as any)[kind], [key]: value },
+          },
+        };
       })
     );
   };
@@ -778,14 +805,23 @@ export default function AdminDashboard() {
   const savePlan = async (plan: Plan) => {
     setSavingPlan(plan.id);
     try {
+      // Always save entitlements as v2; legacy features/limits/caps maps are
+      // not sent (the server rewrites them from the v2 values).
+      const { entitlements, features: _legacyFeatures, limits: _legacyLimits, caps: _legacyCaps, ...rest } = plan as any;
+      const body: any = { ...rest, limitsVersion: 2 };
+      if (entitlements) {
+        body.features = entitlements.features || {};
+        body.limits = entitlements.limits || {};
+      }
       const res = await apiFetch(`/api/admin/plans/${plan.id}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(plan),
+        body: JSON.stringify(body),
       });
 
       if (res.ok) {
         showToast(`${plan.name} plan saved!`);
+        await loadPlans();
         setExpandedPlan(null); // Collapse the expanded plan section
       } else {
         const err = await res.json().catch(() => ({}));
@@ -1031,10 +1067,12 @@ export default function AdminDashboard() {
                           </td>
 
                           <td style={S.td}>
+                            <div style={{ fontSize: 10, color: "#6b7280", marginBottom: 2 }}>Base (Stripe)</div>
                             <select
     value={u.planId || "free"}
     onChange={(e) => changePlan(u.uid, e.target.value)}
     style={S.select}
+    title="Base plan (owned by Stripe/billing). Prefer Admin Override (⚡) to grant a plan."
 >
     {plans.length > 0
       ? plans.map((p) => (
@@ -1048,6 +1086,15 @@ export default function AdminDashboard() {
           </option>
         ))}
 </select>
+                            {u.planOverride ? (
+                              <div style={{ fontSize: 11, color: "#a5b4fc", marginTop: 4 }}>
+                                Override: {u.planOverride.planId}
+                                {u.planOverride.active === false ? " (inactive)" : ""}
+                              </div>
+                            ) : null}
+                            {u.effectivePlanId && u.effectivePlanId !== (u.planId || "free") ? (
+                              <div style={{ fontSize: 11, color: "#4ade80", marginTop: 2 }}>Effective: {u.effectivePlanId}</div>
+                            ) : null}
                           </td>
 
                           <td style={S.td}>
@@ -1394,55 +1441,30 @@ export default function AdminDashboard() {
                           </div>
                         </div>
 
-                        {/* Quick Stats — only show non-zero values */}
+                        {/* Quick Stats (v2: "Unlimited" = null; 0 = none, hidden) */}
                         <div style={S.quickStats}>
-                          {(plan.limits?.monthlyMinutesIncluded || 0) > 0 && (
-                            <div style={S.stat}>
-                              <span style={S.statValue}>{plan.limits?.monthlyMinutesIncluded}</span>
-                              <span style={S.statLabel}>in-room mins</span>
-                            </div>
-                          )}
-                          {(plan.limits?.transcodeMinutes || 0) > 0 && (
-                            <div style={S.stat}>
-                              <span style={S.statValue}>{plan.limits?.transcodeMinutes}</span>
-                              <span style={S.statLabel}>streaming mins</span>
-                            </div>
-                          )}
-                          {(plan.limits?.maxGuests || 0) > 0 && (
-                            <div style={S.stat}>
-                              <span style={S.statValue}>{plan.limits?.maxGuests}</span>
-                              <span style={S.statLabel}>guests</span>
-                            </div>
-                          )}
-                          {resolvePlanMaxDestinations(plan.limits) > 0 && (
-                            <div style={S.stat}>
-                              <span style={S.statValue}>{resolvePlanMaxDestinations(plan.limits)}</span>
-                              <span style={S.statLabel}>destinations</span>
-                            </div>
-                          )}
-                          {plan.editing?.access && (plan.editing?.maxProjects || 0) > 0 && (
-                            <div style={S.stat}>
-                              <span style={S.statValue}>{plan.editing.maxProjects}</span>
-                              <span style={S.statLabel}>projects</span>
-                            </div>
-                          )}
-                          {plan.editing?.access && (plan.editing?.maxStorageGB || 0) > 0 && (
-                            <div style={S.stat}>
-                              <span style={S.statValue}>{plan.editing.maxStorageGB}GB</span>
-                              <span style={S.statLabel}>storage</span>
-                            </div>
+                          {plan.entitlements && (
+                            <>
+                              {(["monthlyStreamingMinutes", "guests", "destinations", "projects", "storageBytes"] as const).map((key) => {
+                                const f = V2_LIMIT_FIELDS.find((x) => x.key === key)!;
+                                const v = entLimit(plan, key);
+                                if (v === 0) return null;
+                                return (
+                                  <div key={key} style={S.stat}>
+                                    <span style={S.statValue}>{formatEntLimit(v, f.unit === "GB" ? "GB" : undefined, f.scale)}</span>
+                                    <span style={S.statLabel}>{f.label.toLowerCase()}</span>
+                                  </div>
+                                );
+                              })}
+                            </>
                           )}
                         </div>
 
                         {/* Feature Pills — only show enabled features */}
                         <div style={S.featurePills}>
-                          {plan.features?.recording && <FeaturePill enabled label="Recording" />}
-                          {plan.features?.dualRecording && <FeaturePill enabled label="Dual Recording" />}
-                          {(plan.features?.rtmpMultistream ?? plan.multistreamEnabled) && <FeaturePill enabled label="Multistream" />}
-                          {Boolean((plan.features as any)?.hls ?? (plan.features as any)?.hlsEnabled ?? plan.features?.canHls) && <FeaturePill enabled label="HLS" />}
-                          {plan.features?.monetization && <FeaturePill enabled label="Monetization" />}
-                          {plan.features?.payPerView && <FeaturePill enabled label="PPV" />}
-                          {plan.editing?.access && <FeaturePill enabled label="Editing" />}
+                          {V2_FEATURE_FIELDS.filter((f) => plan.entitlements?.features?.[f.key]).map((f) => (
+                            <FeaturePill key={f.key} enabled label={f.label} />
+                          ))}
                           {plan.editing?.ai?.autoCut && <FeaturePill enabled label="AI AutoCut" />}
                           {plan.editing?.ai?.captions && <FeaturePill enabled label="AI Captions" />}
                         </div>
@@ -1501,168 +1523,70 @@ export default function AdminDashboard() {
                                 </select>
                               </div>
                             </PlanSection>
-                            {/* ── Plan Usage ── */}
+                            {/* ── Entitlements (v2: null = Unlimited, 0 = none) ── */}
                             <PlanSection
-                              title="📊 Plan Usage"
-                              collapsed={getSectionCollapsed("📊 Plan Usage")}
-                              onToggle={(next) => setSectionCollapsedValue("📊 Plan Usage", next)}
+                              title="📊 Limits"
+                              collapsed={getSectionCollapsed("📊 Limits")}
+                              onToggle={(next) => setSectionCollapsedValue("📊 Limits", next)}
                             >
-                              <EditRow
-                                label="In-room minutes"
-                                value={resolvePlanMonthlyMinutes(plan.limits) || 0}
-                                onChange={(v) => updatePlanField(plan.id, "limits.monthlyMinutesIncluded", Number(v))}
-                              />
-                              <EditRow
-                                label="Streaming minutes"
-                                value={plan.limits?.transcodeMinutes || 0}
-                                onChange={(v) => updatePlanField(plan.id, "limits.transcodeMinutes", Number(v))}
-                              />
+                              <div style={{ fontSize: 12, color: "#9ca3af", margin: "0 0 8px" }}>
+                                Check “Unlimited” for no cap. A number is a hard cap; <b>0 means the plan gets none</b>.
+                                {plan.entitlements?.storedLimitsVersion !== 2
+                                  ? " This plan is stored in the legacy format; saving converts it to v2 with the same meaning."
+                                  : ""}
+                              </div>
+                              {V2_LIMIT_FIELDS.map((f) => (
+                                <LimitRow
+                                  key={f.key}
+                                  label={f.label}
+                                  unit={f.unit}
+                                  scale={f.scale}
+                                  value={entLimit(plan, f.key)}
+                                  onChange={(v) => updatePlanEnt(plan.id, "limits", f.key, v)}
+                                />
+                              ))}
+                              <div style={S.editRow}>
+                                <label style={S.editLabel}>Max media quality</label>
+                                <select
+                                  value={String(plan.entitlements?.limits?.maxPresetId ?? "")}
+                                  onChange={(e) => updatePlanEnt(plan.id, "limits", "maxPresetId", e.target.value || null)}
+                                  style={{ ...S.editInput, width: 200 }}
+                                >
+                                  {V2_PRESET_OPTIONS.map((id) => (
+                                    <option key={id || "default"} value={id}>
+                                      {id || "Plan default"}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
                             </PlanSection>
 
-                            {/* ── Session Limits ── */}
                             <PlanSection
-                              title="⏱️ Session Limits"
-                              collapsed={getSectionCollapsed("⏱️ Session Limits")}
-                              onToggle={(next) => setSectionCollapsedValue("⏱️ Session Limits", next)}
+                              title="🎛️ Features"
+                              collapsed={getSectionCollapsed("🎛️ Features")}
+                              onToggle={(next) => setSectionCollapsedValue("🎛️ Features", next)}
                             >
-                              <EditRow
-                                label="Max session length (mins)"
-                                value={plan.limits?.maxSessionMinutes || 0}
-                                onChange={(v) => updatePlanField(plan.id, "limits.maxSessionMinutes", Number(v))}
-                              />
-                              <EditRow
-                                label="Recording cap per clip (mins)"
-                                value={plan.limits?.maxRecordingMinutesPerClip || 0}
-                                onChange={(v) => updatePlanField(plan.id, "limits.maxRecordingMinutesPerClip", Number(v))}
-                              />
-                              <EditRow
-                                label="Max guests"
-                                value={plan.limits?.maxGuests || 0}
-                                onChange={(v) => updatePlanField(plan.id, "limits.maxGuests", Number(v))}
-                              />
-                              <EditRow
-                                label="Max stream destinations"
-                                value={resolvePlanMaxDestinations(plan.limits)}
-                                onChange={(v) => {
-                                  const num = Number(v);
-                                  updatePlanField(plan.id, "limits.rtmpDestinationsMax", num);
-                                }}
-                              />
-                            </PlanSection>
-
-                            {/* ── Broadcast Features ── */}
-                            <PlanSection
-                              title="🎛️ Broadcast Features"
-                              collapsed={getSectionCollapsed("🎛️ Broadcast Features")}
-                              onToggle={(next) => setSectionCollapsedValue("🎛️ Broadcast Features", next)}
-                            >
-                              <ToggleRow label="Recording" value={plan.features?.recording} onChange={(v) => updatePlanField(plan.id, "features.recording", v)} />
-                              {plan.features?.recording && (
-                                <ToggleRow label="Dual Recording" value={plan.features?.dualRecording} onChange={(v) => updatePlanField(plan.id, "features.dualRecording", v)} />
-                              )}
-                              <ToggleRow
-                                label="Multistream"
-                                value={plan.features?.rtmp}
-                                onChange={(v) => {
-                                  updatePlanField(plan.id, "features.rtmp", v);
-                                  updatePlanField(plan.id, "features.rtmpMultistream", v);
-                                  if (!v) {
-                                    updatePlanField(plan.id, "limits.rtmpDestinationsMax", 0);
-                                  }
-                                }}
-                              />
-                              {platformHlsEnabled && (
-                                <>
-                                  <ToggleRow
-                                    label="HLS"
-                                    value={Boolean((plan.features as any)?.hls ?? (plan.features as any)?.hlsEnabled ?? plan.features?.canHls)}
-                                    onChange={(v) => {
-                                      updatePlanField(plan.id, "features.hls", v);
-                                      updatePlanField(plan.id, "features.hlsEnabled", v);
-                                      updatePlanField(plan.id, "features.canHls", v);
-                                    }}
-                                  />
-                                  {Boolean((plan.features as any)?.hls ?? (plan.features as any)?.hlsEnabled ?? plan.features?.canHls) && (
-                                    <>
-                                      <div style={S.editRow}>
-                                        <label style={{ ...S.editLabel, lineHeight: 1.2 }}>
-                                          <div>HLS max minutes per session</div>
-                                          <div style={{ fontSize: 12, color: "#9ca3af", fontWeight: 600, marginTop: 4 }}>Leave blank for unlimited</div>
-                                        </label>
-                                        <input
-                                          type="number"
-                                          value={plan.caps?.hlsMaxMinutesPerSession ?? ""}
-                                          onChange={(e) => {
-                                            const raw = String(e.target.value || "").trim();
-                                            if (!raw) {
-                                              updatePlanField(plan.id, "caps.hlsMaxMinutesPerSession", null);
-                                              return;
-                                            }
-                                            const n = Number(raw);
-                                            if (!Number.isFinite(n)) return;
-                                            updatePlanField(plan.id, "caps.hlsMaxMinutesPerSession", n);
-                                          }}
-                                          style={{ ...S.editInput, width: 120 }}
-                                          placeholder="unlimited"
-                                        />
-                                      </div>
-                                      <ToggleRow
-                                        label="HLS Branded Viewer Page"
-                                        value={Boolean(
-                                          (plan.features as any)?.hlsCustomizationEnabled ??
-                                            (plan.features as any)?.canCustomizeHlsPage ??
-                                            (plan.features as any)?.hlsEnabled ??
-                                            plan.features?.canHls ??
-                                            (plan.features as any)?.hls
-                                        )}
-                                        onChange={(v) => {
-                                          updatePlanField(plan.id, "features.hlsCustomizationEnabled", v);
-                                          updatePlanField(plan.id, "features.canCustomizeHlsPage", v);
-                                        }}
-                                      />
-                                    </>
-                                  )}
-                                </>
-                              )}
-                            </PlanSection>
-
-                            {/* ── Monetization ── */}
-                            {platformMonetizationEnabled && (
-                              <PlanSection
-                                title="💰 Monetization"
-                                defaultCollapsed
-                                collapsed={getSectionCollapsed("💰 Monetization", true)}
-                                onToggle={(next) => setSectionCollapsedValue("💰 Monetization", next)}
-                              >
+                              <div style={{ fontSize: 12, color: "#9ca3af", margin: "0 0 8px" }}>
+                                Plan features. Platform kill switches (Features tab) can still turn a feature off for everyone
+                                {!platformHlsEnabled ? " — HLS is currently off platform-wide" : ""}
+                                {!platformMonetizationEnabled ? " — monetization is currently off platform-wide" : ""}
+                                {!platformPayPerViewEnabled ? " — pay-per-view is currently off platform-wide" : ""}.
+                              </div>
+                              {V2_FEATURE_FIELDS.map((f) => (
                                 <ToggleRow
-                                  label="Monetization"
-                                  value={Boolean(plan.features?.monetization)}
+                                  key={f.key}
+                                  label={f.label}
+                                  value={Boolean(plan.entitlements?.features?.[f.key])}
                                   onChange={(v) => {
-                                    updatePlanField(plan.id, "features.monetization", v);
-                                    if (!v) updatePlanField(plan.id, "features.payPerView", false);
+                                    updatePlanEnt(plan.id, "features", f.key, v);
+                                    if (f.key === "monetization" && !v) updatePlanEnt(plan.id, "features", "payPerView", false);
+                                    if (f.key === "multistream" && v && entLimit(plan, "destinations") === 0) {
+                                      updatePlanEnt(plan.id, "limits", "destinations", 1);
+                                    }
+                                    if (f.key === "multistream" && !v) updatePlanEnt(plan.id, "limits", "destinations", 0);
                                   }}
                                 />
-                                {Boolean(plan.features?.monetization) && platformPayPerViewEnabled && (
-                                  <ToggleRow
-                                    label="Pay-Per-View"
-                                    value={Boolean(plan.features?.payPerView)}
-                                    onChange={(v) => updatePlanField(plan.id, "features.payPerView", v)}
-                                  />
-                                )}
-                              </PlanSection>
-                            )}
-
-                            {/* ── Billing Rules ── */}
-                            <PlanSection
-                              title="💰 Billing Rules"
-                              collapsed={getSectionCollapsed("💰 Billing Rules")}
-                              onToggle={(next) => setSectionCollapsedValue("💰 Billing Rules", next)}
-                            >
-                              <ToggleRow
-                                label="Overages allowed"
-                                value={Boolean((plan.features as any)?.allowsOverages)}
-                                onChange={(v) => updatePlanField(plan.id, "features.allowsOverages", v)}
-                              />
+                              ))}
                             </PlanSection>
 
                             <PlanSection
@@ -1671,18 +1595,8 @@ export default function AdminDashboard() {
                               collapsed={getSectionCollapsed("✂️ Editing Suite", true)}
                               onToggle={(next) => setSectionCollapsedValue("✂️ Editing Suite", next)}
                             >
-                              <ToggleRow label="Editing Access" value={plan.editing?.access} onChange={(v) => updatePlanField(plan.id, "editing.access", v)} />
-                              <EditRow label="Max Projects" value={plan.editing?.maxProjects || 0} onChange={(v) => updatePlanField(plan.id, "editing.maxProjects", Number(v))} />
+                              {/* Editor access, projects and storage live in Features / Limits above. */}
                               <EditRow label="Max Tracks" value={plan.editing?.maxTracks || 0} onChange={(v) => updatePlanField(plan.id, "editing.maxTracks", Number(v))} />
-                              <EditRow
-                                label="Storage (GB)"
-                                value={plan.editing?.maxStorageGB || 0}
-                                onChange={(v) => {
-                                  const gb = Number(v);
-                                  updatePlanField(plan.id, "editing.maxStorageGB", gb);
-                                  updatePlanField(plan.id, "editing.maxStorageBytes", gb * 1024 * 1024 * 1024);
-                                }}
-                              />
                               <EditRow
                                 label="Exports/Month"
                                 value={plan.editing?.exportsPerMonth || 0}
@@ -1777,6 +1691,25 @@ export default function AdminDashboard() {
                   </button>
                 ))}
               </div>
+              <label style={{ ...S.label, marginTop: 20, display: "block" }}>Admin Override</label>
+              <PlanOverridePanel
+                userId={selectedUser.uid}
+                basePlanId={selectedUser.basePlanId || selectedUser.planId}
+                effectivePlanId={selectedUser.effectivePlanId}
+                planOverride={selectedUser.planOverride ?? null}
+                decidedBy={selectedUser.decidedBy}
+                subscriptionBlockedReason={selectedUser.subscriptionBlockedReason}
+                planOptions={
+                  plans.length > 0
+                    ? plans.map((p) => ({ id: p.id, name: p.name }))
+                    : ["free", "basic", "starter", "pro", "enterprise", "internal_unlimited"].map((id) => ({ id }))
+                }
+                onMessage={showToast}
+                onChanged={async () => {
+                  setSelectedUser(null);
+                  await loadUsers();
+                }}
+              />
             </div>
           </div>
         </div>
@@ -1871,6 +1804,51 @@ function EditRow({ label, value, onChange }: { label: string; value: string | nu
     <div style={S.editRow}>
       <label style={S.editLabel}>{label}</label>
       <input type="number" value={value} onChange={(e) => onChange(e.target.value)} style={{ ...S.editInput, width: 80 }} />
+    </div>
+  );
+}
+
+/** v2 limit editor: "Unlimited" checkbox (null) or a number (0 = none). */
+function LimitRow({
+  label,
+  value,
+  unit,
+  scale,
+  onChange,
+}: {
+  label: string;
+  value: number | null;
+  unit?: string;
+  scale?: number;
+  onChange: (v: number | null) => void;
+}) {
+  const unlimited = value === null;
+  const display = value === null ? "" : scale ? Math.round((value / scale) * 100) / 100 : value;
+  return (
+    <div style={S.editRow}>
+      <label style={S.editLabel}>
+        {label}
+        {unit ? ` (${unit})` : ""}
+      </label>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <input
+          type="number"
+          min={0}
+          disabled={unlimited}
+          value={display}
+          placeholder={unlimited ? "Unlimited" : "0 = none"}
+          onChange={(e) => {
+            const n = Number(e.target.value);
+            if (!Number.isFinite(n) || n < 0) return;
+            onChange(scale ? Math.round(n * scale) : Math.floor(n));
+          }}
+          style={{ ...S.editInput, width: 100, opacity: unlimited ? 0.5 : 1 }}
+        />
+        <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: "#d1d5db" }}>
+          <input type="checkbox" checked={unlimited} onChange={(e) => onChange(e.target.checked ? null : 0)} />
+          Unlimited
+        </label>
+      </div>
     </div>
   );
 }

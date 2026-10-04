@@ -2,23 +2,16 @@ import type Stripe from "stripe";
 import { PERMISSION_ERRORS } from "./permissionErrors";
 
 export type OveragesEndpointDeps = {
-  getAccount: (uid: string) => Promise<any>;
+  /** EFFECTIVE entitlements (lib/entitlements): admin override / platform admin / base plan. */
+  getEntitlements: (uid: string) => Promise<{ planId: string; features: { overages: boolean } }>;
   getUserDoc: (uid: string) => Promise<any | null>;
   patchUserDoc: (uid: string, patch: any) => Promise<void>;
   retrieveStripeCustomer: (customerId: string) => Promise<Stripe.Customer | Stripe.DeletedCustomer | any>;
   now: () => number;
 };
 
-function isOveragesAllowedForAccount(account: any): boolean {
-  const planId = String(account?.effectiveEntitlements?.planId || account?.planId || "").trim();
-  if (planId === "pro") return true;
-
-  // Optional capability flag (if present).
-  const featureFlag =
-    account?.effectiveEntitlements?.features?.overagesAllowed === true ||
-    account?.effectiveEntitlements?.features?.allowsOverages === true;
-
-  return featureFlag === true;
+function isOveragesAllowed(ent: { features?: { overages?: boolean } } | null | undefined): boolean {
+  return ent?.features?.overages === true;
 }
 
 function readOveragesEnabledFromUserDoc(userDoc: any): boolean {
@@ -68,9 +61,13 @@ export function createOveragesEndpointHandler(deps: OveragesEndpointDeps) {
         return res.status(400).json({ success: false, error: "invalid_body" });
       }
 
-      const account = (req as any).account || (await deps.getAccount(uid));
-      if (!isOveragesAllowedForAccount(account)) {
-        return res.status(403).json({ success: false, error: "overages_not_allowed" });
+      // Enabling overages requires the effective plan's `overages` feature.
+      // Turning them OFF is always allowed (never blocked by entitlement).
+      if (enabled) {
+        const ent = await deps.getEntitlements(uid);
+        if (!isOveragesAllowed(ent)) {
+          return res.status(403).json({ success: false, error: "overages_not_allowed" });
+        }
       }
 
       const userDoc = await deps.getUserDoc(uid);

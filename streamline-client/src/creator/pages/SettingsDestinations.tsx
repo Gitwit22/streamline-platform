@@ -27,7 +27,8 @@ export default function SettingsDestinations(
   const lockReason = props.lockReason || "Stream Destinations are not included in your current plan.";
   const [items, setItems] = useState<DestinationItem[]>([]);
   const [usedCount, setUsedCount] = useState<number | undefined>(undefined);
-  const [limit, setLimit] = useState<number | undefined>(undefined);
+  // null = unlimited, 0 = none (server entitlement convention).
+  const [limit, setLimit] = useState<number | null | undefined>(undefined);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [connectedPlatforms, setConnectedPlatforms] = useState<{ youtube: boolean; facebook: boolean; twitch: boolean }>({ youtube: false, facebook: false, twitch: false });
@@ -73,14 +74,14 @@ export default function SettingsDestinations(
   }
 
   useEffect(() => {
-    if (!locked && !platformDisabled) {
-      load();
-    }
+    // Always load: reading / deleting your own destinations is never gated
+    // (cleanup works even when the plan or platform switch is off).
+    load();
     const loadAccount = async () => {
       try {
         const data = await getMeCached();
         if (typeof props.locked === "undefined") {
-          setEffectiveEntitlements(data?.effectiveEntitlements || data?.entitlements || null);
+          setEffectiveEntitlements(data?.entitlements || data?.effectiveEntitlements || null);
         }
         if (data?.connectedPlatforms) {
           setConnectedPlatforms({
@@ -95,6 +96,41 @@ export default function SettingsDestinations(
     };
     loadAccount();
   }, [locked, platformDisabled, props.locked]);
+
+  // Existing destinations stay deletable when the feature is unavailable.
+  const cleanupList =
+    items.length > 0 ? (
+      <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ fontSize: 12, color: "#94a3b8" }}>
+          Saved destinations (you can still remove them):
+        </div>
+        {items.map((item) => (
+          <div
+            key={item.id}
+            style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, fontSize: 13 }}
+          >
+            <span>
+              {item.name || item.platform} <span style={{ color: "#64748b" }}>({item.platform})</span>
+            </span>
+            <button
+              type="button"
+              onClick={() => onDelete(item.id)}
+              style={{
+                padding: "4px 10px",
+                borderRadius: 8,
+                border: "1px solid rgba(248,113,113,0.45)",
+                background: "rgba(127,29,29,0.25)",
+                color: "#fecaca",
+                cursor: "pointer",
+              }}
+            >
+              Delete
+            </button>
+          </div>
+        ))}
+        {error && <div style={{ color: "#fca5a5", fontSize: 12 }}>{error}</div>}
+      </div>
+    ) : null;
 
   if (platformDisabled) {
     return (
@@ -117,6 +153,7 @@ export default function SettingsDestinations(
         >
           Stream Destinations are temporarily disabled by the platform.
         </div>
+        {cleanupList}
       </div>
     );
   }
@@ -155,6 +192,7 @@ export default function SettingsDestinations(
         >
           Upgrade
         </button>
+        {cleanupList}
       </div>
     );
   }
@@ -286,7 +324,7 @@ export default function SettingsDestinations(
           <div>
             Used <span style={{ fontWeight: 600 }}>{typeof usedCount !== "undefined" ? usedCount : "—"}</span>
             {" / "}
-            <span>{typeof limit !== "undefined" ? limit : "Plan limit"}</span>
+            <span>{limit === null ? "Unlimited" : typeof limit !== "undefined" ? limit : "Plan limit"}</span>
           </div>
         </div>
       </div>

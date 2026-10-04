@@ -4,12 +4,53 @@ import { firestore as db } from "../firebaseAdmin";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import type { RoomHlsConfig } from "../services/rooms";
 import { DEFAULT_ROOM_HLS_CONFIG } from "../services/rooms";
+import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { checkFeature, type EffectiveEntitlements, type FeatureKey } from "../lib/entitlements";
+import { LIMIT_ERRORS } from "../lib/limitErrors";
 
 const router = Router();
 
 function normalizeRoomId(raw: string | undefined): string {
   return String(raw || "").trim();
 }
+
+const BRANDING_KEYS = ["title", "subtitle", "logoUrl", "offlineMessage", "theme"] as const;
+
+/**
+ * Which entitlement a PUT needs, given the stored room state. Only CHANGES
+ * that turn something on / edit branding are gated; turning HLS, monetization
+ * or PPV off (cleanup) is always allowed. Exported for tests.
+ */
+export function requiredHlsConfigFeatures(
+  existing: { hlsConfig?: any; monetizationEnabled?: boolean; payPerViewEnabled?: boolean },
+  body: any
+): FeatureKey[] {
+  const stored = (existing?.hlsConfig || {}) as Record<string, unknown>;
+  const prev = { ...DEFAULT_ROOM_HLS_CONFIG, ...stored } as Record<string, unknown>;
+  const out: FeatureKey[] = [];
+  if (body?.enabled === true && stored.enabled !== true) out.push("hls");
+  const norm = (v: unknown) => (v === undefined || v === null ? "" : String(v));
+  const brandingChanged = BRANDING_KEYS.some((k) => body?.[k] !== undefined && norm(body[k]) !== norm(prev[k]));
+  if (brandingChanged) out.push("hlsCustomization");
+  if (body?.monetizationEnabled === true && existing?.monetizationEnabled !== true) out.push("monetization");
+  if (body?.payPerViewEnabled === true && existing?.payPerViewEnabled !== true) out.push("payPerView");
+  return out;
+}
+
+function firstDenied(ent: EffectiveEntitlements, features: FeatureKey[]) {
+  for (const f of features) {
+    const check = checkFeature(ent, f);
+    if (!check.allowed) return check;
+  }
+  return null;
+}
+
+const DENIED_ERROR_BY_FEATURE: Partial<Record<FeatureKey, string>> = {
+  hls: "hls_not_in_plan",
+  hlsCustomization: "hls_customization_not_in_plan",
+  monetization: "monetization_not_enabled",
+  payPerView: "ppv_not_entitled",
+};
 
 // GET /api/rooms/:roomId/hls-config
 router.get("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
@@ -77,6 +118,24 @@ router.put("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
     const ctx = await assertRoomPerm(req as any, roomId, "canLayout");
 
     const existing = ((ctx.room as any).hlsConfig || {}) as RoomHlsConfig;
+
+    // Entitlements of the ROOM OWNER (effective plan + platform kill switches).
+    const needed = requiredHlsConfigFeatures(ctx.room as any, req.body || {});
+    if (needed.length > 0) {
+      const ownerUid = String((ctx.room as any).ownerId || req.user?.uid || "").trim();
+      const ent = await getEffectiveEntitlements(ownerUid);
+      const denied = firstDenied(ent, needed);
+      if (denied) {
+        return res.status(403).json({
+          error:
+            denied.code === LIMIT_ERRORS.FEATURE_DISABLED
+              ? LIMIT_ERRORS.FEATURE_DISABLED
+              : DENIED_ERROR_BY_FEATURE[denied.feature] || LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
+          feature: denied.feature,
+          reason: denied.reason,
+        });
+      }
+    }
 
     const nextConfig: RoomHlsConfig = {
       ...existing,

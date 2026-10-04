@@ -1,4 +1,5 @@
 import { isFeatureAvailable, isPlatformEnabled } from "./featureAvailability";
+import { isServerEntitlements, type ServerEntitlements } from "./serverEntitlements";
 
 export type EffectiveEntitlementsLike = {
   features?: Record<string, unknown>;
@@ -105,7 +106,8 @@ export function computeEffectiveFeatureAccess(input: {
     };
   };
   plan: {
-    rtmpDestinationsMax: number;
+    /** null = unlimited, 0 = none. */
+    rtmpDestinationsMax: number | null;
     hlsRuntime: boolean;
     hlsSetup: boolean;
     destinations: boolean;
@@ -153,6 +155,13 @@ export function computeEffectiveFeatureAccess(input: {
     planIncluded: boolean;
   };
 } {
+  // Canonical path: the server's EffectiveEntitlements (null = unlimited,
+  // features already ANDed with platform switches, flags sent by the server).
+  if (isServerEntitlements(input.effectiveEntitlements)) {
+    return computeFromServerEntitlements(input.effectiveEntitlements);
+  }
+
+  // Legacy payload path (older servers / synthetic room-level objects).
   const eff = input.effectiveEntitlements || {};
   const pf = (input.platformFlags && typeof input.platformFlags === "object") ? input.platformFlags : {};
 
@@ -204,9 +213,10 @@ export function computeEffectiveFeatureAccess(input: {
   const effectivePlanProjects = planProjects || planEditing;
   const effectivePlanEditor = planEditor || planEditing;
 
-  // Numeric RTMP destinations cap is canonical for availability.
+  // Numeric RTMP destinations cap is canonical for availability. Same rule as
+  // the server: multistream = Stream Destinations = at least one destination.
   const planDestinations = rtmpDestinationsMax >= 1;
-  const planMultistream = rtmpDestinationsMax >= 2;
+  const planMultistream = planDestinations;
 
   return {
     platform: {
@@ -271,5 +281,76 @@ export function computeEffectiveFeatureAccess(input: {
       const planIncluded = resolveEntitlementBoolean(features, ["payPerView"]);
       return { allowed: platformEnabled && planIncluded, platformEnabled, planIncluded };
     })(),
+  };
+}
+
+type FeatureAccess = ReturnType<typeof computeEffectiveFeatureAccess>;
+
+/** Feature access straight from the server engine (no client-side defaults). */
+function computeFromServerEntitlements(ent: ServerEntitlements): FeatureAccess {
+  const f = ent.features;
+  const pf = ent.planFeatures;
+  const flags = ent.platformFlags;
+  const destinationsLimit = ent.limits.destinations;
+  return {
+    platform: {
+      hlsEnabled: flags.hlsSettingsTab === true,
+      transcodeEnabled: flags.transcodeEnabled === true,
+      recordingEnabled: flags.recording === true,
+    },
+    usage: {
+      broadcastMinutes: {
+        // Broadcast/transcode is no longer a separate usage bucket.
+        visible: false,
+      },
+    },
+    plan: {
+      rtmpDestinationsMax: destinationsLimit,
+      hlsRuntime: pf.hls,
+      hlsSetup: pf.hlsCustomization,
+      destinations: pf.multistream,
+      multistream: pf.multistream,
+      editing: pf.editing,
+    },
+    canUse: {
+      hlsRuntime: f.hls,
+      hlsSetup: f.hlsCustomization,
+      destinations: f.multistream,
+      multistream: f.multistream,
+    },
+    editing: {
+      allowed: f.editing && flags.transcodeEnabled === true,
+    },
+    contentLibrary: {
+      allowed: f.contentLibrary,
+    },
+    projects: {
+      allowed: f.projects || (f.editing && flags.transcodeEnabled === true),
+    },
+    editor: {
+      allowed: f.editing && flags.transcodeEnabled === true,
+    },
+    myContent: {
+      allowed: flags.myContentEnabled === true,
+    },
+    myContentRecordings: {
+      allowed: flags.myContentEnabled === true && flags.myContentRecordingsEnabled === true,
+    },
+    advancedScreenShare: {
+      allowed: flags.advancedScreenShareEnabled === true,
+    },
+    audioMixer: {
+      allowed: flags.audioMixerEnabled === true,
+    },
+    monetization: {
+      allowed: f.monetization,
+      platformEnabled: flags.monetizationEnabled === true,
+      planIncluded: pf.monetization,
+    },
+    payPerView: {
+      allowed: f.payPerView,
+      platformEnabled: flags.payPerViewEnabled === true,
+      planIncluded: pf.payPerView,
+    },
   };
 }

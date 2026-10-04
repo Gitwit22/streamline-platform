@@ -20,7 +20,7 @@ function makeRes() {
 
 test("non-pro cannot enable overages (403)", async () => {
   const handler = createOveragesEndpointHandler({
-    getAccount: async () => ({ effectiveEntitlements: { planId: "starter", features: {} } }),
+    getEntitlements: async () => ({ planId: "starter", features: { overages: false } }),
     getUserDoc: async () => ({
       billingTruth: { stripeCustomerId: "cus_123", status: "active" },
       billingSettings: { overagesEnabled: false },
@@ -48,7 +48,7 @@ test("pro can enable overages when customer has default payment method (200)", a
   let patched: any = null;
 
   const handler = createOveragesEndpointHandler({
-    getAccount: async () => ({ effectiveEntitlements: { planId: "pro", features: { overagesAllowed: true } } }),
+    getEntitlements: async () => ({ planId: "pro", features: { overages: true } }),
     getUserDoc: async () => ({
       billingTruth: { stripeCustomerId: "cus_123", status: "active" },
       billingSettings: { overagesEnabled: false },
@@ -79,7 +79,7 @@ test("pro enabling fails with 409 when no default payment method", async () => {
   let patched = false;
 
   const handler = createOveragesEndpointHandler({
-    getAccount: async () => ({ effectiveEntitlements: { planId: "pro", features: { overagesAllowed: true } } }),
+    getEntitlements: async () => ({ planId: "pro", features: { overages: true } }),
     getUserDoc: async () => ({
       billingTruth: { stripeCustomerId: "cus_123", status: "active" },
       billingSettings: { overagesEnabled: false },
@@ -103,4 +103,41 @@ test("pro enabling fails with 409 when no default payment method", async () => {
   assert.equal(res.statusCode, 409);
   assert.equal(res.body?.error, "payment_method_required");
   assert.equal(patched, false);
+});
+
+test("admin override plan with overages can enable without base plan pro (entitlement-driven)", async () => {
+  let patched: any = null;
+  const handler = createOveragesEndpointHandler({
+    // Base plan free + override to a custom plan that includes overages.
+    getEntitlements: async () => ({ planId: "custom_override", features: { overages: true } }),
+    getUserDoc: async () => ({ planId: "free", billingTruth: { stripeCustomerId: "cus_1" } }),
+    patchUserDoc: async (_uid, patch) => {
+      patched = patch;
+    },
+    retrieveStripeCustomer: async () => ({ id: "cus_1", invoice_settings: { default_payment_method: "pm_1" } }),
+    now: () => 1,
+  });
+  const res = makeRes();
+  await handler({ user: { uid: "u1" }, body: { enabled: true } } as any, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(patched?.billingSettings?.overagesEnabled, true);
+});
+
+test("turning overages OFF is never blocked by entitlement", async () => {
+  let patched: any = null;
+  const handler = createOveragesEndpointHandler({
+    getEntitlements: async () => {
+      throw new Error("should_not_be_called");
+    },
+    getUserDoc: async () => ({ billingSettings: { overagesEnabled: true } }),
+    patchUserDoc: async (_uid, patch) => {
+      patched = patch;
+    },
+    retrieveStripeCustomer: async () => null,
+    now: () => 1,
+  });
+  const res = makeRes();
+  await handler({ user: { uid: "u1" }, body: { enabled: false } } as any, res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(patched?.billingSettings?.overagesEnabled, false);
 });

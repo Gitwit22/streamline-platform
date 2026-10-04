@@ -16,7 +16,8 @@
 
 import { firestore } from "./firebaseAdmin";
 import { FieldValue } from "firebase-admin/firestore";
-import { resolveMaxStorageBytesFromPlan, canReserveStorage } from "./lib/storagePure";
+import { canReserveStorage } from "./lib/storagePure";
+import { getEffectiveEntitlements } from "./lib/entitlements";
 import type { ReservationCheck } from "./lib/storagePure";
 
 // Re-export pure helpers so callers can import from one place
@@ -117,20 +118,12 @@ export async function getCurrentStorageUsage(userId: string): Promise<number> {
 }
 
 /**
- * Resolve the plan's max storage limit in bytes for a given user.
- * Checks editing.maxStorageGB, editing.maxStorageBytes, top-level maxStorageGB/Bytes.
+ * The user's storage cap from their EFFECTIVE entitlements
+ * (admin override / platform admin / base plan). null = unlimited, 0 = none.
  */
-export async function getMaxStorageBytes(userId: string): Promise<number> {
-  const userSnap = await firestore.collection("users").doc(userId).get();
-  if (!userSnap.exists) return 0;
-  const userData = userSnap.data() as any;
-  const planId = (userData.planId || userData.plan || "free") as string;
-
-  const planSnap = await firestore.collection("plans").doc(planId).get();
-  if (!planSnap.exists) return 0;
-  const planData = planSnap.data() as any;
-
-  return resolveMaxStorageBytesFromPlan(planData);
+export async function getMaxStorageBytes(userId: string): Promise<number | null> {
+  const ent = await getEffectiveEntitlements(userId);
+  return ent.limits.storageBytes;
 }
 
 // ─── Transactional Reservation ───────────────────────────────────────────────
@@ -171,6 +164,9 @@ export async function reserveStorageIfAvailable(
   }
 
   const userRef = firestore.collection("users").doc(userId);
+  // Effective storage cap (null = unlimited, 0 = none), resolved once outside
+  // the transaction; the counter read/increment below stays transactional.
+  const limitBytes = (await getEffectiveEntitlements(userId)).limits.storageBytes;
 
   const result = await firestore.runTransaction(async (tx) => {
     const userSnap = await tx.get(userRef);
@@ -180,12 +176,6 @@ export async function reserveStorageIfAvailable(
 
     const userData = userSnap.data() as any;
     const currentBytes = Math.max(0, Number(userData?.usage?.storageUsedBytes) || 0);
-
-    // Resolve plan limit
-    const planId = (userData.planId || userData.plan || "free") as string;
-    const planSnap = await tx.get(firestore.collection("plans").doc(planId));
-    const planData = planSnap.exists ? (planSnap.data() as any) : {};
-    const limitBytes = resolveMaxStorageBytesFromPlan(planData);
 
     const check = canReserveStorage(currentBytes, fileSizeBytes, limitBytes);
 

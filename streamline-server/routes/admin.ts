@@ -7,13 +7,32 @@ console.log("✅ admin.ts loaded");
 import express from "express";
 
 import { firestore, auth as firebaseAuth } from "../firebaseAdmin";
+import { FieldValue } from "firebase-admin/firestore";
 import { requireAdmin, logAdminAction } from "../middleware/adminAuth";
 import { computeUsageSummaryResult } from "./usageRoutes";
-import { invalidatePlatformBillingCache } from "../lib/userAccount";
+import { getPlatformBillingEnabled, invalidatePlatformBillingCache } from "../lib/userAccount";
 
 import type { UserUsageSummary } from "../types/admin.types";
 import { getCurrentMonthKey } from "../lib/usageTracker";
-import { normalizePlan } from "../lib/normalizePlan";
+import {
+  PLAN_CATALOG_V2,
+  PLAN_LIMITS_VERSION,
+  adminSeededFlagList,
+  getCatalogPlan,
+  getEffectiveEntitlements,
+  getPlatformFlags,
+  invalidateEntitlements,
+  invalidatePlanCache,
+  invalidatePlatformFlags,
+  isOverrideActive,
+  normalizePlanDoc,
+  readStoredPlanOverride,
+  resolveEntitlements,
+  sanitizePlanV2Input,
+  serializeEntitlements,
+  toPlanDocV2,
+  type PlatformFlags,
+} from "../lib/entitlements";
 import { evaluateStreamingGate, readStreamingMinutes } from "../lib/streamingMeterPure";
 import { getStreamingUsageStatus, readOveragesEnabled } from "../lib/streamingMeter";
 import { PLAN_IDS, PlanId, isPlanId, getAllPlanIds } from "../types/plan";
@@ -26,7 +45,6 @@ import {
   hashAdminResetSecret,
 } from "../lib/accountRecovery";
 import { logAuthSecurityEvent } from "../lib/authAudit";
-import { resolveMaxDestinations } from "../lib/planLimits";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import adminMonitoringRoutes from "./adminMonitoring";
@@ -189,6 +207,68 @@ function isDeletedUserRecord(raw: any): boolean {
   return status === "deleted" || Boolean(getDeletedAtMs(raw));
 }
 
+type AdminPlanContext = {
+  plansMap: Record<string, any>;
+  flags: PlatformFlags;
+  platformBillingEnabled: boolean;
+  adminUids: Set<string>;
+  now: number;
+};
+
+async function loadAdminPlanContext(): Promise<AdminPlanContext> {
+  const [plansSnap, flags, platformBillingEnabled, adminsSnap] = await Promise.all([
+    firestore.collection("plans").get(),
+    getPlatformFlags(),
+    getPlatformBillingEnabled().catch(() => true),
+    firestore.collection("admins").get().catch(() => null as any),
+  ]);
+  const adminUids = new Set<string>();
+  adminsSnap?.docs?.forEach((d: any) => {
+    if ((d.data() as any)?.isAdmin === true) adminUids.add(d.id);
+  });
+  return {
+    plansMap: Object.fromEntries(plansSnap.docs.map((d) => [d.id, d.data()])),
+    flags,
+    platformBillingEnabled,
+    adminUids,
+    now: Date.now(),
+  };
+}
+
+/**
+ * Stripe/base plan vs admin override vs EFFECTIVE plan for one user, resolved
+ * by the same engine as every runtime gate (no Firestore reads per user).
+ */
+function buildAdminPlanView(uid: string, userData: any, ctx: AdminPlanContext) {
+  const ent = resolveEntitlements({
+    uid,
+    userDoc: userData || {},
+    adminsCollectionFlag: ctx.adminUids.has(uid),
+    platformBillingEnabled: ctx.platformBillingEnabled,
+    planDocs: ctx.plansMap,
+    flags: ctx.flags,
+    now: ctx.now,
+  });
+  const stored = readStoredPlanOverride(userData || {});
+  const legacy = ent.source.adminOverride?.legacy ? ent.source.adminOverride : null;
+  const override = stored || legacy;
+  return {
+    ent,
+    view: {
+      basePlanId: ent.source.basePlan,
+      effectivePlanId: ent.planId,
+      decidedBy: ent.source.decidedBy,
+      subscriptionBlockedReason: ent.source.subscription.blockedReason,
+      planOverride: override
+        ? {
+            ...override,
+            active: stored ? isOverrideActive(stored, ctx.now) : true,
+          }
+        : null,
+    },
+  };
+}
+
 // All routes require admin authentication
 router.use(requireAdmin);
 // In routes/admin.ts
@@ -283,52 +363,36 @@ router.get("/env-sanity", async (req, res) => {
 
     const user = userSnap.data() || {};
 
-    const planId = String(user.planId ?? user.plan ?? "free");
-    const planSnap = await firestore.collection("plans").doc(planId).get();
-    const planDoc = planSnap.exists ? (planSnap.data() as any) : null;
-
-    const limits = (planDoc?.limits || {}) as any;
-    const features = (planDoc?.features || {}) as any;
-
-    const maxDestinations = resolveMaxDestinations(limits);
-
-    const rtmp = Boolean(features.rtmp);
-    const rtmpMultistream = Boolean(
-      features.rtmpMultistream ?? features.multistream ?? planDoc?.multistreamEnabled
-    );
-    const dualRecording = Boolean(features.dualRecording ?? features.dual_recording);
-
-    const gating = {
-      canUseRtmp: rtmp,
-      canUseMultistream: rtmp && rtmpMultistream,
-      canUseDualRecording: dualRecording,
-    };
+    // Same engine as every runtime gate (fresh, not cached).
+    const ent = await getEffectiveEntitlements(uid, { fresh: true });
 
     return res.json({
       user: {
         uid,
         email: adminUser.email,
-        planId,
+        basePlanId: ent.source.basePlan,
+        effectivePlanId: ent.planId,
         planLegacy: user.plan ?? null,
-        adminOverride: Boolean(user.adminOverride),
+        planOverride: ent.source.adminOverride,
         adminOverrideHls: Boolean((user as any).adminOverrideHls),
         admin: user.admin ?? null,
         isAdminUserField: Boolean(user.admin?.isAdmin ?? user.isAdmin),
       },
       plan: {
-        id: planId,
-        exists: Boolean(planDoc),
-        raw: planDoc,
-        limits,
-        features,
-        resolved: {
-          maxDestinations,
-          rtmp,
-          rtmpMultistream,
-          dualRecording,
+        id: ent.planId,
+        exists: Boolean(ent.plan.raw && Object.keys(ent.plan.raw).length),
+        limitsVersion: ent.plan.limitsVersion,
+        raw: ent.plan.raw,
+        features: ent.features,
+        planFeatures: ent.planFeatures,
+        limits: ent.limits,
+        gating: {
+          canUseRtmp: ent.features.multistream,
+          canUseMultistream: ent.features.multistream,
+          canUseDualRecording: ent.features.dualRecording,
         },
-        gating,
       },
+      source: ent.source,
     });
   } catch (err: any) {
     console.error("/api/admin/env-sanity failed:", err);
@@ -347,10 +411,21 @@ router.get("/plans", async (req, res) => {
     const snap = await firestore.collection("plans").get();
     console.log("🎯 3. Firestore returned, docs count:", snap.size);
 
-    const plans = snap.docs.map((d) => ({
-      id: d.id,
-      ...(d.data() as any),
-    }));
+    // `entitlements` is the v2 view the admin editor edits (null = unlimited,
+    // 0 = none), resolved by the same normalizer as every runtime gate.
+    const plans = snap.docs.map((d) => {
+      const data = (d.data() as any) || {};
+      const v2 = normalizePlanDoc(d.id, data);
+      return {
+        id: d.id,
+        ...data,
+        entitlements: {
+          storedLimitsVersion: v2.limitsVersion,
+          features: v2.features,
+          limits: { ...toPlanDocV2(d.id, data).limits },
+        },
+      };
+    });
     return res.json({ plans });
   } catch (err: any) {
     console.error("🎯 ERROR in plans route:", err);
@@ -367,21 +442,65 @@ router.put("/plans/:planId", async (req, res) => {
       return res.status(400).json({ error: "Invalid plan ID format" });
     }
 
-    const updateData = { ...req.body };
-    // Prevent changing the id field
-    if ("id" in updateData) {
-      delete updateData.id;
-    }
+    const body = (req.body && typeof req.body === "object" ? req.body : {}) as any;
     const planRef = firestore.collection("plans").doc(planId);
     const planSnap = await planRef.get();
+    const existing = planSnap.exists ? ((planSnap.data() as any) || {}) : {};
+
+    // Entitlement fields are ALWAYS written in v2 form (null = unlimited,
+    // 0 = none). v2 bodies (limitsVersion: 2) are validated key-by-key on top
+    // of the plan's current meaning; legacy bodies (old admin UI / scripts)
+    // are merged onto the stored doc and converted, preserving their meaning.
+    const current = toPlanDocV2(planId, planSnap.exists ? existing : getCatalogPlan(planId) || {});
+    let features = current.features;
+    let limits = current.limits;
+    if (Number(body.limitsVersion) === PLAN_LIMITS_VERSION) {
+      const { features: f, limits: l, errors } = sanitizePlanV2Input(body);
+      if (errors.length) {
+        return res.status(400).json({ error: "invalid_plan_entitlements", details: errors });
+      }
+      features = { ...features, ...f };
+      limits = { ...limits, ...l };
+    } else if (body.features || body.limits || body.editing || body.caps) {
+      const merged = {
+        ...existing,
+        ...body,
+        features: { ...(existing.features || {}), ...(body.features || {}) },
+        limits: { ...(existing.limits || {}), ...(body.limits || {}) },
+        editing: { ...(existing.editing || {}), ...(body.editing || {}) },
+        caps: { ...(existing.caps || {}), ...(body.caps || {}) },
+      };
+      delete merged.limitsVersion;
+      const converted = toPlanDocV2(planId, merged);
+      features = converted.features;
+      limits = converted.limits;
+    }
+
+    const passthrough: Record<string, any> = {};
+    for (const [k, v] of Object.entries(body)) {
+      if (["id", "features", "limits", "limitsVersion", "caps", "createdAt", "entitlements"].includes(k)) continue;
+      const prev = existing[k];
+      const isPlainObject = (x: any) => !!x && typeof x === "object" && !Array.isArray(x);
+      // mergeFields replaces whole fields: keep untouched nested keys (e.g. editing.ai).
+      passthrough[k] = isPlainObject(v) && isPlainObject(prev) ? { ...prev, ...(v as any) } : v;
+    }
+    const updateData: Record<string, any> = {
+      ...passthrough,
+      limitsVersion: PLAN_LIMITS_VERSION,
+      features,
+      limits,
+      updatedAt: new Date().toISOString(),
+    };
+
     if (!planSnap.exists) {
-      // Create the plan doc if it doesn't exist yet (e.g. first-time setup)
       await planRef.set({ id: planId, ...updateData, createdAt: new Date().toISOString() });
     } else {
-      await planRef.set(updateData, { merge: true });
+      // mergeFields: replace features/limits maps wholesale (no stale legacy keys).
+      await planRef.set(updateData, { mergeFields: Object.keys(updateData) });
     }
+    invalidatePlanCache(planId);
     await logAdminAction(req.adminUser!.uid, "update_plan", { planId, updateData });
-    res.json({ success: true, planId, updated: updateData });
+    res.json({ success: true, planId, updated: updateData, normalized: normalizePlanDoc(planId, { ...existing, ...updateData }) });
   } catch (error: any) {
     console.error("Failed to update plan:", error);
     res.status(500).json({ error: "Failed to update plan" });
@@ -391,117 +510,8 @@ router.put("/plans/:planId", async (req, res) => {
 // ── Seed / ensure all canonical plan documents exist with full features+limits ──
 router.post("/plans/seed", async (req, res) => {
   try {
-    const PLANS: Record<string, any> = {
-      free: {
-        name: "Free",
-        description: "Get started – basic in-room experience",
-        priceMonthly: 0,
-        visibility: "public",
-        features: {
-          recording: false, rtmp: false, multistream: false, dualRecording: false,
-          advancedPermissions: false, allowsOverages: false,
-          canHls: false, hls: false, hlsEnabled: false, hlsCustomizationEnabled: false,
-          invisibleHost: false,
-        },
-        limits: {
-          monthlyMinutesIncluded: 180, transcodeMinutes: 0, maxGuests: 2,
-          rtmpDestinationsMax: 0, maxSessionMinutes: 60, maxRecordingMinutesPerClip: 0, maxHoursPerMonth: 3,
-        },
-        caps: { hlsMaxMinutesPerSession: null },
-        editing: { access: false, maxProjects: 0, maxStorageGB: 0, maxStorageBytes: 0 },
-      },
-      basic: {
-        name: "Basic",
-        description: "For hobbyists – recording & basic editing",
-        priceMonthly: 15,
-        visibility: "public",
-        features: {
-          recording: true, rtmp: false, multistream: false, dualRecording: false,
-          advancedPermissions: false, allowsOverages: false,
-          canHls: false, hls: false, hlsEnabled: false, hlsCustomizationEnabled: false,
-          invisibleHost: false,
-        },
-        limits: {
-          monthlyMinutesIncluded: 360, transcodeMinutes: 0, maxGuests: 4,
-          rtmpDestinationsMax: 0, maxSessionMinutes: 120, maxRecordingMinutesPerClip: 30, maxHoursPerMonth: 6,
-        },
-        caps: { hlsMaxMinutesPerSession: null },
-        editing: { access: true, maxProjects: 2, maxStorageGB: 3, maxStorageBytes: 3 * 1024 * 1024 * 1024 },
-      },
-      starter: {
-        name: "Starter",
-        description: "For growing creators – streaming, recording & editing",
-        priceMonthly: 29,
-        visibility: "public",
-        features: {
-          recording: true, rtmp: true, multistream: true, dualRecording: false,
-          advancedPermissions: false, allowsOverages: false,
-          canHls: false, hls: false, hlsEnabled: false, hlsCustomizationEnabled: false,
-          invisibleHost: false,
-        },
-        limits: {
-          monthlyMinutesIncluded: 600, transcodeMinutes: 60, maxGuests: 5,
-          rtmpDestinationsMax: 3, maxSessionMinutes: 240, maxRecordingMinutesPerClip: 15, maxHoursPerMonth: 10,
-        },
-        caps: { hlsMaxMinutesPerSession: null },
-        editing: { access: true, maxProjects: 5, maxStorageGB: 15, maxStorageBytes: 15 * 1024 * 1024 * 1024 },
-      },
-      pro: {
-        name: "Pro",
-        description: "For professionals – full suite with HLS & overages",
-        priceMonthly: 79,
-        visibility: "public",
-        features: {
-          recording: true, rtmp: true, multistream: true, dualRecording: true,
-          advancedPermissions: false, allowsOverages: true,
-          canHls: true, hls: true, hlsEnabled: true, hlsCustomizationEnabled: true,
-          invisibleHost: true,
-        },
-        limits: {
-          monthlyMinutesIncluded: 2400, transcodeMinutes: 300, maxGuests: 10,
-          rtmpDestinationsMax: 3, maxSessionMinutes: 480, maxRecordingMinutesPerClip: 60, maxHoursPerMonth: 40,
-        },
-        caps: { hlsMaxMinutesPerSession: null },
-        editing: { access: true, maxProjects: 10, maxStorageGB: 25, maxStorageBytes: 25 * 1024 * 1024 * 1024 },
-      },
-      enterprise: {
-        name: "Enterprise",
-        description: "Custom enterprise solution – configured per account",
-        priceMonthly: 0,
-        visibility: "admin",
-        features: {
-          recording: true, rtmp: true, multistream: true, dualRecording: true,
-          advancedPermissions: false, allowsOverages: true,
-          canHls: true, hls: true, hlsEnabled: true, hlsCustomizationEnabled: true,
-          invisibleHost: true,
-        },
-        limits: {
-          monthlyMinutesIncluded: 6000, transcodeMinutes: 1000, maxGuests: 50,
-          rtmpDestinationsMax: 10, maxSessionMinutes: 720, maxRecordingMinutesPerClip: 120, maxHoursPerMonth: 100,
-        },
-        caps: { hlsMaxMinutesPerSession: null },
-        editing: { access: true, maxProjects: 0, maxStorageGB: 0, maxStorageBytes: 0 },
-        customizable: true, contactSales: true,
-      },
-      internal_unlimited: {
-        name: "Internal Unlimited",
-        description: "Internal testing – all features unlocked",
-        priceMonthly: 0,
-        visibility: "admin",
-        features: {
-          recording: true, rtmp: true, multistream: true, dualRecording: true,
-          advancedPermissions: false, allowsOverages: true,
-          canHls: true, hls: true, hlsEnabled: true, hlsCustomizationEnabled: true,
-          invisibleHost: true,
-        },
-        limits: {
-          monthlyMinutesIncluded: 99999, transcodeMinutes: 99999, maxGuests: 100,
-          rtmpDestinationsMax: 10, maxSessionMinutes: 1440, maxRecordingMinutesPerClip: 999, maxHoursPerMonth: 9999,
-        },
-        caps: { hlsMaxMinutesPerSession: null },
-        editing: { access: true, maxProjects: 999, maxStorageGB: 100, maxStorageBytes: 100 * 1024 * 1024 * 1024 },
-      },
-    };
+    // Built-in v2 catalog (null = unlimited, 0 = none); same data as seed-plans.js.
+    const PLANS: Record<string, any> = PLAN_CATALOG_V2;
 
     const results: { created: string[]; updated: string[]; errors: Array<{ planId: string; error: string }> } = {
       created: [], updated: [], errors: [],
@@ -513,13 +523,16 @@ router.post("/plans/seed", async (req, res) => {
         const existingDoc = await docRef.get();
         const payload: any = { ...planData, id: planId, updatedAt: new Date().toISOString() };
         if (!existingDoc.exists) payload.createdAt = new Date().toISOString();
-        await docRef.set(payload, { merge: true });
+        // mergeFields: replace features/limits maps wholesale (drops stale
+        // legacy keys) while preserving unrelated fields such as stripePriceId.
+        await docRef.set(payload, { mergeFields: Object.keys(payload) });
         (existingDoc.exists ? results.updated : results.created).push(planId);
       } catch (err: any) {
         results.errors.push({ planId, error: err?.message || String(err) });
       }
     }
 
+    invalidatePlanCache();
     await logAdminAction(req.adminUser!.uid, "seed_plans", { created: results.created, updated: results.updated, errors: results.errors.length });
     res.json({ success: true, ...results });
   } catch (error: any) {
@@ -550,15 +563,19 @@ router.get("/users", async (req, res) => {
     const snapshot = await query.limit(limit).offset(offset).get();
 
     const now = Date.now();
+    const planCtx = await loadAdminPlanContext();
 
     const users = snapshot.docs.map((doc) => {
       const raw = doc.data() || {};
       const planId = typeof (raw as any).planId === "string" && String((raw as any).planId).trim() ? (raw as any).planId : "free";
       const billingTruth = normalizeBillingTruthFromUser({ ...raw, planId }, now);
+      const { view } = buildAdminPlanView(doc.id, raw, planCtx);
       return {
         uid: doc.id,
         ...toAdminSafeUser(raw),
         planId,
+        // Stripe/base plan vs admin override vs EFFECTIVE plan.
+        ...view,
         billingTruth,
         billingReady: true,
         stripeConnected: Boolean(billingTruth.stripeCustomerId),
@@ -667,7 +684,8 @@ router.get("/users/:userId", async (req, res) => {
     // evaluated exactly like the start gate.
     const status = await getStreamingUsageStatus(userId);
     const currentMonthUsage = status.decision.usedMinutes;
-    const planLimit = status.decision.limitMinutes ?? 0; // 0 = unlimited
+    const planLimitOrNull = status.decision.limitMinutes; // null = unlimited
+    const planLimit = planLimitOrNull ?? 0; // legacy field: 0 = unlimited
     const lifetime = ((userData as any)?.usage?.lifetime || {}) as any;
 
     const userSummary: UserUsageSummary = {
@@ -683,7 +701,20 @@ router.get("/users/:userId", async (req, res) => {
       recentActivity: [],
     };
 
-    res.json(userSummary);
+    const ent = await getEffectiveEntitlements(userId, { fresh: true });
+    const storedOverride = readStoredPlanOverride(userData || {});
+    res.json({
+      ...userSummary,
+      planLimitMinutes: planLimitOrNull,
+      basePlanId: ent.source.basePlan,
+      effectivePlanId: ent.planId,
+      planOverride: storedOverride
+        ? { ...storedOverride, active: isOverrideActive(storedOverride, Date.now()) }
+        : ent.source.adminOverride
+          ? { ...ent.source.adminOverride, active: true }
+          : null,
+      entitlements: serializeEntitlements(ent),
+    });
   } catch (error: any) {
     console.error("Failed to fetch user details:", error);
     res.status(500).json({ error: "Failed to fetch user details" });
@@ -746,7 +777,10 @@ router.post("/users/:userId/grant-minutes", async (req, res) => {
 
 /**
  * POST /api/admin/users/:userId/change-plan
- * Change a user's plan
+ * Set the user's BASE plan (users.planId, normally owned by Stripe/billing).
+ * A paid base plan without a Stripe subscription is billing-blocked (falls
+ * back to Free). To grant a plan without billing, use the admin override:
+ * PUT /api/admin/users/:userId/plan-override.
  */
 router.post("/users/:userId/change-plan", async (req, res) => {
   try {
@@ -779,12 +813,14 @@ const validPlans: string[] = plansSnap.docs.map((d) => d.id);
 
     });
 
+    invalidateEntitlements(userId);
     // Log the action
     await logAdminAction(req.adminUser!.uid, "change_plan", {
       userId,
       oldPlan,
       newPlan,
       reason,
+      kind: "set_base_plan",
     });
 
     console.log(
@@ -801,6 +837,121 @@ const validPlans: string[] = plansSnap.docs.map((d) => d.id);
   } catch (error: any) {
     console.error("Failed to change plan:", error);
     res.status(500).json({ error: "Failed to change plan" });
+  }
+});
+
+/**
+ * PUT /api/admin/users/:userId/plan-override
+ * Body: { planId, reason, expiresAt?, startsAt? }
+ * Admin override: the EFFECTIVE plan becomes planId (no Stripe subscription
+ * required). Stored as users/{uid}.planOverride; replaces legacy
+ * adminOverridePlanId / adminOverride fields. Audit-logged.
+ */
+router.put("/users/:userId/plan-override", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const body = (req.body || {}) as any;
+    const planId = typeof body.planId === "string" ? body.planId.trim() : "";
+    const reason = typeof body.reason === "string" ? body.reason.trim() : "";
+    if (!planId) return res.status(400).json({ error: "planId is required" });
+    if (!reason) return res.status(400).json({ error: "reason is required" });
+
+    const now = Date.now();
+    const parseTime = (v: any): number | null | "invalid" => {
+      if (v === undefined || v === null || v === "") return null;
+      const t = typeof v === "number" ? v : new Date(String(v)).getTime();
+      return Number.isFinite(t) ? t : "invalid";
+    };
+    const expiresAt = parseTime(body.expiresAt);
+    const startsAtRaw = parseTime(body.startsAt);
+    if (expiresAt === "invalid" || startsAtRaw === "invalid") {
+      return res.status(400).json({ error: "invalid_date" });
+    }
+    const startsAt = startsAtRaw ?? now;
+    if (expiresAt !== null && expiresAt <= Math.max(now, startsAt)) {
+      return res.status(400).json({ error: "expiresAt must be in the future" });
+    }
+
+    const planSnap = await firestore.collection("plans").doc(planId).get();
+    if (!planSnap.exists && !getCatalogPlan(planId)) {
+      return res.status(400).json({ error: "Invalid plan", planId });
+    }
+
+    const userRef = firestore.collection("users").doc(userId);
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
+    const before = (userDoc.data() as any) || {};
+
+    const planOverride = {
+      planId,
+      reason,
+      createdBy: req.adminUser!.uid,
+      startsAt,
+      expiresAt,
+      createdAt: now,
+    };
+    await userRef.update({
+      planOverride,
+      adminOverridePlanId: FieldValue.delete(),
+      adminOverride: FieldValue.delete(),
+      updatedAt: new Date(),
+    });
+    invalidateEntitlements(userId);
+
+    await logAdminAction(req.adminUser!.uid, "set_plan_override", {
+      userId,
+      planOverride,
+      previousOverride: before.planOverride ?? null,
+      previousLegacy: {
+        adminOverridePlanId: before.adminOverridePlanId ?? null,
+        adminOverride: before.adminOverride ?? null,
+      },
+    });
+
+    const ent = await getEffectiveEntitlements(userId, { fresh: true });
+    return res.json({ success: true, userId, planOverride, entitlements: serializeEntitlements(ent) });
+  } catch (error: any) {
+    console.error("Failed to set plan override:", error);
+    return res.status(500).json({ error: "Failed to set plan override" });
+  }
+});
+
+/**
+ * DELETE /api/admin/users/:userId/plan-override
+ * Remove the admin override (and any legacy override fields). Audit-logged.
+ */
+router.delete("/users/:userId/plan-override", async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.trim() : undefined;
+    const userRef = firestore.collection("users").doc(userId);
+    const userDoc = await userRef.get();
+    if (!userDoc.exists) return res.status(404).json({ error: "User not found" });
+    const before = (userDoc.data() as any) || {};
+
+    await userRef.update({
+      planOverride: FieldValue.delete(),
+      adminOverridePlanId: FieldValue.delete(),
+      adminOverride: FieldValue.delete(),
+      updatedAt: new Date(),
+    });
+    invalidateEntitlements(userId);
+
+    await logAdminAction(req.adminUser!.uid, "remove_plan_override", {
+      userId,
+      reason,
+      previousOverride: before.planOverride ?? null,
+      previousLegacy: {
+        adminOverridePlanId: before.adminOverridePlanId ?? null,
+        adminOverride: before.adminOverride ?? null,
+      },
+    });
+
+    const ent = await getEffectiveEntitlements(userId, { fresh: true });
+    return res.json({ success: true, userId, entitlements: serializeEntitlements(ent) });
+  } catch (error: any) {
+    console.error("Failed to remove plan override:", error);
+    return res.status(500).json({ error: "Failed to remove plan override" });
   }
 });
 
@@ -830,6 +981,7 @@ router.post("/users/:userId/toggle-billing", async (req, res) => {
       billingEnabled: enabled,
       updatedAt: new Date(),
     });
+    invalidateEntitlements(userId);
 
     // Log the action
     await logAdminAction(req.adminUser!.uid, "toggle_billing", {
@@ -892,151 +1044,9 @@ router.post("/users/:userId/reset-plan-guards", async (req, res) => {
   }
 });
 
-/**
- * POST /api/admin/plans/migrate-schema
- * One-time migration to normalize plan documents in Firestore to the canonical schema.
- *
- * - Renames legacy fields:
- *   - limits.monthlyMinutesIncluded -> limits.monthlyMinutes
- *   - limits.rtmpDestinationsMax / limits.maxDestinations -> limits.rtmpDestinations
- * - Moves any top-level limit fields into limits and removes the legacy copies:
- *   - maxGuests, maxHoursPerMonth, maxDestinations
- * - Ensures feature flags are booleans (default false).
- * - Ensures known numeric limits are numbers (default 0).
- */
-router.post("/plans/migrate-schema", async (req, res) => {
-  try {
-    const snap = await firestore.collection("plans").get();
-    const report: Array<{
-      id: string;
-      updated: boolean;
-      renamed: Record<string, string>;
-      removed: string[];
-      defaultsApplied: string[];
-    }> = [];
-
-    for (const doc of snap.docs) {
-      const id = doc.id;
-      const before = (doc.data() as any) || {};
-      const after = { ...before } as any;
-      const renamed: Record<string, string> = {};
-      const removed: string[] = [];
-      const defaultsApplied: string[] = [];
-
-      const features = { ...(after.features || {}) } as any;
-      const limits = { ...(after.limits || {}) } as any;
-
-      // ---- Rename legacy minute fields ----
-      if (typeof limits.monthlyMinutes === "undefined" && typeof limits.monthlyMinutesIncluded === "number") {
-        limits.monthlyMinutes = limits.monthlyMinutesIncluded;
-        renamed["limits.monthlyMinutesIncluded"] = "limits.monthlyMinutes";
-      }
-      if (Object.prototype.hasOwnProperty.call(limits, "monthlyMinutesIncluded")) {
-        delete limits.monthlyMinutesIncluded;
-        removed.push("limits.monthlyMinutesIncluded");
-      }
-
-      // ---- RTMP destinations: collapse to limits.rtmpDestinations ----
-      if (typeof limits.rtmpDestinations === "undefined") {
-        if (typeof limits.rtmpDestinationsMax === "number") {
-          limits.rtmpDestinations = limits.rtmpDestinationsMax;
-          renamed["limits.rtmpDestinationsMax"] = "limits.rtmpDestinations";
-        } else if (typeof limits.maxDestinations === "number") {
-          limits.rtmpDestinations = limits.maxDestinations;
-          renamed["limits.maxDestinations"] = "limits.rtmpDestinations";
-        }
-      }
-      if (Object.prototype.hasOwnProperty.call(limits, "rtmpDestinationsMax")) {
-        delete limits.rtmpDestinationsMax;
-        removed.push("limits.rtmpDestinationsMax");
-      }
-      if (Object.prototype.hasOwnProperty.call(limits, "maxDestinations")) {
-        delete limits.maxDestinations;
-        removed.push("limits.maxDestinations");
-      }
-
-      // ---- Move any top-level limit fields into limits ----
-      if (typeof after.maxGuests === "number") {
-        if (typeof limits.maxGuests === "undefined") {
-          limits.maxGuests = after.maxGuests;
-          renamed["maxGuests"] = "limits.maxGuests";
-        }
-        delete after.maxGuests;
-        removed.push("maxGuests");
-      }
-
-      if (typeof after.maxHoursPerMonth === "number") {
-        if (typeof limits.maxHoursPerMonth === "undefined") {
-          limits.maxHoursPerMonth = after.maxHoursPerMonth;
-          renamed["maxHoursPerMonth"] = "limits.maxHoursPerMonth";
-        }
-        delete after.maxHoursPerMonth;
-        removed.push("maxHoursPerMonth");
-      }
-
-      // ---- Ensure feature flags are booleans ----
-      const featureKeys = [
-        "recording",
-        "rtmp",
-        "multistream",
-        // "advancedPermissions" is no longer admin-editable; keep any stored
-        // value as-is and treat advanced permissions as removed from plans.
-        "rtmpMultistream",
-        "overagesAllowed",
-      ];
-      for (const key of featureKeys) {
-        if (typeof features[key] !== "boolean") {
-          if (features[key] !== undefined) {
-            defaultsApplied.push(`features.${key}`);
-          }
-          features[key] = !!features[key];
-        }
-      }
-
-      // ---- Ensure known numeric limits are numbers (default 0) ----
-      const limitKeys = [
-        "monthlyMinutes",
-        "participantMinutes",
-        "transcodeMinutes",
-        "maxGuests",
-        "rtmpDestinations",
-        "maxSessionMinutes",
-        "maxRecordingMinutesPerClip",
-        "maxHoursPerMonth",
-      ];
-      for (const key of limitKeys) {
-        const raw = limits[key];
-        if (typeof raw === "undefined") {
-          limits[key] = 0;
-          defaultsApplied.push(`limits.${key}`);
-        } else if (typeof raw !== "number" || Number.isNaN(raw)) {
-          limits[key] = Number(raw) || 0;
-          defaultsApplied.push(`limits.${key}`);
-        }
-      }
-
-      after.features = features;
-      after.limits = limits;
-
-      const updated = JSON.stringify(before) !== JSON.stringify(after);
-      if (updated) {
-        await doc.ref.set(after, { merge: false });
-      }
-
-      report.push({ id, updated, renamed, removed, defaultsApplied });
-    }
-
-    res.json({
-      ok: true,
-      total: snap.size,
-      updated: report.filter((r) => r.updated).length,
-      report,
-    });
-  } catch (error: any) {
-    console.error("plans/migrate-schema failed", error);
-    res.status(500).json({ error: "plans_migrate_schema_failed" });
-  }
-});
+// Plan schema migration is NOT exposed over HTTP. Use the internal CLI:
+//   npx tsx scripts/migratePlansToV2.ts            (dry run)
+//   npx tsx scripts/migratePlansToV2.ts --apply    (write)
 
 /**
  * POST /api/admin/feature-flags/billing
@@ -1086,6 +1096,7 @@ router.post("/feature-flags/billing", async (req, res) => {
     // Invalidate in-memory cache so the new value is visible immediately
     // from subsequent getUserAccount() calls on this instance.
     invalidatePlatformBillingCache();
+    invalidateEntitlements();
 
     await logAdminAction(req.adminUser!.uid, "toggle_billing_system", {
       previousBillingSystemEnabled: previous,
@@ -1147,9 +1158,8 @@ router.get("/usage", async (req, res) => {
       ? usersSnapshot.docs
       : usersSnapshot.docs.filter((doc) => !isDeletedUserRecord(doc.data()));
 
-    // Fetch all plans once for efficiency
-    const plansSnap = await firestore.collection("plans").get();
-    const plansMap = Object.fromEntries(plansSnap.docs.map(d => [d.id, d.data()]));
+    // Plans, flags, admins loaded once; each user resolved by the engine.
+    const planCtx = await loadAdminPlanContext();
 
     const usageData = await Promise.all(
       userDocs.map(async (doc) => {
@@ -1172,22 +1182,20 @@ router.get("/usage", async (req, res) => {
         const overageMinutesTotal = overageStreamingMinutes;
 
         const planIdRaw = userData.planId || "free";
-        // Canonicalize planId using isPlanId
-        const planId: PlanId | string = isPlanId(planIdRaw) ? planIdRaw : planIdRaw;
-        // Effective plan for limits (admin override respected, like the gate).
-        const override = typeof userData.adminOverridePlanId === "string" ? userData.adminOverridePlanId.trim() : "";
-        const effectivePlanId = override || String(planId);
-        const effectivePlan = normalizePlan(effectivePlanId, plansMap[effectivePlanId] || {});
-        const planLimit = Number(effectivePlan.limits.monthlyMinutes || 0); // 0 = unlimited
+        const planId: PlanId | string = planIdRaw;
+        // Effective plan + limits from the same engine as the start gate.
+        const { ent, view } = buildAdminPlanView(userId, userData, planCtx);
+        const effectivePlanId = ent.planId;
+        const planLimit = ent.limits.monthlyStreamingMinutes; // null = unlimited
         const bonusMinutes = Math.max(0, Number(userData.bonusMinutes || 0));
         const gate = evaluateStreamingGate({
           usedMinutes: minutesUsed,
           includedMinutes: planLimit,
           bonusMinutes,
-          planAllowsOverages: !!effectivePlan.features.allowsOverages,
+          planAllowsOverages: !!ent.features.overages,
           overagesEnabled: readOveragesEnabled(userData),
         });
-        const effectiveLimit = gate.limitMinutes ?? 0; // 0 = unlimited
+        const effectiveLimit = gate.limitMinutes; // null = unlimited
 
         // billingEnabled is tri-state in Firestore; missing => true.
         const billingEnabled = userData.billingEnabled === false ? false : true;
@@ -1217,6 +1225,10 @@ router.get("/usage", async (req, res) => {
           destinationMinutes,
           recordingMinutes,
           effectivePlanId,
+          basePlanId: view.basePlanId,
+          planOverride: view.planOverride,
+          decidedBy: view.decidedBy,
+          subscriptionBlockedReason: view.subscriptionBlockedReason,
           unlimited: gate.unlimited,
           overageStreamingMinutes,
           overageParticipantMinutes,
@@ -1225,7 +1237,7 @@ router.get("/usage", async (req, res) => {
           bonusMinutes,
           planLimit,
           effectiveLimit,
-          percentUsed: effectiveLimit > 0 ? (minutesUsed / effectiveLimit) * 100 : 0,
+          percentUsed: effectiveLimit !== null && effectiveLimit > 0 ? (minutesUsed / effectiveLimit) * 100 : effectiveLimit === 0 && minutesUsed > 0 ? 100 : 0,
           // Same decision as the start gate (bonus, override plan, overage opt-in).
           isBlocked: !gate.allowed,
           lastActive: userData.lastActive,
@@ -1528,6 +1540,7 @@ router.post("/features/toggle", async (req, res) => {
       { merge: true }
     );
 
+    invalidatePlatformFlags();
     // Log the action
     await logAdminAction(req.adminUser!.uid, "toggle_feature", {
       featureName,
@@ -1561,19 +1574,9 @@ router.get("/features", async (req, res) => {
 
     // Ensure important flags are visible in the Admin UI even before they have
     // been explicitly created in Firestore.
-    const seededDefaults: Array<{ name: string; enabled: boolean }> = [
-      { name: "hlsSettingsTab", enabled: true },
-      { name: "editorEnabled", enabled: true },
-      { name: "contentLibraryEnabled", enabled: true },
-      { name: "projectsEnabled", enabled: true },
-      { name: "myContentEnabled", enabled: true },
-      { name: "myContentRecordingsEnabled", enabled: true },
-      { name: "audioMixerEnabled", enabled: false },
-      { name: "advancedScreenShareEnabled", enabled: false },
-      { name: "mixedAudioPublishEnabled", enabled: false },
-      { name: "invisibleHostEnabled", enabled: false },
-      { name: "collaboratorDelegationEnabled", enabled: false },
-    ];
+    // Every platform flag from the single defaults table (lib/entitlements/flags.ts),
+    // shown with its effective default until a doc exists.
+    const seededDefaults: Array<{ name: string; enabled: boolean }> = adminSeededFlagList();
 
     const byName = new Map<string, any>();
     snapshot.docs.forEach((doc) => {

@@ -40,6 +40,20 @@ describe("parseUsageSummary", () => {
     expect(m.streaming.overLimit).toBe(false);
   });
 
+  it("0 limit from the streaming block is ZERO, not unlimited", () => {
+    const m = parseUsageSummary({ streaming: { usedMinutes: 0, limitMinutes: 0, unlimited: false } });
+    expect(m.streaming.unlimited).toBe(false);
+    expect(m.streaming.limit).toBe(0);
+    expect(m.streaming.remaining).toBe(0);
+    expect(m.streaming.overLimit).toBe(true);
+  });
+
+  it("storage: storageLimitBytes null = unlimited, 0 = none", () => {
+    expect(parseUsageSummary({ storageUsedGB: 1, storageLimitBytes: null }).storage.limitGB).toBeNull();
+    expect(parseUsageSummary({ storageUsedGB: 0, storageLimitBytes: 0 }).storage.limitGB).toBe(0);
+    expect(parseUsageSummary({ storageLimitBytes: 25 * 1024 * 1024 * 1024 }).storage.limitGB).toBe(25);
+  });
+
   it("falls back to legacy payloads (0 limit = unlimited)", () => {
     const m = parseUsageSummary({ participantMinutes: 30, plan: { id: "pro", limits: { participantMinutes: 0 } } });
     expect(m.streaming.used).toBe(30);
@@ -53,7 +67,8 @@ describe("formatting", () => {
   it("formats used / limit and unlimited", () => {
     expect(formatMinutesOfLimit(42, 180)).toBe("42 / 180 min");
     expect(formatMinutesOfLimit(1234, null)).toBe("1,234 min / Unlimited");
-    expect(formatMinutesOfLimit(5, 0)).toBe("5 min / Unlimited");
+    // 0 = none included (never unlimited)
+    expect(formatMinutesOfLimit(5, 0)).toBe("5 / 0 min");
   });
 
   it("formats the single UTC reset date", () => {
@@ -65,5 +80,6 @@ describe("formatting", () => {
     expect(usagePercent(90, 180)).toBe(50);
     expect(usagePercent(400, 180)).toBe(100);
     expect(usagePercent(400, null)).toBe(0);
+    expect(usagePercent(0, 0)).toBe(100);
   });
 });

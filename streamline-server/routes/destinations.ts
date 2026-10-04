@@ -3,7 +3,8 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { Router } from "express";
 import { randomUUID } from "crypto";
 import { firestore } from "../firebaseAdmin";
-import { resolveMaxDestinations } from "../lib/planLimits";
+import { getEffectiveEntitlements, checkFeature, hasRoomFor, type Limit } from "../lib/entitlements";
+import { isDisableOnlyUpdate } from "../lib/entitlements/cleanupPolicy";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import type { DestinationStatus, DestinationStatusReason, ApiErrorCode, DestinationItem, DestinationsGetResponse, DestinationPostResponse, ValidateRequestBody, ValidateResponse } from "../types/streaming";
@@ -66,12 +67,10 @@ router.get("/", requireAuth, async (req: any, res) => {
     const uid = req.user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    if (!assertPlatformTranscodeEnabled(res)) return;
-
-    const limit = await getPlanLimit(uid);
-    if (!limit || limit < 1) {
-      return res.status(403).json({ error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED });
-    }
+    // Reading the caller's own destinations is never gated by plan, platform
+    // switches or PLATFORM_TRANSCODE_ENABLED (they must be able to clean up).
+    const access = await getDestinationAccess(uid);
+    const limit = access.limit;
 
     const platform = req.query.platform ? String(req.query.platform).trim().toLowerCase() : "";
     const includeDisabled = req.query.includeDisabled === "true" || req.query.includeDisabled === true ? true : false;
@@ -86,7 +85,7 @@ router.get("/", requireAuth, async (req: any, res) => {
     const snap = await q.get();
     const items = snap.docs.map(toItem);
 
-    const payload: DestinationsGetResponse = { ok: true, items, usedCount: items.length, limit };
+    const payload: DestinationsGetResponse = { ok: true, items, usedCount: items.length, limit, entitled: access.allowed } as any;
     return res.json(payload);
   } catch (err: any) {
     console.error("GET /api/destinations error:", err);
@@ -94,17 +93,25 @@ router.get("/", requireAuth, async (req: any, res) => {
   }
 });
 
-async function getPlanLimit(uid: string): Promise<number | undefined> {
-  const userSnap = await firestore.collection("users").doc(uid).get();
-  const planId = String((userSnap.data() || {}).planId || "free");
-  const planSnap = await firestore.collection("plans").doc(planId).get();
-  if (planSnap.exists) {
-    const limits = (planSnap.data() || {}).limits || {};
-    const resolved = resolveMaxDestinations(limits);
-    const limit = resolved > 0 ? resolved : undefined;
-    return limit;
+/**
+ * Destinations access from the EFFECTIVE entitlements (admin override /
+ * platform admin / base plan). limit: null = unlimited, 0 = none.
+ */
+async function getDestinationAccess(uid: string): Promise<{ allowed: boolean; code?: string; reason?: string; limit: Limit }> {
+  const ent = await getEffectiveEntitlements(uid);
+  const check = checkFeature(ent, "multistream");
+  return { allowed: check.allowed, code: check.code, reason: check.reason, limit: ent.limits.destinations };
+}
+
+/** Create/use gate: transcode switch + multistream feature. Sends the error; returns null when denied. */
+async function requireDestinationAccess(uid: string, res: any): Promise<{ limit: Limit } | null> {
+  if (!assertPlatformTranscodeEnabled(res)) return null;
+  const access = await getDestinationAccess(uid);
+  if (!access.allowed) {
+    res.status(403).json({ error: access.code || LIMIT_ERRORS.FEATURE_NOT_ENTITLED, reason: access.reason });
+    return null;
   }
-  return undefined;
+  return { limit: access.limit };
 }
 
 async function getEnabledCount(uid: string): Promise<number> {
@@ -118,12 +125,9 @@ router.post("/", requireAuth, async (req: any, res) => {
     const uid = req.user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    if (!assertPlatformTranscodeEnabled(res)) return;
-
-    const planLimit = await getPlanLimit(uid);
-    if (!planLimit || planLimit < 1) {
-      return res.status(403).json({ error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED });
-    }
+    const gate = await requireDestinationAccess(uid, res);
+    if (!gate) return;
+    const planLimit = gate.limit; // null = unlimited
     const { platform, name, rtmpUrlBase, streamKeyEnc, streamKeyPlain, enabled, mode, persistent, oauthRef } = req.body || {};
     if (!platform || !rtmpUrlBase) {
       return res.status(400).json({ error: "missing_required_fields" as ApiErrorCode, details: "platform and rtmpUrlBase are required" });
@@ -136,7 +140,7 @@ router.post("/", requireAuth, async (req: any, res) => {
     // Enforce plan limit for enabled destinations
     const enabledCount = await getEnabledCount(uid);
     const willBeEnabled = enabled === false ? false : true;
-    if (willBeEnabled && planLimit !== undefined && planLimit > 0 && enabledCount >= planLimit) {
+    if (willBeEnabled && !hasRoomFor(enabledCount, planLimit)) {
       return res.status(409).json({ error: LIMIT_ERRORS.LIMIT_EXCEEDED });
     }
 
@@ -225,12 +229,7 @@ router.post("/validate", requireAuth, async (req: any, res) => {
     const uid = req.user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    if (!assertPlatformTranscodeEnabled(res)) return;
-
-    const planLimit = await getPlanLimit(uid);
-    if (!planLimit || planLimit < 1) {
-      return res.status(403).json({ error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED });
-    }
+    if (!(await requireDestinationAccess(uid, res))) return;
     const body: ValidateRequestBody = req.body || ({} as any);
     if (!body.platform || !body.rtmpUrlBase) {
       return res.status(400).json({ error: "missing_required_fields" as ApiErrorCode });
@@ -262,12 +261,7 @@ router.post("/:id/validate", requireAuth, async (req: any, res) => {
     const uid = req.user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    if (!assertPlatformTranscodeEnabled(res)) return;
-
-    const planLimit = await getPlanLimit(uid);
-    if (!planLimit || planLimit < 1) {
-      return res.status(403).json({ error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED });
-    }
+    // Read-only check of the caller's own destination: never gated.
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ error: "invalid_query" as ApiErrorCode });
 
@@ -289,15 +283,19 @@ router.put("/:id", requireAuth, async (req: any, res) => {
     const uid = req.user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    if (!assertPlatformTranscodeEnabled(res)) return;
-
-    const planLimit = await getPlanLimit(uid);
-    if (!planLimit || planLimit < 1) {
-      return res.status(403).json({ error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED });
-    }
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ error: "invalid_query" as ApiErrorCode });
     const updates = req.body || {};
+
+    // Disabling a destination and/or clearing its stored key is cleanup: never
+    // gated. Any other change (enable, rename, new key) requires the entitlement.
+    const disableOnly = isDisableOnlyUpdate(updates);
+    let planLimit: Limit = null;
+    if (!disableOnly) {
+      const gate = await requireDestinationAccess(uid, res);
+      if (!gate) return;
+      planLimit = gate.limit;
+    }
 
     const ref = firestore.collection("users").doc(uid).collection("destinations").doc(id);
     const snap = await ref.get();
@@ -373,7 +371,7 @@ router.put("/:id", requireAuth, async (req: any, res) => {
     const enabledCount = await getEnabledCount(uid);
     const currentEnabled = !!current.enabled;
     const nextEnabled = typeof updates.enabled === "boolean" ? !!updates.enabled : currentEnabled;
-    if (!currentEnabled && nextEnabled && planLimit !== undefined && planLimit > 0 && enabledCount >= planLimit) {
+    if (!currentEnabled && nextEnabled && !hasRoomFor(enabledCount, planLimit)) {
       return res.status(409).json({ error: LIMIT_ERRORS.LIMIT_EXCEEDED });
     }
 
@@ -406,12 +404,8 @@ router.delete("/:id", requireAuth, async (req: any, res) => {
     const uid = req.user?.uid;
     if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-    if (!assertPlatformTranscodeEnabled(res)) return;
-
-    const planLimit = await getPlanLimit(uid);
-    if (!planLimit || planLimit < 1) {
-      return res.status(403).json({ error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED });
-    }
+    // Deleting a destination / stream key is cleanup: never gated by plan,
+    // platform switches or PLATFORM_TRANSCODE_ENABLED.
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ error: "invalid_query" as ApiErrorCode });
 

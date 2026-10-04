@@ -51,7 +51,7 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { reserveStorageIfAvailable, releaseReservedStorage } from "../usageHelper";
 import { createDiskUpload, cleanupUploadedFile, MAX_UPLOAD_BYTES, type UploadedDiskFile } from "../lib/diskUpload";
-import { requireContentLibraryUploadsEnabled } from "./editing";
+import { assertCanCreateProject, requireContentLibraryUploadsEnabled } from "./editing";
 
 const router = Router();
 // Spool uploads to os.tmpdir() (not RAM) and stream them to R2.
@@ -94,6 +94,10 @@ router.post("/", requireAuth, async (req: any, res) => {
 
     const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
     if (!name) return res.status(400).json({ error: "Project name is required" });
+
+    // Same gate as /api/editing/projects: projects platform switch, the
+    // effective plan's projects feature and limits.projects (null = unlimited).
+    if (!(await assertCanCreateProject(req, res))) return;
 
     const project = await createProject({
       ownerId: uid,

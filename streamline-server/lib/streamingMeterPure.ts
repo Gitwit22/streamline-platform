@@ -340,8 +340,11 @@ export function legacyStreamingSeed(usageDoc: any): number {
 
 export type StreamingGateInput = {
   usedMinutes: number;
-  /** Plan monthly included minutes (limits.monthlyMinutes). <= 0 means unlimited. */
-  includedMinutes: number;
+  /**
+   * Plan monthly streaming minutes (ent.limits.monthlyStreamingMinutes).
+   * null = unlimited, 0 = none included (bonus minutes still apply).
+   */
+  includedMinutes: number | null;
   /** users.bonusMinutes, added on top of the plan allowance every month. */
   bonusMinutes?: number;
   planAllowsOverages: boolean;
@@ -368,11 +371,10 @@ export type StreamingGateDecision = {
 
 export function evaluateStreamingGate(input: StreamingGateInput): StreamingGateDecision {
   const used = Math.max(0, num(input.usedMinutes));
-  const included = num(input.includedMinutes);
   const bonus = Math.max(0, num(input.bonusMinutes));
   const overagesActive = !!input.planAllowsOverages && !!input.overagesEnabled;
 
-  if (included <= 0) {
+  if (input.includedMinutes === null || input.includedMinutes === undefined) {
     return {
       allowed: true,
       unlimited: true,
@@ -385,6 +387,7 @@ export function evaluateStreamingGate(input: StreamingGateInput): StreamingGateD
     };
   }
 
+  const included = Math.max(0, num(input.includedMinutes));
   const limit = included + bonus;
   const overLimit = used >= limit;
   const base: StreamingGateDecision = {
@@ -422,15 +425,19 @@ export function shouldStopForMonthlyLimit(
   return decision.usedMinutes >= decision.limitMinutes + Math.max(0, num(graceMinutes));
 }
 
-/** Mid-session: plan limits.maxSessionMinutes (0/unset = no cap), measured from the room's earliest open output. */
+/**
+ * Mid-session: plan limits.maxSessionMinutes (null = no cap, 0 = no session
+ * time at all), measured from the room's earliest open output.
+ */
 export function shouldStopForSessionCap(params: {
   sessionStartMs: number | null;
   nowMs: number;
-  maxSessionMinutes: number;
+  maxSessionMinutes: number | null;
   graceMinutes?: number;
 }): boolean {
-  const max = num(params.maxSessionMinutes);
-  if (max <= 0 || params.sessionStartMs === null || !Number.isFinite(params.sessionStartMs)) return false;
+  if (params.maxSessionMinutes === null || params.maxSessionMinutes === undefined) return false;
+  const max = Math.max(0, num(params.maxSessionMinutes));
+  if (params.sessionStartMs === null || !Number.isFinite(params.sessionStartMs)) return false;
   const grace = Math.max(0, num(params.graceMinutes ?? DEFAULT_LIMIT_GRACE_MINUTES));
   return params.nowMs - params.sessionStartMs >= (max + grace) * MINUTE_MS;
 }

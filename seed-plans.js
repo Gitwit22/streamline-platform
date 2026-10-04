@@ -1,10 +1,10 @@
 /**
  * StreamLine Complete Plans Seed Script
  *
- * Seeds / updates the `plans` collection in Firestore with ALL fields:
- *   - features (recording, rtmp, multistream, hls, overages…)
- *   - limits   (monthlyMinutes, maxGuests, transcodeMinutes, destinations…)
- *   - editing  (access, maxProjects, maxStorageGB…)
+ * Seeds / updates the `plans` collection in Firestore in the v2 entitlement
+ * format (limitsVersion: 2 — null = UNLIMITED, 0 = NONE):
+ *   - features (multistream, recording, hls, editing, projects, overages…)
+ *   - limits   (monthlyStreamingMinutes, destinations, guests, storageBytes…)
  *   - metadata (name, description, priceMonthly, visibility)
  *
  * Run from the project ROOT folder. It writes to whatever Firebase project the
@@ -14,7 +14,7 @@
  * Without them it prints the target project and the plans it would write,
  * then exits without touching Firestore.
  *
- * Uses merge: true so existing fields that are NOT in this script
+ * Uses mergeFields so existing fields that are NOT in this script
  * (e.g. Stripe-related fields set by admin UI) are preserved.
  */
 
@@ -71,248 +71,165 @@ let db = null;
 
 // ─── Plan Definitions ────────────────────────────────────────────────
 // Every plan that exists in PLAN_IDS must have a document here.
-// Fields match what normalizePlan / featureAccess / effectiveEntitlements expect.
+// v2 convention (limitsVersion: 2): null = UNLIMITED, 0 = NONE.
+// Keep in sync with streamline-server/lib/entitlements/planCatalog.ts.
+
+const GB = 1024 * 1024 * 1024;
+
+function features(on) {
+  return {
+    multistream: false,
+    recording: false,
+    dualRecording: false,
+    hls: false,
+    hlsCustomization: false,
+    editing: false,
+    projects: false,
+    contentLibrary: false,
+    monetization: false,
+    payPerView: false,
+    invisibleHost: false,
+    overages: false,
+    watermark: false,
+    ...on,
+  };
+}
+
+const ALL_ON = features({
+  multistream: true,
+  recording: true,
+  dualRecording: true,
+  hls: true,
+  hlsCustomization: true,
+  editing: true,
+  projects: true,
+  contentLibrary: true,
+  monetization: true,
+  payPerView: true,
+  invisibleHost: true,
+  overages: true,
+});
 
 const PLANS = {
   free: {
+    limitsVersion: 2,
     name: "Free",
     description: "Get started – basic in-room experience",
     priceMonthly: 0,
     visibility: "public",
-    features: {
-      recording: false,
-      rtmp: false,
-      multistream: false,
-      dualRecording: false,
-      advancedPermissions: false,
-      allowsOverages: false,
-      canHls: false,
-      hls: false,
-      hlsEnabled: false,
-      hlsCustomizationEnabled: false,
-      monetization: false,
-      payPerView: false,
-      invisibleHost: false,
-    },
+    features: features({}),
     limits: {
-      monthlyMinutesIncluded: 180,   // 3 hours
-      transcodeMinutes: 0,
-      maxGuests: 2,
-      rtmpDestinationsMax: 0,
+      monthlyStreamingMinutes: 180,
+      destinations: 0,
+      guests: 2,
+      storageBytes: 0,
+      recordingMinutesPerClip: 0,
       maxSessionMinutes: 60,
-      maxRecordingMinutesPerClip: 0,
-      maxHoursPerMonth: 3,
-    },
-    caps: {
+      projects: 0,
       hlsMaxMinutesPerSession: null,
-    },
-    editing: {
-      access: false,
-      maxProjects: 0,
-      maxStorageGB: 0,
-      maxStorageBytes: 0,
+      maxPresetId: null,
     },
   },
 
   basic: {
+    limitsVersion: 2,
     name: "Basic",
     description: "For hobbyists – recording & basic editing",
     priceMonthly: 15,
     visibility: "public",
-    features: {
-      recording: true,
-      rtmp: false,
-      multistream: false,
-      dualRecording: false,
-      advancedPermissions: false,
-      allowsOverages: false,
-      canHls: false,
-      hls: false,
-      hlsEnabled: false,
-      hlsCustomizationEnabled: false,
-      monetization: false,
-      payPerView: false,
-      invisibleHost: false,
-    },
+    features: features({ recording: true, editing: true, projects: true, contentLibrary: true }),
     limits: {
-      monthlyMinutesIncluded: 360,   // 6 hours
-      transcodeMinutes: 0,
-      maxGuests: 4,
-      rtmpDestinationsMax: 0,
+      monthlyStreamingMinutes: 360,
+      destinations: 0,
+      guests: 4,
+      storageBytes: 3 * GB,
+      recordingMinutesPerClip: 30,
       maxSessionMinutes: 120,
-      maxRecordingMinutesPerClip: 30,
-      maxHoursPerMonth: 6,
-    },
-    caps: {
+      projects: 2,
       hlsMaxMinutesPerSession: null,
-    },
-    editing: {
-      access: true,
-      maxProjects: 2,
-      maxStorageGB: 3,
-      maxStorageBytes: 3 * 1024 * 1024 * 1024,
+      maxPresetId: null,
     },
   },
 
   starter: {
+    limitsVersion: 2,
     name: "Starter",
     description: "For growing creators – streaming, recording & editing",
     priceMonthly: 29,
     visibility: "public",
-    features: {
-      recording: true,
-      rtmp: true,
-      multistream: true,
-      dualRecording: false,
-      advancedPermissions: false,
-      allowsOverages: false,
-      canHls: false,
-      hls: false,
-      hlsEnabled: false,
-      hlsCustomizationEnabled: false,
-      monetization: false,
-      payPerView: false,
-      invisibleHost: false,
-    },
+    features: features({ multistream: true, recording: true, editing: true, projects: true, contentLibrary: true }),
     limits: {
-      monthlyMinutesIncluded: 600,   // 10 hours
-      transcodeMinutes: 60,
-      maxGuests: 5,
-      rtmpDestinationsMax: 3,
+      monthlyStreamingMinutes: 600,
+      destinations: 3,
+      guests: 5,
+      storageBytes: 15 * GB,
+      recordingMinutesPerClip: 15,
       maxSessionMinutes: 240,
-      maxRecordingMinutesPerClip: 15,
-      maxHoursPerMonth: 10,
-    },
-    caps: {
+      projects: 5,
       hlsMaxMinutesPerSession: null,
-    },
-    editing: {
-      access: true,
-      maxProjects: 5,
-      maxStorageGB: 15,
-      maxStorageBytes: 15 * 1024 * 1024 * 1024,
+      maxPresetId: null,
     },
   },
 
   pro: {
+    limitsVersion: 2,
     name: "Pro",
     description: "For professionals – full suite with HLS & overages",
     priceMonthly: 79,
     visibility: "public",
-    features: {
-      recording: true,
-      rtmp: true,
-      multistream: true,
-      dualRecording: true,
-      advancedPermissions: false,
-      allowsOverages: true,
-      canHls: true,
-      hls: true,
-      hlsEnabled: true,
-      hlsCustomizationEnabled: true,
-      monetization: true,
-      payPerView: true,
-      invisibleHost: true,
-    },
+    features: { ...ALL_ON },
     limits: {
-      monthlyMinutesIncluded: 2400,  // 40 hours
-      transcodeMinutes: 300,
-      maxGuests: 10,
-      rtmpDestinationsMax: 3,
+      monthlyStreamingMinutes: 2400,
+      destinations: 3,
+      guests: 10,
+      storageBytes: 25 * GB,
+      recordingMinutesPerClip: 60,
       maxSessionMinutes: 480,
-      maxRecordingMinutesPerClip: 60,
-      maxHoursPerMonth: 40,
-    },
-    caps: {
+      projects: 10,
       hlsMaxMinutesPerSession: null,
-    },
-    editing: {
-      access: true,
-      maxProjects: 10,
-      maxStorageGB: 25,
-      maxStorageBytes: 25 * 1024 * 1024 * 1024,
+      maxPresetId: null,
     },
   },
 
   enterprise: {
+    limitsVersion: 2,
     name: "Enterprise",
     description: "Custom enterprise solution – configured per account",
     priceMonthly: 0,
     visibility: "admin",
-    features: {
-      recording: true,
-      rtmp: true,
-      multistream: true,
-      dualRecording: true,
-      advancedPermissions: false,
-      allowsOverages: true,
-      canHls: true,
-      hls: true,
-      hlsEnabled: true,
-      hlsCustomizationEnabled: true,
-      monetization: true,
-      payPerView: true,
-      invisibleHost: true,
-    },
+    features: { ...ALL_ON },
     limits: {
-      monthlyMinutesIncluded: 6000,
-      transcodeMinutes: 1000,
-      maxGuests: 50,
-      rtmpDestinationsMax: 10,
+      monthlyStreamingMinutes: 6000,
+      destinations: 10,
+      guests: 50,
+      storageBytes: null,
+      recordingMinutesPerClip: 120,
       maxSessionMinutes: 720,
-      maxRecordingMinutesPerClip: 120,
-      maxHoursPerMonth: 100,
-    },
-    caps: {
+      projects: null,
       hlsMaxMinutesPerSession: null,
-    },
-    editing: {
-      access: true,
-      maxProjects: 0,
-      maxStorageGB: 0,
-      maxStorageBytes: 0,
+      maxPresetId: null,
     },
     customizable: true,
     contactSales: true,
   },
 
   internal_unlimited: {
+    limitsVersion: 2,
     name: "Internal Unlimited",
     description: "Internal testing – all features unlocked",
     priceMonthly: 0,
     visibility: "admin",
-    features: {
-      recording: true,
-      rtmp: true,
-      multistream: true,
-      dualRecording: true,
-      advancedPermissions: false,
-      allowsOverages: true,
-      canHls: true,
-      hls: true,
-      hlsEnabled: true,
-      hlsCustomizationEnabled: true,
-      monetization: true,
-      payPerView: true,
-      invisibleHost: true,
-    },
+    features: { ...ALL_ON },
     limits: {
-      monthlyMinutesIncluded: 99999,
-      transcodeMinutes: 99999,
-      maxGuests: 100,
-      rtmpDestinationsMax: 10,
-      maxSessionMinutes: 1440,
-      maxRecordingMinutesPerClip: 999,
-      maxHoursPerMonth: 9999,
-    },
-    caps: {
+      monthlyStreamingMinutes: null,
+      destinations: null,
+      guests: null,
+      storageBytes: null,
+      recordingMinutesPerClip: null,
+      maxSessionMinutes: null,
+      projects: null,
       hlsMaxMinutesPerSession: null,
-    },
-    editing: {
-      access: true,
-      maxProjects: 999,
-      maxStorageGB: 100,
-      maxStorageBytes: 100 * 1024 * 1024 * 1024,
+      maxPresetId: null,
     },
   },
 };
@@ -356,8 +273,9 @@ async function seedPlans() {
         payload.createdAt = admin.firestore.FieldValue.serverTimestamp();
       }
 
-      // merge: true preserves fields like stripePriceId set by admin UI
-      await docRef.set(payload, { merge: true });
+      // mergeFields replaces features/limits wholesale (no stale legacy keys)
+      // while preserving fields like stripePriceId set by the admin UI.
+      await docRef.set(payload, { mergeFields: Object.keys(payload) });
 
       if (existingDoc.exists) {
         console.log(`  [update]  ${planId} (${planData.name})`);

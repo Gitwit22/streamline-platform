@@ -18,7 +18,7 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
-import { resolveMaxDestinations } from "../lib/planLimits";
+import { hasRoomFor } from "../lib/entitlements";
 import { checkStreamingStartGate, closeOutputIntervals, openOutputInterval, streamingGateErrorBody } from "../lib/streamingMeter";
 import { OUTPUT_FORMAT_DIMENSIONS } from "../lib/roomLayout";
 import { logDelegatedRoomAction } from "../lib/collaborators";
@@ -329,10 +329,11 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
     // URL - direct platform keys, saved destinations, standalone session keys
     // and Instagram.
     try {
+      // limits.destinations: null = unlimited, 0 = none (never "no cap").
       const capEntitlements = await getEffectiveEntitlements(ownerUid);
-      const maxDestinations = resolveMaxDestinations(capEntitlements.limits);
+      const maxDestinations = capEntitlements.limits.destinations;
       const requestedDestinations = urls.length + instagramUrls.length;
-      if (maxDestinations > 0 && requestedDestinations > maxDestinations) {
+      if (!hasRoomFor(0, maxDestinations, requestedDestinations)) {
         return res.status(403).json({
           error: "destination_limit_exceeded",
           limit: maxDestinations,

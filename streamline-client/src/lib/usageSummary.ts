@@ -45,20 +45,29 @@ export function parseUsageSummary(data: any): UsageSummaryModel {
   const legacyUsage = data?.usageMonthly?.usage || {};
   const used = num(s.usedMinutes ?? legacyUsage.streamingMinutes ?? data?.participantMinutes);
 
-  // Server sends limitMinutes=null for unlimited. Older payloads only had
-  // plan.limits.participantMinutes where 0 meant unlimited.
+  // Server convention: limitMinutes null = unlimited, 0 = none included.
+  // Older payloads only had plan.limits.participantMinutes where 0 meant unlimited.
   let limit: number | null;
   if (s && Object.prototype.hasOwnProperty.call(s, "limitMinutes")) {
     limit = numOrNull(s.limitMinutes);
+    if (limit !== null) limit = Math.max(0, limit);
   } else {
     const legacyLimit = num(data?.plan?.limits?.participantMinutes);
     limit = legacyLimit > 0 ? legacyLimit : null;
   }
-  const unlimited = limit === null || limit <= 0;
-  if (unlimited) limit = null;
+  const unlimited = limit === null;
 
   const byOutput = s.byOutput || {};
-  const storageLimit = num(data?.storageLimitGB ?? data?.plan?.limits?.storageGB);
+  // Storage: storageLimitBytes null = unlimited, 0 = none. Older payloads used
+  // storageLimitGB with 0 = unlimited.
+  const storageLimitGB: number | null = (() => {
+    if (data && Object.prototype.hasOwnProperty.call(data, "storageLimitBytes")) {
+      if (data.storageLimitBytes === null) return null;
+      return Math.round((num(data.storageLimitBytes) / (1024 * 1024 * 1024)) * 100) / 100;
+    }
+    const legacy = num(data?.storageLimitGB ?? data?.plan?.limits?.storageGB);
+    return legacy > 0 ? legacy : null;
+  })();
 
   return {
     streaming: {
@@ -76,7 +85,7 @@ export function parseUsageSummary(data: any): UsageSummaryModel {
       destinationMinutes: num(s.destinationMinutes),
     },
     recordingMinutes: num(data?.recording?.minutes ?? legacyUsage.recordingMinutes),
-    storage: { usedGB: num(data?.storageUsedGB), limitGB: storageLimit > 0 ? storageLimit : null },
+    storage: { usedGB: num(data?.storageUsedGB), limitGB: storageLimitGB },
     resetDate: typeof data?.resetDate === "string" ? data.resetDate : null,
     lifetime: {
       streamingMinutes: num(data?.lifetime?.streamingMinutes),
@@ -85,10 +94,10 @@ export function parseUsageSummary(data: any): UsageSummaryModel {
   };
 }
 
-/** "42 / 180 min", "42 min / Unlimited". */
+/** "42 / 180 min", "42 min / Unlimited" (null = unlimited; 0 is a real zero). */
 export function formatMinutesOfLimit(used: number, limit: number | null): string {
   const u = Math.max(0, Math.round(num(used)));
-  if (limit === null || !(limit > 0)) return `${u.toLocaleString("en-US")} min / Unlimited`;
+  if (limit === null || !Number.isFinite(Number(limit))) return `${u.toLocaleString("en-US")} min / Unlimited`;
   return `${u.toLocaleString("en-US")} / ${Math.round(limit).toLocaleString("en-US")} min`;
 }
 
@@ -101,8 +110,9 @@ export function formatUsageResetDate(iso: string | null): string {
   return `Resets ${label} (UTC)`;
 }
 
-/** Percent for a usage bar; 0 when unlimited. */
+/** Percent for a usage bar; 0 when unlimited, 100 when the limit is 0 (none). */
 export function usagePercent(used: number, limit: number | null): number {
-  if (limit === null || !(limit > 0)) return 0;
+  if (limit === null || !Number.isFinite(Number(limit))) return 0;
+  if (limit <= 0) return 100;
   return Math.min(100, (Math.max(0, num(used)) / limit) * 100);
 }

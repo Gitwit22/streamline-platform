@@ -4,6 +4,12 @@ import { normalizeBillingTruthFromUser } from "./billingTruth";
 
 export interface UserAccount {
   uid: string;
+  /**
+   * BASE (billing) plan only, coerced to a known PlanId. Never use it for
+   * feature/limit decisions: read the EFFECTIVE plan from
+   * getEffectiveEntitlements() (lib/entitlements), which applies admin
+   * overrides, platform admins, billing blocks and custom plan docs.
+   */
   planId: PlanId;
   /** Per-user billing toggle (tri-state, defaults to true when missing). */
   billingEnabled: boolean;
@@ -27,7 +33,7 @@ let cachedPlatformBillingEnabled: boolean | null = null;
 let cachedPlatformBillingEnabledAt = 0;
 const PLATFORM_BILLING_TTL_MS = 30 * 1000; // ~30 seconds
 
-async function getPlatformBillingEnabled(): Promise<boolean> {
+export async function getPlatformBillingEnabled(): Promise<boolean> {
   const now = Date.now();
   if (
     cachedPlatformBillingEnabled !== null &&

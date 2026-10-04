@@ -3,10 +3,10 @@ import express from "express";
 import { requireAuth } from "../middleware/requireAuth";
 import { firestore } from "../firebaseAdmin";
 import { getNextUsageResetDate } from "../lib/usageTracker";
-import { resolveMaxDestinations } from "../lib/planLimits";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { LEGACY_UNLIMITED_COUNT, serializeEntitlements } from "../lib/entitlements";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
-import { getCurrentStorageUsage, resolveMaxStorageBytesFromPlan } from "../usageHelper";
+import { getCurrentStorageUsage } from "../usageHelper";
 import { getStreamingUsageStatus, readOveragesEnabled } from "../lib/streamingMeter";
 
 const router = express.Router();
@@ -35,10 +35,9 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
   const { decision, monthKey, entitlements } = status;
   const userData = status.userDoc || {};
   const usageMonthly = status.usageDoc || {};
-  const plan = entitlements.plan;
   const planId = entitlements.planId;
-  const features = plan.features;
-  const limits = plan.limits as any;
+  const features = entitlements.features;
+  const limits = entitlements.limits; // null = unlimited, 0 = none
 
   const toNumber = (value: any) => {
     const num = Number(value);
@@ -53,7 +52,7 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
   // Gated monthly streaming minutes (union of output time; never multiplied by destinations).
   const streamingUsed = decision.usedMinutes;
   const streamingLimit = decision.limitMinutes; // null = unlimited (includes bonus minutes)
-  const includedMinutes = toNumber(entitlements.limits.monthlyMinutes);
+  const includedMinutes = limits.monthlyStreamingMinutes; // null = unlimited
   const bonusMinutes = Math.max(0, toNumber(userData.bonusMinutes));
 
   const byOutput = {
@@ -72,10 +71,10 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
 
   // ── Storage accounting ──
   const storageUsedBytes = await getCurrentStorageUsage(uid);
-  const maxStorageBytes = resolveMaxStorageBytesFromPlan(plan.raw || {});
+  const maxStorageBytes = limits.storageBytes; // null = unlimited, 0 = none
   const GB = 1024 * 1024 * 1024;
   const storageUsedGB = Math.round((storageUsedBytes / GB) * 100) / 100;
-  const storageLimitGB = Math.round((maxStorageBytes / GB) * 100) / 100;
+  const storageLimitGB = maxStorageBytes === null ? null : Math.round((maxStorageBytes / GB) * 100) / 100;
 
   const billableOverage = toNumber(overages.streamingMinutes ?? overages.participantMinutes);
 
@@ -91,7 +90,7 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
       // Canonical streaming meter block.
       streaming: {
         usedMinutes: streamingUsed,
-        includedMinutes: includedMinutes > 0 ? includedMinutes : null,
+        includedMinutes,
         bonusMinutes,
         limitMinutes: streamingLimit,
         unlimited: decision.unlimited,
@@ -118,11 +117,13 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
       participantMinutes: streamingUsed,
       transcodeMinutes: streamingUsed,
 
-      // Storage accounting fields (bytes are source of truth, GB for display)
+      // Storage accounting fields (bytes are source of truth, GB for display).
+      // Limits: null = unlimited, 0 = no storage included.
       storageUsedBytes,
       storageLimitBytes: maxStorageBytes,
       storageUsedGB,
       storageLimitGB,
+      storageUnlimited: maxStorageBytes === null,
 
       billing: {
         overagesEnabled: readOveragesEnabled(userData),
@@ -131,25 +132,27 @@ export async function computeUsageSummaryResult(uid: string): Promise<UsageSumma
 
       plan: {
         id: planId,
-        name: plan.name,
-        priceMonthly: (plan as any).priceMonthly ?? null,
+        name: entitlements.planName,
+        priceMonthly: entitlements.plan.priceMonthly ?? null,
         features: {
           recording: !!features.recording,
           rtmpMultistream: !!features.multistream,
-          allowsOverages: !!(features as any).allowsOverages,
+          allowsOverages: !!features.overages,
         },
+        // LEGACY ENCODING (older clients): 0 = no cap. New clients read
+        // `entitlements.limits` below (null = unlimited, 0 = none).
         limits: {
-          maxDestinations: resolveMaxDestinations(entitlements.limits),
-          // Monthly streaming minutes incl. bonus (0 = unlimited). Legacy name.
+          maxDestinations: limits.destinations === null ? LEGACY_UNLIMITED_COUNT : limits.destinations,
           participantMinutes: streamingLimit ?? 0,
           monthlyMinutes: streamingLimit ?? 0,
           // Broadcast/transcode is no longer a separate bucket.
           transcodeMinutes: 0,
-          maxSessionMinutes: toNumber(limits.maxSessionMinutes),
-          maxGuests: Number(plan.limits.maxGuests || 0),
+          maxSessionMinutes: limits.maxSessionMinutes ?? 0,
+          maxGuests: limits.guests ?? 0,
           storageGB: storageLimitGB,
         },
       },
+      entitlements: serializeEntitlements(entitlements),
 
       usageMonthly: {
         id: `${uid}_${monthKey}`,
@@ -218,33 +221,24 @@ router.get("/entitlements", requireAuth, async (req, res) => {
   if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
   const entitlements = await getEffectiveEntitlements(uid);
-  const plan = entitlements.plan;
-
-   // Global recording feature flag: when disabled, recording should be treated
-   // as unavailable even if the plan normally includes it. Default to enabled
-   // if the flag doc is missing so plans behave as defined out of the box.
-   let recordingEnabledFlag = true;
-   try {
-     const snap = await firestore.collection("featureFlags").doc("recording").get();
-     const data = snap.exists ? (snap.data() as any) || {} : {};
-     recordingEnabledFlag = data.enabled === undefined ? true : !!data.enabled;
-   } catch {
-     recordingEnabledFlag = true;
-   }
+  const f = entitlements.features; // plan AND platform switches
+  const l = entitlements.limits; // null = unlimited, 0 = none
 
   const payload = {
     planId: entitlements.planId,
-    planName: plan.name || entitlements.planId,
-    recording: !!entitlements.features.recording && recordingEnabledFlag,
-    rtmpMultistream: !!entitlements.features.multistream,
-    allowsOverages: !!(entitlements.features as any).allowsOverages,
-    dualRecording: !!(plan.raw?.features?.dualRecording || plan.raw?.features?.dual_recording),
-    watermark: !!(plan.raw?.features?.watermarkRecordings || plan.raw?.features?.watermark),
-    canHls: !!((entitlements.features as any).canHls || plan.raw?.features?.canHls || plan.raw?.features?.hls || plan.raw?.features?.hlsBroadcast),
-    maxDestinations: resolveMaxDestinations(plan.raw?.limits || entitlements.limits),
-    maxGuests: Number(entitlements.limits.maxGuests || 0),
-    participantMinutes: Number(entitlements.limits.monthlyMinutes || 0),
-    transcodeMinutes: Number(plan.limits.transcodeMinutes || 0),
+    planName: entitlements.planName,
+    recording: f.recording,
+    rtmpMultistream: f.multistream,
+    allowsOverages: f.overages,
+    dualRecording: f.dualRecording,
+    watermark: f.watermark,
+    canHls: entitlements.planFeatures.hls,
+    // Legacy encoding (0 = no cap); prefer `entitlements` below.
+    maxDestinations: l.destinations === null ? LEGACY_UNLIMITED_COUNT : l.destinations,
+    maxGuests: l.guests ?? 0,
+    participantMinutes: l.monthlyStreamingMinutes ?? 0,
+    transcodeMinutes: 0,
+    entitlements: serializeEntitlements(entitlements),
   };
 
   console.log("[usage/entitlements] effective", { uid, planId: payload.planId, limits: payload.participantMinutes, maxDestinations: payload.maxDestinations });

@@ -19,6 +19,7 @@ import {
   type BillingGuards,
 } from "../lib/billingGuards";
 import { createOveragesEndpointHandler } from "../lib/overagesEndpoint";
+import { getEffectiveEntitlements } from "../lib/entitlements";
 
 const PLAN_CHANGE_LOCK_TTL_MS = 60 * 1000; // 60 seconds
 
@@ -1290,7 +1291,7 @@ router.post(
   "/overages",
   requireAuth,
   createOveragesEndpointHandler({
-    getAccount: async (uid) => await getUserAccount(uid),
+    getEntitlements: async (uid) => await getEffectiveEntitlements(uid),
     getUserDoc: async (uid) => {
       const snap = await getUserRef(uid).get();
       return snap.exists ? ((snap.data() as any) || {}) : null;

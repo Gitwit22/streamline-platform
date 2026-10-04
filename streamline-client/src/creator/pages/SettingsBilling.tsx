@@ -10,6 +10,7 @@ import SettingsDestinations from "./SettingsDestinations";
 import { ApiUnauthorizedError, apiFetch, apiFetchAuth, clearAuthStorage, type RoomLayout, type RoomLayoutMode } from "../../lib/api";
 import { useAuthMe, isAuthUserInTestMode } from "../../hooks/useAuthMe";
 import { formatLimitLabel } from "../../lib/entitlements";
+import { isServerEntitlements } from "../../lib/serverEntitlements";
 import SettingsHlsSetup from "./settings/SettingsHlsSetup";
 import RoomMonetizationSetup from "./settings/RoomMonetizationSetup";
 import { getMeCached, clearMeCache } from "../../lib/meCache";
@@ -136,7 +137,22 @@ const DEFAULT_COLLABORATOR_PERMISSIONS: CollaboratorPermissions = {
   manageStreaming: true,
 };
 
-const DEFAULT_ENTITLEMENTS = {
+// Limits follow the server convention: null = unlimited, 0 = none.
+const DEFAULT_ENTITLEMENTS: {
+  planId: string;
+  planName: string;
+  recording: boolean;
+  dualRecording: boolean;
+  rtmpMultistream: boolean;
+  canHls: boolean;
+  hlsCustomizationEnabled: boolean;
+  monetization: boolean;
+  payPerView: boolean;
+  maxGuests: number | null;
+  maxDestinations: number | null;
+  participantMinutes: number | null;
+  transcodeMinutes: number;
+} = {
   planId: "free",
   planName: "Free",
   recording: false,
@@ -815,6 +831,27 @@ export default function SettingsBilling() {
           : prev
       );
 
+      // Canonical server engine shape (null = unlimited, 0 = none).
+      const ent = (data as any)?.entitlements;
+      if (isServerEntitlements(ent)) {
+        setEntitlements({
+          planId: ent.planId,
+          planName: ent.planName || ent.planId,
+          recording: ent.features.recording,
+          dualRecording: ent.planFeatures.dualRecording,
+          rtmpMultistream: ent.planFeatures.multistream,
+          canHls: ent.planFeatures.hls,
+          hlsCustomizationEnabled: ent.planFeatures.hlsCustomization,
+          maxGuests: ent.limits.guests,
+          maxDestinations: ent.limits.destinations,
+          participantMinutes: ent.limits.monthlyStreamingMinutes,
+          transcodeMinutes: 0,
+          monetization: ent.planFeatures.monetization,
+          payPerView: ent.planFeatures.payPerView,
+        });
+        return;
+      }
+
       const eff = (data as any)?.effectiveEntitlements;
 
       if (eff && typeof eff === "object") {
@@ -844,9 +881,8 @@ export default function SettingsBilling() {
           planName: eff.planName || data.planId || eff.planId || "Free",
           recording: !!features.recording,
           dualRecording: !!features.dualRecording,
-          // Treat "multistream" as "more than 1 RTMP destination" so
-          // a cap of 1 is a valid single-destination plan.
-          rtmpMultistream: maxDestinations > 1,
+          // Same rule as the server: Stream Destinations = at least one.
+          rtmpMultistream: maxDestinations >= 1,
           canHls,
           hlsCustomizationEnabled,
           maxGuests: Number(limits.maxGuests ?? 0),
@@ -3876,7 +3912,7 @@ function UsageBar({ label, used, limit, unit }: { label: string; used: number; l
       <div style={S.usageHeader}>
         <span style={S.usageLabel}>{label}</span>
         <span style={S.usageValue}>
-          {limit !== null && limit > 0 ? `${used}${unit} / ${limit}${unit}` : `${used}${unit} / Unlimited`}
+          {limit !== null ? `${used}${unit} / ${limit}${unit}` : `${used}${unit} / Unlimited`}
         </span>
       </div>
       <div style={S.usageTrack}>

@@ -192,19 +192,25 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
     const playlistUrl = `${publicBase}/${roomId}/${livePlaylistName}`;
 
     // Cap enforcement (per-session): compute stopAt at start and persist in room.hls
-    // caps.hlsMaxMinutesPerSession: null/missing => unlimited
+    // limits.hlsMaxMinutesPerSession: null = unlimited, 0 = no HLS time.
     let capMinutes: number | null = null;
     let stopAt: string | null = null;
+    let hlsCap: number | null = null;
     try {
       const entitlements = await getEffectiveEntitlements(ownerUid);
-      const rawCap = entitlements?.caps?.hlsMaxMinutesPerSession;
-      const n = rawCap === null || rawCap === undefined ? null : Number(rawCap);
-      if (n !== null && Number.isFinite(n) && n > 0) {
-        capMinutes = Math.round(n);
-        stopAt = new Date(Date.now() + capMinutes * 60 * 1000).toISOString();
-      }
+      hlsCap = entitlements.limits.hlsMaxMinutesPerSession;
     } catch {
       // ignore cap lookup failures (treat as unlimited)
+    }
+    if (hlsCap === 0) {
+      return res.status(403).json({
+        error: LIMIT_ERRORS.LIMIT_EXCEEDED,
+        reason: "Your plan does not include HLS session time",
+      });
+    }
+    if (hlsCap !== null && Number.isFinite(hlsCap) && hlsCap > 0) {
+      capMinutes = Math.round(hlsCap);
+      stopAt = new Date(Date.now() + capMinutes * 60 * 1000).toISOString();
     }
 
     // 1) Atomically claim idle → starting (crash-safe). Concurrent starts:

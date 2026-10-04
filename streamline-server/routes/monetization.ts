@@ -15,6 +15,7 @@ import crypto from "crypto";
 import { stripe } from "../lib/stripe";
 import { requireAuth } from "../middleware/requireAuth";
 import { canAccessFeature } from "./featureAccess";
+import { checkFeature, getEffectiveEntitlements } from "../lib/entitlements";
 import { firestore as db } from "../firebaseAdmin";
 import {
   createMonetizedEvent,
@@ -268,6 +269,21 @@ router.post("/checkout", async (req: Request, res: Response) => {
     }
     if (event.monetizationMode === "off") {
       return res.status(400).json({ error: "monetization_off" });
+    }
+
+    // Server-side kill switches + the event OWNER's effective entitlements:
+    // no new payments when monetization (or PPV for paid access) is off
+    // platform-wide or no longer included in the owner's plan.
+    const ownerEnt = await getEffectiveEntitlements(String(event.ownerUid || ""));
+    const monetizationCheck = checkFeature(ownerEnt, "monetization");
+    if (!monetizationCheck.allowed) {
+      return res.status(403).json({ error: "monetization_unavailable", reason: monetizationCheck.reason });
+    }
+    if (type === "access") {
+      const ppvCheck = checkFeature(ownerEnt, "payPerView");
+      if (!ppvCheck.allowed) {
+        return res.status(403).json({ error: "ppv_unavailable", reason: ppvCheck.reason });
+      }
     }
 
     // Determine amount

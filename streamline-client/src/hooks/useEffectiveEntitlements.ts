@@ -11,6 +11,7 @@ import { getMeCached, clearMeCache } from "../lib/meCache";
  *   automatically without a full page reload.
  */
 export function useEffectiveEntitlements() {
+  // ServerEntitlements (lib/serverEntitlements.ts) from current servers.
   const [effectiveEntitlements, setEffectiveEntitlements] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [trigger, setTrigger] = useState(0);
@@ -36,7 +37,10 @@ export function useEffectiveEntitlements() {
 
       try {
         const me = await getMeCached();
-        const ent = me?.effectiveEntitlements || me?.entitlements || null;
+        // Prefer the server engine's EffectiveEntitlements (`entitlements`:
+        // null = unlimited, features already include platform switches);
+        // fall back to the legacy payload from older servers.
+        const ent = me?.entitlements || me?.effectiveEntitlements || null;
         if (!cancelled) setEffectiveEntitlements(ent);
       } catch {
         if (!cancelled) setEffectiveEntitlements(null);

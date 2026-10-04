@@ -7,7 +7,9 @@
  */
 
 /**
- * Extract max storage bytes from a plan document (pure helper, no Firestore reads).
+ * DEPRECATED legacy reader: max storage bytes from a RAW legacy plan document
+ * (0 = "no cap" in the legacy encoding). Enforcement uses the entitlement
+ * engine's `ent.limits.storageBytes` (null = unlimited, 0 = none) instead.
  */
 export function resolveMaxStorageBytesFromPlan(planData: any): number {
   const GB = 1024 * 1024 * 1024;
@@ -37,7 +39,8 @@ export type ReservationCheck = {
   allowed: boolean;
   currentBytes: number;
   requestedBytes: number;
-  limitBytes: number;
+  /** null = unlimited, 0 = no storage included. */
+  limitBytes: number | null;
   newTotalBytes: number;
   reason?: string;
 };
@@ -46,19 +49,25 @@ export type ReservationCheck = {
  * Decide whether a storage reservation of `requestedBytes` is allowed given
  * the current counter value and the plan limit.  Pure function — no I/O.
  *
- * Rules:
- *   - If limitBytes is 0 (unlimited / unset), always allow.
+ * Rules (entitlement convention):
+ *   - limitBytes null => unlimited, always allow.
+ *   - limitBytes 0    => the plan includes no storage, always reject.
  *   - If currentBytes + requestedBytes > limitBytes, reject.
  *   - requestedBytes must be > 0, finite.
  */
 export function canReserveStorage(
   currentBytes: number,
   requestedBytes: number,
-  limitBytes: number,
+  limitBytes: number | null,
 ): ReservationCheck {
   const cur = Number.isFinite(currentBytes) && currentBytes >= 0 ? currentBytes : 0;
   const req = Number.isFinite(requestedBytes) && requestedBytes > 0 ? requestedBytes : 0;
-  const lim = Number.isFinite(limitBytes) && limitBytes > 0 ? limitBytes : 0;
+  const lim: number | null =
+    limitBytes === null || limitBytes === undefined
+      ? null
+      : Number.isFinite(limitBytes) && limitBytes > 0
+        ? limitBytes
+        : 0;
 
   if (req <= 0) {
     return { allowed: false, currentBytes: cur, requestedBytes: req, limitBytes: lim, newTotalBytes: cur, reason: "requestedBytes must be > 0" };
@@ -66,9 +75,19 @@ export function canReserveStorage(
 
   const newTotal = cur + req;
 
-  // 0 limit means unlimited (plan does not cap storage)
-  if (lim === 0) {
+  if (lim === null) {
     return { allowed: true, currentBytes: cur, requestedBytes: req, limitBytes: lim, newTotalBytes: newTotal };
+  }
+
+  if (lim === 0) {
+    return {
+      allowed: false,
+      currentBytes: cur,
+      requestedBytes: req,
+      limitBytes: 0,
+      newTotalBytes: newTotal,
+      reason: "Your plan does not include storage.",
+    };
   }
 
   if (newTotal > lim) {

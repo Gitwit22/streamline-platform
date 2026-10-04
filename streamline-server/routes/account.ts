@@ -12,8 +12,8 @@ import {
   presetsWithAvailability,
 } from "../lib/mediaPresets";
 import { getCurrentMonthKey } from "../lib/usageTracker";
-import { resolveMaxDestinations } from "../lib/planLimits";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { serializeEntitlements, toLegacyEntitlementsPayload, toPlatformFlagsPayload } from "../lib/entitlements";
 import { buildPublicPasswordResetState, buildPublicRecoveryState, needsRecoverySetup } from "../lib/accountRecovery";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import crypto from "crypto";
@@ -23,7 +23,6 @@ import {
   DEFAULT_ROLE_PROFILES_BY_ID,
   type RolePermissionMap,
 } from "../lib/permissions/defaultRoleProfiles";
-import { getPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { stripe } from "../lib/stripe";
 import { computeAccountMeBillingFields } from "../lib/billingTruth";
 import { normalizeRoomLayout } from "../lib/roomLayout";
@@ -122,97 +121,6 @@ async function getNormalizedMediaPrefs(uid: string) {
   const snap = await firestore.collection("users").doc(uid).get();
   const data = snap.exists ? snap.data() || {} : {};
   return { mediaPrefs: normalizeMediaPrefs((data as any).mediaPrefs, planId, maxPresetId), planId, maxPresetId };
-}
-
-async function getSegmentedUiFlags() {
-  const [
-    contentLibrarySnap,
-    projectsSnap,
-    editorSnap,
-    myContentSnap,
-    myContentRecordingsSnap,
-    audioMixerSnap,
-    advancedScreenShareSnap,
-    mixedAudioPublishSnap,
-    monetizationSnap,
-    payPerViewSnap,
-    invisibleHostSnap,
-    collaboratorDelegationSnap,
-  ] = await Promise.all([
-    firestore.collection("featureFlags").doc("contentLibraryEnabled").get(),
-    firestore.collection("featureFlags").doc("projectsEnabled").get(),
-    firestore.collection("featureFlags").doc("editorEnabled").get(),
-    firestore.collection("featureFlags").doc("myContentEnabled").get(),
-    firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
-    firestore.collection("featureFlags").doc("audioMixerEnabled").get(),
-    firestore.collection("featureFlags").doc("advancedScreenShareEnabled").get(),
-    firestore.collection("featureFlags").doc("mixedAudioPublishEnabled").get(),
-    firestore.collection("featureFlags").doc("monetizationEnabled").get(),
-    firestore.collection("featureFlags").doc("payPerViewEnabled").get(),
-    firestore.collection("featureFlags").doc("invisibleHostEnabled").get(),
-    firestore.collection("featureFlags").doc("collaboratorDelegationEnabled").get(),
-  ]);
-
-  // Default to ENABLED when the Firestore document doesn't exist.
-  // Plans already gate feature access; platform flags act only as
-  // kill-switches. Set `{ enabled: false }` in Firestore to disable.
-  const resolve = (snap: FirebaseFirestore.DocumentSnapshot) => {
-    if (!snap.exists) return true;               // missing → enabled
-    const d = (snap.data() as any) || {};
-    return d.enabled !== false;                   // explicit false → disabled
-  };
-
-  // Room feature flags default to DISABLED (opt-in) — set `{ enabled: true }` in
-  // Firestore to activate. This is the opposite of the UI flags above which
-  // default to enabled.
-  const resolveOptIn = (snap: FirebaseFirestore.DocumentSnapshot) => {
-    if (!snap.exists) return false;              // missing → disabled
-    const d = (snap.data() as any) || {};
-    return d.enabled === true;                   // only explicit true → enabled
-  };
-
-  return {
-    contentLibraryEnabled: resolve(contentLibrarySnap),
-    projectsEnabled: resolve(projectsSnap),
-    editorEnabled: resolve(editorSnap),
-    myContentEnabled: resolve(myContentSnap),
-    myContentRecordingsEnabled: resolve(myContentRecordingsSnap),
-    audioMixerEnabled: resolveOptIn(audioMixerSnap),
-    advancedScreenShareEnabled: resolveOptIn(advancedScreenShareSnap),
-    mixedAudioPublishEnabled: resolveOptIn(mixedAudioPublishSnap),
-    monetizationEnabled: resolveOptIn(monetizationSnap),
-    payPerViewEnabled: resolveOptIn(payPerViewSnap),
-    invisibleHostEnabled: resolveOptIn(invisibleHostSnap),
-    collaboratorDelegationEnabled: resolveOptIn(collaboratorDelegationSnap),
-  };
-}
-// Advanced permissions have been fully removed in favor of a single,
-// simple permissions mode. Keep a minimal helper that always reports
-// advanced permissions as disabled so existing callers continue to
-// receive a stable payload shape.
-
-async function getHlsUiFlag() {
-  // Global HLS UI/tab flag, driven from the featureFlags collection.
-  // When missing, we default to enabled so HLS UI is visible by default.
-  const snap = await firestore.collection("featureFlags").doc("hlsSettingsTab").get();
-  const data = snap.exists ? (snap.data() as any) || {} : {};
-  const enabled = data.enabled === undefined ? true : !!data.enabled;
-  return {
-    enabled,
-    reason: typeof data.reason === "string" ? data.reason : undefined,
-  };
-}
-
-// Global recording UI/feature flag.
-// When missing, we default to enabled so recording behaves according to the plan.
-async function getRecordingUiFlag() {
-  const snap = await firestore.collection("featureFlags").doc("recording").get();
-  const data = snap.exists ? (snap.data() as any) || {} : {};
-  const enabled = data.enabled === undefined ? true : !!data.enabled;
-  return {
-    enabled,
-    reason: typeof data.reason === "string" ? data.reason : undefined,
-  };
 }
 
 async function getAdvancedPermissionsEnabled(uid: string) {
@@ -437,7 +345,6 @@ router.get("/me", async (req, res) => {
     const { mediaPrefs } = await getNormalizedMediaPrefs(uid);
     const adv = await getAdvancedPermissionsEnabled(uid);
     const entitlements = await getEffectiveEntitlements(uid);
-    const hlsUi = await getHlsUiFlag();
 
     const monthKey = getCurrentMonthKey();
     const usageDocId = `${uid}_${monthKey}`;
@@ -474,113 +381,15 @@ router.get("/me", async (req, res) => {
     const effectivePermissionsMode = "simple" as const;
     const permissionsModeLockReason = "plan" as const;
 
-    // Canonical effective entitlements payload (features + limits) for client gating
+    // Canonical entitlements (engine shape: null = unlimited, 0 = none) plus
+    // the back-compat `effectiveEntitlements` shape for older clients.
+    const flags = entitlements.platformFlags;
     let effectiveEntitlements: any = null;
-    // Global feature/UI flags that can further constrain plan-based entitlements.
-    const recordingUi = await getRecordingUiFlag();
-
     try {
-      const plan = entitlements.plan;
-      const limits = entitlements.limits;
-      const features = entitlements.features;
-
-      const rawFeatures = (plan.raw?.features || {}) as any;
-
-      // Honor all known multistream flags so internal/admin plans that only set
-      // rtmpMultistream or multistreamEnabled still unlock social streaming.
-      const rtmpMultistreamEnabled = Boolean(
-        rawFeatures.rtmpMultistream ??
-          rawFeatures.multistream ??
-          (plan.raw as any)?.multistreamEnabled ??
-          features.multistream
-      );
-
-      const canHls = Boolean(
-        (features as any).hls ??
-          (features as any).hlsEnabled ??
-          (features as any).canHls ??
-          rawFeatures.canHls ??
-          rawFeatures.hls ??
-          rawFeatures.hlsBroadcast
-      );
-
-      const hlsCustomizationEnabled = (() => {
-        const explicit = (features as any).hlsCustomizationEnabled;
-        if (typeof explicit === "boolean") return explicit;
-        const legacy = rawFeatures.canCustomizeHlsPage;
-        if (typeof legacy === "boolean") return legacy;
-        return canHls;
-      })();
-
-      // Canonical RTMP destinations cap: derive once from the
-      // normalized plan limits and expose both the canonical
-      // rtmpDestinationsMax and a maxDestinations alias so
-      // older callers can continue to function.
-      const rtmpDestinationsMax = resolveMaxDestinations(limits);
-
-      const transcodeLimitRaw = (limits as any).transcodeMinutes;
-
-      // Editing access comes from the Firestore plan doc's `editing` object.
-      // This is intentionally separate from the legacy `features` map.
-      const planEditingAccess = Boolean((plan.raw as any)?.editing?.access === true);
-
-      effectiveEntitlements = {
-        planId: entitlements.planId,
-        planName: plan.name || entitlements.planId,
-        features: {
-          // Recording is available only when the plan includes it AND the
-          // global recording feature flag is enabled.
-          recording: !!features.recording && recordingUi.enabled,
-          rtmpMultistream: rtmpMultistreamEnabled,
-          dualRecording: !!(rawFeatures.dualRecording ?? rawFeatures.dual_recording),
-          watermark: !!(rawFeatures.watermarkRecordings ?? rawFeatures.watermark),
-          canHls,
-          // Canonical + compatibility fields for HLS
-          hls: canHls,
-          hlsEnabled: canHls,
-          hlsCustomizationEnabled,
-          canCustomizeHlsPage: hlsCustomizationEnabled,
-
-          // Optional: surface for client gating (e.g. Overages toggle).
-          overagesAllowed: !!(features as any).overagesAllowed,
-
-          // Monetization / PPV plan-level entitlements
-          monetization: !!(features as any).monetization,
-          payPerView: !!(features as any).payPerView,
-
-          // Invisible host mode (plan-level)
-          invisibleHost: !!(features as any).invisibleHost,
-
-          // Editing (plans are truth)
-          editing: planEditingAccess,
-          // Segmented editing surfaces (until a separate segmented plan matrix exists)
-          contentLibrary: planEditingAccess,
-          projects: planEditingAccess,
-          editor: planEditingAccess,
-        },
-        limits: {
-          // Canonical numeric usage/feature caps
-          rtmpDestinationsMax,
-          // Backwards-compatible alias for older clients
-          maxDestinations: rtmpDestinationsMax,
-          maxGuests: Number(limits.maxGuests || 0),
-          participantMinutes: Number(limits.monthlyMinutes || limits.monthlyMinutesIncluded || 0),
-          // IMPORTANT: omit this field entirely when the plan does not include broadcast/transcode.
-          // Client gating relies on presence (typeof === "number").
-          transcodeMinutes: typeof transcodeLimitRaw === "number" ? Number(transcodeLimitRaw) : undefined,
-          maxRecordingMinutesPerClip: Number(limits.maxRecordingMinutesPerClip || 0),
-
-          // Editing limits (optional client UX)
-          editingMaxProjects: Number((plan.raw as any)?.editing?.maxProjects ?? 0),
-          editingMaxTracks: Number((plan.raw as any)?.editing?.maxTracks ?? 0),
-        },
-        caps: entitlements.caps || {},
-      };
+      effectiveEntitlements = toLegacyEntitlementsPayload(entitlements);
     } catch (e) {
       console.error("[account/me] failed to compute effectiveEntitlements", e);
     }
-
-    const platformTranscodeEnabled = getPlatformTranscodeEnabled();
 
       const responsePlanId = effectiveEntitlements?.planId ?? entitlements.planId;
       const { planId: normalizedPlanId, billingTruth } = computeAccountMeBillingFields(data, responsePlanId, Date.now());
@@ -670,15 +479,16 @@ router.get("/me", async (req, res) => {
       tosVersion: typeof (data as any).tosVersion === "string" ? (data as any).tosVersion : null,
       tosAcceptedAt: typeof (data as any).tosAcceptedAt === "number" ? (data as any).tosAcceptedAt : null,
       currentTosVersion: CURRENT_TOS_VERSION,
-      platformFlags: {
-        hlsEnabled: hlsUi.enabled,
-        hlsSettingsTab: hlsUi.enabled,
-        transcodeEnabled: platformTranscodeEnabled,
-        recordingEnabled: recordingUi.enabled,
-        ...await getSegmentedUiFlags(),
-      },
-            planId: normalizedPlanId,
+      // Single platform-flag source (lib/entitlements/flags.ts); clients must
+      // not apply their own defaults.
+      platformFlags: toPlatformFlagsPayload(flags),
+      planId: normalizedPlanId,
+      // Base (billing) plan; `entitlements.planId` is the EFFECTIVE plan.
+      basePlanId: entitlements.source.basePlan,
       effectiveEntitlements,
+      entitlements: serializeEntitlements(entitlements),
+      // Overage capability of the effective plan (was read from a missing key).
+      overagesAllowed: entitlements.features.overages,
       usage: {
         minutes: {
           // Canonical / UX-safe names:

@@ -1,3 +1,14 @@
+/**
+ * DEPRECATED legacy plan shape, kept as a thin wrapper over the entitlement
+ * engine's normalizer (lib/entitlements/normalizePlanV2.ts) for older callers.
+ *
+ * LEGACY ENCODING: in this shape a numeric limit of 0 means "no cap" (the
+ * historic meaning). New code must use `normalizePlanDoc()` / the
+ * EffectiveEntitlements `limits`, where null = unlimited and 0 = none.
+ */
+import { normalizePlanDoc } from "./entitlements/normalizePlanV2";
+import type { Limit, NormalizedPlan } from "./entitlements/types";
+
 export type CanonicalPlan = {
   id: string;
   name: string;
@@ -5,10 +16,8 @@ export type CanonicalPlan = {
   visibility: "public" | "hidden" | "admin";
   priceMonthly: number;
   limits: {
-    monthlyMinutes: number; // canonical minutes bucket used by usage
-    monthlyMinutesIncluded: number; // alias for plan listing
-    // When undefined, the plan does NOT include broadcast/transcode minutes.
-    // When 0, it may mean "unlimited" for internal plans.
+    monthlyMinutes: number;
+    monthlyMinutesIncluded: number;
     transcodeMinutes?: number;
     maxGuests: number;
     rtmpDestinationsMax: number;
@@ -22,315 +31,90 @@ export type CanonicalPlan = {
     rtmp: boolean;
     multistream: boolean;
     advancedPermissions: boolean;
-    // When true, the account is allowed to continue past included monthly
-    // minutes (server will log overage totals; billing is handled elsewhere).
     allowsOverages: boolean;
-    // hlsEnabled is the canonical runtime flag (can generate/play HLS)
     hlsEnabled: boolean;
-    // hlsCustomizationEnabled controls whether the user can edit the HLS broadcast page
-    // (title/subtitle/logo/theme/offline message).
     hlsCustomizationEnabled: boolean;
-    // canHls is the canonical HLS-plan feature used by entitlements
     canHls: boolean;
-    // hls mirrors canHls so callers can use either name
     hls: boolean;
-    // monetization: general monetization tools visible to the user
     monetization: boolean;
-    // payPerView: can create ticketed / PPV events (requires monetization + hls)
     payPerView: boolean;
-    // invisibleHost: host can join rooms in invisible mode (no tile, observe-only)
     invisibleHost: boolean;
   };
   caps: {
-    // null/missing = unlimited
     hlsMaxMinutesPerSession: number | null;
   };
-  // Raw fields that callers might still want for display/debug
   raw: any;
+  /** v2 view (null = unlimited, 0 = none). */
+  v2: NormalizedPlan;
 };
 
-// Helper to coerce unknown values to finite numbers with a default
-function toNumber(value: any, fallback = 0): number {
-  const n = Number(value);
-  return Number.isFinite(n) ? n : fallback;
+/** v2 limit -> legacy number (null/unlimited -> 0). */
+function legacyNumber(limit: Limit): number {
+  return limit === null ? 0 : limit;
 }
 
-function firstFiniteNumber(candidates: any[], fallback = 0): number {
-  for (const value of candidates) {
-    const n = Number(value);
-    if (Number.isFinite(n)) return n;
-  }
-  return fallback;
-}
+export function toLegacyCanonicalPlan(plan: NormalizedPlan): CanonicalPlan {
+  const data = plan.raw || {};
+  const l = plan.limits;
+  const monthlyMinutes = legacyNumber(l.monthlyStreamingMinutes);
 
-// Helper to coerce booleans
-function toBool(value: any): boolean {
-  return value === true || value === "true" || value === 1;
-}
+  const explicitHours = data.limits?.maxHoursPerMonth ?? data.maxHoursPerMonth;
+  const explicitHoursNum = Number(explicitHours);
+  const maxHoursPerMonth =
+    explicitHours !== undefined && explicitHours !== null && Number.isFinite(explicitHoursNum)
+      ? explicitHoursNum
+      : monthlyMinutes > 0
+        ? Math.ceil(monthlyMinutes / 60)
+        : 0;
 
-function toNullableNumber(value: any): number | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value === "string" && value.trim() === "") return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-// Accepts a plan Firestore document and returns a canonical, defensive shape.
-// Supports legacy keys such as maxHoursPerMonth, participantMinutes, maxDestinations, maxStorageBytes, etc.
-export function normalizePlan(id: string, doc: any | undefined | null): CanonicalPlan {
-  const data = doc || {};
-  const features = (data.features || {}) as any;
-  const limits = (data.limits || {}) as any;
-  const caps = (data.caps || {}) as any;
-  const idLower = String(id).toLowerCase();
-
-  const rtmpEnabled = toBool(features.rtmp ?? data.rtmpEnabled);
-
-  const rawMonthlyMinutes =
-    limits.monthlyMinutesIncluded ??
-    limits.participantMinutes ??
-    limits.monthlyMinutes ??
-    data.monthlyMinutesIncluded ??
-    data.participantMinutes ??
-    data.monthlyMinutes ??
-    0;
-
-  const monthlyMinutes = toNumber(rawMonthlyMinutes, 0);
-
-  // Price input can come from either legacy `price` or canonical `priceMonthly`.
-  // Important: if `priceMonthly` exists but is non-numeric (e.g. "$25"),
-  // we must fall back to `price` instead of zeroing out.
-  const priceMonthly = firstFiniteNumber([data.priceMonthly, data.price], 0);
-
-  const rawVisibility: any =
-    data.visibility ?? (data.hidden === true ? "hidden" : undefined);
-
-  let visibility: "public" | "hidden" | "admin";
-  if (rawVisibility === "hidden" || rawVisibility === "admin" || rawVisibility === "public") {
-    visibility = rawVisibility;
-  } else if (id === "enterprise" || id === "internal") {
-    visibility = "admin";
-  } else {
-    visibility = "public";
-  }
-
-  const maxGuests = toNumber(limits.maxGuests ?? data.maxGuests, 0);
-
-  let rtmpDestinationsMax = toNumber(
-    limits.rtmpDestinationsMax ??
-      limits.maxDestinations ??
-      limits.rtmpDestinations ??
-      data.rtmpDestinationsMax ??
-      data.maxDestinations ??
-      data.rtmpDestinations,
-    0
-  );
-
-  const maxSessionMinutes = toNumber(limits.maxSessionMinutes ?? data.maxSessionMinutes, 0);
-
-  // Canonical per-clip recording cap; map legacy keys once here
-  const maxRecordingMinutesPerClip = toNumber(
-    limits.maxRecordingMinutesPerClip ??
-      limits.maxRecordingMinutesPerSession ??
-      data.maxRecordingMinutesPerClip ??
-      data.maxRecordingMinutesPerSession,
-    0
-  );
-
-  // IMPORTANT: preserve absence vs explicit value.
-  // - If the plan doc does not define transcodeMinutes at all, treat as "not included" (undefined).
-  // - If the plan doc defines transcodeMinutes (including 0), keep it.
-  const hasTranscodeMinutesField =
-    (limits && Object.prototype.hasOwnProperty.call(limits, "transcodeMinutes")) ||
+  const transcodeRaw = data.limits?.transcodeMinutes ?? data.transcodeMinutes;
+  const hasTranscode =
+    (data.limits && Object.prototype.hasOwnProperty.call(data.limits, "transcodeMinutes")) ||
     Object.prototype.hasOwnProperty.call(data, "transcodeMinutes");
+  const transcodeNum = Number(transcodeRaw);
 
-  const transcodeMinutes = hasTranscodeMinutesField
-    ? toNumber(limits.transcodeMinutes ?? data.transcodeMinutes, 0)
-    : undefined;
-
-  // Canonical multistream feature flag. Honor both the modern
-  // `features.multistream` key and the legacy/admin
-  // `features.rtmpMultistream` + top-level `multistreamEnabled`.
-  const multistreamFeature = toBool(
-    features.multistream ??
-      (features as any).rtmpMultistream ??
-      (data as any).multistreamEnabled ??
-      (data as any).multistream
-  );
-
-  // Built-in defaults for known plans when the destination cap
-  // has not been explicitly configured in the plan document.
-  // This keeps Pro/Internal Unlimited plans from appearing to
-  // have Stream Destinations disabled when only the feature
-  // toggle has been enabled.
-  if (rtmpDestinationsMax === 0) {
-    if (idLower === "pro") {
-      // Social multistream (YouTube, Facebook, Twitch)
-      rtmpDestinationsMax = 3;
-    } else if (idLower === "internal_unlimited") {
-      // Generous default for internal testing; can be overridden
-      // by explicitly setting limits.rtmpDestinationsMax or
-      // limits.maxDestinations on the plan document.
-      rtmpDestinationsMax = 10;
-    }
-  }
-
-  // RTMP destinations are only meaningful when RTMP itself is enabled.
-  // This avoids “phantom” destination counts (e.g., Basic showing 1)
-  // when a leftover numeric cap exists but RTMP is turned off.
-  if (!rtmpEnabled) {
-    rtmpDestinationsMax = 0;
-  }
-
-  const maxHoursPerMonth = (() => {
-    const explicit = limits.maxHoursPerMonth ?? data.maxHoursPerMonth;
-    if (explicit !== undefined && explicit !== null) return toNumber(explicit, 0);
-    // Use ceil so hour-based caps never undercut minute-based caps.
-    // Example: 2000 minutes => 33h 20m, so we need 34 hours to cover all minutes.
-    if (monthlyMinutes > 0) return Math.ceil(monthlyMinutes / 60);
-    return 0;
-  })();
-
-  const maxStorageGB = (() => {
-    const fromLimitsGb = limits.maxStorageGB;
-    const fromEditingGb = data.editing?.maxStorageGB;
-    const fromEditingBytes = data.editing?.maxStorageBytes;
-    const fromBytes = limits.maxStorageBytes ?? data.maxStorageBytes;
-
-    if (fromLimitsGb !== undefined && fromLimitsGb !== null) return toNumber(fromLimitsGb, 0);
-    if (fromEditingGb !== undefined && fromEditingGb !== null) return toNumber(fromEditingGb, 0);
-    if (fromEditingBytes !== undefined && fromEditingBytes !== null)
-      return Math.round(toNumber(fromEditingBytes, 0) / (1024 * 1024 * 1024));
-    if (fromBytes !== undefined && fromBytes !== null)
-      return Math.round(toNumber(fromBytes, 0) / (1024 * 1024 * 1024));
-    return 0;
-  })();
-
-  const rawFeatures = features as any;
-  const rawData: any = data;
-
-  // Overage capability flag (NOT billing): Pro allows overages by default.
-  // This is separate from legacy per-user toggles.
-  const allowsOverages = (() => {
-    const explicit =
-      rawFeatures.allowsOverages ??
-      rawFeatures.overagesAllowed ??
-      rawData.allowsOverages ??
-      rawData.overagesAllowed;
-    if (explicit !== undefined) return toBool(explicit);
-    return idLower === "pro" || idLower === "internal_unlimited";
-  })();
-
-  // Derive canonical HLS feature flag with sensible defaults:
-  // - Respect any explicit HLS flags on the plan document first.
-  // - When no HLS-related keys are present, default based on plan id
-  //   (Pro+/enterprise-style tiers get HLS, Free/Starter-style do not).
-  const hasExplicitHlsFlag =
-    rawFeatures.canHls !== undefined ||
-    rawFeatures.hls !== undefined ||
-    rawData.hlsEnabled !== undefined ||
-    rawData.hlsBroadcastEnabled !== undefined;
-
-  let canHls = toBool(
-    rawFeatures.canHls ??
-      rawFeatures.hls ??
-      rawFeatures.hlsEnabled ??
-      rawData.hlsEnabled ??
-      rawData.hlsBroadcastEnabled
-  );
-
-  if (!hasExplicitHlsFlag) {
-    // Default matrix:
-    // - Free/Starter-style tiers: HLS OFF
-    // - Paid/enterprise/internal tiers: HLS ON
-    if (idLower === "free" || idLower === "starter") {
-      canHls = false;
-    } else if (
-      idLower === "pro" ||
-      idLower === "basic" ||
-      idLower === "enterprise" ||
-      idLower === "internal_unlimited"
-    ) {
-      canHls = true;
-    }
-  }
-
-  // Page customization flag (separate from runtime HLS) so plans can offer
-  // "HLS is free but customization is paid" without hacks.
-  // Defaults to canHls unless explicitly set.
-  const hlsCustomizationEnabled = (() => {
-    const explicit =
-      rawFeatures.hlsCustomizationEnabled ??
-      rawFeatures.canCustomizeHlsPage ??
-      rawData.hlsCustomizationEnabled ??
-      rawData.canCustomizeHlsPage;
-    if (explicit !== undefined) return toBool(explicit);
-    return canHls;
-  })();
-
-  const hlsMaxMinutesPerSession = (() => {
-    const explicit = caps.hlsMaxMinutesPerSession;
-    if (explicit !== undefined) return toNullableNumber(explicit);
-
-    // Legacy support: some older migrations stored HLS caps under plan.hls.*
-    const legacy = data?.hls?.maxSessionMinutes;
-    if (legacy !== undefined) return toNullableNumber(legacy);
-
-    return null;
-  })();
+  const storageBytes = legacyNumber(l.storageBytes);
 
   return {
-    id,
-    name: String(data.name || id),
-    description: String(data.description || ""),
-    visibility,
-    priceMonthly,
+    id: plan.id,
+    name: plan.name,
+    description: plan.description,
+    visibility: plan.visibility,
+    priceMonthly: plan.priceMonthly,
     limits: {
       monthlyMinutes,
       monthlyMinutesIncluded: monthlyMinutes,
-      transcodeMinutes,
-      maxGuests,
-      rtmpDestinationsMax,
-      maxSessionMinutes,
-      maxRecordingMinutesPerClip,
+      transcodeMinutes: hasTranscode ? (Number.isFinite(transcodeNum) ? transcodeNum : 0) : undefined,
+      maxGuests: legacyNumber(l.guests),
+      rtmpDestinationsMax: legacyNumber(l.destinations),
+      maxSessionMinutes: legacyNumber(l.maxSessionMinutes),
+      maxRecordingMinutesPerClip: legacyNumber(l.recordingMinutesPerClip),
       maxHoursPerMonth,
-      maxStorageGB,
+      maxStorageGB: Math.round(storageBytes / (1024 * 1024 * 1024)),
     },
     features: {
-      recording: toBool(features.recording ?? data.recordingEnabled),
-      rtmp: rtmpEnabled,
-      // Multistream is enabled when either the explicit feature flag
-      // is set or the numeric destination cap allows more than one
-      // RTMP destination.
-      multistream: rtmpEnabled && (multistreamFeature || rtmpDestinationsMax > 1),
-      // Advanced permissions have been removed; plans no longer toggle
-      // permissions mode. Always operate in simple mode.
+      recording: plan.features.recording,
+      rtmp: plan.features.multistream,
+      multistream: plan.features.multistream,
       advancedPermissions: false,
-      allowsOverages,
-      hlsEnabled: canHls,
-      hlsCustomizationEnabled,
-      canHls,
-      hls: canHls,
-      monetization: toBool(
-        rawFeatures.monetization ??
-          rawData.monetizationEnabled ??
-          rawData.monetization
-      ),
-      payPerView: toBool(
-        rawFeatures.payPerView ??
-          rawFeatures.ppv ??
-          rawData.payPerViewEnabled ??
-          rawData.ppvEnabled
-      ),
-      invisibleHost: toBool(
-        rawFeatures.invisibleHost ??
-          rawData.invisibleHostEnabled ??
-          rawData.invisibleHost
-      ),
+      allowsOverages: plan.features.overages,
+      hlsEnabled: plan.features.hls,
+      hlsCustomizationEnabled: plan.features.hlsCustomization,
+      canHls: plan.features.hls,
+      hls: plan.features.hls,
+      monetization: plan.features.monetization,
+      payPerView: plan.features.payPerView,
+      invisibleHost: plan.features.invisibleHost,
     },
     caps: {
-      hlsMaxMinutesPerSession,
+      hlsMaxMinutesPerSession: l.hlsMaxMinutesPerSession,
     },
     raw: data,
+    v2: plan,
   };
+}
+
+/** @deprecated use normalizePlanDoc() from lib/entitlements. */
+export function normalizePlan(id: string, doc: any | undefined | null): CanonicalPlan {
+  return toLegacyCanonicalPlan(normalizePlanDoc(id, doc));
 }

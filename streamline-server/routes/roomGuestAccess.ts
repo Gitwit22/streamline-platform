@@ -26,6 +26,7 @@ import { resolveCohostRoomPermissions } from "../lib/rolePermissions";
 import { roleToParticipantPermission, applyPresenceModeToGrant, toLiveKitTrackSourceNumber } from "../lib/livekitPermissions";
 import { isValidPresenceMode, normalizePresenceMode, buildPresenceMetadata, type PresenceMode } from "../lib/presenceMode";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { getPlatformFlag, resolveGuestCap, serializeEntitlements, toLegacyEntitlementsPayload } from "../lib/entitlements";
 import { isAdmin } from "../middleware/adminAuth";
 import { resolveHostName } from "../lib/resolveHostName";
 import { logDelegatedRoomAction, resolveOwnerActingContext } from "../lib/collaborators";
@@ -215,33 +216,14 @@ async function getParticipantCount(livekitRoomName: string): Promise<number | nu
   }
 }
 
-async function getPlanLimit(uid: string, field: string): Promise<number | undefined> {
-  const userSnap = await firestore.collection("users").doc(uid).get();
-  const planId = String((userSnap.data() || {}).planId || "free");
-  const planSnap = await firestore.collection("plans").doc(planId).get();
-  if (!planSnap.exists) return undefined;
-  const limits = (planSnap.data() || {}).limits || {};
-  const raw = (limits as any)[field];
-  if (raw === undefined || raw === null) return undefined;
-  const num = Number(raw);
-  return Number.isFinite(num) ? num : undefined;
-}
-
-function normalizePositiveCap(raw: number | undefined): number | undefined {
-  if (raw === undefined) return undefined;
-  const n = Number(raw);
-  if (!Number.isFinite(n) || n <= 0) return undefined;
-  return Math.floor(n);
-}
-
+/** Owner's effective guest cap (see resolveGuestCap: plan limit, else env cap). */
 async function resolveMaxGuestsCap(ownerId: string | null): Promise<number | undefined> {
-  const planCapRaw = ownerId ? await getPlanLimit(ownerId, "maxGuests") : undefined;
-  const planCap = normalizePositiveCap(planCapRaw);
-
-  const envRaw = Number(process.env.MAX_GUESTS_PER_ROOM || "0");
-  const envCap = Number.isFinite(envRaw) && envRaw > 0 ? Math.floor(envRaw) : undefined;
-
-  return planCap !== undefined ? planCap : envCap;
+  let planGuests: number | null | undefined = undefined;
+  if (ownerId) {
+    const ent = await getEffectiveEntitlements(ownerId);
+    planGuests = ent.limits.guests;
+  }
+  return resolveGuestCap(planGuests, process.env.MAX_GUESTS_PER_ROOM);
 }
 
 const CAPACITY_LOCK_TTL_MS = 10_000;
@@ -1201,13 +1183,18 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       presenceMode = "normal";
     }
 
-    // Server-side gate: invisible host requires the plan entitlement.
-    // If the plan doesn't include it, silently downgrade to "normal".
-    if (presenceMode === "invisible" && user && !isAdminHost) {
+    // Server-side gate: invisible host requires the owner's effective plan
+    // entitlement AND the invisibleHostEnabled platform switch (kill switch
+    // applies to platform admins too). Otherwise silently downgrade.
+    if (presenceMode === "invisible" && user) {
       try {
-        const ent = await getEffectiveEntitlements(ownerId || user.uid);
-        if (!ent.features.invisibleHost) {
-          presenceMode = "normal";
+        if (isAdminHost) {
+          if (!(await getPlatformFlag("invisibleHostEnabled"))) presenceMode = "normal";
+        } else {
+          const ent = await getEffectiveEntitlements(ownerId || user.uid);
+          if (!ent.features.invisibleHost) {
+            presenceMode = "normal";
+          }
         }
       } catch {
         presenceMode = "normal";
@@ -1397,7 +1384,9 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       presenceMode,
       // Production-room access mode (invite_only | link | public).
       access: roomAccessMode,
-      effectiveEntitlements: ownerEntitlements,
+      // Back-compat shape + canonical engine shape (null = unlimited).
+      effectiveEntitlements: ownerEntitlements ? toLegacyEntitlementsPayload(ownerEntitlements) : null,
+      entitlements: ownerEntitlements ? serializeEntitlements(ownerEntitlements) : null,
       actingContext: user
         ? {
             ownerUid: ownerId || user.uid,

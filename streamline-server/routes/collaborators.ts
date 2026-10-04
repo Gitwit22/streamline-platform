@@ -11,10 +11,15 @@ import {
   normalizeCollaboratorPermissions,
   normalizeEmail,
 } from "../lib/collaborators";
+import { isCollaboratorCleanupRoute } from "../lib/entitlements/cleanupPolicy";
 
 const router = Router();
 
-router.use(async (_req, res, next) => {
+// collaboratorDelegationEnabled gates CREATE/USE only (invite, accept,
+// permission changes). Listing your own relationships and ending them
+// (decline / leave / revoke) always works, even with the switch off.
+router.use(async (req, res, next) => {
+  if (isCollaboratorCleanupRoute(req.method, req.path)) return next();
   const enabled = await getCollaboratorDelegationEnabled();
   if (!enabled) {
     return res.status(404).json({ error: "feature_not_found" });

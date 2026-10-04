@@ -238,12 +238,22 @@ test("readStreamingMinutes prefers usage.streamingMinutes, falls back to old liv
   assert.equal(legacyStreamingSeed(null), 0);
 });
 
-test("gate: unlimited when plan has no monthly minutes", () => {
-  const d = evaluateStreamingGate({ usedMinutes: 99999, includedMinutes: 0, planAllowsOverages: false, overagesEnabled: false });
+test("gate: null monthly minutes = unlimited", () => {
+  const d = evaluateStreamingGate({ usedMinutes: 99999, includedMinutes: null, planAllowsOverages: false, overagesEnabled: false });
   assert.equal(d.allowed, true);
   assert.equal(d.unlimited, true);
   assert.equal(d.limitMinutes, null);
   assert.equal(d.remainingMinutes, null);
+});
+
+test("gate: 0 monthly minutes = none (never unlimited)", () => {
+  const d = evaluateStreamingGate({ usedMinutes: 0, includedMinutes: 0, planAllowsOverages: false, overagesEnabled: false });
+  assert.equal(d.allowed, false);
+  assert.equal(d.unlimited, false);
+  assert.equal(d.limitMinutes, 0);
+  const withBonus = evaluateStreamingGate({ usedMinutes: 10, includedMinutes: 0, bonusMinutes: 30, planAllowsOverages: false, overagesEnabled: false });
+  assert.equal(withBonus.allowed, true);
+  assert.equal(withBonus.limitMinutes, 30);
 });
 
 test("gate: bonus minutes extend the monthly limit", () => {
@@ -280,14 +290,16 @@ test("mid-session monthly stop only after the grace period and never with active
   assert.equal(shouldStopForMonthlyLimit(at182, 2), true);
   const overage = evaluateStreamingGate({ usedMinutes: 9999, includedMinutes: 180, planAllowsOverages: true, overagesEnabled: true });
   assert.equal(shouldStopForMonthlyLimit(overage, 2), false);
-  const unlimited = evaluateStreamingGate({ usedMinutes: 9999, includedMinutes: 0, planAllowsOverages: false, overagesEnabled: false });
+  const unlimited = evaluateStreamingGate({ usedMinutes: 9999, includedMinutes: null, planAllowsOverages: false, overagesEnabled: false });
   assert.equal(shouldStopForMonthlyLimit(unlimited, 2), false);
 });
 
-test("maxSessionMinutes cap (0 = none) with grace", () => {
+test("maxSessionMinutes cap (null = no cap, 0 = zero) with grace", () => {
   assert.equal(shouldStopForSessionCap({ sessionStartMs: at(0), nowMs: at(61), maxSessionMinutes: 60, graceMinutes: 2 }), false);
   assert.equal(shouldStopForSessionCap({ sessionStartMs: at(0), nowMs: at(62), maxSessionMinutes: 60, graceMinutes: 2 }), true);
-  assert.equal(shouldStopForSessionCap({ sessionStartMs: at(0), nowMs: at(9999), maxSessionMinutes: 0 }), false);
+  assert.equal(shouldStopForSessionCap({ sessionStartMs: at(0), nowMs: at(9999), maxSessionMinutes: null }), false);
+  assert.equal(shouldStopForSessionCap({ sessionStartMs: at(0), nowMs: at(1), maxSessionMinutes: 0, graceMinutes: 2 }), false);
+  assert.equal(shouldStopForSessionCap({ sessionStartMs: at(0), nowMs: at(2), maxSessionMinutes: 0, graceMinutes: 2 }), true);
   assert.equal(shouldStopForSessionCap({ sessionStartMs: null, nowMs: at(9999), maxSessionMinutes: 60 }), false);
 });
 

@@ -11,6 +11,7 @@ import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { canAccessFeature } from "./featureAccess";
+import { getEffectiveEntitlements, getPlatformFlags, hasRoomFor } from "../lib/entitlements";
 import { logger } from "../lib/logger";
 import { copyViewerStatsToRecording } from "../lib/viewerStats";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
@@ -51,60 +52,17 @@ type SegmentedPlatformFlags = {
   myContentRecordingsEnabled: boolean;
 };
 
-let cachedSegmentedFlags: SegmentedPlatformFlags | null = null;
-let cachedSegmentedFlagsAt = 0;
-const SEGMENTED_FLAGS_TTL_MS = 30 * 1000;
-
 async function getSegmentedPlatformFlags(): Promise<SegmentedPlatformFlags> {
-  const now = Date.now();
-  if (cachedSegmentedFlags && now - cachedSegmentedFlagsAt < SEGMENTED_FLAGS_TTL_MS) {
-    return cachedSegmentedFlags;
-  }
-
-  try {
-    const [contentLibrarySnap, projectsSnap, editorSnap, myContentSnap, myContentRecordingsSnap] = await Promise.all([
-      db.collection("featureFlags").doc("contentLibraryEnabled").get(),
-      db.collection("featureFlags").doc("projectsEnabled").get(),
-      db.collection("featureFlags").doc("editorEnabled").get(),
-      db.collection("featureFlags").doc("myContentEnabled").get(),
-      db.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
-    ]);
-
-    const contentLibraryData = contentLibrarySnap.exists
-      ? ((contentLibrarySnap.data() as any) || {})
-      : {};
-    const projectsData = projectsSnap.exists ? ((projectsSnap.data() as any) || {}) : {};
-    const editorData = editorSnap.exists ? ((editorSnap.data() as any) || {}) : {};
-    const myContentData = myContentSnap.exists ? ((myContentSnap.data() as any) || {}) : {};
-    const myContentRecordingsData = myContentRecordingsSnap.exists
-      ? ((myContentRecordingsSnap.data() as any) || {})
-      : {};
-
-    // Platform flags act as kill-switches: missing → enabled.
-    // Set { enabled: false } in Firestore to disable.
-    const resolve = (d: any) => d.enabled !== false;
-
-    cachedSegmentedFlags = {
-      contentLibraryEnabled: resolve(contentLibraryData),
-      projectsEnabled: resolve(projectsData),
-      editorEnabled: resolve(editorData),
-      myContentEnabled: resolve(myContentData),
-      myContentRecordingsEnabled: resolve(myContentRecordingsData),
-    };
-    cachedSegmentedFlagsAt = now;
-    return cachedSegmentedFlags;
-  } catch (err) {
-    console.error("[editing] failed to load segmented platform flags", err);
-    cachedSegmentedFlags = {
-      contentLibraryEnabled: true,
-      projectsEnabled: true,
-      editorEnabled: true,
-      myContentEnabled: true,
-      myContentRecordingsEnabled: true,
-    };
-    cachedSegmentedFlagsAt = now;
-    return cachedSegmentedFlags;
-  }
+  // Single platform-flag source (lib/entitlements/flags.ts defaults table:
+  // these surface switches default to ENABLED when the doc is missing).
+  const flags = await getPlatformFlags();
+  return {
+    contentLibraryEnabled: flags.contentLibraryEnabled,
+    projectsEnabled: flags.projectsEnabled,
+    editorEnabled: flags.editorEnabled,
+    myContentEnabled: flags.myContentEnabled,
+    myContentRecordingsEnabled: flags.myContentRecordingsEnabled,
+  };
 }
 
 async function assertSegmentEnabled(
@@ -140,57 +98,48 @@ function getAuthedUid(req: Request): string | null {
 
 type EditingPlanInfo = {
   planId: string;
+  /** Plan includes the editor (before platform switches). */
   access: boolean;
-  maxProjects: number; // 0 => unlimited when access=true
-  maxStorageGB: number;
+  /** Plan includes projects (before platform switches). */
+  projectsAccess: boolean;
+  /** Plan includes the content library (before platform switches). */
+  contentLibraryAccess: boolean;
+  /** null = unlimited, 0 = none. */
+  maxProjects: number | null;
+  /** null = unlimited, 0 = none. */
+  maxStorageBytes: number | null;
   maxTracks?: number;
   maxResolution?: string | null;
 };
 
+type EditingPlanFeature = "editing" | "projects" | "contentLibrary";
+
+/** Editing plan info from the EFFECTIVE entitlements (override / admin / base plan). */
 async function getEditingPlanInfo(uid: string): Promise<EditingPlanInfo> {
-  const userSnap = await db.collection("users").doc(uid).get();
-  const userData = userSnap.exists ? ((userSnap.data() as any) || {}) : {};
-  const planId = String(userData.planId || userData.plan || "free");
-
-  const planSnap = await db.collection("plans").doc(planId).get();
-  const planData = planSnap.exists ? ((planSnap.data() as any) || {}) : {};
-
-  const editing = (planData.editing || {}) as any;
-
-  // If the plan doc is missing from Firestore, fall back based on planId.
-  // Internal/enterprise/pro plans get full access even without a plan doc.
-  const FULL_ACCESS_PLAN_IDS = ["internal_unlimited", "enterprise", "pro"];
-  const planDocMissing = !planSnap.exists;
-  const access = planDocMissing
-    ? FULL_ACCESS_PLAN_IDS.includes(planId)
-    : editing.access === true;
-  const maxProjects = planDocMissing && access ? 999 : Number(editing.maxProjects ?? 0);
-  const maxStorageGB = (() => {
-    if (planDocMissing && access) return 100;
-    const gb = editing.maxStorageGB;
-    const bytes = editing.maxStorageBytes;
-    if (gb !== undefined && gb !== null) {
-      const n = Number(gb);
-      return Number.isFinite(n) ? Math.max(0, n) : 0;
-    }
-    if (bytes !== undefined && bytes !== null) {
-      const n = Number(bytes);
-      return Number.isFinite(n) ? Math.max(0, Math.round(n / (1024 * 1024 * 1024))) : 0;
-    }
-    return 0;
-  })();
-
+  const ent = await getEffectiveEntitlements(uid);
+  const editing = (ent.plan.raw?.editing || {}) as any;
   return {
-    planId,
-    access,
-    maxProjects: Number.isFinite(maxProjects) ? Math.max(0, Math.round(maxProjects)) : 0,
-    maxStorageGB,
+    planId: ent.planId,
+    access: ent.planFeatures.editing,
+    projectsAccess: ent.planFeatures.projects,
+    contentLibraryAccess: ent.planFeatures.contentLibrary,
+    maxProjects: ent.limits.projects,
+    maxStorageBytes: ent.limits.storageBytes,
     maxTracks: typeof editing.maxTracks === "number" ? Math.max(0, Math.round(editing.maxTracks)) : undefined,
     maxResolution: typeof editing.maxResolution === "string" ? editing.maxResolution : (editing.maxResolution ?? null),
   };
 }
 
-async function assertEditingAccess(req: Request, res: Response): Promise<{ uid: string; plan: EditingPlanInfo } | null> {
+/**
+ * Plan gate for editing surfaces (create/use). Platform surface switches are
+ * checked separately by assertSegmentEnabled (FEATURE_DISABLED). Never use
+ * this on delete / cleanup routes.
+ */
+async function assertEditingAccess(
+  req: Request,
+  res: Response,
+  feature: EditingPlanFeature = "editing",
+): Promise<{ uid: string; plan: EditingPlanInfo } | null> {
   const uid = getAuthedUid(req);
   if (!uid) {
     res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
@@ -198,16 +147,43 @@ async function assertEditingAccess(req: Request, res: Response): Promise<{ uid: 
   }
 
   const plan = await getEditingPlanInfo(uid);
-  if (!plan.access) {
+  const allowed =
+    feature === "projects" ? plan.projectsAccess : feature === "contentLibrary" ? plan.contentLibraryAccess : plan.access;
+  if (!allowed) {
     res.status(403).json({
       error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
-      reason: "Editing not available on your plan",
+      reason: feature === "projects" ? "Projects are not available on your plan" : "Editing not available on your plan",
       planId: plan.planId,
     });
     return null;
   }
 
   return { uid, plan };
+}
+
+/**
+ * Shared gate for creating a project (POST /api/editing/projects, duplicate,
+ * POST /api/projects): projects platform switch + plan projects feature +
+ * limits.projects (null = unlimited, 0 = none). Sends the error and returns
+ * false when creation is not allowed.
+ */
+export async function assertCanCreateProject(req: Request, res: Response): Promise<boolean> {
+  if (!(await assertSegmentEnabled(res, "projectsEnabled"))) return false;
+  const access = await assertEditingAccess(req, res, "projects");
+  if (!access) return false;
+  const limit = access.plan.maxProjects;
+  if (limit !== null) {
+    const totalCount = limit === 0 ? 0 : await countUserProjects(access.uid);
+    if (!hasRoomFor(totalCount, limit)) {
+      res.status(409).json({
+        error: LIMIT_ERRORS.LIMIT_EXCEEDED,
+        reason: limit === 0 ? "Projects are not included in your plan" : "Max projects limit reached",
+        limit,
+      });
+      return false;
+    }
+  }
+  return true;
 }
 
 // Multipart uploads are spooled to os.tmpdir() (not RAM) and streamed to R2.
@@ -431,9 +407,8 @@ router.get("/assets/:id", async (req: Request, res: Response) => {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
-    if (!(await assertSegmentEnabled(res, "contentLibraryEnabled"))) {
-      return;
-    }
+    // Reading / downloading the caller's own asset is never gated by plan or
+    // platform switches (owner check only).
 
     // 1) Recordings-backed assets
     const recordingSnap = await db.collection("recordings").doc(id).get();
@@ -500,9 +475,7 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
-    if (!(await assertSegmentEnabled(res, "contentLibraryEnabled"))) {
-      return;
-    }
+    // Cleanup is never gated by plan or platform switches (owner check only).
 
     // 1) Try recordings-backed assets
     const recordingSnap = await db.collection("recordings").doc(id).get();
@@ -646,8 +619,8 @@ router.get("/projects", async (req: Request, res: Response) => {
       return;
     }
 
-    // Plan-based gating: projects are part of editing.
-    const access = await assertEditingAccess(req, res);
+    // Plan-based gating: projects feature of the effective plan.
+    const access = await assertEditingAccess(req, res, "projects");
     if (!access) return;
 
     // Use the project bridge to merge both collections into one normalized list
@@ -671,27 +644,11 @@ router.post("/projects", async (req: Request, res: Response) => {
     }
 
     // Creating projects requires the editor surface.
-    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
-      return;
-    }
     if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
       return;
     }
-
-    const access = await assertEditingAccess(req, res);
-    if (!access) return;
-
-    // Enforce max projects (0 means unlimited when access=true)
-    if (access.plan.maxProjects > 0) {
-      const totalCount = await countUserProjects(userId);
-      if (totalCount >= access.plan.maxProjects) {
-        return res.status(409).json({
-          error: LIMIT_ERRORS.LIMIT_EXCEEDED,
-          reason: "Max projects limit reached",
-          limit: access.plan.maxProjects,
-        });
-      }
-    }
+    // projects switch + plan projects + limits.projects (null = unlimited, 0 = none)
+    if (!(await assertCanCreateProject(req, res))) return;
 
     if (!name || typeof name !== "string" || !name.trim()) {
       return res.status(400).json({ error: "name is required" });
@@ -739,7 +696,7 @@ router.get("/projects/:id", async (req: Request, res: Response) => {
       return;
     }
 
-    const access = await assertEditingAccess(req, res);
+    const access = await assertEditingAccess(req, res, "projects");
     if (!access) return;
 
     // Use the bridge to resolve from either collection, auto-creating if needed
@@ -768,7 +725,7 @@ router.patch("/projects/:id", async (req: Request, res: Response) => {
       return;
     }
 
-    const access = await assertEditingAccess(req, res);
+    const access = await assertEditingAccess(req, res, "projects");
     if (!access) return;
 
     const ref = db.collection("editing_projects").doc(id);
@@ -819,13 +776,7 @@ router.delete("/projects/:id", async (req: Request, res: Response) => {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
-    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
-      return;
-    }
-
-    const access = await assertEditingAccess(req, res);
-    if (!access) return;
-
+    // Cleanup is never gated by plan or platform switches (owner check only).
     const ref = db.collection("editing_projects").doc(id);
     const snap = await ref.get();
     if (!snap.exists) {
@@ -854,27 +805,11 @@ router.post("/projects/:id/duplicate", async (req: Request, res: Response) => {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
-    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
-      return;
-    }
     if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
       return;
     }
-
-    const access = await assertEditingAccess(req, res);
-    if (!access) return;
-
-    // Enforce max projects
-    if (access.plan.maxProjects > 0) {
-      const totalCount = await countUserProjects(userId);
-      if (totalCount >= access.plan.maxProjects) {
-        return res.status(409).json({
-          error: LIMIT_ERRORS.LIMIT_EXCEEDED,
-          reason: "Max projects limit reached",
-          limit: access.plan.maxProjects,
-        });
-      }
-    }
+    // projects switch + plan projects + limits.projects (null = unlimited, 0 = none)
+    if (!(await assertCanCreateProject(req, res))) return;
 
     const ref = db.collection("editing_projects").doc(id);
     const snap = await ref.get();
@@ -1795,9 +1730,11 @@ router.get("/plan-info", async (req: Request, res: Response) => {
     return res.json({
       planId: plan.planId,
       access: plan.access,
-      maxProjects: plan.maxProjects,
+      // Legacy encoding for older clients: 0 = no cap. Prefer `limits` (null = unlimited).
+      maxProjects: plan.maxProjects ?? 0,
       currentProjects: projectCount,
-      maxStorageGB: plan.maxStorageGB,
+      maxStorageGB: plan.maxStorageBytes === null ? 0 : Math.round(plan.maxStorageBytes / GB),
+      limits: { projects: plan.maxProjects, storageBytes: plan.maxStorageBytes },
       maxTracks: plan.maxTracks ?? null,
       maxResolution: plan.maxResolution ?? null,
       storageUsedBytes,

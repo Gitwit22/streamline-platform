@@ -41,66 +41,28 @@ import { deleteFiles, deletePrefix } from "../lib/storageClient";
 import { resolveCompositeLayoutFromRoom } from "../lib/roomLayout";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { createSavedVideoFromRecording } from "./myContent";
-import { getCurrentStorageUsage, reserveStorageUsage, resolveMaxStorageBytesFromPlan } from "../usageHelper";
+import { getCurrentStorageUsage, reserveStorageUsage } from "../usageHelper";
 import { countRecordingMinutes, recordingBillingUid, releaseRecordingStorageOnce } from "../lib/recordingUsage";
 import { requireAdmin } from "../middleware/adminAuth";
 import { DOWNLOAD_LINK_TTL_SECONDS, evaluateDownloadRules, shouldClaimStorageCount } from "../lib/mediaPure";
 import { compositorUrl, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
 import { copyViewerStatsToRecording } from "../lib/viewerStats";
+import { getPlatformFlags } from "../lib/entitlements";
 
 const router = Router();
 
-type MyContentPlatformFlags = {
-  myContentEnabled: boolean;
-  myContentRecordingsEnabled: boolean;
-};
-
-let cachedMyContentFlags: MyContentPlatformFlags | null = null;
-let cachedMyContentFlagsAt = 0;
-const MY_CONTENT_FLAGS_TTL_MS = 30 * 1000;
-
-async function getMyContentPlatformFlags(): Promise<MyContentPlatformFlags> {
-  const now = Date.now();
-  if (cachedMyContentFlags && now - cachedMyContentFlagsAt < MY_CONTENT_FLAGS_TTL_MS) {
-    return cachedMyContentFlags;
-  }
-
-  try {
-    const [myContentSnap, myContentRecordingsSnap] = await Promise.all([
-      firestore.collection("featureFlags").doc("myContentEnabled").get(),
-      firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
-    ]);
-
-    const myContentData = myContentSnap.exists ? ((myContentSnap.data() as any) || {}) : {};
-    const myContentRecordingsData = myContentRecordingsSnap.exists
-      ? ((myContentRecordingsSnap.data() as any) || {})
-      : {};
-
-    const myContentEnabled = myContentData.enabled === true;
-    // Recording pipeline is controlled by featureFlags/recording.
-    // This flag is an additional opt-out. Missing => enabled.
-    const rawMyContentRecordingsEnabled = (myContentRecordingsData as any).enabled;
-    const myContentRecordingsEnabled =
-      rawMyContentRecordingsEnabled === undefined ? true : rawMyContentRecordingsEnabled === true;
-
-    cachedMyContentFlags = {
-      myContentEnabled,
-      myContentRecordingsEnabled,
-    };
-    cachedMyContentFlagsAt = now;
-    return cachedMyContentFlags;
-  } catch (err) {
-    console.error("[recordings] failed to load My Content platform flags", err);
-    cachedMyContentFlags = {
-      myContentEnabled: false,
-      // Fail-open to avoid breaking recording when Firestore is transient.
-      myContentRecordingsEnabled: true,
-    };
-    cachedMyContentFlagsAt = now;
-    return cachedMyContentFlags;
-  }
+async function getMyContentPlatformFlags() {
+  // Single platform-flag source (lib/entitlements/flags.ts defaults table).
+  const flags = await getPlatformFlags();
+  return {
+    myContentEnabled: flags.myContentEnabled,
+    myContentRecordingsEnabled: flags.myContentRecordingsEnabled,
+  };
 }
 
+// NOTE: this surface switch gates the My Content recordings UI endpoints only.
+// Reading, downloading and deleting the caller's OWN recordings is never
+// gated (cleanup is always allowed).
 async function assertMyContentRecordingsEnabled(res: any): Promise<boolean> {
   const flags = await getMyContentPlatformFlags();
   if (flags.myContentRecordingsEnabled) return true;
@@ -607,7 +569,8 @@ router.post(
     // Optional: emergency recordings have special retention rules.
     const recordingClass = rawRecordingClass === "emergency" ? "emergency" : null;
 
-    // Plan + features (canonical limits via EffectiveEntitlements)
+    // Plan + features (canonical limits via EffectiveEntitlements:
+    // admin override / platform admin / base plan; null = unlimited).
     const entitlements = await getEffectiveEntitlements(ownerUid);
     const planId = entitlements.planId;
     const plan = entitlements.plan.raw || {};
@@ -617,8 +580,8 @@ router.post(
     // refuse to start when the owner is already at/over the plan storage cap.
     // Fails open on lookup errors (logged) so a Firestore hiccup never blocks.
     try {
-      const storageLimitBytes = resolveMaxStorageBytesFromPlan(plan);
-      if (storageLimitBytes > 0) {
+      const storageLimitBytes = entitlements.limits.storageBytes; // null = unlimited, 0 = none
+      if (storageLimitBytes !== null) {
         const storageUsedBytes = await getCurrentStorageUsage(ownerUid);
         if (storageUsedBytes >= storageLimitBytes) {
           console.warn(`[recordings/start] storage full ownerUid=${ownerUid} actorUid=${uid} roomId=${roomId}`, {
@@ -643,11 +606,21 @@ router.post(
       });
     }
 
-    const dualAllowed = !!(plan?.features?.dualRecording || plan?.features?.dual_recording);
+    const dualAllowed = !!entitlements.features.dualRecording;
     const allowHigherRecordingThanStream = !!(
       plan?.features?.allowHigherRecordingThanStream || plan?.features?.allow_higher_recording_than_stream
     );
-    const maxRecordingMinutesPerClip = Number(entitlements.limits.maxRecordingMinutesPerClip || 0);
+    // null = no per-clip cap. 0 cannot reach here in practice (recording off),
+    // but is treated as "no recording time" rather than unlimited.
+    const clipLimit = entitlements.limits.recordingMinutesPerClip;
+    if (clipLimit === 0) {
+      return res.status(403).json({
+        success: false,
+        error: LIMIT_ERRORS.LIMIT_EXCEEDED,
+        reason: "Your plan does not include recording time",
+      });
+    }
+    const maxRecordingMinutesPerClip: number | null = clipLimit;
 
     // Plan gate for dual recording (feature: dualRecording)
     if (mode === "dual" && !dualAllowed) {
@@ -760,7 +733,7 @@ router.post(
     const emergencyExpiresAtMs = emergencyExpiresAt.getTime();
 
     const autoStopAt =
-      maxRecordingMinutesPerClip > 0
+      maxRecordingMinutesPerClip !== null && maxRecordingMinutesPerClip > 0
         ? new Date(now.getTime() + maxRecordingMinutesPerClip * 60_000)
         : null;
 
@@ -1510,7 +1483,7 @@ router.get("/:id/storage-check", requireAuth, requireMyContentRecordingsEnabled 
 // GET /:id - Get recording status
 // =============================================================================
 
-router.get("/:id", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
+router.get("/:id", requireAuth, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
     const recordingId = String(req.params.id ?? "");
@@ -1538,7 +1511,7 @@ router.get("/:id", requireAuth, requireMyContentRecordingsEnabled as any, async 
 // Default behavior is SOFT delete (status="deleted"); pass ?hard=1 to delete the doc.
 // =============================================================================
 
-router.delete("/:id", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
+router.delete("/:id", requireAuth, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
     const recordingId = String(req.params.id ?? "");
@@ -1729,7 +1702,7 @@ export async function buildRecordingDownloadLink(params: {
   };
 }
 
-router.get("/:id/download-link", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
+router.get("/:id/download-link", requireAuth, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
     const recordingId = String(req.params.id ?? "");
@@ -1788,7 +1761,7 @@ router.post("/:id/report-download-issue", requireAuth, requireMyContentRecording
 // GET /:id/download - Legacy direct download (placeholder)
 // =============================================================================
 
-router.get("/:id/download", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
+router.get("/:id/download", requireAuth, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
     const recordingId = String(req.params.id ?? "");

@@ -3,74 +3,21 @@ import { PLANS } from "../usagePlans";
 import { PLAN_IDS, PlanId, isPlanId } from "../types/plan";
 import { firestore } from "../firebaseAdmin";
 import { normalizePlan } from "../lib/normalizePlan";
-import { getPlatformTranscodeEnabled } from "../lib/platformFlags";
+import { defaultPlatformFlags, getPlatformFlags, toPlatformFlagsPayload } from "../lib/entitlements";
 
 const router = Router();
 
 router.get("/", async (_req, res) => {
   try {
-    const [
-      hlsUiSnap,
-      recordingUiSnap,
-      contentLibrarySnap,
-      projectsSnap,
-      editorSnap,
-      myContentSnap,
-      myContentRecordingsSnap,
-      monetizationSnap,
-      payPerViewSnap,
-      collaboratorDelegationSnap,
-    ] = await Promise.all([
-      firestore.collection("featureFlags").doc("hlsSettingsTab").get(),
-      firestore.collection("featureFlags").doc("recording").get(),
-      firestore.collection("featureFlags").doc("contentLibraryEnabled").get(),
-      firestore.collection("featureFlags").doc("projectsEnabled").get(),
-      firestore.collection("featureFlags").doc("editorEnabled").get(),
-      firestore.collection("featureFlags").doc("myContentEnabled").get(),
-      firestore.collection("featureFlags").doc("myContentRecordingsEnabled").get(),
-      firestore.collection("featureFlags").doc("monetizationEnabled").get(),
-      firestore.collection("featureFlags").doc("payPerViewEnabled").get(),
-      firestore.collection("featureFlags").doc("collaboratorDelegationEnabled").get(),
-    ]);
-
-    const hlsUiData = hlsUiSnap.exists ? ((hlsUiSnap.data() as any) || {}) : {};
-    const recordingUiData = recordingUiSnap.exists ? ((recordingUiSnap.data() as any) || {}) : {};
-    const contentLibraryData = contentLibrarySnap.exists ? ((contentLibrarySnap.data() as any) || {}) : {};
-    const projectsData = projectsSnap.exists ? ((projectsSnap.data() as any) || {}) : {};
-    const editorData = editorSnap.exists ? ((editorSnap.data() as any) || {}) : {};
-    const myContentData = myContentSnap.exists ? ((myContentSnap.data() as any) || {}) : {};
-    const myContentRecordingsData = myContentRecordingsSnap.exists
-      ? ((myContentRecordingsSnap.data() as any) || {})
-      : {};
-    const monetizationData = monetizationSnap.exists ? ((monetizationSnap.data() as any) || {}) : {};
-    const payPerViewData = payPerViewSnap.exists ? ((payPerViewSnap.data() as any) || {}) : {};
-    const collaboratorDelegationData = collaboratorDelegationSnap.exists
-      ? ((collaboratorDelegationSnap.data() as any) || {})
-      : {};
-
-    const hlsEnabled = hlsUiData.enabled === undefined ? true : !!hlsUiData.enabled;
-    const recordingEnabled = recordingUiData.enabled === undefined ? true : !!recordingUiData.enabled;
-    const transcodeEnabled = getPlatformTranscodeEnabled();
-
-    // New segmented flags default to DISABLED when missing.
-    const contentLibraryEnabled = contentLibraryData.enabled === true;
-    const projectsEnabled = projectsData.enabled === true;
-    const editorEnabled = editorData.enabled === true;
-
-    // My Content umbrella + sub-feature flags default to DISABLED when missing.
-    const myContentEnabled = myContentData.enabled === true;
-    const myContentRecordingsEnabled = myContentRecordingsData.enabled === true;
-
-    // Monetization + PPV flags default to DISABLED (opt-in).
-    const monetizationEnabled = monetizationData.enabled === true;
-    const payPerViewEnabled = payPerViewData.enabled === true;
-    const collaboratorDelegationEnabled = collaboratorDelegationData.enabled === true;
+    // Single platform-flag source (same values /api/account/me returns).
+    const platformFlags = toPlatformFlagsPayload(await getPlatformFlags());
 
     const snap = await firestore.collection("plans").get();
     const mapped = snap.docs.map((d) => {
       const data = (d.data() as any) || {};
       const id = d.id;
       const plan = normalizePlan(id, data);
+      const v2 = plan.v2; // null = unlimited, 0 = none
 
       const visibility = plan.visibility;
 
@@ -112,7 +59,7 @@ router.get("/", async (_req, res) => {
         },
         features: {
           recording: !!plan.features.recording,
-          dualRecording: !!(data.features?.dualRecording ?? data.dualRecordingEnabled),
+          dualRecording: !!v2.features.dualRecording,
           rtmp: !!plan.features.rtmp,
           multistream: !!plan.features.multistream,
           // Advanced permissions have been removed; all accounts use
@@ -138,16 +85,17 @@ router.get("/", async (_req, res) => {
         caps: {
           hlsMaxMinutesPerSession: plan.caps?.hlsMaxMinutesPerSession ?? null,
         },
+        // LEGACY ENCODING above/below (0 = no cap) for older pricing UIs.
         editing: {
-          access: !!data.editing?.access,
-          maxProjects: Number(data.editing?.maxProjects ?? 0),
-          maxStorageGB: (() => {
-            const fromGb = data.editing?.maxStorageGB;
-            const fromBytes = data.editing?.maxStorageBytes;
-            if (fromGb !== undefined && fromGb !== null) return Number(fromGb);
-            if (fromBytes !== undefined && fromBytes !== null) return Math.round(Number(fromBytes) / (1024 * 1024 * 1024));
-            return 0;
-          })(),
+          access: !!v2.features.editing,
+          maxProjects: v2.limits.projects ?? 0,
+          maxStorageGB: v2.limits.storageBytes === null ? 0 : Math.round(v2.limits.storageBytes / (1024 * 1024 * 1024)),
+        },
+        // Canonical entitlements of this plan (null = unlimited, 0 = none).
+        entitlements: {
+          limitsVersion: v2.limitsVersion,
+          features: v2.features,
+          limits: v2.limits,
         },
       };
 
@@ -163,63 +111,16 @@ router.get("/", async (_req, res) => {
 
     // If no plan docs, fall back to ids
     if (!mapped.length) {
-      return res.json({
-        plans: PLANS,
-        platformFlags: {
-          hlsEnabled,
-          hlsSettingsTab: hlsEnabled,
-          recordingEnabled,
-          transcodeEnabled,
-          contentLibraryEnabled,
-          projectsEnabled,
-          editorEnabled,
-          myContentEnabled,
-          myContentRecordingsEnabled,
-          monetizationEnabled,
-          payPerViewEnabled,
-          collaboratorDelegationEnabled,
-        },
-      });
+      return res.json({ plans: PLANS, platformFlags });
     }
 
     // If filter removed everything, fall back to mapped to avoid empty payloads
     const plansToReturn = publicPlans.length ? publicPlans : mapped;
-    return res.json({
-      plans: plansToReturn,
-      platformFlags: {
-        hlsEnabled,
-        hlsSettingsTab: hlsEnabled,
-        recordingEnabled,
-        transcodeEnabled,
-        contentLibraryEnabled,
-        projectsEnabled,
-        editorEnabled,
-        myContentEnabled,
-        myContentRecordingsEnabled,
-        monetizationEnabled,
-        payPerViewEnabled,
-        collaboratorDelegationEnabled,
-      },
-    });
+    return res.json({ plans: plansToReturn, platformFlags });
   } catch (err: any) {
     console.error("/api/plans failed, returning fallback IDs:", err?.message || err);
-    return res.json({
-      plans: PLANS,
-      platformFlags: {
-        hlsEnabled: true,
-        hlsSettingsTab: true,
-        recordingEnabled: true,
-        transcodeEnabled: getPlatformTranscodeEnabled(),
-        contentLibraryEnabled: false,
-        projectsEnabled: false,
-        editorEnabled: false,
-        myContentEnabled: false,
-        myContentRecordingsEnabled: false,
-        monetizationEnabled: false,
-        payPerViewEnabled: false,
-        collaboratorDelegationEnabled: false,
-      },
-    });
+    // Same defaults table as every other surface.
+    return res.json({ plans: PLANS, platformFlags: toPlatformFlagsPayload(defaultPlatformFlags()) });
   }
 });
 
@@ -233,7 +134,11 @@ router.get("/:id", async (req, res) => {
     if (!snap.exists) return res.status(404).json({ error: "plan_not_found" });
 
     const plan = normalizePlan(id, snap.data() || {});
-    return res.json({ plan });
+    const { v2, ...legacy } = plan;
+    return res.json({
+      plan: legacy,
+      entitlements: { limitsVersion: v2.limitsVersion, features: v2.features, limits: v2.limits },
+    });
   } catch (err: any) {
     console.error("/api/plans/:id failed", err?.message || err);
     return res.status(500).json({ error: "internal_error" });
