@@ -294,7 +294,7 @@ export default function Join() {
 
     (async () => {
       try {
-        const res = await apiFetchAuth(`${API_BASE}/api/account/me`, {}, { allowNonOk: true });
+        const res = await apiFetchAuth(`${API_BASE}/api/account/me`, {}, { allowNonOk: true, suppressAuthSideEffects: true });
         if (!res.ok) {
           if (!cancelled) setPlatformHlsEnabled(true);
           return;
@@ -354,7 +354,7 @@ export default function Join() {
         const res = await apiFetchAuth(`${API_BASE}/api/saved-embeds`, {
           method: "GET",
           cache: "no-store",
-        }, { allowNonOk: true });
+        }, { allowNonOk: true, suppressAuthSideEffects: true });
         const payload = await res.json().catch(() => null);
         if (!res.ok) {
           throw new Error(payload?.error || "Failed to load Saved Rooms");
@@ -393,7 +393,7 @@ export default function Join() {
       setCollaboratorsLoading(true);
       setCollaboratorsError(null);
       try {
-        const res = await apiFetchAuth(`${API_BASE}/api/collaborators/me`, { method: "GET" }, { allowNonOk: true });
+        const res = await apiFetchAuth(`${API_BASE}/api/collaborators/me`, { method: "GET" }, { allowNonOk: true, suppressAuthSideEffects: true });
         const payload = await res.json().catch(() => null);
         if (!res.ok) {
           throw new Error(payload?.error || "Failed to load collaborators");
@@ -445,7 +445,7 @@ export default function Join() {
       if (!res.ok) {
         throw new Error(payload?.error || `Failed to ${action} invite`);
       }
-      const reload = await apiFetchAuth(`${API_BASE}/api/collaborators/me`, { method: "GET" }, { allowNonOk: true });
+      const reload = await apiFetchAuth(`${API_BASE}/api/collaborators/me`, { method: "GET" }, { allowNonOk: true, suppressAuthSideEffects: true });
       const next = await reload.json().catch(() => null);
       if (reload.ok) {
         setCollaboratorsData((next || null) as CollaboratorsPayload | null);
