@@ -6,6 +6,7 @@ import type { InviteClaims } from "../middleware/requireAuth";
 import type { RoomAccessClaims } from "../middleware/roomAccessToken";
 import { getRoom, type RoomDoc } from "../services/rooms";
 import { resolveOwnerActingContext } from "./collaborators";
+import { getInviteAcceptance, isInviteShapedClaims } from "./inviteAcceptance";
 import {
   DEFAULT_ROLE_PROFILES_BY_ID,
   type RolePermissionMap,
@@ -169,6 +170,21 @@ function collaboratorToRoomPermissions(raw: any): RolePermissions {
 
 export type RoomPermissionKey = keyof RolePermissions;
 
+/** True when an invite JWT names this room by id with a cohost (or legacy moderator) role. */
+export function inviteGrantsCohostForRoom(invite: InviteClaims | undefined, roomId: string): boolean {
+  if (!invite || !isInviteShapedClaims(invite)) return false;
+  const inviteRoomId = String(invite.roomId || "").trim();
+  if (!inviteRoomId || inviteRoomId !== roomId) return false;
+  const r = String(invite.role || "").trim().toLowerCase();
+  return r === "cohost" || r === "moderator";
+}
+
+async function isInvitedCohost(invite: InviteClaims | undefined, roomId: string, uid: string): Promise<boolean> {
+  if (inviteGrantsCohostForRoom(invite, roomId)) return true;
+  const acceptance = await getInviteAcceptance(roomId, uid);
+  return acceptance?.role === "cohost";
+}
+
 export async function assertRoomPerm(
   req: Request,
   roomId: string,
@@ -248,6 +264,13 @@ export async function assertRoomPerm(
       if (isDelegatedForRoom) {
         role = "cohost";
         permissions = collaboratorToRoomPermissions(actingContext?.permissions);
+      } else if (await isInvitedCohost(invite, trimmedRoomId, uid)) {
+        // Logged-in cohost invitee (cohost invite JWT for this room, or a
+        // recorded cohost acceptance): cohost profile limited to the owner's plan.
+        role = "cohost";
+        permissions = ensureBooleanPerms(
+          await intersectPermissionsWithEntitlements({ ...ROLE_PERMISSIONS.cohost }, ownerId || undefined),
+        );
       } else {
         role = "participant";
         permissions = ensureBooleanPerms({});

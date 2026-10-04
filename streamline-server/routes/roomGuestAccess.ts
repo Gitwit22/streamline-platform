@@ -4,11 +4,25 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { firestore } from "../firebaseAdmin";
 import { tryGetAuthUserAny, verifyInviteToken } from "../middleware/requireAuth";
-import { tryGetGuestSession } from "../middleware/guestSession";
+import {
+  tryGetGuestSession,
+  signGuestSession,
+  setGuestSessionCookie,
+  GUEST_SESSION_TTL,
+  type GuestSessionClaims,
+} from "../middleware/guestSession";
 import { verifyRoomAccessToken } from "../middleware/roomAccessToken";
 import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
-import { signGuestSession } from "../middleware/guestSession";
+import {
+  getInviteAcceptance,
+  recordInviteAcceptance,
+  isFirestoreInviteId,
+  jwtInviteAcceptanceId,
+  isInviteShapedClaims,
+  type InviteAcceptance,
+} from "../lib/inviteAcceptance";
+import { ROLE_PERMISSIONS, intersectPermissionsWithEntitlements } from "../lib/rolePermissions";
 import { roleToParticipantPermission, applyPresenceModeToGrant } from "../lib/livekitPermissions";
 import { isValidPresenceMode, normalizePresenceMode, buildPresenceMetadata, type PresenceMode } from "../lib/presenceMode";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
@@ -16,13 +30,15 @@ import { isAdmin } from "../middleware/adminAuth";
 import { resolveHostName } from "../lib/resolveHostName";
 import { logDelegatedRoomAction, resolveOwnerActingContext } from "../lib/collaborators";
 
+/**
+ * Invite JWT from x-invite-token, body.inviteToken or query inviteToken/t.
+ * Deliberately does NOT read x-room-access-token: room access tokens are
+ * per-participant credentials, not invites, and must never count as one.
+ */
 export function extractInviteToken(req: any): string | null {
   const hdr = (req?.headers as any) || {};
   const fromHeader = hdr["x-invite-token"] ?? hdr["X-Invite-Token"];
   if (typeof fromHeader === "string" && fromHeader.trim()) return fromHeader.trim();
-  // Fallback: some clients may pass the invite token in the room-access header.
-  const fromRoomAccessHeader = hdr["x-room-access-token"] ?? hdr["X-Room-Access-Token"];
-  if (typeof fromRoomAccessHeader === "string" && fromRoomAccessHeader.trim()) return fromRoomAccessHeader.trim();
   const fromBody = req?.body?.inviteToken;
   if (typeof fromBody === "string" && fromBody.trim()) return fromBody.trim();
   const fromQuery = req?.query?.inviteToken ?? req?.query?.t;
@@ -30,63 +46,111 @@ export function extractInviteToken(req: any): string | null {
   return null;
 }
 
-export function tryGetLegacyInviteGuest(req: any, roomId: string): { inviteId: string; roomId: string; role: "guest" | "participant" } | null {
+/**
+ * Maps a verified invite-JWT role to the guest-session role an anonymous
+ * holder may get. Elevated roles (host/cohost/moderator) and unknown values
+ * return null: cohost invites go through the authenticated flow.
+ * Backward compatibility: legacy "guest" behaved like an on-stage participant
+ * and legacy "viewer" like a "guest".
+ */
+export function inviteClaimRoleToGuestRole(rawRole: unknown): "guest" | "participant" | null {
+  const r = String(rawRole ?? "").trim().toLowerCase();
+  if (r === "participant" || r === "guest") return "participant";
+  if (r === "viewer") return "guest";
+  return null;
+}
+
+/**
+ * Maps a room access token role to the role a share-link holder may join
+ * with. Never elevates: "viewer" stays subscribe-only, guest/participant stay
+ * guest, and host/cohost tokens are not shareable at all.
+ */
+export function roomAccessRoleToShareRole(rawRole: unknown): "guest" | "viewer" | null {
+  const r = String(rawRole ?? "").trim().toLowerCase();
+  if (r === "viewer") return "viewer";
+  if (r === "guest" || r === "participant") return "guest";
+  return null;
+}
+
+/** Verified invite JWT claims for this room (any non-host role), else null. */
+export function getInviteClaimsForRoom(req: any, roomId: string): { role: string; createdByUid: string | null; exp: number | null; raw: string } | null {
   const raw = extractInviteToken(req);
   if (!raw) return null;
   try {
-    let claims: any;
-    try {
-      claims = verifyInviteToken(raw) as any;
-    } catch {
-      // Also allow roomAccessTokens in invite flows (share links).
-      claims = verifyRoomAccessToken(raw) as any;
-    }
+    const claims = verifyInviteToken(raw) as any;
+    if (!isInviteShapedClaims(claims)) return null;
     const claimRoomId = typeof claims?.roomId === "string" ? claims.roomId.trim() : "";
-    // Normalize role: defensive parse, trim whitespace, lowercase
-    const rawRole = String(claims?.role ?? "").trim().toLowerCase();
-    // Never allow elevated roles through legacy invite JWTs for guest RTC join.
-    // Cohost (and legacy moderator) invites must be handled by the authed flow.
-    if (rawRole === "host" || rawRole === "cohost" || rawRole === "moderator") return null;
-    if (!claimRoomId || claimRoomId !== roomId) return null;
-
-    const inviteId = `legacy:${Buffer.from(raw).toString("base64url").slice(0, 24)}`;
-    // Backward compatibility:
-    // - legacy role "guest" historically behaved like an on-stage "participant"
-    // - legacy role "viewer" behaved like a view-only "guest"
-    // Security: explicitly validate known roles, reject unknown/corrupted values.
-    let role: "guest" | "participant";
-    if (rawRole === "participant") {
-      role = "participant";
-    } else if (rawRole === "guest") {
-      role = "participant";
-    } else if (rawRole === "viewer") {
-      role = "guest";
-    } else {
-      // Unknown/corrupted role - reject for security
-      return null;
-    }
-    return { inviteId, roomId, role };
+    const role = String(claims?.role ?? "").trim().toLowerCase();
+    if (!claimRoomId || claimRoomId !== roomId || role === "host") return null;
+    return {
+      role,
+      createdByUid: typeof claims?.createdByUid === "string" && claims.createdByUid ? claims.createdByUid : null,
+      exp: typeof claims?.exp === "number" ? claims.exp : null,
+      raw,
+    };
   } catch {
     return null;
   }
 }
 
+export function tryGetLegacyInviteGuest(req: any, roomId: string): { inviteId: string; roomId: string; role: "guest" | "participant" } | null {
+  const claims = getInviteClaimsForRoom(req, roomId);
+  if (!claims) return null;
+  const role = inviteClaimRoleToGuestRole(claims.role);
+  if (!role) return null;
+  const inviteId = `legacy:${Buffer.from(claims.raw).toString("base64url").slice(0, 24)}`;
+  return { inviteId, roomId, role };
+}
+
 /**
- * True when the request carries a valid invite JWT for this room with any
- * non-host role, cohost included (tryGetLegacyInviteGuest rejects cohost
- * because guests must not get it, but an authenticated cohost holds it).
+ * Share-link fallback for anonymous callers whose `t` is a room access token
+ * rather than an invite. Only used to let such a holder in at the token's own
+ * (non-elevated) role; never counts as an invite for publish decisions.
  */
-function hasInviteTokenForRoom(req: any, roomId: string): boolean {
-  const raw = extractInviteToken(req);
-  if (!raw) return false;
-  try {
-    const claims = verifyInviteToken(raw) as any;
-    const claimRoomId = typeof claims?.roomId === "string" ? claims.roomId.trim() : "";
-    const role = String(claims?.role ?? "").trim().toLowerCase();
-    return !!claimRoomId && claimRoomId === roomId && role !== "host";
-  } catch {
-    return false;
+export function tryGetRoomAccessShareGuest(req: any, roomId: string): { role: "guest" | "viewer"; raw: string } | null {
+  const hdr = (req?.headers as any) || {};
+  const candidates = [
+    hdr["x-room-access-token"] ?? hdr["X-Room-Access-Token"],
+    extractInviteToken(req),
+  ];
+  for (const c of candidates) {
+    if (typeof c !== "string" || !c.trim()) continue;
+    try {
+      const claims = verifyRoomAccessToken(c.trim()) as any;
+      if (String(claims?.roomId || "").trim() !== roomId) continue;
+      const role = roomAccessRoleToShareRole(claims?.role);
+      if (role) return { role, raw: c.trim() };
+    } catch {
+      // not a room access token
+    }
   }
+  return null;
+}
+
+/** Random LiveKit identity for an invite-based guest. */
+function newInviteIdentity(inviteId: string): string {
+  return `invite:${inviteId}:${crypto.randomBytes(8).toString("hex")}`;
+}
+
+/**
+ * Validates a client-generated join nonce (InviteRedeem keeps one per tab in
+ * sessionStorage). Returns null when absent or malformed.
+ */
+export function normalizeJoinNonce(raw: unknown): string | null {
+  const v = String(raw ?? "").trim();
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(v)) return null;
+  return v;
+}
+
+/**
+ * Stable identity for a join-now redeem: the same (invite, nonce) pair always
+ * maps to the same identity (double-click / retry from the same tab), while
+ * different tabs/people (different nonces) never collide.
+ */
+export function joinNowIdentity(inviteId: string, nonce: string | null): string {
+  if (!nonce) return newInviteIdentity(inviteId);
+  const h = crypto.createHash("sha256").update(`${inviteId}:${nonce}`).digest("hex").slice(0, 16);
+  return `invite:${inviteId}:${h}`;
 }
 
 async function getAccessTokenCtor() {
@@ -268,7 +332,11 @@ function getRoomAccessSecret() {
   return raw || "dev-secret";
 }
 
-function roleGrant(role: "viewer" | "guest" | "participant" | "host", presenceMode?: PresenceMode) {
+type MintRole = "viewer" | "guest" | "participant" | "cohost" | "host";
+
+// Cohosts get host-level publish sources but never roomAdmin: LiveKit admin
+// stays with the owner (and delegated producers).
+function roleGrant(role: MintRole, presenceMode?: PresenceMode) {
   // Use canonical roleToParticipantPermission() for consistency
   const participantPerm = roleToParticipantPermission(role);
   const isHost = role === "host";
@@ -343,41 +411,9 @@ function hitInviteIdRateLimit(inviteId: string): boolean {
   return false;
 }
 
-// Idempotency tracking: prevent rapid duplicate joins from same client
-// Key: inviteId:deviceFingerprint, Value: { identity, expiresAt }
-const idempotencyCache = new Map<string, { identity: string; expiresAt: number }>();
-const idempotencyCacheTtl = 10_000; // 10 seconds
-
-function generateDeviceFingerprint(req: any): string {
-  // Simple fingerprint from IP + User-Agent
-  // In production, could use more sophisticated techniques
-  const ip = String(req.ip || req.connection?.remoteAddress || "unknown");
-  const ua = String(req.get("user-agent") || "unknown");
-  return `${ip}:${ua.substring(0, 100)}`;
-}
-
-function checkIdempotency(inviteId: string, fingerprint: string): { identity: string } | null {
-  const now = Date.now();
-  const key = `${inviteId}:${fingerprint}`;
-  const cached = idempotencyCache.get(key);
-  if (cached && now < cached.expiresAt) {
-    return { identity: cached.identity };
-  }
-  // Clean up expired entries
-  if (cached && now >= cached.expiresAt) {
-    idempotencyCache.delete(key);
-  }
-  return null;
-}
-
-function setIdempotency(inviteId: string, fingerprint: string, identity: string): void {
-  const now = Date.now();
-  const key = `${inviteId}:${fingerprint}`;
-  idempotencyCache.set(key, {
-    identity,
-    expiresAt: now + idempotencyCacheTtl,
-  });
-}
+// Join-now idempotency: identities are derived from a client nonce (see
+// joinNowIdentity) instead of an IP+User-Agent fingerprint, which gave two
+// people behind the same NAT/browser the same LiveKit identity.
 
 /**
  * POST /api/invites/:inviteId/redeem
@@ -436,22 +472,11 @@ router.post("/invites/:inviteId/redeem", async (req: any, res) => {
       return res.status(result.status).json({ error: result.error });
     }
 
-    const expiresIn = "2h";
-    const sessionJwt = signGuestSession({ inviteId, roomId: result.roomId, role: "guest" }, expiresIn);
-
-    // CRITICAL: Use SameSite=None in production for cross-site compatibility (FB/IG in-app browsers).
-    // Requires Secure=true. Local dev uses Lax since localhost is same-site.
-    const isProduction = String(process.env.NODE_ENV || "development").toLowerCase() === "production";
-    const secure = isProduction;
-    const sameSite: "none" | "lax" = isProduction ? "none" : "lax";
-
-    res.cookie("sl_guest", sessionJwt, {
-      httpOnly: true,
-      sameSite,
-      secure,
-      path: "/",
-      maxAge: 2 * 60 * 60 * 1000,
-    });
+    const sessionJwt = signGuestSession(
+      { inviteId, roomId: result.roomId, role: "guest", identity: newInviteIdentity(inviteId) },
+      GUEST_SESSION_TTL,
+    );
+    setGuestSessionCookie(res, sessionJwt);
 
     return res.json({ roomId: result.roomId, guestSessionToken: sessionJwt });
   } catch (err: any) {
@@ -507,16 +532,12 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       return res.status(429).json({ error: "rate_limited" });
     }
     
-    // Idempotency check: prevent duplicate sessions from rapid double-clicks
-    const deviceFingerprint = generateDeviceFingerprint(req);
-    const existingSession = checkIdempotency(inviteId, deviceFingerprint);
-    if (existingSession) {
-      logPayload.event = "join_now_idempotent";
-      logPayload.cachedIdentity = existingSession.identity;
-      console.log("[join-now]", logPayload);
-      // Return cached identity but regenerate tokens (they're cheap)
-      // This prevents weird duplicate sessions while still allowing token refresh
-    }
+    // Idempotency: a retry/double-click from the same tab sends the same
+    // client nonce and gets the same identity; different nonces never share one.
+    const joinNonce = normalizeJoinNonce(req.body?.clientNonce ?? req.body?.nonce);
+    // Logged-in callers redeem as themselves (account identity) and get an
+    // acceptance record so later /token calls keep their invited role.
+    const authedUser = await tryGetAuthUserAny(req).catch(() => null);
 
     // Step 1: Redeem the invite (validate + increment use count)
     const inviteRef = firestore.collection("roomInvites").doc(inviteId);
@@ -596,7 +617,9 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
         return { ok: false as const, status: 403 as const, error: "INVALID_ROLE" };
       }
 
-      return { ok: true as const, roomId, role, maxUses, useCount: useCount + 1 };
+      const expiresAtMsOut = typeof expiresAtMs === "number" && Number.isFinite(expiresAtMs) ? expiresAtMs : null;
+      const createdByUid = typeof data.createdByUid === "string" && data.createdByUid ? data.createdByUid : null;
+      return { ok: true as const, roomId, role, maxUses, useCount: useCount + 1, expiresAtMs: expiresAtMsOut, createdByUid };
     });
 
     if (!redeemResult.ok) {
@@ -630,8 +653,9 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     const allowGuestsPolicy = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
     const ownerId = typeof room.ownerId === "string" && room.ownerId.trim() ? room.ownerId.trim() : null;
 
-    // Optional per-room guest policy
-    if (allowGuestsPolicy === false) {
+    // Optional per-room guest policy. Applies to anonymous guests only:
+    // logged-in invitees join with their account.
+    if (allowGuestsPolicy === false && !authedUser) {
       logPayload.event = "join_now_fail";
       logPayload.reason = "guests_not_allowed";
       logPayload.latencyMs = Date.now() - startTime;
@@ -675,14 +699,28 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
 
     const displayName = sanitizeDisplayName(String(req.body?.displayName || "")).trim() || `Guest-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
     
-    // Use cached identity for idempotent requests, otherwise generate new
-    const identity = existingSession?.identity || `invite:${inviteId}:${Math.random().toString(16).slice(2)}`;
+    // Logged-in callers keep their account identity; anonymous guests get a
+    // nonce-derived identity that is also stored in the guest session so
+    // /token refreshes reconnect as the same participant.
+    const identity = authedUser ? authedUser.uid : joinNowIdentity(inviteId, joinNonce);
     logPayload.identity = identity;
     logPayload.displayName = displayName;
-    
-    // Store in idempotency cache
-    if (!existingSession) {
-      setIdempotency(inviteId, deviceFingerprint, identity);
+    logPayload.authed = !!authedUser;
+
+    if (authedUser) {
+      try {
+        await recordInviteAcceptance({
+          roomId,
+          uid: authedUser.uid,
+          inviteId,
+          role: "participant",
+          createdByUid: redeemResult.createdByUid,
+          expiresAtMs: redeemResult.expiresAtMs,
+        });
+      } catch (err: any) {
+        // Non-fatal: the guest session below still carries the invite.
+        console.warn("[join-now] failed to record acceptance", err?.message || err);
+      }
     }
 
     const AccessToken = await getAccessTokenCtor();
@@ -696,9 +734,10 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       ttl: livekitTtl,
     });
 
-    // SECURITY: join-now is unauthenticated; inviteRole is always "guest"
-    // (host role is rejected in the redeem step above).
-    const mintedRole: "guest" = "guest";
+    // SECURITY: inviteRole is always "guest" (host role is rejected in the
+    // redeem step above). Logged-in invitees are reported as "participant",
+    // which carries the same publish grant.
+    const mintedRole: "guest" | "participant" = authedUser ? "participant" : "guest";
     const grant = roleGrant(mintedRole);
     at.addGrant({ room: livekitRoomName, ...grant } as any);
 
@@ -708,9 +747,11 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     // Step 4: Create guest session JWT
     // Guest session TTL: 2 hours (longer than LiveKit token, allows token refresh)
     // CRITICAL: Guest session must expire AFTER LiveKit token so re-minting works
-    const guestSessionTtl = "2h";
-    const guestSessionToken = signGuestSession({ inviteId, roomId, role: "guest", displayName }, guestSessionTtl);
-    logPayload.guestSessionTtl = guestSessionTtl;
+    const guestSessionToken = signGuestSession(
+      { inviteId, roomId, role: "guest", displayName, identity: authedUser ? undefined : identity },
+      GUEST_SESSION_TTL,
+    );
+    logPayload.guestSessionTtl = GUEST_SESSION_TTL;
 
     // Step 5: Create room access token
     const basePerms =
@@ -752,17 +793,7 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     const roomAccessToken = jwt.sign(roomAccessPayload, getRoomAccessSecret(), { expiresIn: "12h" });
 
     // Step 6: Set HttpOnly cookie
-    const isProduction = String(process.env.NODE_ENV || "development").toLowerCase() === "production";
-    const secure = isProduction;
-    const sameSite: "none" | "lax" = isProduction ? "none" : "lax";
-
-    res.cookie("sl_guest", guestSessionToken, {
-      httpOnly: true,
-      sameSite,
-      secure,
-      path: "/",
-      maxAge: 2 * 60 * 60 * 1000,
-    });
+    setGuestSessionCookie(res, guestSessionToken);
 
     // Step 7: Get LiveKit server URL
     const serverUrl = getLiveKitServerUrlForClient();
@@ -831,29 +862,25 @@ router.get("/rooms/:roomId/status", async (req: any, res) => {
     const allowGuestsPolicy = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
 
     const user = await tryGetAuthUserAny(req);
-    let guest = tryGetGuestSession(req);
+    let guest: { roomId: string } | null = tryGetGuestSession(req, roomId);
 
     // Optional per-room guest policy: only enforced when explicitly set.
     if (!user && allowGuestsPolicy === false) {
       return res.status(401).json({ error: "login_required" });
     }
 
-    if (!user && !guest) {
+    if (!user && (!guest || guest.roomId !== roomId)) {
       const legacyGuest = tryGetLegacyInviteGuest(req, roomId);
       if (legacyGuest) {
-        guest = legacyGuest as any;
-        const expiresIn = "2h";
-        const sessionJwt = signGuestSession({ inviteId: legacyGuest.inviteId, roomId, role: "guest" }, expiresIn);
-        const isProduction = String(process.env.NODE_ENV || "development").toLowerCase() === "production";
-        const secure = isProduction;
-        const sameSite: "none" | "lax" = isProduction ? "none" : "lax";
-        res.cookie("sl_guest", sessionJwt, {
-          httpOnly: true,
-          sameSite,
-          secure,
-          path: "/",
-          maxAge: 2 * 60 * 60 * 1000,
-        });
+        guest = legacyGuest;
+        const sessionJwt = signGuestSession(
+          { inviteId: legacyGuest.inviteId, roomId, role: legacyGuest.role, identity: newInviteIdentity(legacyGuest.inviteId) },
+          GUEST_SESSION_TTL,
+        );
+        setGuestSessionCookie(res, sessionJwt);
+      } else if (tryGetRoomAccessShareGuest(req, roomId)) {
+        // Read-only status for share-link holders; no session is minted.
+        guest = { roomId };
       }
     }
 
@@ -881,30 +908,46 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     if (!roomId) return res.status(400).json({ error: "roomId_required" });
 
     const user = await tryGetAuthUserAny(req);
-    let guest = tryGetGuestSession(req);
-    // Track whether the guest had a pre-existing session (e.g. sl_guest cookie
-    // from a prior join-now call) vs being newly promoted from a legacy invite
-    // token below.  Pre-existing sessions prove prior authorization and allow
-    // the guest to refresh tokens without the ALLOW_GUEST_RTC_JOIN env-var gate
-    // and without requiring the room to be "live".
+    // Only a session scoped to this room counts; with both a cookie and a
+    // header present, the one for this room wins (see selectGuestSession).
+    const presentedSession = tryGetGuestSession(req, roomId);
+    let guest: GuestSessionClaims | null =
+      presentedSession && presentedSession.roomId === roomId ? presentedSession : null;
+    // Track whether the guest had a pre-existing session (e.g. from a prior
+    // join-now call) vs being newly promoted from a legacy invite token below.
+    // Pre-existing sessions prove prior authorization and allow the guest to
+    // refresh tokens without the ALLOW_GUEST_RTC_JOIN env-var gate and
+    // without requiring the room to be "live".
     const hadPreExistingSession = !!guest;
+
+    // A session minted from a Firestore invite dies with that invite.
+    if (guest && isFirestoreInviteId(guest.inviteId)) {
+      try {
+        const inviteSnap = await firestore.collection("roomInvites").doc(guest.inviteId).get();
+        if (inviteSnap.exists && (inviteSnap.data() as any)?.revokedAt) {
+          if (!user) return res.status(403).json({ error: "invite_revoked" });
+          guest = null;
+        }
+      } catch {
+        // fail open on transient read errors; the session itself is signed
+      }
+    }
+
+    // Anonymous share-link holder whose token is a room access token: may
+    // join at that token's own role, viewer stays subscribe-only.
+    let shareViewerOnly = false;
 
     if (!user && !guest) {
       const legacyGuest = tryGetLegacyInviteGuest(req, roomId);
       if (legacyGuest) {
-        guest = legacyGuest as any;
-        const expiresIn = "2h";
-        const sessionJwt = signGuestSession({ inviteId: legacyGuest.inviteId, roomId, role: legacyGuest.role }, expiresIn);
-        const isProduction = String(process.env.NODE_ENV || "development").toLowerCase() === "production";
-        const secure = isProduction;
-        const sameSite: "none" | "lax" = isProduction ? "none" : "lax";
-        res.cookie("sl_guest", sessionJwt, {
-          httpOnly: true,
-          sameSite,
-          secure,
-          path: "/",
-          maxAge: 2 * 60 * 60 * 1000,
-        });
+        guest = { ...legacyGuest, identity: newInviteIdentity(legacyGuest.inviteId) };
+      } else {
+        const share = tryGetRoomAccessShareGuest(req, roomId);
+        if (share) {
+          const shareId = `share:${crypto.createHash("sha256").update(share.raw).digest("base64url").slice(0, 24)}`;
+          guest = { inviteId: shareId, roomId, role: "guest", identity: newInviteIdentity(shareId) };
+          shareViewerOnly = share.role === "viewer";
+        }
       }
     }
 
@@ -967,13 +1010,39 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       }
     }
 
+    // Invite evidence. Only real invites count: a verified invite JWT for this
+    // room, a guest session for this room, or (logged in) an acceptance doc.
+    // Room access tokens are never treated as invites.
+    const inviteClaims = getInviteClaimsForRoom(req, roomId);
+    const acceptance: InviteAcceptance | null =
+      user && !isPrivilegedProducer ? await getInviteAcceptance(roomId, user.uid) : null;
+    const hasGuestSessionForRoom = !!guest && guest.roomId === roomId;
+    // Direct (no-invite) guest sessions don't open private rooms.
+    const hasInviteSessionForRoom = hasGuestSessionForRoom && !guest!.inviteId.startsWith("direct:");
+
     // Policy: visibility
-    // Private rooms are owner-only UNLESS the caller presents a valid invite token.
+    // Private rooms are owner-only UNLESS the caller has invite access.
     // This supports "invite someone on stage" while keeping strict access by default.
-    const inviteForRoom = tryGetLegacyInviteGuest(req, roomId);
-    const hasInviteAccess = !!inviteForRoom;
+    const hasInviteAccess = !!inviteClaims || !!acceptance || hasInviteSessionForRoom;
     if (visibility === "private" && !isPrivilegedProducer && !hasInviteAccess) {
       return res.status(403).json({ error: "not_allowed" });
+    }
+
+    // Cohost: logged-in, not the owner, holding a cohost acceptance or a
+    // cohost invite JWT for this room.
+    const inviteClaimIsCohost =
+      !!inviteClaims && (inviteClaims.role === "cohost" || inviteClaims.role === "moderator");
+    const isCohost = !!user && !isPrivilegedProducer && (acceptance?.role === "cohost" || inviteClaimIsCohost);
+    if (isCohost && inviteClaimIsCohost && acceptance?.role !== "cohost") {
+      // Persist so the cohost keeps the role after the invite link is gone.
+      await recordInviteAcceptance({
+        roomId,
+        uid: user!.uid,
+        inviteId: jwtInviteAcceptanceId(inviteClaims!.raw),
+        role: "cohost",
+        createdByUid: inviteClaims!.createdByUid,
+        expiresAtMs: inviteClaims!.exp ? inviteClaims!.exp * 1000 : null,
+      }).catch((err: any) => console.warn("[token] failed to record cohost acceptance", err?.message || err));
     }
 
     // Policy: payment
@@ -982,18 +1051,18 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     }
 
     // Policy: publish rights for authenticated non-owners. Logged-in users who
-    // aren't the owner/delegate can publish only with a guest session or invite
-    // for this room, or when the room is explicitly public and allows guests;
-    // otherwise they get a subscribe-only token. The client forwards the guest
-    // session via x-guest-session on authed requests, so this doesn't depend on
-    // the cross-site sl_guest cookie. Escape hatch: ROOM_TOKEN_STRICT_AUTHED_PUBLISH=0.
+    // aren't the owner/delegate can publish only with a guest session, invite
+    // JWT or invite acceptance for this room, or when the room is explicitly
+    // public and allows guests; otherwise they get a subscribe-only token. The
+    // client forwards the guest session via x-guest-session on authed
+    // requests, so this doesn't depend on the cross-site sl_guest cookie.
+    // A roomAccessToken (even the caller's own) is not invite evidence.
+    // Escape hatch: ROOM_TOKEN_STRICT_AUTHED_PUBLISH=0.
     const strictAuthedPublish = String(process.env.ROOM_TOKEN_STRICT_AUTHED_PUBLISH || "").trim() !== "0";
     let authedSubscribeOnly = false;
-    if (user && !isPrivilegedProducer && strictAuthedPublish) {
-      const hasGuestSessionForRoom = !!guest && guest.roomId === roomId;
-      const hasRoomInvite = hasInviteAccess || hasInviteTokenForRoom(req, roomId);
+    if (user && !isPrivilegedProducer && !isCohost && strictAuthedPublish) {
       const isOpenPublicRoom = visibility === "public" && allowGuestsPolicy !== false;
-      authedSubscribeOnly = !(hasGuestSessionForRoom || hasRoomInvite || isOpenPublicRoom);
+      authedSubscribeOnly = !(hasGuestSessionForRoom || !!inviteClaims || !!acceptance || isOpenPublicRoom);
     }
 
     // First-time guests (no pre-existing session) can only join once room is live.
@@ -1055,11 +1124,13 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // Determine LiveKit role based on authentication
     // - Authenticated users: host (if owner) or participant
     // - Guest sessions: "guest" (RTC participant with mic/cam)
-    const lkRole: "viewer" | "guest" | "participant" | "host" = user
-      ? (isPrivilegedProducer ? "host" : authedSubscribeOnly ? "viewer" : "participant")
-      : guest?.role === "participant"
-        ? "participant"
-        : "guest";
+    const lkRole: MintRole = user
+      ? (isPrivilegedProducer ? "host" : isCohost ? "cohost" : authedSubscribeOnly ? "viewer" : "participant")
+      : shareViewerOnly
+        ? "viewer"
+        : guest?.role === "participant"
+          ? "participant"
+          : "guest";
 
     // Enforce room capacity (plan maxGuests) for non-owner joins.
     // Fail-closed if we cannot determine occupancy.
@@ -1078,7 +1149,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       ? isDelegatedProducer
         ? `producer:${user.uid}:${ownerId}`
         : user.uid
-      : `invite:${guest!.inviteId}:${Math.random().toString(16).slice(2)}`;
+      : guest!.identity || newInviteIdentity(guest!.inviteId);
     if (!identity || !String(identity).trim()) {
       return res.status(500).json({ code: "internal_error", error: "invalid_identity" });
     }
@@ -1121,9 +1192,17 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
 
     const token = await at.toJwt();
 
-    const effectiveRoleKey: "viewer" | "guest" | "participant" | "host" = lkRole;
+    const effectiveRoleKey: MintRole = lkRole;
+    // Cohost room permissions: the cohost role profile, limited to what the
+    // owner's plan allows (recording, destinations).
+    const cohostPerms =
+      effectiveRoleKey === "cohost"
+        ? await intersectPermissionsWithEntitlements({ ...ROLE_PERMISSIONS.cohost }, ownerId || undefined)
+        : null;
     const basePerms =
-      effectiveRoleKey === "host"
+      cohostPerms
+        ? cohostPerms
+        : effectiveRoleKey === "host"
         ? isDelegatedProducer
           ? {
               canStream: !!actingContext?.permissions?.manageStreaming,
@@ -1211,6 +1290,25 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       }).catch(() => {});
     }
 
+    // Guest session renewal: whenever this request carried a valid session
+    // for the room (or was just promoted from an invite), hand back a fresh
+    // one with the same claims and a new expiry, pinned to the identity we
+    // minted, so long sessions don't lapse mid-room.
+    let renewedGuestSessionToken: string | undefined;
+    if (guest && guest.roomId === roomId && !shareViewerOnly) {
+      renewedGuestSessionToken = signGuestSession(
+        {
+          inviteId: guest.inviteId,
+          roomId,
+          role: guest.role,
+          displayName: user ? guest.displayName : displayName,
+          identity: user ? guest.identity : identity,
+        },
+        GUEST_SESSION_TTL,
+      );
+      setGuestSessionCookie(res, renewedGuestSessionToken);
+    }
+
     return res.json({
       token,
       serverUrl,
@@ -1218,7 +1316,10 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       roomName: roomAccessPayload.roomName,
       roomAccessToken,
       participantIdentity: identity,
-      isViewer: false, // guest/participant/host all use /room route (not HLS viewer)
+      // Subscribe-only tokens (strict publish policy, share-link viewers) are
+      // reported as viewers so the client hides publish controls.
+      isViewer: lkRole === "viewer",
+      ...(renewedGuestSessionToken ? { guestSessionToken: renewedGuestSessionToken } : {}),
       role: lkRole,
       effectiveRoleKey,
       presenceMode,
@@ -1488,8 +1589,8 @@ router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
 
       // Create a synthetic guest session (no invite ID — direct join)
       const guestSessionToken = signGuestSession(
-        { inviteId: `direct:${roomId}:${identity}`, roomId, role: "guest", displayName },
-        "2h",
+        { inviteId: `direct:${roomId}:${identity}`, roomId, role: "guest", displayName, identity },
+        GUEST_SESSION_TTL,
       );
 
       // Room access token
@@ -1515,14 +1616,7 @@ router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
       const roomAccessToken = jwt.sign(roomAccessPayload, getRoomAccessSecret(), { expiresIn: "12h" });
 
       // Set HttpOnly cookie
-      const isProduction = String(process.env.NODE_ENV || "development").toLowerCase() === "production";
-      res.cookie("sl_guest", guestSessionToken, {
-        httpOnly: true,
-        sameSite: isProduction ? "none" : "lax",
-        secure: isProduction,
-        path: "/",
-        maxAge: 2 * 60 * 60 * 1000,
-      });
+      setGuestSessionCookie(res, guestSessionToken);
 
       const serverUrl = getLiveKitServerUrlForClient();
       if (!serverUrl) {

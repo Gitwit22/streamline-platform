@@ -5,6 +5,7 @@ import { API_BASE } from "../../lib/apiBase";
 import { logAuthDebugContext } from "../../lib/logAuthDebug";
 import { useNavigate, useSearchParams,} from "react-router-dom";
 import { apiFetchAuth } from "../../lib/api";
+import { loginUrlReturningHere, optionalAuthHeaders } from "../../lib/guestSession";
 import { logout } from "../../lib/logout";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
 import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
@@ -215,20 +216,42 @@ export default function Join() {
         try {
           console.log('[Join] Resolving invite token → landing page');
           
-          // Resolve legacy token to Firestore inviteId
+          // Resolve legacy token to Firestore inviteId. Send auth when signed
+          // in: cohost invites are accepted for signed-in users only.
           const resolveRes = await fetch(`${API_BASE}/api/invites/legacy/resolve`, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: { "Content-Type": "application/json", ...(await optionalAuthHeaders()) },
+            credentials: "include",
             body: JSON.stringify({ inviteToken: inviteTokenParam }),
           });
 
           if (!resolveRes.ok) {
+            const errBody = await resolveRes.json().catch(() => null as any);
+            if (cancelled) return;
+            if (resolveRes.status === 401 && errBody?.error === "login_required") {
+              // Cohost invite opened while signed out: sign in, then come back
+              // to this same link (preserved via ?next=).
+              nav(loginUrlReturningHere(), { replace: true });
+              return;
+            }
             console.warn('[Join] Invite resolve failed:', resolveRes.status);
-            if (!cancelled) setInviteError(INVITE_INVALID_MSG);
+            setInviteError(INVITE_INVALID_MSG);
             return;
           }
           const resolveData = await resolveRes.json().catch(() => null as any);
           if (!resolveData || cancelled) return;
+
+          // Cohost invites resolve straight to the room (acceptance recorded
+          // server-side); the room token endpoint then mints the cohost role.
+          if (resolveData?.role === "cohost" && typeof resolveData?.url === "string" && resolveData.url.startsWith("/room/")) {
+            try {
+              localStorage.removeItem("sl_invite_token");
+            } catch {
+              // ignore
+            }
+            nav(resolveData.url, { replace: true });
+            return;
+          }
 
           const inviteId = String(resolveData?.inviteId || "").trim();
           if (!inviteId) {

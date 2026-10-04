@@ -4,6 +4,13 @@ import { useEffect, useState, useRef, useMemo } from "react";
 import { logAuthDebugContext } from "../../lib/logAuthDebug";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { API_BASE } from "../../lib/apiBase";
+import {
+  clearStoredGuestSession,
+  isUsableGuestSession,
+  readStoredGuestSession,
+  storeGuestSession,
+  stripQueryParams,
+} from "../../lib/guestSession";
 import { APP_BASE } from "../../lib/appBase";
 import {
   LiveKitRoom,
@@ -712,34 +719,29 @@ function mapJoinErrorMessage(code: string | null): string | null {
 function getGuestSessionToken(roomId: string | null): string | null {
   if (!roomId) return null;
 
-  // 1. Try query param (highest priority, works in FB/IG in-app browsers)
+  // 1. Query param `gst` (handed over by InviteRedeem; works in FB/IG in-app
+  //    browsers). Persist it, then drop it from the address bar so it isn't
+  //    shared or bookmarked along with the URL.
   try {
     const params = new URLSearchParams(window.location.search);
-    const fromQuery = params.get("gst");
-    if (fromQuery) return fromQuery.trim();
+    const fromQuery = params.get("gst")?.trim();
+    if (fromQuery) {
+      if (isUsableGuestSession(fromQuery, roomId)) {
+        storeGuestSession(roomId, fromQuery);
+        stripQueryParams(["gst"]);
+        return fromQuery;
+      }
+      stripQueryParams(["gst"]);
+    }
   } catch {
     // ignore
   }
 
-  // 2. Try sessionStorage (preferred, per-room)
-  try {
-    const fromSession = sessionStorage.getItem(`sl_guest_session:${roomId}`);
-    if (fromSession) return fromSession.trim();
-  } catch {
-    // sessionStorage may fail in private browsing
-  }
-
-  // 3. Try localStorage (fallback, check if token matches roomId)
-  try {
-    const storedRoomId = localStorage.getItem("sl_guestSessionRoomId");
-    if (storedRoomId === roomId) {
-      const fromLocal = localStorage.getItem("sl_guestSessionToken");
-      if (fromLocal) return fromLocal.trim();
-    }
-  } catch {
-    // localStorage may fail in private browsing
-  }
-
+  // 2. sessionStorage (per-room), then localStorage. Expired sessions are
+  //    ignored so a fresh ?t= invite isn't hidden behind a dead session.
+  const stored = readStoredGuestSession(roomId);
+  if (stored) return stored;
+  clearStoredGuestSession(roomId);
   return null;
 }
 
@@ -2108,8 +2110,9 @@ function RoomPage() {
 
         const resolvedId = String(data.roomId || "");
         const resolvedName = String(data.roomName || "");
-        const rawResolvedRole = String(data.role || "guest");
-        const resolvedRole = rawResolvedRole === "cohost" ? "guest" : rawResolvedRole;
+        // Keep cohost as cohost: /token decides the real role (it mints cohost
+        // only for a signed-in user with a cohost acceptance/invite).
+        const resolvedRole = String(data.role || "guest");
         const expectedId = roomId || "";
         const expectedName = effectiveRoomName || "";
         const clearStaleInvite = () => {
@@ -2526,7 +2529,11 @@ function RoomPage() {
           isViewer
         });
         const inviteTokenFromUrl = new URLSearchParams(window.location.search).get("t");
-        const inviteTokenForJoin = (!guestSessionToken ? (inviteTokenFromUrl || inviteToken || null) : null)?.trim?.() || null;
+        // Forward the invite whenever there's no usable guest session (expired
+        // sessions are already filtered out), and always for signed-in users
+        // so a cohost invite link is honored even next to an old session.
+        const inviteTokenForJoin =
+          (bearerToken || !guestSessionToken ? (inviteTokenFromUrl || inviteToken || null) : null)?.trim?.() || null;
         const selectedOwnerContext = getSelectedOwnerContext();
         const buildRoomTokenRequest = () => {
           const canonicalRoomId = roomId || "";
@@ -2560,6 +2567,129 @@ function RoomPage() {
           }
 
           return { endpoint, payload };
+        };
+
+        // Shared success handling for the main request and the guest-session
+        // retry, so both set identity, role, viewer state and permissions the
+        // same way. Returns false when the response carries no usable token.
+        const applyTokenResponse = (data: any): boolean => {
+          if (!data) {
+            console.error("[Room] No data from /roomToken");
+            return false;
+          }
+
+          // SECURITY: Never log tokens in production - they're like passwords
+          if (process.env.NODE_ENV === 'development') {
+            console.log("[roomToken] response received:", {
+              hasToken: !!data.token,
+              hasServerUrl: !!data.serverUrl,
+              roomId: data.roomId,
+              role: data.role,
+              isViewer: data.isViewer,
+            });
+          }
+
+          if (typeof data?.token !== "string" || !data.token) {
+            console.error("[Room] Invalid token returned (no token string)");
+            return false;
+          }
+
+          // Renewed guest session (same claims, fresh expiry): keep it in both
+          // storage layers so refreshes/new tabs present a live session.
+          const canonicalRoomId =
+            (typeof data?.roomId === "string" && data.roomId.trim()) || roomId || "";
+          if (typeof data?.guestSessionToken === "string" && data.guestSessionToken.trim() && canonicalRoomId) {
+            storeGuestSession(canonicalRoomId, data.guestSessionToken.trim());
+          }
+
+          if (typeof data?.roomName === "string" && data.roomName.trim()) {
+            setRoomName(data.roomName.trim());
+          }
+
+          if (data?.permissions && typeof data.permissions === "object") {
+            setRoomPermissions({
+              canStream: !!data.permissions.canStream,
+              canRecord: !!data.permissions.canRecord,
+              canDestinations: !!data.permissions.canDestinations,
+              canModerate: !!data.permissions.canModerate,
+              canLayout: !!data.permissions.canLayout,
+              canScreenShare: !!data.permissions.canScreenShare,
+              canInvite: !!data.permissions.canInvite,
+              canAnalytics: !!data.permissions.canAnalytics,
+            });
+          } else {
+            setRoomPermissions(null);
+          }
+          if (data.effectiveEntitlements || data.platformFlags) {
+            applyEntitlementsAndPlatform(data.effectiveEntitlements, data.platformFlags || {});
+          }
+          if (data?.actingContext && typeof data.actingContext === "object") {
+            const ownerLabel = data.actingContext.ownerDisplayName || data.actingContext.ownerEmail || null;
+            setActingContextBanner({
+              ownerUid: typeof data.actingContext.ownerUid === "string" ? data.actingContext.ownerUid : null,
+              ownerLabel,
+              isDelegated: !!data.actingContext.isDelegated,
+            });
+          } else {
+            setActingContextBanner({ ownerUid: null, ownerLabel: null, isDelegated: false });
+          }
+          const {
+            token: lkToken,
+            serverUrl: serverUrlFromApi,
+            roomId: returnedRoomId,
+            roomAccessToken: roomAccessTokenRaw,
+          } = data as any;
+          // Server returns participantIdentity; older join-now payloads used identity.
+          const participantIdentityRaw = (data as any).participantIdentity ?? (data as any).identity;
+          if (typeof returnedRoomId === "string" && returnedRoomId.trim()) {
+            setFirestoreRoomId(returnedRoomId.trim());
+          } else {
+            console.warn("[Room] /roomToken did not return roomId; leaving firestoreRoomId null", data);
+            setFirestoreRoomId(null);
+          }
+          if (typeof roomAccessTokenRaw === "string" && roomAccessTokenRaw.trim()) {
+            setRoomAccessToken(roomAccessTokenRaw.trim());
+          } else {
+            setRoomAccessToken(null);
+          }
+
+          if (typeof (data as any)?.adminOverride === "boolean") {
+            setAdminOverride(!!(data as any).adminOverride);
+          } else {
+            setAdminOverride(false);
+          }
+
+          if (typeof participantIdentityRaw === "string" && participantIdentityRaw.trim()) {
+            setParticipantIdentity(participantIdentityRaw.trim());
+          } else {
+            setParticipantIdentity(null);
+          }
+          const finalServerUrl = serverUrlFromApi || import.meta.env.VITE_LIVEKIT_URL;
+          console.log("[Room] token received:", !!lkToken, "serverUrl:", finalServerUrl);
+          setToken(typeof lkToken === "string" && lkToken.trim() ? lkToken : null);
+          setServerUrl(finalServerUrl || null);
+          // Server reports isViewer=true for subscribe-only tokens.
+          if (typeof data?.isViewer === "boolean") {
+            setIsViewer(data.isViewer);
+          }
+          if (typeof data?.effectiveRoleKey === "string") {
+            setUserRole(data.effectiveRoleKey);
+            if (data.effectiveRoleKey === "viewer") setIsHost(false);
+            if (data.effectiveRoleKey === "host") setIsHost(true);
+          } else if (typeof data?.role === "string") {
+            setUserRole(data.role);
+            if (data.role === "viewer") setIsHost(false);
+            if (data.role === "host") setIsHost(true);
+          }
+          if (!lkToken || !finalServerUrl) {
+            console.error("[Room] Missing token or serverUrl", { token: lkToken, serverUrl: serverUrlFromApi });
+            return false;
+          }
+
+          // Credentials are stored now; drop them from the address bar so
+          // they aren't shared or bookmarked with the room URL.
+          stripQueryParams(["gst", "t"]);
+          return true;
         };
 
         const { endpoint, payload } = buildRoomTokenRequest();
@@ -2660,15 +2790,9 @@ function RoomPage() {
               );
               if (retryRes.ok) {
                 const retryData = await retryRes.json().catch(() => null);
-                if (retryData?.token && retryData?.serverUrl) {
+                if (retryData?.token && retryData?.serverUrl && applyTokenResponse(retryData)) {
                   console.log('[Room] Guest session retry succeeded');
-                  setToken(retryData.token);
-                  setServerUrl(retryData.serverUrl);
-                  if (retryData.identity) setParticipantIdentity(retryData.identity);
-                  if (retryData.roomAccessToken) setRoomAccessToken(retryData.roomAccessToken);
-                  if (retryData.roomName) setRoomName(retryData.roomName);
-                  if (retryData.roomId) setFirestoreRoomId(retryData.roomId);
-                  if (retryData.isViewer) setIsViewer(true);
+                  setRoomTokenMode("guest");
                   setNeedsReauth(false);
                   return;
                 }
@@ -2684,7 +2808,7 @@ function RoomPage() {
                   : "This room requires an account to join. Please sign in.")
             );
             // Only force login redirect when we truly have no invite or guest session to attempt guest join.
-            if (!inviteToken && !gst) {
+            if (!inviteToken && !inviteTokenForJoin && !gst) {
               try {
                 const next = `${location.pathname}${location.search}`;
                 nav(`/login?next=${encodeURIComponent(next)}`, { replace: true });
@@ -2707,108 +2831,7 @@ function RoomPage() {
           }
           return;
         }
-        if (!data) {
-          console.error("[Room] No data from /roomToken");
-          return;
-        }
-
-        // SECURITY: Never log tokens in production - they're like passwords
-        if (process.env.NODE_ENV === 'development') {
-          console.log("[roomToken] response received:", {
-            hasToken: !!data.token,
-            hasServerUrl: !!data.serverUrl,
-            roomId: data.roomId,
-            role: data.role,
-            isViewer: data.isViewer,
-          });
-        }
-        
-        if (typeof data?.token !== "string" || !data.token) {
-          console.error("[Room] Invalid token returned (no token string)");
-          return;
-        }
-
-        if (typeof data?.roomName === "string" && data.roomName.trim()) {
-          setRoomName(data.roomName.trim());
-        }
-
-        if (data?.permissions && typeof data.permissions === "object") {
-          setRoomPermissions({
-            canStream: !!data.permissions.canStream,
-            canRecord: !!data.permissions.canRecord,
-            canDestinations: !!data.permissions.canDestinations,
-            canModerate: !!data.permissions.canModerate,
-            canLayout: !!data.permissions.canLayout,
-            canScreenShare: !!data.permissions.canScreenShare,
-            canInvite: !!data.permissions.canInvite,
-            canAnalytics: !!data.permissions.canAnalytics,
-          });
-        } else {
-          setRoomPermissions(null);
-        }
-        if (data.effectiveEntitlements || data.platformFlags) {
-          applyEntitlementsAndPlatform(data.effectiveEntitlements, data.platformFlags || {});
-        }
-        if (data?.actingContext && typeof data.actingContext === "object") {
-          const ownerLabel = data.actingContext.ownerDisplayName || data.actingContext.ownerEmail || null;
-          setActingContextBanner({
-            ownerUid: typeof data.actingContext.ownerUid === "string" ? data.actingContext.ownerUid : null,
-            ownerLabel,
-            isDelegated: !!data.actingContext.isDelegated,
-          });
-        } else {
-          setActingContextBanner({ ownerUid: null, ownerLabel: null, isDelegated: false });
-        }
-        const {
-          token: lkToken,
-          serverUrl: serverUrlFromApi,
-          roomId: returnedRoomId,
-          roomAccessToken: roomAccessTokenRaw,
-          participantIdentity: participantIdentityRaw,
-        } = data as any;
-        if (typeof returnedRoomId === "string" && returnedRoomId.trim()) {
-          setFirestoreRoomId(returnedRoomId.trim());
-        } else {
-          console.warn("[Room] /roomToken did not return roomId; leaving firestoreRoomId null", data);
-          setFirestoreRoomId(null);
-        }
-        if (typeof roomAccessTokenRaw === "string" && roomAccessTokenRaw.trim()) {
-          setRoomAccessToken(roomAccessTokenRaw.trim());
-        } else {
-          setRoomAccessToken(null);
-        }
-
-        if (typeof (data as any)?.adminOverride === "boolean") {
-          setAdminOverride(!!(data as any).adminOverride);
-        } else {
-          setAdminOverride(false);
-        }
-
-        if (typeof participantIdentityRaw === "string" && participantIdentityRaw.trim()) {
-          setParticipantIdentity(participantIdentityRaw.trim());
-        } else {
-          setParticipantIdentity(null);
-        }
-        const finalServerUrl = serverUrlFromApi || import.meta.env.VITE_LIVEKIT_URL;
-        console.log("[Room] token received:", !!lkToken, "serverUrl:", finalServerUrl);
-        setToken(typeof lkToken === "string" && lkToken.trim() ? lkToken : null);
-        setServerUrl(finalServerUrl || null);
-        // isViewer should always be false for /room (invite guests are RTC participants)
-        if (typeof data?.isViewer === "boolean") {
-          setIsViewer(data.isViewer); // Will be false from server for invite guests
-        }
-        if (typeof data?.effectiveRoleKey === "string") {
-          setUserRole(data.effectiveRoleKey);
-          if (data.effectiveRoleKey === "viewer") setIsHost(false);
-          if (data.effectiveRoleKey === "host") setIsHost(true);
-        } else if (typeof data?.role === "string") {
-          setUserRole(data.role);
-          if (data.role === "viewer") setIsHost(false);
-          if (data.role === "host") setIsHost(true);
-        }
-        if (!lkToken || !finalServerUrl) {
-          console.error("[Room] Missing token or serverUrl", { token: lkToken, serverUrl: serverUrlFromApi });
-        }
+        applyTokenResponse(data);
       } catch (err) {
         console.error("[Room] fetchToken error:", err);
       } finally {
@@ -3805,7 +3828,8 @@ function RoomPage() {
     }
   };
 
-  const copyInviteLink = (_role: "participant", label: string) => {
+  // "cohost" links are host-only server-side and require the invitee to sign in.
+  const copyInviteLink = (_role: "participant" | "cohost", label: string) => {
     (async () => {
       try {
         if (!roomId && !effectiveRoomName) {
@@ -3824,7 +3848,11 @@ function RoomPage() {
 
         const data = await res.json().catch(() => ({}));
         if (!res.ok || !data?.inviteToken) {
-          alert("Failed to create invite link");
+          alert(
+            _role === "cohost" && res.status === 403
+              ? "Only the room host can create co-host invite links."
+              : "Failed to create invite link",
+          );
           return;
         }
 
@@ -4561,7 +4589,7 @@ function RoomPage() {
             </div>
 
             <p style={{ marginTop: 0, marginBottom: 14, color: "#94a3b8", fontSize: 13 }}>
-              Room invites are participant-only. Copy the link to invite someone on stage.
+              Copy a participant link to invite someone on stage{isHost ? ", or a co-host link for someone who helps run the room" : ""}.
             </p>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -4599,6 +4627,43 @@ function RoomPage() {
                   {copiedInviteLabel === "Participant" ? "Copied" : "Copy link"}
                 </button>
               </div>
+              {isHost && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "space-between",
+                    padding: "10px 12px",
+                    borderRadius: 8,
+                    border: "1px solid #1f2937",
+                    background: "rgba(255,255,255,0.02)",
+                  }}
+                >
+                  <div style={{ display: "flex", flexDirection: "column" }}>
+                    <span style={{ fontWeight: 600, fontSize: 14 }}>Co-host</span>
+                    <span style={{ fontSize: 12, color: "#9ca3af" }}>Helps run the room; must sign in</span>
+                  </div>
+                  <button
+                    onClick={() => copyInviteLink("cohost", "Co-host")}
+                    aria-label="Copy co-host invite link"
+                    style={{
+                      fontSize: 12,
+                      padding: "6px 10px",
+                      borderRadius: 6,
+                      border: "1px solid rgba(129, 140, 248, 0.4)",
+                      background:
+                        copiedInviteLabel === "Co-host"
+                          ? "rgba(129, 140, 248, 0.18)"
+                          : "rgba(129, 140, 248, 0.08)",
+                      color: copiedInviteLabel === "Co-host" ? "#c7d2fe" : "#818cf8",
+                      cursor: "pointer",
+                      fontWeight: 600,
+                    }}
+                  >
+                    {copiedInviteLabel === "Co-host" ? "Copied" : "Copy co-host link"}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </div>

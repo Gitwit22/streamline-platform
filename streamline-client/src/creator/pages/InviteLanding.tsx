@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { API_BASE } from "../../lib/apiBase";
+import { loginUrlReturningHere, optionalAuthHeaders } from "../../lib/guestSession";
 
 async function postJson<T>(url: string, body: any): Promise<T> {
+  // Optional auth: cohost invites resolve only for signed-in users.
   const res = await fetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "omit",
+    headers: { "Content-Type": "application/json", ...(await optionalAuthHeaders()) },
+    credentials: "include",
     body: JSON.stringify(body),
   });
   const ct = res.headers.get("content-type") || "";
@@ -34,11 +36,17 @@ export default function InviteLanding() {
       }
 
       try {
-        const legacy = await postJson<{ inviteId: string }>(
+        const legacy = await postJson<{ inviteId: string | null; role?: string; url?: string }>(
           `${API_BASE}/api/invites/legacy/resolve`,
           { inviteToken },
         );
         if (cancelled) return;
+
+        // Cohost invite (signed in): acceptance is recorded; go to the room.
+        if (legacy?.role === "cohost" && typeof legacy.url === "string" && legacy.url.startsWith("/room/")) {
+          nav(legacy.url, { replace: true });
+          return;
+        }
 
         const inviteId = String(legacy?.inviteId || "").trim();
         if (!inviteId) throw new Error("invalid_invite");
@@ -46,6 +54,11 @@ export default function InviteLanding() {
         nav(`/invite/${encodeURIComponent(inviteId)}`, { replace: true });
       } catch (e: any) {
         if (cancelled) return;
+        if (e?.message === "login_required") {
+          // Cohost invite while signed out: sign in, then return to this link.
+          nav(loginUrlReturningHere(), { replace: true });
+          return;
+        }
         setStatus("error");
         setErrorMsg(e?.message || "Invalid invite");
       }

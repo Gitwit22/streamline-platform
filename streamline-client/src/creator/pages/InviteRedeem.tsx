@@ -7,6 +7,12 @@ import {
   resolveDisplayName,
   persistDisplayName,
 } from "../../lib/displayNameUtils";
+import {
+  getJoinNonce,
+  loginUrlReturningHere,
+  optionalAuthHeaders,
+  storeGuestSession,
+} from "../../lib/guestSession";
 
 interface InviteInfo {
   inviteId: string;
@@ -146,9 +152,14 @@ export default function InviteRedeem() {
     setError(null);
     try {
       persistDisplayName(name);
+      // Signed-in invitees redeem as themselves (server records an acceptance
+      // so they keep publish rights after the guest session lapses). The nonce
+      // makes retries from this tab idempotent without sharing identities.
+      const authHeaders = await optionalAuthHeaders();
       const res = await apiFetch(`/api/invites/${encodeURIComponent(info.inviteId)}/join-now`, {
         method: "POST",
-        body: JSON.stringify({ displayName: name }),
+        headers: authHeaders,
+        body: JSON.stringify({ displayName: name, clientNonce: getJoinNonce(info.inviteId) }),
       }, { allowNonOk: true });
 
       const ct = res.headers.get("content-type") || "";
@@ -156,6 +167,11 @@ export default function InviteRedeem() {
 
       if (!res.ok) {
         const msg = data?.error || `HTTP ${res.status}`;
+        if (msg === "login_required") {
+          // Room doesn't allow anonymous guests: sign in and come back here.
+          nav(loginUrlReturningHere(), { replace: true });
+          return;
+        }
         if (msg === "invite_expired") setError("This invite has expired.");
         else if (msg === "max_uses_reached" || msg === "invite_max_used" || msg === "invite_already_used") setError("This invite has reached its use limit.");
         else if (msg === "room_full") setError("This room is full. Please try again later.");
@@ -170,10 +186,7 @@ export default function InviteRedeem() {
       if (!roomId) { setError("Missing room ID."); setJoining(false); return; }
 
       // Store guest session token in multiple layers for resilience
-      if (gst) {
-        try { sessionStorage.setItem(`sl_guest_session:${roomId}`, gst); } catch {}
-        try { localStorage.setItem("sl_guestSessionToken", gst); localStorage.setItem("sl_guestSessionRoomId", roomId); } catch {}
-      }
+      if (gst) storeGuestSession(roomId, gst);
 
       // Cache the LiveKit token from join-now so Room.tsx can use it immediately
       if (data?.roomToken && data?.serverUrl) {

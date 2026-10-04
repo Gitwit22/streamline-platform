@@ -216,17 +216,46 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   }
 }
 
-export function verifyInviteToken(rawInviteToken: string): InviteClaims {
-  const secret = process.env.INVITE_TOKEN_SECRET || getJwtSecret();
-  if (!secret) {
-    throw new Error("Invite token secret not configured");
+/**
+ * Single source of truth for the invite JWT secret, used both when signing
+ * (routes/invites.ts) and when verifying. Trimmed so stray whitespace in the
+ * env value can't make signer and verifier disagree.
+ */
+export function getInviteTokenSecret(): string {
+  const raw = String(process.env.INVITE_TOKEN_SECRET || process.env.JWT_SECRET || "").trim();
+  const env = String(process.env.NODE_ENV || "development").toLowerCase();
+  if ((env === "production" || env === "staging") && (!raw || raw === "dev-secret")) {
+    throw new Error("INVITE_TOKEN_SECRET (or JWT_SECRET) must be set (no dev-secret in production)");
   }
+  return raw || "dev-secret";
+}
+
+function getInviteIssuerAudience(): { iss: string; aud: string } {
+  return {
+    iss: String(process.env.INVITE_TOKEN_ISS || "").trim(),
+    aud: String(process.env.INVITE_TOKEN_AUD || "").trim(),
+  };
+}
+
+/** jwt.sign options for invite tokens: sets iss/aud when they are configured. */
+export function inviteTokenSignOptions(expiresIn: jwt.SignOptions["expiresIn"]): jwt.SignOptions {
+  const { iss, aud } = getInviteIssuerAudience();
+  const opts: jwt.SignOptions = { expiresIn, algorithm: "HS256" };
+  if (iss) opts.issuer = iss;
+  if (aud) opts.audience = aud;
+  return opts;
+}
+
+export function verifyInviteToken(rawInviteToken: string): InviteClaims {
+  const secret = getInviteTokenSecret();
 
   // Strict verification:
   // - Reject alg=none
   // - Restrict algorithms (default: HS256)
   // - Enforce exp presence + expiry check
-  // - Optional issuer/audience checks when configured
+  // - Issuer/audience checks when configured. Tokens minted before iss/aud
+  //   were configured carry neither claim and still verify, unless
+  //   INVITE_TOKEN_REQUIRE_ISS_AUD=1. A token that carries iss/aud must match.
   const complete = jwt.decode(rawInviteToken, { complete: true }) as any;
   const alg = String(complete?.header?.alg || "").trim();
   if (!alg || alg.toLowerCase() === "none") {
@@ -245,10 +274,11 @@ export function verifyInviteToken(rawInviteToken: string): InviteClaims {
     algorithms: allowedAlgs.length ? (allowedAlgs as any) : undefined,
   };
 
-  const iss = String(process.env.INVITE_TOKEN_ISS || "").trim();
-  const aud = String(process.env.INVITE_TOKEN_AUD || "").trim();
-  if (iss) verifyOptions.issuer = iss;
-  if (aud) verifyOptions.audience = aud;
+  const { iss, aud } = getInviteIssuerAudience();
+  const requireIssAud = String(process.env.INVITE_TOKEN_REQUIRE_ISS_AUD || "").trim() === "1";
+  const payload = (complete?.payload && typeof complete.payload === "object" ? complete.payload : {}) as any;
+  if (iss && (requireIssAud || payload.iss !== undefined)) verifyOptions.issuer = iss;
+  if (aud && (requireIssAud || payload.aud !== undefined)) verifyOptions.audience = aud;
 
   const decoded = jwt.verify(rawInviteToken, secret, verifyOptions) as any;
   if (typeof decoded?.exp !== "number" || !Number.isFinite(decoded.exp) || decoded.exp <= 0) {

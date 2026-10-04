@@ -3,10 +3,17 @@ import admin from "firebase-admin";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { firestore } from "../firebaseAdmin";
-import { requireAuth, tryGetAuthUserAny, verifyInviteToken } from "../middleware/requireAuth";
+import {
+  requireAuth,
+  tryGetAuthUserAny,
+  verifyInviteToken,
+  getInviteTokenSecret,
+  inviteTokenSignOptions,
+} from "../middleware/requireAuth";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
 import { assertRoomPerm, RoomPermissionError } from "../lib/rolePermissions";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { recordInviteAcceptance, jwtInviteAcceptanceId, isInviteShapedClaims } from "../lib/inviteAcceptance";
 
 type InviteRole = "guest" | "cohost";
 
@@ -17,20 +24,18 @@ type InviteTokenClaims = {
   createdByUid?: string;
 };
 
-function getInviteSecret(): string {
-  const raw = String(process.env.INVITE_TOKEN_SECRET || process.env.JWT_SECRET || "").trim();
-  const env = String(process.env.NODE_ENV || "development").toLowerCase();
-  if ((env === "production" || env === "staging") && (!raw || raw === "dev-secret")) {
-    throw new Error("INVITE_TOKEN_SECRET (or JWT_SECRET) must be set (no dev-secret in production)");
-  }
-  return raw || "dev-secret";
+/** verifyInviteToken plus a shape check so room access tokens / guest sessions never act as invites. */
+function verifyInviteJwt(inviteToken: string) {
+  const claims = verifyInviteToken(inviteToken);
+  if (!isInviteShapedClaims(claims)) throw new Error("invalid_invite");
+  return claims;
 }
 
 function requiresAuthForRole(role: InviteRole): boolean {
   return role === "cohost";
 }
 
-function normalizeRole(raw: unknown): InviteRole | null {
+export function normalizeRole(raw: unknown): InviteRole | null {
   const v = String(raw || "").toLowerCase();
   if (v === "guest" || v === "participant") return "guest";
   if (v === "cohost") return "cohost";
@@ -126,20 +131,47 @@ router.post("/legacy/resolve", async (req, res) => {
 
     let claims: any;
     try {
-      claims = verifyInviteToken(inviteToken) as any;
+      claims = verifyInviteJwt(inviteToken) as any;
     } catch {
       return res.status(401).json({ error: "invalid_invite" });
     }
 
     const requestedRole = normalizeRole(claims?.role || "guest") || "guest";
-    if (requiresAuthForRole(requestedRole)) {
-      // Cohost-style invites must go through signed-in flow.
-      return res.status(401).json({ error: "login_required" });
-    }
 
     const roomId = normalizeRoomId(claims?.roomId);
     const roomName = normalizeRoomName(claims?.roomName || claims?.room);
     if (!roomId && !roomName) return res.status(400).json({ error: "invite_room_missing" });
+
+    if (requiresAuthForRole(requestedRole)) {
+      // Cohost invites are for signed-in users only. Anonymous callers get a
+      // clear login_required so the client can send them to login and back.
+      // Cohost invites must name the room by id (no legacy name-only tokens).
+      const user = await tryGetAuthUserAny(req);
+      if (!user) {
+        return res.status(401).json({ error: "login_required", role: "cohost", requiresAuth: true });
+      }
+      if (!roomId) return res.status(400).json({ error: "invite_room_missing" });
+      const resolvedCohost = await resolveRoomIdentity({ roomId, roomName });
+      if (!resolvedCohost) return res.status(400).json({ error: "invite_room_missing" });
+
+      const expSec = Number(claims?.exp || 0);
+      await recordInviteAcceptance({
+        roomId: resolvedCohost.roomId,
+        uid: user.uid,
+        inviteId: jwtInviteAcceptanceId(inviteToken),
+        role: "cohost",
+        createdByUid: typeof claims?.createdByUid === "string" ? claims.createdByUid : null,
+        expiresAtMs: Number.isFinite(expSec) && expSec > 0 ? expSec * 1000 : null,
+      });
+
+      return res.json({
+        inviteId: null,
+        roomId: resolvedCohost.roomId,
+        url: `/room/${encodeURIComponent(resolvedCohost.roomId)}`,
+        role: "cohost",
+        requiresAuth: true,
+      });
+    }
 
     const resolved = await resolveRoomIdentity({ roomId, roomName });
     if (!resolved) return res.status(400).json({ error: "invite_room_missing" });
@@ -280,6 +312,11 @@ router.post("/create", requireAuth, async (req, res) => {
     let roomName: string = requestedRoomId;
     try {
       const ctx = await assertRoomPerm(req as any, requestedRoomId, "canInvite");
+      // Cohost links are host-only: an invited cohost (who has canInvite for
+      // participants) must not mint more cohosts.
+      if (role === "cohost" && ctx.role !== "owner" && ctx.role !== "admin") {
+        return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+      }
       const roomDoc = ctx.room as any;
       roomName = normalizeRoomName(roomDoc?.roomName || roomDoc?.name || ctx.roomId) || ctx.roomId;
     } catch (err: any) {
@@ -299,7 +336,7 @@ router.post("/create", requireAuth, async (req, res) => {
     };
 
     const expiresIn = "30d";
-    const inviteToken = jwt.sign(claims, getInviteSecret(), { expiresIn });
+    const inviteToken = jwt.sign(claims, getInviteTokenSecret(), inviteTokenSignOptions(expiresIn));
 
     // New canonical format: /join?t=<inviteToken>
     // Room pages should prefer /room/<roomId>?t=<inviteToken> when navigating
@@ -311,7 +348,7 @@ router.post("/create", requireAuth, async (req, res) => {
       role,
       roomId,
       roomName,
-      requiresAuth: false,
+      requiresAuth: requiresAuthForRole(role),
     });
   } catch (err: any) {
     console.error("/api/invites/create error", err);
@@ -330,7 +367,7 @@ router.post("/resolve", async (req, res) => {
     const inviteToken = String((req.body as any)?.inviteToken || "").trim();
     if (!inviteToken) return res.status(400).json({ error: "inviteToken_required" });
 
-    const claims = verifyInviteToken(inviteToken) as any;
+    const claims = verifyInviteJwt(inviteToken) as any;
     const roomId = normalizeRoomId(claims?.roomId);
     const roomName = normalizeRoomName(claims?.roomName || claims?.room);
     const role = normalizeRole(claims?.role || "guest") || "guest";
@@ -365,7 +402,7 @@ router.post("/accept", async (req, res) => {
     const inviteToken = String((req.body as any)?.inviteToken || "").trim();
     if (!inviteToken) return res.status(400).json({ error: "inviteToken_required" });
 
-    const claims = verifyInviteToken(inviteToken) as any;
+    const claims = verifyInviteJwt(inviteToken) as any;
     const roomId = normalizeRoomId(claims?.roomId);
     const roomName = normalizeRoomName(claims?.roomName || claims?.room);
     const role = normalizeRole(claims?.role || "guest") || "guest";
@@ -390,6 +427,15 @@ router.post("/accept", async (req, res) => {
         },
         { merge: true }
       );
+      const expSec = Number(claims?.exp || 0);
+      await recordInviteAcceptance({
+        roomId: resolved.roomId,
+        uid: user.uid,
+        inviteId: jwtInviteAcceptanceId(inviteToken),
+        role: role === "cohost" ? "cohost" : "participant",
+        createdByUid: typeof claims?.createdByUid === "string" ? claims.createdByUid : null,
+        expiresAtMs: Number.isFinite(expSec) && expSec > 0 ? expSec * 1000 : null,
+      }).catch((err: any) => console.warn("/api/invites/accept acceptance record failed", err?.message || err));
     }
 
     const requiresAuth = role === "cohost";
@@ -422,7 +468,7 @@ router.post("/track-landing", async (req, res) => {
     const stage = stageRaw === "entered_room" ? "entered_room" : stageRaw === "join_page" ? "join_page" : null;
     if (!stage) return res.status(400).json({ error: "stage_invalid" });
 
-    const claims = verifyInviteToken(inviteToken) as any;
+    const claims = verifyInviteJwt(inviteToken) as any;
     const roomId = normalizeRoomId(claims?.roomId);
     const roomName = normalizeRoomName(claims?.roomName || claims?.room);
     const role = normalizeRole(claims?.role || "guest") || "guest";
