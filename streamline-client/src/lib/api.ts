@@ -433,7 +433,7 @@ export async function apiUpdateStudioLayout(
 // ---------------------------------------------------------------------------
 
 import type { ProgramState } from "./programState";
-import type { ProgramStateV2, ProgramStateV2Patch } from "./programPresets";
+import type { ProgramStateV2, ProgramStateV2Patch } from "./programResolve";
 
 /** GET returns v2; older servers may still return a legacy (v1) state. */
 export async function apiGetProgramState(roomId: string, roomAccessToken: string) {

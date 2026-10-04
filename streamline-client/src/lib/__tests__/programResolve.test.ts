@@ -1,20 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { buildOrientationLayout, portraitFor, type OrientationLayout, type ProgramStateV2 } from "../programPresets";
 import {
   autoGridSlots,
-  isEligible,
-  normalizeProgramState,
+  buildOrientationLayout,
+  isEligibleParticipant as isEligible,
   orderParticipants,
+  portraitFor,
+  resolveProgramLayout,
+  type OrientationLayout,
+  type ResolverParticipant as ResolveParticipant,
+} from "../programPresets";
+import {
+  normalizeProgramState,
   programStateFromRoomMetadata,
   resolveProgram,
-  type ResolveParticipant,
+  type ProgramStateV2,
 } from "../programResolve";
 
 function state(landscapeId: string, over: Partial<ProgramStateV2> = {}): ProgramStateV2 {
   return {
     version: 2,
-    landscape: buildOrientationLayout(landscapeId, "landscape")!,
-    portrait: buildOrientationLayout(portraitFor(landscapeId), "portrait")!,
+    landscape: buildOrientationLayout(landscapeId, "landscape"),
+    portrait: buildOrientationLayout(portraitFor(landscapeId), "portrait"),
     screenShareMode: "auto",
     hostIdentity: "host",
     updatedAt: 1,
@@ -27,9 +33,11 @@ const cam = (identity: string, joinedAt: number, extra: Partial<ResolveParticipa
   name: identity,
   joinedAt,
   canPublish: true,
-  hasCamera: true,
+  camera: { publishedAt: joinedAt },
   ...extra,
 });
+
+const screenAt = (publishedAt: number | null = null) => ({ screen: { publishedAt } });
 
 const ids = (r: ReturnType<typeof resolveProgram>) => r.slots.map((s) => (s.identity ? `${s.identity}:${s.track}` : null));
 
@@ -40,17 +48,19 @@ describe("eligibility", () => {
       { identity: "viewer", joinedAt: 2, canPublish: false },
       cam("invisible_admin", 3),
       cam("ghost", 4, { metadata: JSON.stringify({ presenceMode: "invisible" }) }),
-      cam("hid", 5, { metadata: { hidden: true } }),
+      cam("hid", 5, { metadata: JSON.stringify({ hidden: true }) }),
       cam("EG_abc", 6),
       cam("bot", 7, { isAgent: true }),
       { identity: "guest_nocam", joinedAt: 8, canPublish: true },
-      { identity: "screen_only", joinedAt: 9, canPublish: false, hasScreen: true },
+      // canPublish === false always wins (shared rule), even with a stale track
+      { identity: "screen_only", joinedAt: 9, canPublish: false, screen: { publishedAt: 1 } },
+      { identity: "unknown_perm_screen", joinedAt: 9, screen: { publishedAt: 1 } },
       cam("bad_meta", 10, { metadata: "{not json" }),
     ];
     expect(list.filter(isEligible).map((p) => p.identity)).toEqual([
       "host",
       "guest_nocam",
-      "screen_only",
+      "unknown_perm_screen",
       "bad_meta",
     ]);
   });
@@ -59,7 +69,7 @@ describe("eligibility", () => {
 describe("ordering", () => {
   it("host first, then producer:, then joinedAt asc, identity tiebreak", () => {
     const ordered = orderParticipants(
-      [cam("b", 5), cam("a", 5), cam("producer:x", 9), cam("early", 1), cam("host", 99), cam("nojoin", NaN)],
+      [cam("b", 5), cam("a", 5), cam("producer:x", 9), cam("early", 1), cam("host", 99), cam("nojoin", 0, { joinedAt: null })],
       "host",
     ).map((p) => p.identity);
     expect(ordered).toEqual(["host", "producer:x", "early", "a", "b", "nojoin"]);
@@ -83,7 +93,7 @@ describe("resolveProgram", () => {
   });
 
   it("auto screen override keeps cameras visible, including the sharer's camera", () => {
-    const sharing = [cam("host", 50), cam("g1", 20, { hasScreen: true, screenPublishedAt: 100 })];
+    const sharing = [cam("host", 50), cam("g1", 20, screenAt(100))];
     const r = resolveProgram({ state: state("side_by_side"), participants: sharing, orientation: "landscape" });
     expect(r.screenOverride).toBe(true);
     expect(r.presetId).toBe("screen_focus");
@@ -97,7 +107,7 @@ describe("resolveProgram", () => {
   });
 
   it("manual mode does not override; a screen slot in the layout still shows the share", () => {
-    const sharing = [cam("host", 50), cam("g1", 20, { hasScreen: true })];
+    const sharing = [cam("host", 50), cam("g1", 20, screenAt())];
     const manual = resolveProgram({
       state: state("side_by_side", { screenShareMode: "manual" }),
       participants: sharing,
@@ -124,8 +134,8 @@ describe("resolveProgram", () => {
     const r = resolveProgram({
       state: state("solo"),
       participants: [
-        cam("host", 1, { hasScreen: true, screenPublishedAt: 200 }),
-        cam("g1", 2, { hasScreen: true, screenPublishedAt: 100 }),
+        cam("host", 1, screenAt(200)),
+        cam("g1", 2, screenAt(100)),
       ],
       orientation: "landscape",
     });
@@ -146,12 +156,12 @@ describe("resolveProgram", () => {
     };
     const r = resolveProgram({
       state: { ...state("solo"), landscape },
-      participants: [cam("host", 1), cam("g1", 2, { hasScreen: true })],
+      participants: [cam("host", 1), cam("g1", 2, screenAt())],
       orientation: "landscape",
     });
     expect(ids(r)).toEqual(["host:camera", "g1:camera", "g1:screen", null]);
-    expect(r.slots[1].label).toBe(false);
-    expect(r.slots[0].label).toBe(true);
+    expect(r.slots[1].label).toBeNull();
+    expect(r.slots[0].label).toBe("host");
     expect(r.screenOverride).toBe(false);
   });
 
@@ -176,11 +186,36 @@ describe("resolveProgram", () => {
   it("no state + screen share uses the override (auto by default)", () => {
     const r = resolveProgram({
       state: null,
-      participants: [cam("host", 1, { hasScreen: true })],
+      participants: [cam("host", 1, screenAt())],
       orientation: "landscape",
     });
     expect(r.presetId).toBe("screen_focus");
     expect(ids(r)).toEqual(["host:screen", "host:camera", null, null]);
+  });
+});
+
+describe("shared resolver parity", () => {
+  it("resolveProgram is a thin wrapper over the shared resolveProgramLayout", () => {
+    const parts = [cam("host", 5), cam("g1", 1, screenAt(7)), cam("producer:p", 2), cam("g2", 3, { camera: null })];
+    for (const orientation of ["landscape", "portrait"] as const) {
+      for (const id of ["solo", "grid_2x2", "speaker_focus", "screen_pip", "floating_host"]) {
+        const st = state(id);
+        const layout = st[orientation];
+        for (const mode of ["auto", "manual"] as const) {
+          const shared = resolveProgramLayout({
+            layout,
+            orientation,
+            screenShareMode: mode,
+            hostIdentity: "host",
+            participants: parts,
+          });
+          const r = resolveProgram({ state: { ...st, screenShareMode: mode }, participants: parts, orientation });
+          expect(r.slots).toEqual(shared.slots);
+          expect(r.screenOverride).toBe(shared.overridden);
+          expect(r.fallbackGrid).toBe(shared.autoGrid);
+        }
+      }
+    }
   });
 });
 

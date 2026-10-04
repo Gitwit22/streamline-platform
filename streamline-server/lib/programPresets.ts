@@ -1,3 +1,4 @@
+// Shared with streamline-client/src/lib/programPresets.ts — keep identical (checked by tests).
 /**
  * Program layout presets (programState v2) – shared, dependency-free data.
  *
@@ -5,9 +6,12 @@
  * same layout renders without distortion at any resolution of the given
  * orientation (16:9 landscape, 9:16 portrait).
  *
- * This file is mirrored byte-for-byte by streamline-client/src/lib/programPresets.ts
- * and serialised to streamline-server/public/egress-templates/program-presets.json
- * for the egress compositor.  Keep it pure TypeScript with no imports.
+ * This file is the single source of truth for program layouts.  It is copied
+ * byte-for-byte to streamline-client/src/lib/programPresets.ts (in-room stage
+ * and layout picker; lib/programPresetsShared.test.ts fails when they differ)
+ * and transpiled by scripts/gen-program-layout.mjs into
+ * public/egress-templates/program-layout.mjs + program-presets.json for the
+ * egress compositor.  Keep it pure TypeScript with no imports.
  */
 
 // ---------------------------------------------------------------------------
@@ -196,9 +200,11 @@ const STACK_3: FracSlot[] = [
   { id: "guest1", x: 0, y: 0.34, w: 1, h: 0.33, z: 1, source: A },
   { id: "guest2", x: 0, y: 0.67, w: 1, h: 0.33, z: 1, source: A },
 ];
+// Screen on top at exactly 16:9 for the full 9:16 width (9/16 * 9/16 = 0.3164
+// of the height), face cam fills the rest: no black dead area.
 const SCREEN_FACECAM: FracSlot[] = [
-  { id: "screen", x: 0, y: 0, w: 1, h: 0.65, z: 1, source: S },
-  { id: "facecam", x: 0.6, y: 0.65, w: 0.4, h: 0.35, z: 2, source: A },
+  { id: "screen", x: 0, y: 0, w: 1, h: 0.3164, z: 1, source: S, fit: "contain" },
+  { id: "facecam", x: 0, y: 0.3164, w: 1, h: 0.6836, z: 1, source: A, fit: "cover" },
 ];
 
 export const PORTRAIT_PRESETS: ProgramPreset[] = [

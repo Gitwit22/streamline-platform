@@ -11,8 +11,11 @@
   Query params (LiveKit appends url/token/layout to the customBaseUrl):
     url, token        LiveKit connection (required)
     aspect            "landscape" | "portrait" (default: from window aspect)
-    idleEndSec        seconds without eligible participants before END_RECORDING
-                      (default 30; 0 disables)
+    idleEndSec        opt-in: seconds without eligible participants before
+                      END_RECORDING (default off; only N > 0 enables it).
+                      LiveKit already ends RoomComposite egress when the room
+                      closes, and an automatic stop could kill a live stream
+                      while the host is reconnecting.
 
   Layout comes from room metadata `programState` (v2, see
   streamline-server/lib/programPresets.ts).  Resolution logic is imported from
@@ -87,7 +90,7 @@
     const wsUrl = params.get("url");
     const token = params.get("token");
     const aspectParam = (params.get("aspect") || "").toLowerCase();
-    const idleEndSec = params.has("idleEndSec") ? Math.max(0, Number(params.get("idleEndSec")) || 0) : 30;
+    const idleEndSec = Math.max(0, Number(params.get("idleEndSec")) || 0); // 0 = disabled (default)
 
     const stage = document.getElementById("stage");
     const placeholder = document.getElementById("placeholder");

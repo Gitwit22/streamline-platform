@@ -83,13 +83,14 @@ import {
   TileVisibilityEnforcer,
   type PublishPermissionState,
 } from "../components/HostControlsEnforcer";
+import { isEligibleParticipant, type FracSlot, type Orientation } from "../../lib/programPresets";
 import {
-  LANDSCAPE_PRESETS,
-  PORTRAIT_PRESETS,
-  type FracSlot,
-  type Orientation,
-} from "../../lib/programPresets";
-import { isEligible, resolveProgram, type ProgramResolution } from "../../lib/programResolve";
+  canonicalPresetId,
+  pickerPresets,
+  resolveProgram,
+  slotIsScreen,
+  type ProgramResolution,
+} from "../../lib/programResolve";
 
 const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
 
@@ -1069,7 +1070,7 @@ function SlotThumb({
 }
 
 function presetThumbSlots(slots: FracSlot[]) {
-  return slots.map((s) => ({ ...s, screen: s.source.kind === "auto-screen" || (s.source.kind === "participant" && s.source.track === "screen") }));
+  return slots.map((s) => ({ ...s, screen: slotIsScreen(s) }));
 }
 
 function resolutionThumbSlots(res: ProgramResolution, nameOf: (id: string) => string) {
@@ -1095,7 +1096,7 @@ function LayoutPickerPanel({ open, onClose }: { open: boolean; onClose: () => vo
     const m = new Map(participants.map((p) => [p.identity, p.name || p.identity] as const));
     return (id: string) => m.get(id) || id;
   }, [participants]);
-  const eligibleCount = useMemo(() => participants.filter(isEligible).length, [participants]);
+  const eligibleCount = useMemo(() => participants.filter(isEligibleParticipant).length, [participants]);
   const resLandscape = useMemo(
     () => resolveProgram({ state, participants, orientation: "landscape" }),
     [state, participants],
@@ -1107,8 +1108,8 @@ function LayoutPickerPanel({ open, onClose }: { open: boolean; onClose: () => vo
 
   if (!open || !ctx) return null;
 
-  const activeId = tab === "landscape" ? state?.landscape?.presetId ?? null : state?.portrait?.presetId ?? null;
-  const presets = tab === "landscape" ? LANDSCAPE_PRESETS : PORTRAIT_PRESETS;
+  const activeId = canonicalPresetId(tab === "landscape" ? state?.landscape?.presetId : state?.portrait?.presetId, tab);
+  const presets = pickerPresets(tab);
   const screenMode = state?.screenShareMode ?? "auto";
 
   const tabBtn = (o: Orientation, label: string) => (
@@ -1250,7 +1251,7 @@ function LayoutPickerPanel({ open, onClose }: { open: boolean; onClose: () => vo
               onClick={() =>
                 void ctx.apply(tab === "landscape" ? { landscapeId: preset.id } : { portraitId: preset.id })
               }
-              title={preset.description}
+              title={preset.label}
               style={{
                 display: "flex",
                 flexDirection: "column",
@@ -1268,7 +1269,7 @@ function LayoutPickerPanel({ open, onClose }: { open: boolean; onClose: () => vo
             >
               <SlotThumb
                 slots={presetThumbSlots(preset.slots)}
-                orientation={preset.orientation}
+                orientation={tab}
                 height={tab === "portrait" ? 56 : 40}
                 active={isActive}
               />

@@ -6,7 +6,8 @@
  *   (RoomMetadataChanged), with an initial GET since metadata may be empty,
  *   and lets the layout picker apply changes optimistically.
  * - ProgramStage renders the landscape layout in a letterboxed 16:9 box using
- *   the same resolution algorithm as the egress compositor (programResolve).
+ *   the shared resolver from lib/programPresets.ts — a byte-for-byte copy of
+ *   the server module the egress compositor is generated from.
  * - A local, per-user "Gallery" toggle falls back to LiveKit's prefab
  *   VideoConference (SafeVideoConference).
  */
@@ -22,21 +23,21 @@ import {
 import { RoomEvent, Track, type Participant } from "livekit-client";
 import { apiGetProgramState, apiUpdateProgramState } from "../../lib/api";
 import {
-  buildOrientationLayout,
+  isEligibleParticipant,
   portraitFor,
   suggestPreset,
   type OrientationLayout,
-  type ProgramStateV2,
-  type ProgramStateV2Patch,
-  type ScreenShareMode,
+  type ResolverParticipant,
 } from "../../lib/programPresets";
 import {
-  isEligible,
+  buildLayout,
   normalizeProgramState,
   programStateFromRoomMetadata,
   resolveProgram,
   type ProgramResolution,
-  type ResolveParticipant,
+  type ProgramStateV2,
+  type ProgramStateV2Patch,
+  type ScreenShareMode,
 } from "../../lib/programResolve";
 import SafeVideoConference from "./SafeVideoConference";
 import type { ScreenShareRouteMode } from "./ScreenShareRouter";
@@ -73,33 +74,32 @@ function allParticipants(room: RoomLike): Participant[] {
 }
 
 /**
- * Snapshot of the room's participants as resolver input. `seen` records the
- * first time each screen-share publication was observed (publish-order proxy;
- * LiveKit does not expose a publish timestamp to clients).
+ * Snapshot of the room's participants as shared-resolver input. `seen` records
+ * the first time each camera / screen-share publication was observed
+ * (publish-order proxy; LiveKit does not expose a publish timestamp to clients).
  */
-function snapshotParticipants(room: RoomLike, seen: Map<string, number>): ResolveParticipant[] {
+function snapshotParticipants(room: RoomLike, seen: Map<string, number>): ResolverParticipant[] {
   const live = new Set<string>();
   const now = Date.now();
-  const out = allParticipants(room).map((p): ResolveParticipant => {
+  const firstSeen = (identity: string, trackSid: string | undefined) => {
+    const key = `${identity}:${trackSid ?? "?"}`;
+    live.add(key);
+    if (!seen.has(key)) seen.set(key, now);
+    return seen.get(key) ?? now;
+  };
+  const out = allParticipants(room).map((p): ResolverParticipant => {
     const cam = p.getTrackPublication(Track.Source.Camera);
     const scr = p.getTrackPublication(Track.Source.ScreenShare);
-    let screenPublishedAt: number | null = null;
-    if (scr) {
-      const key = `${p.identity}:${scr.trackSid}`;
-      live.add(key);
-      if (!seen.has(key)) seen.set(key, now);
-      screenPublishedAt = seen.get(key) ?? null;
-    }
+    const joined = p.joinedAt ? p.joinedAt.getTime() : NaN;
     return {
       identity: p.identity,
       name: p.name || p.identity,
       metadata: p.metadata ?? null,
       isAgent: !!p.isAgent,
-      joinedAt: p.joinedAt ? p.joinedAt.getTime() : null,
       canPublish: p.permissions?.canPublish,
-      hasCamera: !!cam,
-      hasScreen: !!scr,
-      screenPublishedAt,
+      joinedAt: Number.isFinite(joined) ? joined : null,
+      camera: cam ? { publishedAt: firstSeen(p.identity, cam.trackSid) } : null,
+      screen: scr ? { publishedAt: firstSeen(p.identity, scr.trackSid) } : null,
     };
   });
   for (const key of Array.from(seen.keys())) if (!live.has(key)) seen.delete(key);
@@ -107,10 +107,10 @@ function snapshotParticipants(room: RoomLike, seen: Map<string, number>): Resolv
 }
 
 /** Live resolver input; updates on participant/track/permission changes. */
-export function useProgramParticipants(): ResolveParticipant[] {
+export function useProgramParticipants(): ResolverParticipant[] {
   const room = useRoomContext();
   const [seen] = useState(() => new Map<string, number>());
-  const [snapshot, setSnapshot] = useState<ResolveParticipant[]>(() => snapshotParticipants(room, seen));
+  const [snapshot, setSnapshot] = useState<ResolverParticipant[]>(() => snapshotParticipants(room, seen));
 
   useEffect(() => {
     if (!room) return;
@@ -144,7 +144,7 @@ type ProgramStateContextValue = {
   saving: boolean;
   error: string | null;
   canLayout: boolean;
-  participants: ResolveParticipant[];
+  participants: ResolverParticipant[];
   /** Applies a change (optimistic for this client; others get it via metadata). */
   apply: (change: { landscapeId?: string; portraitId?: string; screenShareMode?: ScreenShareMode }) => Promise<void>;
   /** True when the portrait preset was chosen explicitly (not portraitFor). */
@@ -233,19 +233,19 @@ export function ProgramStateProvider({
     async (change) => {
       if (!roomId || !roomAccessToken) return;
       const cur = stateRef.current;
-      const eligibleCount = participantsRef.current.filter(isEligible).length;
+      const eligibleCount = participantsRef.current.filter(isEligibleParticipant).length;
       const landscape: OrientationLayout | null = change.landscapeId
-        ? buildOrientationLayout(change.landscapeId, "landscape")
-        : cur?.landscape ?? buildOrientationLayout(suggestPreset(eligibleCount, "landscape"), "landscape");
+        ? buildLayout(change.landscapeId, "landscape")
+        : cur?.landscape ?? buildLayout(suggestPreset(eligibleCount, "landscape"), "landscape");
       if (!landscape) return;
       const explicitNow = !!cur && cur.portrait?.presetId !== portraitFor(cur.landscape?.presetId);
       let portrait: OrientationLayout | undefined;
-      if (change.portraitId) portrait = buildOrientationLayout(change.portraitId, "portrait") ?? undefined;
+      if (change.portraitId) portrait = buildLayout(change.portraitId, "portrait") ?? undefined;
       else if (explicitNow && cur?.portrait) portrait = cur.portrait;
       const screenShareMode: ScreenShareMode = change.screenShareMode ?? cur?.screenShareMode ?? "auto";
 
       const patch: ProgramStateV2Patch = { version: 2, landscape, screenShareMode, ...(portrait ? { portrait } : {}) };
-      const derivedPortrait = portrait ?? buildOrientationLayout(portraitFor(landscape.presetId), "portrait");
+      const derivedPortrait = portrait ?? buildLayout(portraitFor(landscape.presetId), "portrait");
       if (!derivedPortrait) return;
       const opt: ProgramStateV2 = {
         version: 2,
