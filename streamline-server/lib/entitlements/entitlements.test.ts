@@ -218,7 +218,9 @@ test("candidatePlanIds includes base, active override, free and internal", () =>
 
 test("paid base plan without subscription is billing-blocked => Free; test mode is not", () => {
   assert.equal(computeBillingBlock({}, "pro", true), "Missing subscription");
-  assert.equal(computeBillingBlock({ stripeSubscriptionId: "sub", billingStatus: "past_due" }, "pro", true), "Billing past_due");
+  // Retry window keeps the paid plan; terminal states block.
+  assert.equal(computeBillingBlock({ stripeSubscriptionId: "sub", billingStatus: "past_due" }, "pro", true), null);
+  assert.equal(computeBillingBlock({ stripeSubscriptionId: "sub", billingStatus: "unpaid" }, "pro", true), "Billing unpaid");
   assert.equal(computeBillingBlock({ stripeSubscriptionId: "sub", billingStatus: "active" }, "pro", true), null);
   assert.equal(computeBillingBlock({}, "free", true), null);
   assert.equal(computeBillingBlock({}, "internal_unlimited", true), null);

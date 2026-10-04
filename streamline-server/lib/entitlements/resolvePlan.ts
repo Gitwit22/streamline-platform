@@ -10,7 +10,7 @@
  *                                 matching UNLIMITED limits instead of base-plan limits).
  *   3. Base plan               users/{uid}.planId (billing truth / admin "set base plan"),
  *                              unless the paid base plan is billing-blocked (missing
- *                              subscription, past_due, ...) => free.
+ *                              subscription, unpaid, canceled, ...) => free.
  *
  * Platform flags are applied last: a feature is usable only when the plan
  * includes it AND the platform switch is on (see combineFeatures()).
@@ -121,7 +121,10 @@ export function isInternalAdmin(userDoc: any, adminsCollectionFlag: boolean): bo
 // ---------------------------------------------------------------------------
 
 const PAID_PLAN_IDS = new Set(["starter", "pro", "basic", "enterprise"]);
-const BAD_BILLING_STATUSES = new Set(["past_due", "unpaid", "incomplete", "incomplete_expired", "canceled"]);
+// Only terminal states block. past_due / incomplete are Stripe's retry window:
+// the customer keeps their paid plan until Stripe gives up (unpaid/canceled),
+// matching the invoice.payment_failed policy in the webhook.
+const BAD_BILLING_STATUSES = new Set(["unpaid", "incomplete_expired", "canceled"]);
 
 export function isPaidBasePlan(planId: string): boolean {
   let canonical = String(planId || "").toLowerCase();
@@ -138,8 +141,12 @@ export function computeBillingBlock(userDoc: any, basePlanId: string, billingEnf
   if (!isPaidBasePlan(basePlanId)) return null;
   const subscriptionId = userDoc?.stripeSubscriptionId || userDoc?.billing?.subscriptionId;
   if (!subscriptionId) return "Missing subscription";
-  if (userDoc?.billingActive === false) return "Billing inactive";
   const status = userDoc?.billingStatus;
+  // billingActive=false is also written during Stripe's retry window
+  // (past_due); only treat it as blocking when the status doesn't say otherwise.
+  if (userDoc?.billingActive === false && !(status && !BAD_BILLING_STATUSES.has(String(status)))) {
+    return "Billing inactive";
+  }
   if (status && BAD_BILLING_STATUSES.has(String(status))) return `Billing ${status}`;
   if (!status) return "Missing billing status";
   return null;
