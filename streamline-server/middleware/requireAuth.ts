@@ -286,6 +286,13 @@ export function verifyInviteToken(rawInviteToken: string): InviteClaims {
     throw new Error("invalid_invite");
   }
 
+  // Invite, room-access and guest-session JWTs can share JWT_SECRET, so a
+  // room-access token (or guest session) would otherwise verify here and be
+  // treated as an invite. Reject anything carrying their distinctive claims.
+  if ("livekitRoomName" in decoded || "permissions" in decoded || "inviteId" in decoded) {
+    throw new Error("invalid_invite");
+  }
+
   return decoded as InviteClaims;
 }
 
