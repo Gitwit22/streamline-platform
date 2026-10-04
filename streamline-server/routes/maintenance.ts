@@ -1,4 +1,5 @@
 import { Router } from "express";
+import crypto from "crypto";
 import { firestore } from "../firebaseAdmin";
 import { FieldValue } from "firebase-admin/firestore";
 import { requireAdmin } from "../middleware/adminAuth";
@@ -46,9 +47,14 @@ function toDate(value: any): Date | null {
 // 1) Standard admin auth via requireAdmin (JWT/cookie/body)
 // 2) Static maintenance key for cron jobs: header x-maintenance-key
 //    (Authorization: Bearer <key> is deprecated; use only for legacy clients)
+function keyMatches(provided: string, expected: string): boolean {
+  const a = Buffer.from(provided);
+  const b = Buffer.from(expected);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
 router.use((req, res, next) => {
-  const key = process.env.MAINTENANCE_KEY;
-  if (!key) return requireAdmin(req, res, next);
+  const key = String(process.env.MAINTENANCE_KEY || "").trim();
 
   const headerKey = String(req.headers["x-maintenance-key"] || "").trim();
   const allowDeprecated = process.env.ALLOW_DEPRECATED_AUTHZ_TOKENS !== "0";
@@ -58,10 +64,18 @@ router.use((req, res, next) => {
       ? authHeader.slice("Bearer ".length).trim()
       : "";
 
-  if (headerKey && headerKey === key) return next();
-  if (bearer && bearer === key) {
+  if (key && headerKey && keyMatches(headerKey, key)) return next();
+  if (key && bearer && keyMatches(bearer, key)) {
     console.warn("[deprecation] maintenance key provided via Authorization header; send x-maintenance-key instead");
     return next();
+  }
+
+  // Every maintenance route mutates data. GET is only accepted with the
+  // maintenance key (cron); cookie-authenticated admins must POST, because the
+  // CSRF guard skips GET and the session cookie is SameSite=None (an <img> on
+  // any site could otherwise trigger purges through an admin's browser).
+  if (req.method === "GET" || req.method === "HEAD") {
+    return res.status(405).json({ error: "method_not_allowed", hint: "Use POST (or send x-maintenance-key)" });
   }
 
   return requireAdmin(req, res, next);

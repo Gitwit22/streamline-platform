@@ -31,6 +31,24 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import adminMonitoringRoutes from "./adminMonitoring";
 
+// Admin responses must never include credential material. Strip hashes and
+// replace reset/recovery state with their public views.
+function toAdminSafeUser(raw: any): any {
+  const {
+    passwordHash: _passwordHash,
+    passwordReset,
+    recovery,
+    emergencyCodeHash: _emergencyCodeHash,
+    ...rest
+  } = (raw || {}) as any;
+  return {
+    ...rest,
+    passwordReset: buildPublicPasswordResetState(passwordReset),
+    recovery: buildPublicRecoveryState(recovery),
+    recoveryConfigured: buildPublicRecoveryState(recovery).configured,
+  };
+}
+
 const router = express.Router();
 
 function toMillis(value: any): number | null {
@@ -539,7 +557,7 @@ router.get("/users", async (req, res) => {
       const billingTruth = normalizeBillingTruthFromUser({ ...raw, planId }, now);
       return {
         uid: doc.id,
-        ...raw,
+        ...toAdminSafeUser(raw),
         planId,
         billingTruth,
         billingReady: true,
@@ -655,7 +673,7 @@ router.get("/users/:userId", async (req, res) => {
     const userSummary: UserUsageSummary = {
       user: {
         uid: userId,
-        ...userData,
+        ...toAdminSafeUser(userData),
       } as any,
       currentMonthUsage,
       allTimeUsage: Number(lifetime.streamingMinutes || 0),
