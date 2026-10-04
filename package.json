@@ -3,22 +3,19 @@
     "hooks:install": "git config core.hooksPath .githooks",
     "hooks:check": "node scripts/hooks-check.cjs",
     "check:no-raw-api-fetch": "tsx scripts/check-no-raw-api-fetch.ts",
-    "test": "node --test test-usage.js test-r2-connection.js",
+    "test": "npm --prefix streamline-server test",
     "test:admin": "tsx test/admin.test.ts",
-    "enforcement:drift-check": "tsx scripts/enforcement-drift-check.ts"
+    "enforcement:drift-check": "tsx scripts/enforcement-drift-check.ts",
+    "smoke:usage": "node test-usage.js",
+    "seed:plans": "node seed-plans.js"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.946.0",
-    "@types/react": "^19.0.0",
-    "@types/react-dom": "^19.0.0",
-    "cookie-parser": "^1.4.7",
     "dotenv": "^17.2.3",
-    "firebase-admin": "^13.6.0",
+    "firebase-admin": "^13.10.0",
     "jsonwebtoken": "^9.0.2",
     "node-fetch": "^2.6.13"
   },
   "devDependencies": {
-    "@types/cookie-parser": "^1.4.10",
     "@types/jsonwebtoken": "^9.0.10",
     "@types/node-fetch": "^2.6.13",
     "tsx": "^4.21.0"

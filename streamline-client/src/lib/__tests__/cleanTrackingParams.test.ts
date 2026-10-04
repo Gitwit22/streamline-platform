@@ -1,4 +1,4 @@
-import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach, type Mock } from "vitest";
 import { cleanTrackingParams } from "../cleanTrackingParams";
 
 describe("cleanTrackingParams", () => {
@@ -11,12 +11,12 @@ describe("cleanTrackingParams", () => {
   });
 
   describe("with mocked window.location and history", () => {
-    let replaceStateSpy: ReturnType<typeof vi.fn>;
+    let replaceStateSpy: Mock<History["replaceState"]>;
     let originalHref: string;
 
     beforeEach(() => {
       originalHref = window.location.href;
-      replaceStateSpy = vi.fn();
+      replaceStateSpy = vi.fn<History["replaceState"]>();
       vi.spyOn(window.history, "replaceState").mockImplementation(replaceStateSpy);
     });
 

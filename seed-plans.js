@@ -7,8 +7,12 @@
  *   - editing  (access, maxProjects, maxStorageGB…)
  *   - metadata (name, description, priceMonthly, visibility)
  *
- * Run from the project ROOT folder:
- *   node seed-plans.js
+ * Run from the project ROOT folder. It writes to whatever Firebase project the
+ * credentials point at, so both flags are required:
+ *   node seed-plans.js --project=<firebase-project-id> --confirm
+ *
+ * Without them it prints the target project and the plans it would write,
+ * then exits without touching Firestore.
  *
  * Uses merge: true so existing fields that are NOT in this script
  * (e.g. Stripe-related fields set by admin UI) are preserved.
@@ -21,29 +25,49 @@ const fs = require("fs");
 // Load .env from the server directory (same as the running server)
 require("dotenv").config({ path: path.resolve(__dirname, "streamline-server", ".env") });
 
+function parseJsonSecret(raw, source) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // Don't echo the parse error: it can contain private key fragments.
+    throw new Error(`${source} is not valid JSON`);
+  }
+}
+
 function loadServiceAccount() {
   const rawJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-  if (rawJson) return JSON.parse(rawJson);
+  if (rawJson) return parseJsonSecret(rawJson, "FIREBASE_SERVICE_ACCOUNT_JSON");
 
   const rawB64 = process.env.FIREBASE_SERVICE_ACCOUNT_BASE64;
-  if (rawB64) return JSON.parse(Buffer.from(rawB64, "base64").toString("utf8"));
+  if (rawB64) {
+    const standard = rawB64.replace(/\s+/g, "").replace(/-/g, "+").replace(/_/g, "/");
+    return parseJsonSecret(Buffer.from(standard, "base64").toString("utf8"), "FIREBASE_SERVICE_ACCOUNT_BASE64");
+  }
 
   const filePath =
     process.env.FIREBASE_SERVICE_ACCOUNT_PATH ||
     path.resolve(__dirname, "streamline-server", "firebaseServiceAccount.json");
 
-  if (fs.existsSync(filePath)) return JSON.parse(fs.readFileSync(filePath, "utf8"));
+  if (fs.existsSync(filePath)) return parseJsonSecret(fs.readFileSync(filePath, "utf8"), filePath);
 
   throw new Error("Firebase service account not found. Check .env or place firebaseServiceAccount.json in streamline-server/.");
 }
 
-if (!admin.apps.length) {
-  admin.initializeApp({
-    credential: admin.credential.cert(loadServiceAccount()),
-  });
-}
+// ─── Safety guard ────────────────────────────────────────────────────
+// Require --confirm and a --project that matches the credentials, so this
+// can't silently write to the wrong Firestore.
 
-const db = admin.firestore();
+const args = process.argv.slice(2);
+const confirmed = args.includes("--confirm");
+const projectArg = (args.find((a) => a.startsWith("--project=")) || "").slice("--project=".length).trim();
+
+const serviceAccount = loadServiceAccount();
+if (typeof serviceAccount.private_key === "string") {
+  serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
+}
+const targetProjectId = serviceAccount.project_id || serviceAccount.projectId || "(unknown)";
+
+let db = null;
 
 // ─── Plan Definitions ────────────────────────────────────────────────
 // Every plan that exists in PLAN_IDS must have a document here.
@@ -297,6 +321,23 @@ const PLANS = {
 
 async function seedPlans() {
   console.log("\n=== StreamLine Plan Seeder ===\n");
+  console.log(`  Target Firebase project: ${targetProjectId}`);
+  console.log(`  Plans: ${Object.keys(PLANS).join(", ")}\n`);
+
+  if (!confirmed || !projectArg) {
+    console.log("  Dry run: nothing was written.");
+    console.log(`  To write these plans, run: node seed-plans.js --project=${targetProjectId} --confirm\n`);
+    process.exit(confirmed ? 1 : 0);
+  }
+  if (projectArg !== targetProjectId) {
+    console.error(`  Refusing to run: --project=${projectArg} does not match the credentials (${targetProjectId}).\n`);
+    process.exit(1);
+  }
+
+  if (!admin.apps.length) {
+    admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+  }
+  db = admin.firestore();
 
   const results = { created: [], updated: [], errors: [] };
 

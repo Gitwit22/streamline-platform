@@ -39,7 +39,7 @@ import projectsRoutes from "./routes/projects";
 import myContentRoutes from "./routes/myContent";
 import maintenanceRoutes from "./routes/maintenance";
 import onboardingRoutes from "./routes/onboarding";
-import { startRecordingCleanup } from "./services/recordingCleanup";
+import { startRecordingCleanup, stopRecordingCleanup } from "./services/recordingCleanup";
 import { firestore as db } from "./firebaseAdmin";
 import path from "path";
 import { getLiveKitSdk } from "./lib/livekit"; // adjust path
@@ -80,8 +80,6 @@ import horizonBotApi from "./routes/horizon/botApi";
 
 import { uploadVideo } from "./lib/storageClient";
 
-
-console.log("CLIENT_URL:", process.env.CLIENT_URL);
 
 const PORT = process.env.PORT || 5137;
 
@@ -376,7 +374,7 @@ app.use("/api/horizon/support/actions", requireAdmin, supportActionsRoutes);
 app.use("/api/horizon/support/tickets", requireAdmin, supportTicketsRoutes);
 
 // Protected config health (helps diagnose env drift across Render services)
-app.get("/api/health/config", requireAuth, (req, res) => {
+app.get("/api/health/config", requireAdmin, (req, res) => {
   const asBool = (v: any) => (v ? true : false);
   return res.json({
     ok: true,
@@ -1019,7 +1017,7 @@ const server = app.listen(PORT, () => {
 });
 
 // Attach Horizon WebSocket (authenticated admin-only WS)
-attachHorizonWs(server);
+const horizonWss = attachHorizonWs(server);
 
 // =============================================================================
 // PROCESS-LEVEL HANDLERS
@@ -1036,8 +1034,32 @@ process.on("uncaughtException", (err: Error) => {
   setTimeout(() => process.exit(1), 500);
 });
 
+let shuttingDown = false;
+
 function gracefulShutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
   logger.info({ signal }, "Received shutdown signal — closing server");
+
+  // Stop background work so nothing new starts while connections drain.
+  stopRecordingCleanup();
+  import("./lib/renderWorker.js")
+    .then(({ stopExportWorker }) => stopExportWorker())
+    .catch((err) => {
+      logger.warn({ err: (err as any)?.message }, "Export worker stop failed (non-fatal)");
+    });
+
+  // Close Horizon WebSocket clients; open sockets would otherwise keep
+  // server.close() from completing.
+  for (const client of horizonWss.clients) {
+    try {
+      client.close(1001, "Server shutting down");
+    } catch {
+      client.terminate();
+    }
+  }
+  horizonWss.close();
+
   server.close(() => {
     logger.info("HTTP server closed");
     process.exit(0);

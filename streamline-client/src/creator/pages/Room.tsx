@@ -58,23 +58,14 @@ import {
 
 const DEV_CONTROLS = import.meta.env.VITE_DEV_CONTROLS === "1";
 
-// Optimised screen-share audio: disable browser processing that mangles
-// system/tab audio and prefer stereo capture so music & game audio sounds
-// clean rather than "shotty".
-const ROOM_OPTIONS: RoomOptions = {
-  screenShareCaptureDefaults: {
-    audio: {
-      autoGainControl: false,
-      echoCancellation: false,
-      noiseSuppression: false,
-      channelCount: 2,
-      sampleRate: 48000,
-    },
-    selfBrowserSurface: "include",
-    systemAudio: "include",
-    surfaceSwitching: "include",
-  },
-};
+// livekit-client has no room-level screen-share defaults (the former
+// `screenShareCaptureDefaults` key was not a RoomOptions field and was
+// silently ignored). To tune screen-share audio, pass ScreenShareCaptureOptions
+// (audio: { autoGainControl: false, echoCancellation: false,
+// noiseSuppression: false, channelCount: 2 }, systemAudio: "include", ...)
+// to localParticipant.setScreenShareEnabled(true, options) or to
+// <TrackToggle captureOptions>.
+const ROOM_OPTIONS: RoomOptions = {};
 
 // Telemetry tracker for measuring guest invite flow performance
 function GuestTelemetryTracker({ roomId, isViewer }: { roomId: string | null; isViewer: boolean }) {

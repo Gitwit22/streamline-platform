@@ -5,13 +5,13 @@ export const dashboardTour: Step[] = [
     target: "body",
     content: "Tour started. Click Next to walk through the main controls.",
     placement: "center",
-    disableBeacon: true,
+    skipBeacon: true,
   },
   {
     target: '[data-tour="create-room-btn"]',
     content: "Click here to create a new room.",
     placement: "bottom",
-    disableBeacon: true,
+    skipBeacon: true,
   },
   {
     target: '[data-tour="usage-meter"]',
@@ -30,13 +30,13 @@ export const studioTour: Step[] = [
     target: "body",
     content: "Tour started. Click Next to walk through the studio controls.",
     placement: "center",
-    disableBeacon: true,
+    skipBeacon: true,
   },
   {
     target: '[data-tour="end-room-button"]',
     content: "End the room when finished.",
     placement: "bottom",
-    disableBeacon: true,
+    skipBeacon: true,
   },
   {
     target: '[data-tour="invite-button"]',

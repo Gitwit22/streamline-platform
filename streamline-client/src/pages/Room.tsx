@@ -23,7 +23,7 @@ import {
 import { logTelemetry, markTiming, measureTiming } from "../lib/telemetry";
 import RoleOverlay from "../components/RoleOverlay";
 import StudioLayoutPanel from "../components/StudioLayoutPanel";
-import { apiUpdateProgramState } from "../lib/api";
+import { apiFetch, apiUpdateProgramState } from "../lib/api";
 import type { LayoutSlot, StudioLayoutPresetId } from "../lib/studioLayout";
 import StreamSetupModalV2 from "../components/StreamSetupModal";
 import { ErrorBoundary } from "../components/ErrorBoundary";
@@ -1957,7 +1957,7 @@ function RoomPage() {
 
     const fetchRoomInfo = async () => {
       try {
-        const res = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/info`);
+        const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/info`, {}, { allowNonOk: true });
         if (cancelled) return;
         if (res.status === 404) {
           if (!cancelled) {
@@ -3969,12 +3969,14 @@ function RoomPage() {
       setGuestJoinLoading(true);
       setGuestJoinError(null);
       try {
-        const res = await fetch(`${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/join-guest`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({ displayName: name.trim() }),
-        });
+        const res = await apiFetch(
+          `/api/rooms/${encodeURIComponent(roomId)}/join-guest`,
+          {
+            method: "POST",
+            body: JSON.stringify({ displayName: name.trim() }),
+          },
+          { allowNonOk: true },
+        );
         const ct = res.headers.get("content-type") || "";
         const data = ct.includes("application/json") ? await res.json() : null;
 

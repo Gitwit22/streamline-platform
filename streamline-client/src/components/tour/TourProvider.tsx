@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useCallback, useEffect, useMemo } from "react";
 import { Joyride, STATUS, ACTIONS, EVENTS } from "../../lib/vendor/reactJoyride";
-import type { CallBackProps, Step } from "../../lib/vendor/reactJoyride";
+import type { EventData, Options, PartialDeep, Step, Styles } from "../../lib/vendor/reactJoyride";
 import { tourMap, type TourName } from "../../tours/streamlineTours";
 
 function cleanupTourArtifacts(): void {
@@ -51,20 +51,26 @@ export const useTour = () => useContext(TourContext);
 /*  Joyride style overrides (dark theme matching StreamLine UI)       */
 /* ------------------------------------------------------------------ */
 
-const joyrideStyles = {
-  options: {
-    zIndex: 10000,
-    arrowColor: "#1f2937",
-    backgroundColor: "#1f2937",
-    primaryColor: "#dc2626",
-    textColor: "#e5e7eb",
-    overlayColor: "rgba(0, 0, 0, 0.5)",
-  },
+// react-joyride v3 moved theme colors and button settings from
+// `styles.options` / top-level props into the `options` prop.
+const joyrideOptions: Partial<Options> = {
+  zIndex: 10000,
+  arrowColor: "#1f2937",
+  backgroundColor: "#1f2937",
+  primaryColor: "#dc2626",
+  textColor: "#e5e7eb",
+  overlayColor: "rgba(0, 0, 0, 0.5)",
+  buttons: ["back", "close", "primary", "skip"],
+  showProgress: true,
+  skipScroll: false,
+};
+
+const joyrideStyles: PartialDeep<Styles> = {
   tooltipContent: {
     fontSize: "14px",
     padding: "12px 16px",
   },
-  buttonNext: {
+  buttonPrimary: {
     backgroundColor: "#dc2626",
     borderRadius: "6px",
     fontSize: "13px",
@@ -143,7 +149,7 @@ export function TourProvider({ tourName, children }: TourProviderProps) {
   }, []);
 
   const handleCallback = useCallback(
-    (data: CallBackProps) => {
+    (data: EventData) => {
       const { status, action, type, index } = data;
 
       if (
@@ -193,11 +199,9 @@ export function TourProvider({ tourName, children }: TourProviderProps) {
           run={tourActive}
           stepIndex={stepIndex}
           continuous
-          showSkipButton
-          showProgress
           onEvent={handleCallback}
+          options={joyrideOptions}
           styles={joyrideStyles}
-          disableScrolling={false}
           locale={{
             back: "Back",
             close: "Close",
