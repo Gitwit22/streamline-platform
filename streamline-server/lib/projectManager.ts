@@ -2,11 +2,11 @@
  * Project Manager — Core utility for managing Projects and ProjectAssets
  *
  * Projects are first-class media workspaces that exist independently of editing.
- * Every recording automatically lands in a project. Editing is optional.
+ * The editor timeline lives on the project doc (see lib/projectStore.ts).
  *
  * Firestore collections:
- *   projects          — Project documents
- *   project_assets    — Assets belonging to projects
+ *   projects          — Project documents (canonical Project concept)
+ *   project_assets    — Files a project owns (uploads) or references
  */
 
 import { firestore } from "../firebaseAdmin";
@@ -306,108 +306,4 @@ export async function deleteProjectAsset(
   }
 
   return { deleted, releasedBytes };
-}
-
-// ── Auto-project from recording ──────────────────────────────────────────────
-
-/**
- * Called when a recording reaches "ready".
- * Finds or creates a project for the room session, then adds the recording as
- * a ProjectAsset.
- */
-export async function attachRecordingToProject(opts: {
-  userId: string;
-  recordingId: string;
-  roomId: string;
-  roomName: string;
-  objectKey: string;
-  fileSize: number | null;
-  durationSeconds: number | null;
-}): Promise<{ projectId: string; assetId: string }> {
-  const { userId, recordingId, roomId, roomName, objectKey, fileSize, durationSeconds } = opts;
-
-  console.log(`[attachRecordingToProject] Starting: recording=${recordingId}, userId=${userId}, roomId=${roomId}`);
-
-  // Re-use existing project for this room if one exists (Option A — per-room project)
-  let project: ProjectDoc | null = null;
-  try {
-    const existingSnap = await projectsColl()
-      .where("ownerId", "==", userId)
-      .where("sourceRoomId", "==", roomId)
-      .where("status", "==", "active")
-      .orderBy("updatedAt", "desc")
-      .limit(1)
-      .get();
-
-    if (!existingSnap.empty) {
-      project = { id: existingSnap.docs[0].id, ...(existingSnap.docs[0].data() as any) } as ProjectDoc;
-    }
-  } catch (queryErr: any) {
-    // Firestore composite index may be missing — fall back to simpler query
-    console.warn(`[attachRecordingToProject] Compound query failed (missing index?): ${queryErr?.message}`);
-    try {
-      const fallbackSnap = await projectsColl()
-        .where("ownerId", "==", userId)
-        .where("sourceRoomId", "==", roomId)
-        .get();
-      const activeProjects = fallbackSnap.docs
-        .filter((d) => (d.data() as any).status === "active")
-        .sort((a, b) => {
-          const aTime = (a.data() as any).updatedAt?.toMillis?.() || 0;
-          const bTime = (b.data() as any).updatedAt?.toMillis?.() || 0;
-          return bTime - aTime;
-        });
-      if (activeProjects.length > 0) {
-        project = { id: activeProjects[0].id, ...(activeProjects[0].data() as any) } as ProjectDoc;
-      }
-    } catch (fallbackErr: any) {
-      console.error(`[attachRecordingToProject] Fallback query also failed:`, fallbackErr);
-    }
-  }
-
-  // No existing project for this room — create one
-  if (!project) {
-    const datePart = new Date().toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
-    project = await createProject({
-      ownerId: userId,
-      name: `${roomName || "Room"} – ${datePart}`,
-      createdBy: userId,
-      sourceRoomId: roomId,
-      sourceRoomName: roomName,
-    });
-  }
-
-  // Check idempotency — don't double-add the same recording
-  const dupCheck = await assetsColl()
-    .where("projectId", "==", project.id)
-    .where("sourceRecordingId", "==", recordingId)
-    .limit(1)
-    .get();
-
-  if (!dupCheck.empty) {
-    return { projectId: project.id, assetId: dupCheck.docs[0].id };
-  }
-
-  // Derive a human filename
-  const ext = objectKey.split(".").pop() || "mp4";
-  const filename = `${roomName || "recording"}-${recordingId.slice(0, 8)}.${ext}`;
-
-  const asset = await addAssetToProject({
-    projectId: project.id,
-    ownerId: userId,
-    type: "recording",
-    sourceRoomId: roomId,
-    sourceRecordingId: recordingId,
-    filename,
-    storageKey: objectKey,
-    duration: durationSeconds,
-    size: fileSize,
-    processingStatus: "ready",
-  });
-
-  return { projectId: project.id, assetId: asset.id };
 }

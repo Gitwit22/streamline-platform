@@ -35,7 +35,7 @@ export function exportRetentionDays(): number {
 }
 
 
-async function releaseExportStorageOnce(ref: FirebaseFirestore.DocumentReference, bytes: number, now: Date): Promise<boolean> {
+export async function releaseExportStorageOnce(ref: FirebaseFirestore.DocumentReference, bytes: number, now: Date): Promise<boolean> {
   return firestore.runTransaction(async (tx) => {
     const snap = await tx.get(ref);
     if (!snap.exists) return false;

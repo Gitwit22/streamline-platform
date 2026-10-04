@@ -32,7 +32,10 @@ export interface TimelineClip {
   isMuted: boolean;
   isHidden: boolean;
   displayName: string;
-  volume: number; // 0-1, default 1
+  /** Linear gain 0..MAX_CLIP_VOLUME (1 = unity). Exported audio applies it. */
+  volume: number;
+  /** Video clips only: embedded audio split off (unlinked from its audio clip). */
+  audioDetached?: boolean;
 }
 
 /** A lane on the timeline */
@@ -49,6 +52,8 @@ export interface Track {
 /** Resolved playback state at a given time */
 export interface PlaybackState {
   activeVideoClip: TimelineClip | null;
+  /** The active video clip's own audio is audible (no linked audio clip). */
+  videoPlaysEmbeddedAudio: boolean;
   activeAudioClips: TimelineClip[];
   videoSourceTime: number | null;
   audioSourceTimes: Map<string, number>; // clipId -> sourceTime
@@ -82,10 +87,28 @@ export const MIN_CLIP_DURATION = 0.033; // ~1 frame at 30fps
 export const MAX_UNDO_HISTORY = 50;
 export const SNAP_THRESHOLD_PX = 6;
 export const MAX_SIMULTANEOUS_AUDIO = 4;
+/** Per-clip gain ceiling (2 = +6 dB); matches the server render. */
+export const MAX_CLIP_VOLUME = 2;
 
 // ============================================================================
 // HELPERS
 // ============================================================================
+
+export function clampVolume(v: number): number {
+  if (!Number.isFinite(v)) return 1;
+  return Math.max(0, Math.min(MAX_CLIP_VOLUME, v));
+}
+
+/**
+ * A video clip plays its embedded audio only when that audio is not already a
+ * linked audio clip (the editor places linked video+audio pairs) and has not
+ * been detached. Mirrors server lib/editorTimeline.ts.
+ */
+export function videoClipPlaysEmbeddedAudio(clip: TimelineClip, clips: TimelineClip[]): boolean {
+  if (clip.type !== 'video' || clip.audioDetached) return false;
+  if (!clip.linkedGroupId) return true;
+  return !clips.some(c => c.type === 'audio' && c.linkedGroupId === clip.linkedGroupId && c.id !== clip.id);
+}
 
 export function clipDuration(clip: TimelineClip): number {
   return clip.timelineEnd - clip.timelineStart;

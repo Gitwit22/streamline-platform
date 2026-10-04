@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { editingApi, type Recording } from "../../../lib/editingApi";
+import { editingApi, mediaAssetToRecording, type MediaAsset, type Recording } from "../../../lib/editingApi";
 import { createProject } from "../../../lib/projectsApi";
 import { recordingStatChips } from "../../../lib/streamSummary";
 import { useEffectiveEntitlements } from "../../../hooks/useEffectiveEntitlements";
@@ -14,7 +14,7 @@ export default function AssetLibrary() {
   const canAssets = access.contentLibrary.allowed;
   const canMyContentRecordings = !!access?.myContentRecordings?.allowed;
   const canEditor = access.editor.allowed;
-  const [assets, setAssets] = useState<Awaited<ReturnType<typeof editingApi.getAssets>>>([]);
+  const [assets, setAssets] = useState<MediaAsset[]>([]);
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'stream' | 'upload' | 'recordings'>('all');
@@ -23,13 +23,15 @@ export default function AssetLibrary() {
   const [projectName, setProjectName] = useState("");
   const [playingVideo, setPlayingVideo] = useState<{ url: string; title: string } | null>(null);
 
+  // One MediaAsset listing (recordings + uploads + saved/exported videos).
   const loadData = async () => {
-    const [assetsData, recordingsData] = await Promise.all([
-      canAssets ? editingApi.getAssets() : Promise.resolve([]),
-      canMyContentRecordings ? editingApi.getRecordings() : Promise.resolve([]),
-    ]);
-    setAssets(assetsData);
-    setRecordings(recordingsData.filter((r) => r.status === 'ready'));
+    const all = canAssets || canMyContentRecordings ? await editingApi.getMediaAssets() : [];
+    setAssets(canAssets ? all : []);
+    setRecordings(
+      canMyContentRecordings
+        ? all.filter((a) => a.type === 'recording' && a.status === 'ready').map(mediaAssetToRecording)
+        : [],
+    );
     setLoading(false);
   };
 
@@ -67,7 +69,10 @@ export default function AssetLibrary() {
   }, [canAssets, canMyContentRecordings, filter]);
 
   const filtered = assets.filter((a) => {
-    if (filter !== 'all' && a.source !== filter) return false;
+    // "All" lists library files; stream recordings have their own section.
+    if (filter === 'all' && a.type === 'recording') return false;
+    if (filter === 'stream' && a.source !== 'stream') return false;
+    if (filter === 'upload' && a.source === 'stream') return false;
     if (search && !a.name.toLowerCase().includes(search.toLowerCase())) return false;
     return true;
   });
@@ -375,7 +380,7 @@ export default function AssetLibrary() {
               }
               if (canAssets) {
                 tabs.push(['stream', 'From Streams']);
-                tabs.push(['upload', 'Uploads']);
+                tabs.push(['upload', 'Uploads & Exports']);
               }
               if (canMyContentRecordings) {
                 tabs.push(['recordings', `Recent Streams (${recordings.length})`]);
@@ -487,7 +492,7 @@ export default function AssetLibrary() {
                   onDelete={async () => {
                     if (!window.confirm(`Delete "${recording.title}"? This will permanently remove the video.`)) return;
                     try {
-                      await editingApi.deleteRecording(recording.id);
+                      await editingApi.deleteAsset(recording.id);
                       setRecordings((prev) => prev.filter((r) => r.id !== recording.id));
                     } catch (err) {
                       console.error('Failed to delete recording:', err);
@@ -511,7 +516,7 @@ export default function AssetLibrary() {
               alignItems: 'center',
               gap: '0.5rem'
             }}>
-              📦 {filter === 'all' ? 'All Assets' : filter === 'stream' ? 'From Streams' : 'Uploads'}
+              📦 {filter === 'all' ? 'All Assets' : filter === 'stream' ? 'From Streams' : 'Uploads & Exports'}
             </h2>
             {loading ? (
               <div style={{
@@ -598,7 +603,7 @@ function RecordingCard({
   onDelete: () => void;
 }) {
   const mins = Math.floor(recording.duration / 60);
-  const secs = recording.duration % 60;
+  const secs = Math.floor(recording.duration % 60);
   const _d = recording.createdAt ? new Date(recording.createdAt) : null;
   const dateStr = _d && !isNaN(_d.getTime())
     ? _d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
@@ -830,9 +835,9 @@ function RecordingCard({
   );
 }
 
-function AssetCard({ asset, onPlay, onDelete }: { asset: any; onPlay: () => void; onDelete: () => void }) {
+function AssetCard({ asset, onPlay, onDelete }: { asset: MediaAsset; onPlay: () => void; onDelete: () => void }) {
   const mins = Math.floor(asset.duration / 60);
-  const secs = asset.duration % 60;
+  const secs = Math.floor(asset.duration % 60);
   const dateStr = asset.createdAt
     ? new Date(asset.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
     : '';
@@ -915,7 +920,15 @@ function AssetCard({ asset, onPlay, onDelete }: { asset: any; onPlay: () => void
           fontWeight: '600',
           textTransform: 'capitalize'
         }}>
-          {asset.source === "stream" ? "📡 Stream" : "⬆️ Upload"}
+          {asset.source === "stream"
+            ? "📡 Stream"
+            : asset.source === "export"
+              ? "🎞️ Export"
+              : asset.type === "audio"
+                ? "🎵 Audio"
+                : asset.type === "image"
+                  ? "🖼️ Image"
+                  : "⬆️ Upload"}
         </div>
         {/* Duration badge */}
         <div style={{

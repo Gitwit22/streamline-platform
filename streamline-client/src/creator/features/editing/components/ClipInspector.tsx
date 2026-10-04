@@ -3,7 +3,7 @@
 // ============================================================================
 
 import { useEditorStore } from '../store/editorStore';
-import { clipDuration, formatTimecode } from '../types';
+import { MAX_CLIP_VOLUME, clipDuration, formatTimecode, videoClipPlaysEmbeddedAudio } from '../types';
 
 export default function ClipInspector() {
   const selectedClipIds = useEditorStore(s => s.selectedClipIds);
@@ -11,6 +11,8 @@ export default function ClipInspector() {
   const assets = useEditorStore(s => s.assets);
   const deleteClips = useEditorStore(s => s.deleteClipsByIds);
   const unlinkClips = useEditorStore(s => s.unlinkClips);
+  const setClipVolume = useEditorStore(s => s.setClipVolume);
+  const setClipMuted = useEditorStore(s => s.setClipMuted);
 
   const selectedIds = Array.from(selectedClipIds);
   const selectedClips = clips.filter(c => selectedIds.includes(c.id));
@@ -54,6 +56,10 @@ export default function ClipInspector() {
   const asset = assets.get(clip.assetId);
   const duration = clipDuration(clip);
   const isLinked = !!clip.linkedGroupId;
+  // Audio controls apply to audio clips and to video clips that carry their own
+  // (embedded) audio; a linked video clip's sound is controlled on its audio clip.
+  const hasAudioControls = clip.type === 'audio' || videoClipPlaysEmbeddedAudio(clip, clips);
+  const volumePct = Math.round(clip.volume * 100);
 
   return (
     <div className="flex flex-col h-full">
@@ -108,28 +114,54 @@ export default function ClipInspector() {
           </p>
         </div>
 
-        {/* Volume */}
+        {/* Volume / mute */}
         <div className="border-t border-zinc-800 pt-2">
-          <label className="text-zinc-500 text-[10px] uppercase tracking-wider">Volume</label>
-          <div className="flex items-center gap-2 mt-1">
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.01}
-              value={clip.volume}
-              onChange={() => {/* TODO: wire volume change */}}
-              className="flex-1 accent-indigo-500 h-1"
-            />
-            <span className="text-zinc-400 font-mono w-10 text-right">{Math.round(clip.volume * 100)}%</span>
+          <div className="flex items-center justify-between">
+            <label htmlFor={`clip-volume-${clip.id}`} className="text-zinc-500 text-[10px] uppercase tracking-wider">Volume</label>
+            {hasAudioControls && (
+              <button
+                type="button"
+                onClick={() => setClipMuted(clip.id, !clip.isMuted)}
+                aria-pressed={clip.isMuted}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition ${clip.isMuted ? 'bg-red-600/40 text-red-200' : 'bg-zinc-800 text-zinc-400 hover:text-zinc-200'}`}
+                title={clip.isMuted ? 'Unmute clip' : 'Mute clip'}
+              >
+                {clip.isMuted ? 'Muted' : 'Mute'}
+              </button>
+            )}
           </div>
+          {hasAudioControls ? (
+            <>
+              <div className="flex items-center gap-2 mt-1">
+                <input
+                  id={`clip-volume-${clip.id}`}
+                  type="range"
+                  min={0}
+                  max={MAX_CLIP_VOLUME}
+                  step={0.01}
+                  value={clip.volume}
+                  disabled={clip.isMuted}
+                  onChange={(e) => setClipVolume(clip.id, Number(e.target.value))}
+                  onDoubleClick={() => setClipVolume(clip.id, 1)}
+                  className="flex-1 accent-indigo-500 h-1 disabled:opacity-40"
+                  aria-valuetext={`${volumePct}%`}
+                />
+                <span className="text-zinc-400 font-mono w-12 text-right">{clip.isMuted ? 'muted' : `${volumePct}%`}</span>
+              </div>
+              {clip.volume > 1 && !clip.isMuted && (
+                <p className="text-[10px] text-zinc-500 mt-1">Boost above 100% applies to the export; preview plays at 100%.</p>
+              )}
+            </>
+          ) : (
+            <p className="text-[10px] text-zinc-500 mt-1">Sound for this clip is on its linked audio clip.</p>
+          )}
         </div>
 
         {/* Actions */}
         <div className="border-t border-zinc-800 pt-2 space-y-1.5">
           {isLinked && (
             <button
-              onClick={() => unlinkClips(clip.id)}
+              onClick={() => clip.linkedGroupId && unlinkClips(clip.linkedGroupId)}
               className="w-full text-[11px] py-1.5 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded transition"
             >
               🔗 Unlink A/V

@@ -27,7 +27,9 @@ import {
   getExportJob,
   reapStaleExportJobs,
 } from "./exportQueue";
-import type { ExportJobDoc, ExportTimeline, ExportTimelineClip } from "./exportTypes";
+import type { ExportJobDoc, ExportTimelineClip } from "./exportTypes";
+import { buildRenderPlan, clipSourceId, type RenderInput } from "./renderPlan";
+import { probeMedia } from "./mediaProbe";
 import { resolutionToDimensions, formatToContainer } from "./exportTypes";
 import {
   EXPORT_DOWNLOAD_LIMITS,
@@ -43,10 +45,8 @@ import {
 
 const POLL_INTERVAL_MS = Number(process.env.EXPORT_WORKER_POLL_MS) || 5_000;
 const FFMPEG_BIN = process.env.FFMPEG_PATH || "ffmpeg";
-const FFPROBE_BIN = process.env.FFPROBE_PATH || "ffprobe";
 /** Kill ffmpeg after this long. */
 const FFMPEG_TIMEOUT_MS = (Number(process.env.EXPORT_FFMPEG_TIMEOUT_MINUTES) || 20) * 60_000;
-const FFPROBE_TIMEOUT_MS = 60_000;
 /** Jobs active longer than this are considered abandoned and failed by the reaper. */
 const STALE_JOB_MS = (Number(process.env.EXPORT_STALE_JOB_MINUTES) || 30) * 60_000;
 const REAPER_INTERVAL_MS = 5 * 60_000;
@@ -271,23 +271,6 @@ function runCommand(
   });
 }
 
-/** Get duration of a media file in milliseconds via ffprobe. */
-async function probeDuration(filePath: string): Promise<number> {
-  try {
-    const { code, stdout } = await runCommand(
-      FFPROBE_BIN,
-      ["-v", "quiet", "-print_format", "json", "-show_format", filePath],
-      { timeoutMs: FFPROBE_TIMEOUT_MS }
-    );
-    if (code !== 0) return 0;
-    const info = JSON.parse(stdout);
-    const dur = parseFloat(info?.format?.duration || "0");
-    return Math.round(dur * 1000);
-  } catch {
-    return 0;
-  }
-}
-
 // ============================================================================
 // Core job processor
 // ============================================================================
@@ -301,11 +284,6 @@ async function setStepOrAbort(jobId: string, patch: Parameters<typeof updateExpo
 async function isJobInactive(jobId: string): Promise<boolean> {
   const fresh = await getExportJob(jobId);
   return !fresh || fresh.status === "canceled" || fresh.status === "failed" || fresh.status === "completed";
-}
-
-/** Map key for de-duplicating downloads. */
-function clipSourceId(clip: ExportTimelineClip): string {
-  return clip.sourceKey ? `key:${clip.sourceKey}` : clip.sourceUrl ? `url:${clip.sourceUrl}` : "";
 }
 
 export async function processExportJob(job: ExportJobDoc): Promise<void> {
@@ -332,7 +310,7 @@ export async function processExportJob(job: ExportJobDoc): Promise<void> {
     const container = formatToContainer(job.settings?.format);
     const outputExt = container;
 
-    // Collect all unique source URLs to download
+    // Collect the clips of audible/visible tracks (sources to download)
     const allClips: ExportTimelineClip[] = [];
     for (const track of timeline.tracks) {
       if (track.muted) continue;
@@ -389,7 +367,7 @@ export async function processExportJob(job: ExportJobDoc): Promise<void> {
       });
     }
 
-    // --- Step 2: Build FFmpeg command ---
+    // --- Step 2: Build FFmpeg command (picture + mixed audio) ---
     await setStepOrAbort(jobId, {
       status: "rendering",
       currentStep: "Building render plan",
@@ -397,95 +375,27 @@ export async function processExportJob(job: ExportJobDoc): Promise<void> {
     });
 
     const outputPath = path.join(workDir, `output.${outputExt}`);
-    const totalDurationMs = timeline.durationMs || allClips.reduce(
-      (max, c) => Math.max(max, c.endMs), 0
+
+    // Probe every downloaded source once: clips whose file has no audio
+    // stream get generated silence instead of a dangling [n:a] reference.
+    const renderInputs = new Map<string, RenderInput>();
+    for (const [sourceId, localPath] of urlToLocal) {
+      const probe = await probeMedia(localPath);
+      renderInputs.set(sourceId, {
+        path: localPath,
+        // Unknown (probe failed): assume a normal A/V file; ffmpeg will report.
+        hasVideo: probe ? probe.hasVideo : true,
+        hasAudio: probe ? probe.hasAudio : true,
+      });
+    }
+
+    const plan = buildRenderPlan(timeline, renderInputs, { outputPath, width, height, fps, container });
+    const ffmpegArgs = plan.args;
+    const totalDurationMs = plan.durationMs;
+    logger.info(
+      { jobId, durationMs: plan.durationMs, videoBranches: plan.videoBranches, audioBranches: plan.audioBranches, silentBranches: plan.silentBranches },
+      "Render plan built",
     );
-
-    // Build a concat-demuxer file for simple sequential rendering
-    // For the first version we render only unmuted video-track clips sequentially.
-    const videoClips = allClips
-      .filter((c) => {
-        const track = timeline.tracks.find((t) => t.id === c.trackId);
-        return track && track.kind === "video" && !track.muted && urlToLocal.has(clipSourceId(c));
-      })
-      .sort((a, b) => a.startMs - b.startMs);
-
-    if (videoClips.length === 0) {
-      throw new Error("No unmuted video clips to render");
-    }
-
-    // Build FFmpeg args for complex filter
-    const ffmpegArgs: string[] = [];
-
-    // Add each input with trim
-    for (let i = 0; i < videoClips.length; i++) {
-      const clip = videoClips[i];
-      const localFile = urlToLocal.get(clipSourceId(clip));
-      if (!localFile) continue;
-
-      const ssSeconds = (clip.sourceInMs / 1000).toFixed(3);
-      const durationSeconds = ((clip.sourceOutMs - clip.sourceInMs) / 1000).toFixed(3);
-
-      ffmpegArgs.push("-ss", ssSeconds);
-      ffmpegArgs.push("-t", durationSeconds);
-      ffmpegArgs.push("-i", localFile);
-    }
-
-    if (videoClips.length === 1) {
-      // Simple case: one clip, direct output with scaling
-      const scaleFilter = [
-        `scale=${width}:${height}:force_original_aspect_ratio=decrease`,
-        `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`,
-        `fps=${fps}`,
-      ].join(",");
-
-      ffmpegArgs.push(
-        "-vf", scaleFilter,
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-        "-y",
-        outputPath
-      );
-    } else {
-      // Multiple clips: use concat filter
-      const scaleFilter = [
-        `scale=${width}:${height}:force_original_aspect_ratio=decrease`,
-        `pad=${width}:${height}:(ow-iw)/2:(oh-ih)/2`,
-        `fps=${fps}`,
-        "setpts=PTS-STARTPTS",
-      ].join(",");
-
-      const filterParts: string[] = [];
-      for (let i = 0; i < videoClips.length; i++) {
-        filterParts.push(`[${i}:v]${scaleFilter}[v${i}]`);
-        filterParts.push(`[${i}:a]aresample=48000[a${i}]`);
-      }
-
-      const vConcat = videoClips.map((_, i) => `[v${i}]`).join("");
-      const aConcat = videoClips.map((_, i) => `[a${i}]`).join("");
-      filterParts.push(`${vConcat}concat=n=${videoClips.length}:v=1:a=0[outv]`);
-      filterParts.push(`${aConcat}concat=n=${videoClips.length}:v=0:a=1[outa]`);
-
-      const filterComplex = filterParts.join(";");
-
-      ffmpegArgs.push(
-        "-filter_complex", filterComplex,
-        "-map", "[outv]",
-        "-map", "[outa]",
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "128k",
-        "-movflags", "+faststart",
-        "-y",
-        outputPath
-      );
-    }
 
     // --- Step 3: Run FFmpeg ---
     await setStepOrAbort(jobId, {

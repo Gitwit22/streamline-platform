@@ -101,6 +101,20 @@ export default function VideoPreview() {
       currentClipId.current = null;
     }
 
+    // --- Embedded audio of the active video clip (no linked audio clip) ---
+    {
+      const activeVid = getActiveVideo();
+      const inactiveVid = getInactiveVideo();
+      if (inactiveVid) inactiveVid.muted = true;
+      if (activeVid) {
+        activeVid.muted = !pb.videoPlaysEmbeddedAudio;
+        if (pb.videoPlaysEmbeddedAudio && pb.activeVideoClip) {
+          // HTMLMediaElement volume is 0..1; boosts above unity apply on export.
+          activeVid.volume = Math.min(1, Math.max(0, pb.activeVideoClip.volume));
+        }
+      }
+    }
+
     // --- Audio sync ---
     const newAudioIds = new Set(pb.activeAudioClips.map(c => c.id));
 
@@ -125,7 +139,8 @@ export default function VideoPreview() {
         el.src = url;
         el.load();
       }
-      el.volume = clip.isMuted ? 0 : clip.volume;
+      // HTMLMediaElement volume is 0..1 (throws above 1); boosts apply on export.
+      el.volume = clip.isMuted ? 0 : Math.min(1, Math.max(0, clip.volume));
       const drift = Math.abs(el.currentTime - sourceTime);
       if (drift > 0.3 || !isPlaying) {
         el.currentTime = sourceTime;

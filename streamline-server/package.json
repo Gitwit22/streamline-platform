@@ -21,7 +21,8 @@
     "cron:expire-emergency": "node dist/scripts/runJobsCron.js",
     "auth:audit-duplicate-emails": "tsx scripts/auditDuplicateEmails.ts",
     "auth:backfill-firebase-users": "tsx scripts/backfillFirebaseAuthUsers.ts",
-    "plans:migrate-v2": "tsx scripts/migratePlansToV2.ts"
+    "plans:migrate-v2": "tsx scripts/migratePlansToV2.ts",
+    "content:migrate": "tsx scripts/migrateContentToProjects.ts"
   },
   "keywords": [],
   "author": "",

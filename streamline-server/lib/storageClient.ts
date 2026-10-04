@@ -7,6 +7,7 @@ import {
   HeadObjectCommand,
   HeadObjectCommandOutput,
   ListObjectsV2Command,
+  CopyObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import fs from "fs";
@@ -209,6 +210,18 @@ export async function getSignedUploadUrl(
     console.error(`❌ Failed to generate signed upload URL for ${remotePath}:`, error);
     throw new Error(`Failed to generate signed upload URL: ${error}`);
   }
+}
+
+/**
+ * Server-side copy of an object inside the bucket (no download). Used to move
+ * a rendered export under a stable My Content key ("Save to library").
+ */
+export async function copyObject(sourcePath: string, destPath: string): Promise<void> {
+  const src = String(sourcePath || "").trim().replace(/^\/+/, "");
+  const dst = String(destPath || "").trim().replace(/^\/+/, "");
+  if (!src || !dst) throw new Error("copyObject: source and destination keys are required");
+  const copySource = `${R2_BUCKET}/${src.split("/").map(encodeURIComponent).join("/")}`;
+  await s3Client.send(new CopyObjectCommand({ Bucket: R2_BUCKET, Key: dst, CopySource: copySource }));
 }
 
 /**

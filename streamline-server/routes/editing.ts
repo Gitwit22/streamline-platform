@@ -1,47 +1,43 @@
+/**
+ * Editing API (/api/editing)
+ *
+ *   POST   /upload                              — upload to the content library (editing_assets)
+ *   GET    /assets                              — unified MediaAsset list (recordings, uploads, saved/exported videos)
+ *   GET    /assets/:id                          — one MediaAsset with a playable URL
+ *   DELETE /assets/:id                          — delete a recording / upload / saved video (owner, ungated)
+ *   POST   /export                              — export the canonical project timeline (projects/{id})
+ *   GET    /exports/:exportId                   — export status
+ *   POST   /exports/:exportId/cancel            — cancel
+ *   POST   /exports/:exportId/save-to-library   — keep the output as a SavedVideo
+ *   DELETE /exports/:exportId                   — delete the rendered output now (owner, ungated)
+ *   GET    /recordings/:id                      — recording details with presigned playback URL
+ *
+ * Projects (create/list/load/save timeline) live under /api/projects.
+ */
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { Router, Request, Response } from "express";
 import { firestore as db } from "../firebaseAdmin";
-import { uploadVideo, uploadFileFromPath, getSignedDownloadUrl, deleteFile } from "../lib/storageClient";
+import { uploadFileFromPath, getSignedDownloadUrl, deleteFile } from "../lib/storageClient";
 import { createDiskUpload, cleanupUploadedFile, MAX_UPLOAD_BYTES, type UploadedDiskFile } from "../lib/diskUpload";
 import { getAllowedExportSourceHosts, validateExportSourceUrl } from "../lib/exportSourceUrl";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
-import { reserveStorageIfAvailable, releaseReservedStorage, releaseStorageUsage, reserveStorageUsage, getCurrentStorageUsage } from "../usageHelper";
+import { reserveStorageIfAvailable, releaseReservedStorage, releaseStorageUsage } from "../usageHelper";
 import { releaseRecordingStorageOnce } from "../lib/recordingUsage";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { decideProjectCreate, projectCountNeeded } from "../lib/projectCreateGate";
-import { canAccessFeature } from "./featureAccess";
 import { getEffectiveEntitlements, getPlatformFlags } from "../lib/entitlements";
 import { logger } from "../lib/logger";
-import { copyViewerStatsToRecording } from "../lib/viewerStats";
-import { resolveRoomIdentity } from "../lib/roomIdentity";
-import {
-  normalizeExportSettings,
-  resolutionToDimensions,
-  formatToContainer,
-} from "../lib/exportTypes";
-import type {
-  ExportSettingsInput,
-  ExportTimeline,
-  ExportTimelineClip,
-  ExportTimelineTrack,
-} from "../lib/exportTypes";
-import {
-  createExportJob,
-  getExportJob,
-  cancelJob,
-} from "../lib/exportQueue";
-import {
-  resolveProjectForEditor,
-  listProjectsForEditor,
-  countUserProjects,
-} from "../lib/projectBridge";
-import {
-  getProcessingJob,
-  listProjectProcessingJobs,
-  enqueueStandardJobs,
-} from "../lib/processingQueue";
+import { normalizeExportSettings, resolutionToDimensions } from "../lib/exportTypes";
+import { createExportJob, getExportJob, cancelJob } from "../lib/exportQueue";
+import { countUserProjects, loadEditorProject } from "../lib/projectStore";
+import { buildExportTimeline, type ResolvedClipSource } from "../lib/editorTimeline";
+import { listMediaAssets, resolveMediaAsset, resolveMediaAssets, withPlayableUrl } from "../lib/mediaAssets";
+import { inferMediaType, publicMediaAsset, uploadToMediaAsset } from "../lib/mediaAssetsPure";
+import { probeMedia } from "../lib/mediaProbe";
+import { deleteSavedVideo } from "../lib/savedVideos";
+import { deleteExportOutput, saveExportToLibrary } from "../lib/exportLibrary";
 
 const router = Router();
 
@@ -66,7 +62,7 @@ async function getSegmentedPlatformFlags(): Promise<SegmentedPlatformFlags> {
   };
 }
 
-async function assertSegmentEnabled(
+export async function assertSegmentEnabled(
   res: Response,
   key: keyof SegmentedPlatformFlags,
 ): Promise<boolean> {
@@ -76,17 +72,6 @@ async function assertSegmentEnabled(
     error: LIMIT_ERRORS.FEATURE_DISABLED,
     feature: key,
     reason: "Feature disabled platform-wide",
-  });
-  return false;
-}
-
-async function assertMyContentRecordingsEnabled(res: Response): Promise<boolean> {
-  const flags = await getSegmentedPlatformFlags();
-  if (flags.myContentEnabled && flags.myContentRecordingsEnabled) return true;
-  res.status(403).json({
-    error: LIMIT_ERRORS.FEATURE_DISABLED,
-    feature: "myContentRecordingsEnabled",
-    reason: "My Content recordings are disabled platform-wide",
   });
   return false;
 }
@@ -136,7 +121,7 @@ async function getEditingPlanInfo(uid: string): Promise<EditingPlanInfo> {
  * checked separately by assertSegmentEnabled (FEATURE_DISABLED). Never use
  * this on delete / cleanup routes.
  */
-async function assertEditingAccess(
+export async function assertEditingAccess(
   req: Request,
   res: Response,
   feature: EditingPlanFeature = "editing",
@@ -163,8 +148,8 @@ async function assertEditingAccess(
 }
 
 /**
- * Shared gate for creating a project (POST /api/editing/projects, duplicate,
- * POST /api/projects): projects platform switch + plan projects feature +
+ * Shared gate for creating a project (POST /api/projects): projects
+ * platform switch + plan projects feature +
  * limits.projects (null = unlimited, 0 = none). Sends the error and returns
  * false when creation is not allowed.
  */
@@ -198,7 +183,7 @@ export async function requireContentLibraryUploadsEnabled(_req: Request, res: Re
 }
 
 // ============================================================================
-// UPLOAD ENDPOINT
+// UPLOAD ENDPOINT — content library upload (editing_assets)
 // ============================================================================
 
 router.post(
@@ -217,9 +202,15 @@ router.post(
         return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
       }
 
+      const mediaType = inferMediaType(file.mimetype, file.originalname);
+      const mime = String(file.mimetype || "").toLowerCase();
+      if (mime && !/^(video|audio|image)\//.test(mime) && mime !== "application/octet-stream") {
+        return res.status(400).json({ error: "Only video, audio and image files are accepted" });
+      }
+
       const title = req.body.title || file.originalname.replace(/\.[^/.]+$/, "");
 
-      console.log(`[editing] upload ${(file.size / 1024 / 1024).toFixed(2)} MB for user ${userId}`);
+      console.log(`[editing] upload ${(file.size / 1024 / 1024).toFixed(2)} MB (${mediaType}) for user ${userId}`);
 
       // Transactional reservation: atomically check limit + increment counter.
       const reservation = await reserveStorageIfAvailable(userId, file.size, {
@@ -231,6 +222,9 @@ router.post(
           details: reservation.reason || "Storage limit exceeded",
         });
       }
+
+      // Duration + stream layout (best effort; ffprobe on the spooled file).
+      const probe = mediaType === "image" ? null : await probeMedia(file.path);
 
       // Generate unique filename
       const timestamp = Date.now();
@@ -246,23 +240,28 @@ router.post(
         const assetData = {
           userId,
           name: title,
-          type: 'video',
+          type: mediaType,
+          mimeType: file.mimetype || null,
           fileSize: file.size,
           videoUrl: publicUrl,
           storagePath: path,
           thumbnailUrl: null,
-          duration: 0,
+          duration: probe ? probe.durationMs / 1000 : 0,
+          hasVideo: probe ? probe.hasVideo : mediaType === "video",
+          hasAudio: probe ? probe.hasAudio : mediaType !== "image",
           createdAt: new Date(),
           source: 'upload'
         };
 
         const assetRef = await db.collection('editing_assets').add(assetData);
+        const asset = await withPlayableUrl(uploadToMediaAsset(assetRef.id, assetData));
 
         return res.json({
           ok: true,
           assetId: assetRef.id,
           publicUrl,
           storagePath: path,
+          asset: publicMediaAsset(asset),
           message: "Upload successful"
         });
       } catch (uploadErr: any) {
@@ -294,178 +293,58 @@ router.post(
 );
 
 // ============================================================================
-// ASSETS ENDPOINTS
+// MEDIA ASSETS — one listing for recordings, uploads and saved/exported videos
 // ============================================================================
 
-// GET /api/editing/assets - Get all user's assets
+// GET /api/editing/assets — unified MediaAsset list (type: recording | video | audio | image)
 router.get("/assets", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
-
     if (!userId) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
 
-    if (!(await assertMyContentRecordingsEnabled(res))) {
-      return;
+    // Platform surface switches decide which sources are listed; the client
+    // additionally hides sections the plan does not include.
+    const flags = await getSegmentedPlatformFlags();
+    const recordings = flags.myContentEnabled && flags.myContentRecordingsEnabled;
+    const uploads = flags.contentLibraryEnabled;
+    if (!recordings && !uploads) {
+      return res.status(403).json({
+        error: LIMIT_ERRORS.FEATURE_DISABLED,
+        feature: "contentLibraryEnabled",
+        reason: "Content library is disabled platform-wide",
+      });
     }
 
-    // Fetch all recordings for this user and convert to assets format
-    const recordingsSnap = await db
-      .collection("recordings")
-      .where("userId", "==", userId)
-      .get();
-
-    const assets = recordingsSnap.docs.map((doc) => {
-      const data = doc.data();
-      return {
-        id: data.id || doc.id,
-        name: data.title || "Untitled",
-        type: 'video' as const,
-        duration: data.duration || data.durationMinutes * 60 || 0,
-        fileSize: 0,
-        videoUrl: data.videoUrl || "",
-        thumbnailUrl: data.thumbnailUrl || null,
-        createdAt: data.createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
-        source: 'stream' as const,
-        roomId: data.roomName || data.roomId,
-        userId: data.userId
-      };
-    });
-
-    // Also fetch uploaded assets
-    const uploadsSnap = await db
-      .collection("editing_assets")
-      .where("userId", "==", userId)
-      .get();
-
-    const uploads = uploadsSnap.docs.map((doc) => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        name: data.name || "Untitled",
-        type: data.type || 'video',
-        duration: data.duration || 0,
-        fileSize: data.fileSize || 0,
-        videoUrl: data.videoUrl || "",
-        thumbnailUrl: data.thumbnailUrl || null,
-        createdAt: data.createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
-        source: data.source || 'upload',
-        userId: data.userId
-      };
-    });
-
-    const allAssets = [...assets, ...uploads];
-    res.json(allAssets);
+    const assets = await listMediaAssets(userId, { recordings, uploads });
+    res.json(assets.map(publicMediaAsset));
   } catch (err: any) {
     console.error("Get assets error:", err);
     res.status(500).json({ error: "Failed to fetch assets" });
   }
 });
 
-// GET /api/editing/listall - Legacy endpoint
-router.get("/listall", async (req: Request, res: Response) => {
-  // Same as /assets
-  try {
-    const userId = getAuthedUid(req);
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!(await assertMyContentRecordingsEnabled(res))) {
-      return;
-    }
-    const recordingsSnap = await db.collection("recordings").where("userId", "==", userId).get();
-    const uploadsSnap = await db.collection("editing_assets").where("userId", "==", userId).get();
-    
-    const assets = [...recordingsSnap.docs, ...uploadsSnap.docs].map((doc) => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        name: data.title || data.name || "Untitled",
-        type: 'video',
-        videoUrl: data.videoUrl || "",
-        createdAt: data.createdAt?.toDate?.()?.toISOString() || new Date().toISOString(),
-        source: data.source || 'stream'
-      };
-    });
-
-    res.json(assets);
-  } catch (err: any) {
-    console.error("listall error:", err);
-    res.status(500).json({ error: "Failed to fetch assets" });
-  }
-});
-
-// GET /api/editing/assets/:id - Get single asset by ID
+// GET /api/editing/assets/:id — one asset (any backing collection) with a playable URL
 router.get("/assets/:id", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
-    const id = String(req.params.id ?? "");
-
     if (!userId) {
       return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
     }
-
-    // Reading / downloading the caller's own asset is never gated by plan or
-    // platform switches (owner check only).
-
-    // 1) Recordings-backed assets
-    const recordingSnap = await db.collection("recordings").doc(id).get();
-    if (recordingSnap.exists) {
-      const data = recordingSnap.data();
-
-      // Verify ownership
-      if (data?.userId !== userId) {
-        return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-      }
-
-      const asset = {
-        id: data?.id || recordingSnap.id,
-        name: data?.title || "Untitled",
-        duration: data?.duration || 0,
-        source: "stream" as const,
-        thumbnail: data?.thumbnailUrl || "",
-        thumbnailUrl: data?.thumbnailUrl || null,
-        videoUrl: data?.videoUrl || data?.publicExportUrl,
-        fileSize: data?.fileSize,
-        createdAt: data?.createdAt?.toDate?.()?.toISOString?.() || new Date().toISOString(),
-        userId: data?.userId,
-      };
-
-      return res.json(asset);
-    }
-
-    // 2) Uploaded assets
-    const uploadSnap = await db.collection("editing_assets").doc(id).get();
-    if (!uploadSnap.exists) {
+    // Reading the caller's own asset is never gated by plan or platform switches.
+    const asset = await resolveMediaAsset(userId, String(req.params.id ?? ""));
+    if (!asset) {
       return res.status(404).json({ error: "Asset not found" });
     }
-
-    const data = uploadSnap.data() as any;
-    if (data?.userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-
-    return res.json({
-      id: uploadSnap.id,
-      name: data?.name || "Untitled",
-      duration: data?.duration || 0,
-      source: data?.source || "upload",
-      thumbnail: data?.thumbnailUrl || "",
-      thumbnailUrl: data?.thumbnailUrl || null,
-      videoUrl: data?.videoUrl || "",
-      fileSize: data?.fileSize || 0,
-      createdAt: data?.createdAt?.toDate?.()?.toISOString?.() || new Date().toISOString(),
-      userId: data?.userId,
-    });
+    return res.json(publicMediaAsset(await withPlayableUrl(asset)));
   } catch (err: any) {
     console.error("get asset error:", err);
-    res.status(500).json({ error: err.message || "Internal server error" });
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
-// DELETE /api/editing/assets/:id - Delete an asset
+// DELETE /api/editing/assets/:id — delete a recording, uploaded asset or saved video
 router.delete("/assets/:id", async (req: Request, res: Response) => {
   try {
     const userId = getAuthedUid(req);
@@ -508,7 +387,11 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
     // 2) Try uploaded editing_assets
     const uploadSnap = await db.collection("editing_assets").doc(id).get();
     if (!uploadSnap.exists) {
-      return res.status(404).json({ error: "Asset not found" });
+      // 3) Saved / exported videos (saved_videos)
+      const r = await deleteSavedVideo(userId, id, "editing.DELETE.savedVideo");
+      if (r.status === 404) return res.status(404).json({ error: "Asset not found" });
+      if (r.status === 403) return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+      return res.status(r.status).json({ ...r.body, message: "Asset deleted" });
     }
 
     const uploadData = uploadSnap.data() as any;
@@ -549,402 +432,13 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
     return res.json({ ok: true, message: "Asset deleted" });
   } catch (err: any) {
     console.error("delete asset error:", err);
-    res.status(500).json({ error: err.message || "Internal server error" });
-  }
-});
-
-// POST /api/editing/assets/from-recording - Convert recording to asset
-router.post("/assets/from-recording", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    const { recordingId } = req.body;
-
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!(await assertSegmentEnabled(res, "contentLibraryEnabled"))) {
-      return;
-    }
-
-    if (!recordingId) {
-      return res.status(400).json({ error: "recordingId is required" });
-    }
-
-    const recordingSnap = await db.collection("recordings").doc(recordingId).get();
-
-    if (!recordingSnap.exists) {
-      return res.status(404).json({ error: "Recording not found" });
-    }
-
-    const data = recordingSnap.data();
-
-    // Verify ownership
-    if (data?.userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-
-    const asset = {
-      id: data?.id || recordingSnap.id,
-      name: data?.title || "Untitled",
-      duration: data?.duration || 0,
-      source: "stream" as const,
-      thumbnail: data?.thumbnailUrl || "",
-      videoUrl: data?.videoUrl || data?.publicExportUrl,
-      fileSize: data?.fileSize,
-      createdAt: data?.createdAt?.toDate?.()?.toISOString?.() || new Date().toISOString(),
-      userId: data?.userId,
-    };
-
-    res.json(asset);
-  } catch (err: any) {
-    console.error("convert recording error:", err);
-    res.status(500).json({ error: err.message || "Internal server error" });
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
 // ============================================================================
-// PROJECTS ENDPOINTS
+// EXPORTS — render the canonical project timeline (projects/{id}.timeline)
 // ============================================================================
-
-// GET /api/editing/projects - List all projects
-router.get("/projects", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
-      return;
-    }
-
-    // Plan-based gating: projects feature of the effective plan.
-    const access = await assertEditingAccess(req, res, "projects");
-    if (!access) return;
-
-    // Use the project bridge to merge both collections into one normalized list
-    const projects = await listProjectsForEditor(userId);
-
-    res.json(projects);
-  } catch (err: any) {
-    console.error("Get projects error:", err);
-    res.status(500).json({ error: "Failed to fetch projects" });
-  }
-});
-
-// POST /api/editing/projects - Create new project
-router.post("/projects", async (req: Request, res: Response) => {
-  try {
-    const { name, assetId } = req.body;
-    const userId = getAuthedUid(req);
-
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    // Creating projects requires the editor surface.
-    if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
-      return;
-    }
-    // projects switch + plan projects + limits.projects (null = unlimited, 0 = none)
-    if (!(await assertCanCreateProject(req, res))) return;
-
-    if (!name || typeof name !== "string" || !name.trim()) {
-      return res.status(400).json({ error: "name is required" });
-    }
-
-    const newProject: Record<string, any> = {
-      userId,
-      name: String(name).trim(),
-      ...(assetId && typeof assetId === "string" && assetId.trim() ? { assetId: assetId.trim() } : {}),
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      duration: 0,
-      status: 'draft',
-      timeline: {
-        clips: [],
-        tracks: 2,
-      }
-    };
-
-    const projectRef = await db.collection("editing_projects").add(newProject);
-
-    res.json({
-      id: projectRef.id,
-      ...newProject,
-      createdAt: newProject.createdAt.toISOString(),
-      updatedAt: newProject.updatedAt.toISOString(),
-      lastModified: newProject.updatedAt.toISOString(),
-    });
-  } catch (err: any) {
-    console.error("Create project error:", err);
-    res.status(500).json({ error: "Failed to create project" });
-  }
-});
-
-// GET /api/editing/projects/:id - Get a single project
-router.get("/projects/:id", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    const id = String(req.params.id ?? "");
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
-      return;
-    }
-
-    const access = await assertEditingAccess(req, res, "projects");
-    if (!access) return;
-
-    // Use the bridge to resolve from either collection, auto-creating if needed
-    const project = await resolveProjectForEditor(id, userId);
-    if (!project) {
-      return res.status(404).json({ error: "Project not found" });
-    }
-
-    return res.json(project);
-  } catch (err: any) {
-    console.error("Get project error:", err);
-    res.status(500).json({ error: "Failed to fetch project" });
-  }
-});
-
-// PATCH /api/editing/projects/:id - Update project metadata
-router.patch("/projects/:id", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    const id = String(req.params.id ?? "");
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!(await assertSegmentEnabled(res, "projectsEnabled"))) {
-      return;
-    }
-
-    const access = await assertEditingAccess(req, res, "projects");
-    if (!access) return;
-
-    const ref = db.collection("editing_projects").doc(id);
-    const snap = await ref.get();
-    if (!snap.exists) {
-      return res.status(404).json({ error: "Project not found" });
-    }
-
-    const existing = snap.data() as any;
-    if (existing?.userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-
-    const patch: any = { updatedAt: new Date() };
-    if (typeof req.body?.name === "string" && req.body.name.trim()) {
-      patch.name = req.body.name.trim();
-    }
-    if (typeof req.body?.status === "string") {
-      patch.status = req.body.status;
-    }
-
-    await ref.set(patch, { merge: true });
-    const merged = { ...(existing || {}), ...patch };
-
-    return res.json({
-      id,
-      name: merged.name,
-      assetId: merged.assetId,
-      status: merged.status || "draft",
-      lastModified: patch.updatedAt.toISOString(),
-      duration: merged.duration || 0,
-      thumbnail: merged.thumbnail || merged.thumbnailUrl || null,
-      userId: merged.userId,
-      timeline: merged.timeline || null,
-    });
-  } catch (err: any) {
-    console.error("Update project error:", err);
-    res.status(500).json({ error: "Failed to update project" });
-  }
-});
-
-// DELETE /api/editing/projects/:id - Delete a project
-router.delete("/projects/:id", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    const id = String(req.params.id ?? "");
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    // Cleanup is never gated by plan or platform switches (owner check only).
-    const ref = db.collection("editing_projects").doc(id);
-    const snap = await ref.get();
-    if (!snap.exists) {
-      return res.status(404).json({ error: "Project not found" });
-    }
-
-    const data = snap.data() as any;
-    if (data?.userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-
-    await ref.delete();
-    return res.json({ ok: true });
-  } catch (err: any) {
-    console.error("Delete project error:", err);
-    res.status(500).json({ error: "Failed to delete project" });
-  }
-});
-
-// POST /api/editing/projects/:id/duplicate - Duplicate a project
-router.post("/projects/:id/duplicate", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    const id = String(req.params.id ?? "");
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
-      return;
-    }
-    // projects switch + plan projects + limits.projects (null = unlimited, 0 = none)
-    if (!(await assertCanCreateProject(req, res))) return;
-
-    const ref = db.collection("editing_projects").doc(id);
-    const snap = await ref.get();
-    if (!snap.exists) {
-      return res.status(404).json({ error: "Project not found" });
-    }
-    const data = snap.data() as any;
-    if (data?.userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-
-    const now = new Date();
-    const duplicated = {
-      userId,
-      name: `${(data.name || "Untitled").trim()} (Copy)`,
-      assetId: data.assetId || "",
-      createdAt: now,
-      updatedAt: now,
-      duration: data.duration || 0,
-      status: "draft",
-      timeline: data.timeline || { clips: [], tracks: 2 },
-    };
-
-    const newRef = await db.collection("editing_projects").add(duplicated);
-
-    return res.json({
-      id: newRef.id,
-      ...duplicated,
-      createdAt: now.toISOString(),
-      updatedAt: now.toISOString(),
-      lastModified: now.toISOString(),
-    });
-  } catch (err: any) {
-    console.error("Duplicate project error:", err);
-    res.status(500).json({ error: "Failed to duplicate project" });
-  }
-});
-
-// PUT /api/editing/projects/:id/timeline - Persist timeline clips
-router.put("/projects/:id/timeline", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    const id = String(req.params.id ?? "");
-    const { clips, tracks: rawTracks } = req.body as any;
-
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-    if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
-      return;
-    }
-
-    const access = await assertEditingAccess(req, res);
-    if (!access) return;
-
-    const ref = db.collection("editing_projects").doc(id);
-    const snap = await ref.get();
-    if (!snap.exists) {
-      return res.status(404).json({ error: "Project not found" });
-    }
-    const data = snap.data() as any;
-    if (data?.userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-
-    if (!Array.isArray(clips)) {
-      return res.status(400).json({ error: "clips must be an array" });
-    }
-
-    const sanitized = clips
-      .map((c: any) => {
-        const startTime = Math.max(0, Number(c?.startTime ?? 0));
-        const duration = Math.max(0, Number(c?.duration ?? 0));
-        const inPoint = Math.max(0, Number(c?.inPoint ?? 0));
-        const outPoint = Math.max(inPoint, Number(c?.outPoint ?? 0));
-        return {
-          id: String(c?.id || ""),
-          assetId: String(c?.assetId || ""),
-          trackId: typeof c?.trackId === "string" ? c.trackId : "video_1",
-          startTime,
-          duration,
-          inPoint,
-          outPoint,
-          name: typeof c?.name === "string" ? c.name.slice(0, 200) : "Clip",
-          videoUrl: typeof c?.videoUrl === "string" ? c.videoUrl : "",
-        };
-      })
-      .filter((c: any) => c.id && c.assetId);
-
-    // SSRF guard: the export worker downloads clip URLs server-side, so only
-    // URLs on our own storage hosts may be persisted.
-    const allowedHosts = getAllowedExportSourceHosts();
-    for (const c of sanitized) {
-      if (!c.videoUrl) continue;
-      const check = validateExportSourceUrl(c.videoUrl, allowedHosts);
-      if (!check.ok) {
-        return res.status(400).json({ error: "invalid_clip_source_url", clipId: c.id, reason: check.reason });
-      }
-    }
-
-    // Persist track state if provided, otherwise default to track count
-    let tracksData: any = 2;
-    if (Array.isArray(rawTracks) && rawTracks.length > 0) {
-      tracksData = rawTracks
-        .filter((t: any) => t && typeof t.id === "string" && typeof t.type === "string")
-        .map((t: any) => ({
-          id: String(t.id),
-          name: typeof t.name === "string" ? t.name.slice(0, 100) : "Track",
-          type: t.type === "audio" ? "audio" : "video",
-          muted: !!t.muted,
-          locked: !!t.locked,
-          solo: !!t.solo,
-          linkedTrackId: typeof t.linkedTrackId === "string" ? t.linkedTrackId : null,
-        }));
-    }
-
-    const timeline = {
-      clips: sanitized,
-      tracks: tracksData,
-    };
-
-    await ref.set(
-      {
-        timeline,
-        updatedAt: new Date(),
-      },
-      { merge: true }
-    );
-
-    return res.json({ saved: true });
-  } catch (err: any) {
-    console.error("Save timeline error:", err);
-    res.status(500).json({ error: "Failed to save timeline" });
-  }
-});
 
 // POST /api/editing/export - Create an export job for a project
 router.post("/export", async (req: Request, res: Response) => {
@@ -969,129 +463,56 @@ router.post("/export", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "projectId is required" });
     }
 
-    const projectSnap = await db.collection("editing_projects").doc(projectId).get();
-    if (!projectSnap.exists) {
+    // projects/{id} (canonical); legacy editing_projects ids migrate lazily.
+    const loaded = await loadEditorProject(userId, projectId);
+    if (!loaded) {
       return res.status(404).json({ error: "Project not found" });
     }
-    const project = projectSnap.data() as any;
-    if (project?.userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    if (!loaded.timeline || loaded.timeline.clips.length === 0) {
+      return res.status(400).json({ error: "timeline_empty", reason: "Add clips and save the project before exporting" });
     }
 
     // Normalise settings
     const settings = normalizeExportSettings(rawSettings);
     const { width, height } = resolutionToDimensions(settings.resolution);
 
-    // Build the render timeline from the saved project timeline
-    let exportTimeline: ExportTimeline | null = null;
-    const savedTimeline = project?.timeline;
-
-    if (savedTimeline && Array.isArray(savedTimeline.clips) && savedTimeline.clips.length > 0) {
-      // Resolve each clip's source from the caller's own recordings /
-      // editing_assets docs (storage key preferred; the worker presigns it).
-      // A client-supplied URL is used only when it is on an allowlisted
-      // storage host — anything else is rejected (SSRF guard).
-      const allowedHosts = getAllowedExportSourceHosts();
-      const resolvedClips: ExportTimelineClip[] = [];
-      for (const c of savedTimeline.clips) {
-        const clip: ExportTimelineClip = {
-          id: String(c.id || ""),
-          assetId: String(c.assetId || ""),
-          trackId: String(c.trackId || "video_1"),
-          startMs: Math.round(Number(c.startTime || 0) * 1000),
-          endMs: Math.round((Number(c.startTime || 0) + Number(c.duration || 0)) * 1000),
-          sourceInMs: Math.round(Number(c.inPoint || 0) * 1000),
-          sourceOutMs: Math.round(Number(c.outPoint || 0) * 1000),
-          sourceUrl: "",
-          name: typeof c.name === "string" ? c.name : "Clip",
-        };
-
-        let docUrl = "";
-        if (clip.assetId) {
-          try {
-            const recSnap = await db.collection("recordings").doc(clip.assetId).get();
-            if (recSnap.exists) {
-              const d = recSnap.data() as any;
-              const status = String(d?.status || "").toLowerCase();
-              if (d?.userId === userId && status !== "deleted" && status !== "deleting") {
-                const key = String(d?.objectKey || d?.downloadPath || "").trim().replace(/^\/+/, "");
-                if (key) clip.sourceKey = key;
-                docUrl = d?.videoUrl || d?.publicExportUrl || "";
-              }
-            }
-            if (!clip.sourceKey && !docUrl) {
-              const assetSnap = await db.collection("editing_assets").doc(clip.assetId).get();
-              if (assetSnap.exists) {
-                const d = assetSnap.data() as any;
-                if (d?.userId === userId) {
-                  const key = String(d?.storagePath || "").trim().replace(/^\/+/, "");
-                  if (key) clip.sourceKey = key;
-                  docUrl = d?.videoUrl || "";
-                }
-              }
-            }
-          } catch {}
-        }
-
-        const candidates = [docUrl, typeof c.videoUrl === "string" ? c.videoUrl : ""].filter(Boolean);
-        for (const candidate of candidates) {
-          if (validateExportSourceUrl(candidate, allowedHosts).ok) {
-            clip.sourceUrl = candidate;
-            break;
-          }
-        }
-
-        if (!clip.sourceKey && !clip.sourceUrl && candidates.length > 0) {
-          return res.status(400).json({
-            error: "invalid_clip_source_url",
-            clipId: clip.id,
-            reason: "Clip source is not on an allowed storage host",
-          });
-        }
-
-        resolvedClips.push(clip);
+    // Resolve every clip's source from the caller's own MediaAssets (storage
+    // key preferred; the worker presigns it). A stored URL is used only when
+    // it is on an allowlisted storage host (SSRF guard).
+    const allowedHosts = getAllowedExportSourceHosts();
+    const assets = await resolveMediaAssets(userId, loaded.timeline.clips.map((c) => c.assetId));
+    const sources = new Map<string, ResolvedClipSource>();
+    for (const [id, a] of assets) {
+      const mediaType = a.type === "recording" ? "video" : a.type;
+      if (a.storageKey) {
+        sources.set(id, { sourceKey: a.storageKey, mediaType });
+      } else if (a.videoUrl && validateExportSourceUrl(a.videoUrl, allowedHosts).ok) {
+        sources.set(id, { sourceUrl: a.videoUrl, mediaType });
       }
+    }
 
-      // Build tracks
-      const savedTracks = Array.isArray(savedTimeline.tracks) ? savedTimeline.tracks : [];
-      const trackMap = new Map<string, ExportTimelineTrack>();
-
-      for (const clip of resolvedClips) {
-        if (!trackMap.has(clip.trackId)) {
-          const savedTrack = savedTracks.find((t: any) => t.id === clip.trackId);
-          trackMap.set(clip.trackId, {
-            id: clip.trackId,
-            kind: savedTrack?.type === "audio" ? "audio" : "video",
-            muted: savedTrack?.muted === true,
-            clips: [],
-          });
-        }
-        trackMap.get(clip.trackId)!.clips.push(clip);
-      }
-
-      const durationMs = resolvedClips.reduce(
-        (max, c) => Math.max(max, c.endMs), 0
-      );
-
-      exportTimeline = {
-        width,
-        height,
-        fps: 30,
-        durationMs,
-        tracks: Array.from(trackMap.values()),
-      };
+    const built = buildExportTimeline(loaded.timeline, sources, { width, height, fps: 30 });
+    if ("error" in built) {
+      return res.status(400).json({
+        error: built.error,
+        clipId: built.clipId,
+        reason: built.error === "clip_source_unavailable"
+          ? "A clip's media is missing, deleted or not on an allowed storage host"
+          : "Nothing to export",
+      });
     }
 
     // Create the durable export job
     const job = await createExportJob({
       userId,
-      projectId,
+      projectId: loaded.project.id,
       settings,
-      timeline: exportTimeline,
+      timeline: built.timeline,
     });
 
     return res.json({
       id: job.id,
+      projectId: loaded.project.id,
       status: job.status,
       progressPercent: job.progressPercent,
       currentStep: job.currentStep,
@@ -1127,7 +548,13 @@ router.get("/exports/:exportId", async (req: Request, res: Response) => {
       return String(d);
     };
 
-    const url = job.outputUrl || undefined;
+    // The bucket is private: hand out a short-lived presigned link while the
+    // rendered file still exists (not expired / moved to the library).
+    const raw = job as any;
+    let url: string | undefined;
+    if (job.status === "completed" && job.outputPath && raw.outputExpired !== true && !raw.savedVideoId) {
+      url = await getSignedDownloadUrl(job.outputPath, 3600).catch(() => job.outputUrl || undefined);
+    }
 
     return res.json({
       id: job.id,
@@ -1138,6 +565,8 @@ router.get("/exports/:exportId", async (req: Request, res: Response) => {
       currentStep: job.currentStep,
       outputUrl: url,
       downloadUrl: url,                    // alias for backward compat
+      outputExpired: raw.outputExpired === true,
+      savedVideoId: raw.savedVideoId || null,
       error: job.errorMessage || undefined,
       attemptCount: job.attemptCount,
       createdAt: toISO(job.createdAt),
@@ -1179,6 +608,54 @@ router.post("/exports/:exportId/cancel", async (req: Request, res: Response) => 
   }
 });
 
+// POST /api/editing/exports/:exportId/save-to-library — keep the rendered
+// video as a SavedVideo (stable key, storage stays on the owner).
+router.post("/exports/:exportId/save-to-library", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+    if (!(await assertSegmentEnabled(res, "editorEnabled"))) return;
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+
+    const title = typeof req.body?.title === "string" ? req.body.title.slice(0, 200) : undefined;
+    const result = await saveExportToLibrary(userId, String(req.params.exportId ?? ""), title);
+    if ("error" in result) {
+      if (result.status === 403) return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+      return res.status(result.status).json({ error: result.error });
+    }
+    const asset = await resolveMediaAsset(userId, result.savedVideoId);
+    return res.status(result.created ? 201 : 200).json({
+      ok: true,
+      savedVideoId: result.savedVideoId,
+      created: result.created,
+      asset: asset ? publicMediaAsset(await withPlayableUrl(asset)) : null,
+    });
+  } catch (err: any) {
+    logger.error({ err: err?.message || String(err) }, "Save export to library error");
+    res.status(500).json({ error: "Failed to save export to library" });
+  }
+});
+
+// DELETE /api/editing/exports/:exportId — delete the rendered output now
+// (owner cleanup, never plan-gated; the job doc is kept as history).
+router.delete("/exports/:exportId", async (req: Request, res: Response) => {
+  try {
+    const userId = getAuthedUid(req);
+    if (!userId) {
+      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    }
+    const r = await deleteExportOutput(userId, String(req.params.exportId ?? ""));
+    if (r.status === 403) return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
+    return res.status(r.status).json(r.body);
+  } catch (err: any) {
+    logger.error({ err: err?.message || String(err) }, "Delete export output error");
+    res.status(500).json({ error: "Failed to delete export output" });
+  }
+});
+
 // ============================================================================
 // RECORDINGS ENDPOINTS
 // ============================================================================
@@ -1196,9 +673,9 @@ router.get("/recordings/:id", async (req: Request, res: Response) => {
     if (!(await assertSegmentEnabled(res, "contentLibraryEnabled"))) {
       return;
     }
-    
+
     const recordingDoc = await db.collection("recordings").doc(id).get();
-    
+
     if (!recordingDoc.exists) {
       return res.status(404).json({ error: "Recording not found" });
     }
@@ -1232,687 +709,6 @@ router.get("/recordings/:id", async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error("Get recording error:", err);
     res.status(500).json({ error: "Failed to fetch recording" });
-  }
-});
-
-// GET /api/editing/list - Get all recordings for the authenticated user
-router.get("/list", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!(await assertSegmentEnabled(res, "contentLibraryEnabled"))) {
-      return;
-    }
-
-    const recordingsSnap = await db
-      .collection("recordings")
-      .where("userId", "==", userId)
-      .get();
-
-    // Convert Firestore Timestamp objects to ISO strings so the frontend
-    // receives serialisable date strings instead of raw { _seconds, _nanoseconds }
-    // objects, which cause "Invalid Date" when parsed by new Date().
-    const toISO = (v: any): string | null => {
-      if (!v) return null;
-      if (typeof v?.toDate === "function") return v.toDate().toISOString();
-      if (v instanceof Date) return v.toISOString();
-      if (typeof v === "string") return v;
-      return null;
-    };
-
-    const recordings = recordingsSnap.docs
-      .map((doc: any) => {
-        const data = doc.data();
-        return {
-          id: doc.id,
-          ...data,
-          createdAt: toISO(data.createdAt),
-          updatedAt: toISO(data.updatedAt),
-          startedAt: toISO(data.startedAt),
-          readyAt: toISO(data.readyAt),
-          stoppedAt: toISO(data.stoppedAt),
-          deletedAt: toISO(data.deletedAt),
-        };
-      })
-      .sort((a: any, b: any) => {
-        // Sort by createdAt descending in memory
-        const aTime = new Date(a.createdAt || 0).getTime();
-        const bTime = new Date(b.createdAt || 0).getTime();
-        return bTime - aTime;
-      });
-
-    // Generate presigned playback URLs for ready recordings whose videoUrl
-    // is missing or points to a private R2 bucket path.
-    await Promise.all(
-      recordings.map(async (rec: any) => {
-        const storageKey = rec.objectKey || rec.downloadPath;
-        if (storageKey && rec.status === "ready") {
-          try {
-            rec.videoUrl = await getSignedDownloadUrl(storageKey, 3600);
-          } catch (e) {
-            console.warn("[editing] signed-url generation failed for", rec.id, e);
-          }
-        }
-      }),
-    );
-
-    res.json(recordings);
-  } catch (err) {
-    console.error("list error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// POST /api/editing/save - Save edit configuration for a recording
-router.post("/save", async (req: Request, res: Response) => {
-  try {
-    const { recordingId, editConfig } = req.body;
-    const userId = getAuthedUid(req);
-
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
-      return;
-    }
-
-    if (!recordingId) {
-      return res.status(400).json({ error: "recordingId is required" });
-    }
-
-    // Verify ownership
-    const recordingSnap = await db.collection("recordings").doc(recordingId).get();
-
-    if (!recordingSnap.exists) {
-      return res.status(404).json({ error: "Recording not found" });
-    }
-
-    const recordingData = recordingSnap.data() as any;
-    if (recordingData.userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    // Save edit config
-    await db.collection("recordings").doc(recordingId).update({
-      editConfig,
-      updatedAt: new Date(),
-    });
-
-    res.json({ ok: true, message: "Edit config saved" });
-  } catch (err) {
-    console.error("save error:", err);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// PUT /api/editing/:recordingId - Update recording metadata (duration, status).
-// viewerCount/peakViewers are server-managed (copied from the room's live
-// viewer session) and ignored here.
-router.put("/:recordingId", async (req: Request, res: Response) => {
-  try {
-    const recordingId = String(req.params.recordingId ?? "");
-    const { duration, status } = req.body;
-    const userId = getAuthedUid(req);
-
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
-      return;
-    }
-
-    if (!recordingId) {
-      return res.status(400).json({ error: "recordingId is required" });
-    }
-
-    // Verify ownership
-    const recordingSnap = await db.collection("recordings").doc(recordingId).get();
-
-    if (!recordingSnap.exists) {
-      return res.status(404).json({ error: "Recording not found" });
-    }
-
-    const recordingData = recordingSnap.data() as any;
-    if (recordingData.userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    // Update recording metadata
-    const updateData: any = { updatedAt: new Date() };
-    if (typeof duration === 'number') updateData.duration = duration;
-    // Status is server-managed (recording/processing/ready/deleted drive
-    // retention and billing). Owners may only mark a recording as failed.
-    if (status !== undefined && status !== null && status !== "") {
-      if (status !== "failed") {
-        return res.status(400).json({ error: "status_not_editable" });
-      }
-      updateData.status = status;
-    }
-
-    await db.collection("recordings").doc(recordingId).update(updateData);
-
-    console.log("✅ Recording updated:", { recordingId, ...updateData });
-
-    res.json({
-      ok: true,
-      message: "Recording updated successfully",
-      recording: { id: recordingId, ...updateData },
-    });
-  } catch (err: any) {
-    console.error("❌ update recording error:", err);
-    res.status(500).json({ error: err.message || "Internal server error" });
-  }
-});
-
-// POST /api/editing/render - Trigger render job for a recording
-router.post("/render", async (req: Request, res: Response) => {
-  try {
-    if (!(await assertSegmentEnabled(res, "editorEnabled"))) {
-      return;
-    }
-    if (!assertPlatformTranscodeEnabled(res)) {
-      return;
-    }
-
-    const { recordingId, renderedBuffer } = req.body;
-    const userId = getAuthedUid(req);
-
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!recordingId) {
-      return res.status(400).json({ error: "recordingId is required" });
-    }
-
-    // Verify ownership
-    const recordingSnap = await db.collection("recordings").doc(recordingId).get();
-
-    if (!recordingSnap.exists) {
-      return res.status(404).json({ error: "Recording not found" });
-    }
-
-    const recordingData = recordingSnap.data() as any;
-    if (recordingData.userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    // Update recording status to "rendering"
-    await db.collection("recordings").doc(recordingId).update({
-      status: "rendering",
-      renderStartedAt: new Date(),
-    });
-
-    // ✅ PROMPT #4: When export finishes, upload rendered video to R2
-    if (renderedBuffer) {
-      try {
-        const buffer = Buffer.from(renderedBuffer);
-        
-        // Transactional reservation: atomically check limit + increment counter.
-        const reservation = await reserveStorageIfAvailable(userId, buffer.byteLength, {
-          caller: "editing.render",
-          recordingId,
-        });
-        if (!reservation.reserved) {
-          return res.status(409).json({
-            error: LIMIT_ERRORS.LIMIT_EXCEEDED,
-            details: reservation.reason || "Storage limit exceeded",
-          });
-        }
-
-        // Upload to R2
-        const exportPath = `exports/${userId}/${recordingId}/${Date.now()}.mp4`;
-        let publicUrl: string;
-        try {
-          publicUrl = await uploadVideo(buffer, exportPath, "video/mp4");
-        } catch (uploadErr: any) {
-          // Upload failed — release the reserved bytes.
-          try {
-            await releaseReservedStorage(userId, buffer.byteLength, {
-              caller: "editing.render.rollback",
-              exportPath,
-            });
-          } catch (releaseErr: any) {
-            console.error("[editing] CRITICAL: failed to release reservation after render upload failure", {
-              userId, exportPath, fileSizeBytes: buffer.byteLength,
-              uploadError: uploadErr?.message, releaseError: releaseErr?.message,
-            });
-          }
-          throw uploadErr;
-        }
-
-        // Update recording with rendered path and URL
-        await db.collection("recordings").doc(recordingId).update({
-          status: "complete",
-          renderedPath: exportPath,
-          publicExportUrl: publicUrl,
-          renderedAt: new Date(),
-        });
-
-        return res.json({
-          status: "complete",
-          recordingId,
-          message: "Render and export completed",
-          publicUrl,
-          exportPath,
-        });
-      } catch (uploadErr: any) {
-        console.error("Export upload failed:", uploadErr);
-        await db.collection("recordings").doc(recordingId).update({
-          status: "render_failed",
-          error: uploadErr.message,
-        });
-
-        return res.status(500).json({
-          error: "Failed to upload rendered video",
-          details: uploadErr.message,
-        });
-      }
-    }
-
-    res.json({
-      status: "queued",
-      recordingId,
-      message: "Render job queued",
-    });
-  } catch (err: any) {
-    console.error("render error:", err);
-    res.status(500).json({ error: err.message || "Internal server error" });
-  }
-});
-
-// POST /api/editing/create-recording - Create a new recording document when stream starts
-router.post("/create-recording", async (req: Request, res: Response) => {
-  try {
-    const { roomName, title } = req.body;
-    const userId = getAuthedUid(req);
-
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!title) {
-      return res.status(400).json({ error: "Title is required" });
-    }
-
-    // Enforce plan entitlement + platform flag (default-enabled when missing)
-    const access = await canAccessFeature(userId, "recording");
-    if (!access.allowed) {
-      return res.status(403).json({
-        error: access.code || LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
-        reason: access.reason || "Recording not available",
-      });
-    }
-
-    // Create new recording document
-    const recordingRef = db.collection("recordings").doc();
-    const recordingData = {
-      id: recordingRef.id,
-      userId,
-      roomName: roomName || "default-room",
-      title,
-      status: "ready", // Immediately ready since we can't record the actual stream
-      duration: 0,
-      // Server-managed; client-supplied viewer numbers are not trusted.
-      viewerCount: 0,
-      peakViewers: 0,
-      createdAt: new Date(),
-      updatedAt: new Date(),
-      videoUrl: null, // Will be populated if video is uploaded
-      thumbnailUrl: null,
-      progress: 100,
-      usageType: "recording_only",
-    };
-
-    await recordingRef.set(recordingData);
-
-    console.log("✅ Recording created:", recordingData);
-
-    res.json({
-      ok: true,
-      id: recordingRef.id,
-      status: "ready",
-      message: "Recording created successfully",
-      recording: recordingData,
-    });
-  } catch (err: any) {
-    console.error("❌ create-recording error:", err);
-    res.status(500).json({ error: err.message || "Internal server error" });
-  }
-});
-
-// ============================================================================
-// RECORDING START/STOP ENDPOINTS
-// ============================================================================
-
-// POST /api/recordings/start - Start a new recording session
-router.post("/recordings/start", async (req: Request, res: Response) => {
-  try {
-    const { roomName, title } = req.body;
-    const userId = getAuthedUid(req);
-
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!roomName || !title) {
-      return res.status(400).json({ error: "roomName and title required" });
-    }
-
-    // Enforce plan entitlement + platform flag (default-enabled when missing)
-    const access = await canAccessFeature(userId, "recording");
-    if (!access.allowed) {
-      return res.status(403).json({
-        error: access.code || LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
-        reason: access.reason || "Recording not available",
-      });
-    }
-
-    // Create recording document
-    const recordingRef = db.collection("recordings").doc();
-    const recordingStartedAt = new Date();
-    const recordingData = {
-      id: recordingRef.id,
-      userId,
-      roomName,
-      title,
-      status: "recording",
-      createdAt: recordingStartedAt,
-      startedAt: recordingStartedAt,
-      stoppedAt: null,
-      duration: 0,
-      viewerCount: 0,
-      peakViewers: 0,
-      videoUrl: null,
-      thumbnailUrl: null,
-      progress: 0,
-      usageType: "recording_only",
-    };
-
-    await recordingRef.set(recordingData);
-
-    console.log("✅ Recording started:", recordingRef.id);
-
-    res.json({
-      success: true,
-      id: recordingRef.id,
-      status: "recording",
-    });
-  } catch (err: any) {
-    console.error("❌ recording start error:", err);
-    res.status(500).json({ error: err.message || "Failed to start recording" });
-  }
-});
-
-// POST /api/recordings/stop - Stop recording and finalize metadata
-router.post("/recordings/stop", async (req: Request, res: Response) => {
-  try {
-    const { recordingId, duration } = req.body;
-    const userId = getAuthedUid(req);
-
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    if (!recordingId) {
-      return res.status(400).json({ error: "recordingId is required" });
-    }
-
-    // Update recording document
-    const recordingRef = db.collection("recordings").doc(recordingId);
-
-    const snap = await recordingRef.get();
-    if (!snap.exists) {
-      return res.status(404).json({ error: "Recording not found" });
-    }
-
-    const data = snap.data() as any;
-    if (data?.userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-    
-    await recordingRef.update({
-      status: "ready",
-      stoppedAt: new Date(),
-      duration: duration || 0,
-      progress: 100,
-    });
-
-    // Viewer numbers from the room's live viewer session (best-effort).
-    try {
-      const resolved = data?.roomId
-        ? { roomId: String(data.roomId) }
-        : typeof data?.roomName === "string" && data.roomName.trim()
-          ? await resolveRoomIdentity({ roomName: data.roomName.trim() })
-          : null;
-      if (resolved?.roomId) await copyViewerStatsToRecording(recordingRef, resolved.roomId);
-    } catch (e: any) {
-      console.warn("[editing/recordings/stop] viewer stats copy failed", e?.message || e);
-    }
-
-    console.log("✅ Recording stopped:", recordingId);
-
-    res.json({
-      success: true,
-      id: recordingId,
-      status: "ready",
-      duration: duration,
-    });
-  } catch (err: any) {
-    console.error("❌ recording stop error:", err);
-    res.status(500).json({ error: err.message || "Failed to stop recording" });
-  }
-});
-
-// ============================================================================
-// PLAN INFO ENDPOINT — expose editing plan limits to the client
-// ============================================================================
-
-router.get("/plan-info", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    const plan = await getEditingPlanInfo(userId);
-    const projectCount = await countUserProjects(userId);
-
-    // Include real current storage usage so the client can show actual state
-    const storageUsedBytes = await getCurrentStorageUsage(userId);
-    const GB = 1024 * 1024 * 1024;
-
-    return res.json({
-      planId: plan.planId,
-      access: plan.access,
-      // Legacy encoding for older clients: 0 = no cap. Prefer `limits` (null = unlimited).
-      maxProjects: plan.maxProjects ?? 0,
-      currentProjects: projectCount,
-      maxStorageGB: plan.maxStorageBytes === null ? 0 : Math.round(plan.maxStorageBytes / GB),
-      limits: { projects: plan.maxProjects, storageBytes: plan.maxStorageBytes },
-      maxTracks: plan.maxTracks ?? null,
-      maxResolution: plan.maxResolution ?? null,
-      storageUsedBytes,
-      storageUsedGB: Math.round((storageUsedBytes / GB) * 100) / 100,
-    });
-  } catch (err: any) {
-    console.error("Plan info error:", err);
-    res.status(500).json({ error: "Failed to fetch plan info" });
-  }
-});
-
-// ============================================================================
-// PROCESSING STATUS ENDPOINTS — background job status
-// ============================================================================
-
-router.get("/processing/:jobId", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    const job = await getProcessingJob(String(req.params.jobId ?? ""));
-    if (!job || job.userId !== userId) {
-      return res.status(404).json({ error: "Processing job not found" });
-    }
-
-    return res.json(job);
-  } catch (err: any) {
-    console.error("Processing status error:", err);
-    res.status(500).json({ error: "Failed to fetch processing status" });
-  }
-});
-
-router.get("/projects/:id/processing", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    if (!userId) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    const jobs = await listProjectProcessingJobs(String(req.params.id ?? ""));
-    // Filter to only this user's jobs
-    const userJobs = jobs.filter((j) => j.userId === userId);
-
-    return res.json(userJobs);
-  } catch (err: any) {
-    console.error("Project processing status error:", err);
-    res.status(500).json({ error: "Failed to fetch processing status" });
-  }
-});
-
-// ============================================================================
-// CONTENT ITEMS — lightweight references to recordings in the user's library
-// ============================================================================
-
-// GET /api/editing/content-items — list user's content items
-router.get("/content-items", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    if (!userId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-
-    if (!(await assertSegmentEnabled(res, "contentLibraryEnabled"))) return;
-
-    const snap = await db.collection("content_items")
-      .where("userId", "==", userId)
-      .get();
-
-    const items = snap.docs
-      .map((doc) => {
-        const d = doc.data();
-        return {
-          id: doc.id,
-          ...d,
-          createdAt: d.createdAt?.toDate?.()?.toISOString?.() ?? d.createdAt,
-        };
-      })
-      .sort((a: any, b: any) => {
-        const aTime = new Date(a.createdAt || 0).getTime();
-        const bTime = new Date(b.createdAt || 0).getTime();
-        return bTime - aTime;
-      });
-
-    return res.json({ items });
-  } catch (err: any) {
-    console.error("[content-items] list error:", err);
-    res.status(500).json({ error: "Failed to list content items" });
-  }
-});
-
-// POST /api/editing/content-items — add a recording to the user's content library
-router.post("/content-items", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    if (!userId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-
-    if (!(await assertSegmentEnabled(res, "contentLibraryEnabled"))) return;
-
-    const { recordingId } = req.body;
-    if (!recordingId || typeof recordingId !== "string") {
-      return res.status(400).json({ error: "recordingId is required" });
-    }
-
-    // Verify the recording exists and belongs to this user
-    const recSnap = await db.collection("recordings").doc(recordingId).get();
-    if (!recSnap.exists) {
-      return res.status(404).json({ error: "Recording not found" });
-    }
-    const recData = recSnap.data() as any;
-    if (recData.userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-
-    // Idempotency: don't duplicate
-    const dupCheck = await db.collection("content_items")
-      .where("userId", "==", userId)
-      .where("sourceId", "==", recordingId)
-      .where("sourceType", "==", "recording")
-      .limit(1)
-      .get();
-
-    if (!dupCheck.empty) {
-      const existing = dupCheck.docs[0];
-      return res.json({
-        item: {
-          id: existing.id,
-          ...existing.data(),
-          createdAt: existing.data().createdAt?.toDate?.()?.toISOString?.() ?? existing.data().createdAt,
-        },
-        duplicate: true,
-      });
-    }
-
-    const now = new Date();
-    const item = {
-      userId,
-      sourceType: "recording" as const,
-      sourceId: recordingId,
-      title: recData.title || recData.roomName || "Untitled Recording",
-      kind: "video" as const,
-      playbackUrl: recData.videoUrl || "",
-      thumbnailUrl: recData.thumbnailUrl || null,
-      durationMs: recData.duration ? Math.round(recData.duration * 1000) : null,
-      roomName: recData.roomName || null,
-      status: recData.status || "ready",
-      createdAt: now,
-    };
-
-    const ref = await db.collection("content_items").add(item);
-
-    return res.status(201).json({
-      item: { id: ref.id, ...item, createdAt: now.toISOString() },
-      duplicate: false,
-    });
-  } catch (err: any) {
-    console.error("[content-items] create error:", err);
-    res.status(500).json({ error: "Failed to add content item" });
-  }
-});
-
-// DELETE /api/editing/content-items/:id — remove a content item (reference only, not the recording)
-router.delete("/content-items/:id", async (req: Request, res: Response) => {
-  try {
-    const userId = getAuthedUid(req);
-    if (!userId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-
-    const docRef = db.collection("content_items").doc(String(req.params.id ?? ""));
-    const snap = await docRef.get();
-    if (!snap.exists) return res.status(404).json({ error: "Content item not found" });
-    if ((snap.data() as any).userId !== userId) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-
-    await docRef.delete();
-    return res.json({ ok: true });
-  } catch (err: any) {
-    console.error("[content-items] delete error:", err);
-    res.status(500).json({ error: "Failed to delete content item" });
   }
 });
 

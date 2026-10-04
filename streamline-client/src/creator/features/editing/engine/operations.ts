@@ -284,8 +284,12 @@ export function unlinkClips(
   linkedGroupId: string,
   clips: TimelineClip[],
 ): TimelineClip[] {
+  // The video half keeps playing silently: its sound stays on the (now
+  // independent) audio clip, so mark the embedded audio as detached.
   return clips.map(c =>
-    c.linkedGroupId === linkedGroupId ? { ...c, linkedGroupId: null } : c
+    c.linkedGroupId === linkedGroupId
+      ? { ...c, linkedGroupId: null, ...(c.type === 'video' ? { audioDetached: true } : {}) }
+      : c
   );
 }
 

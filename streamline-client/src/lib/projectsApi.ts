@@ -6,6 +6,7 @@
 
 import { API_BASE } from "./apiBase";
 import { apiFetchAuth } from "./api";
+import type { MediaAsset } from "./editingApi";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -21,6 +22,53 @@ export interface Project {
   assetCount: number;
   sourceRoomId: string | null;
   sourceRoomName: string | null;
+  /** Unmigrated legacy (editing_projects) project; opening it migrates it. */
+  legacy?: boolean;
+}
+
+// ── Editor timeline (stored on the project, version 2, seconds) ─────────────
+
+export interface EditorTrackDTO {
+  id: string;
+  name: string;
+  type: "video" | "audio";
+  order: number;
+  isMuted: boolean;
+  isSolo: boolean;
+  isLocked: boolean;
+}
+
+export interface EditorClipDTO {
+  id: string;
+  assetId: string;
+  trackId: string;
+  type: "video" | "audio";
+  timelineStart: number;
+  timelineEnd: number;
+  sourceStart: number;
+  sourceEnd: number;
+  linkedGroupId: string | null;
+  isMuted: boolean;
+  isHidden: boolean;
+  displayName: string;
+  /** Linear gain 0..2 (1 = unity). */
+  volume: number;
+  audioDetached?: boolean;
+}
+
+export interface EditorTimelineDTO {
+  version: 2;
+  tracks: EditorTrackDTO[];
+  clips: EditorClipDTO[];
+}
+
+export interface EditorProjectPayload {
+  project: Project;
+  timeline: EditorTimelineDTO | null;
+  /** Playable media for every timeline clip and project asset, by asset id. */
+  mediaAssets: Record<string, MediaAsset>;
+  projectAssets: ProjectAsset[];
+  migratedFrom: "editing_projects" | "timeline_clips" | null;
 }
 
 export type AssetType =
@@ -77,6 +125,37 @@ export async function getProject(id: string): Promise<Project> {
   const res = await apiFetchAuth(`${API_BASE}/api/projects/${encodeURIComponent(id)}`);
   const data = await res.json();
   return data.project;
+}
+
+/** Project + timeline + resolved media for the editor (null when not found). */
+export async function getProjectForEditor(id: string): Promise<EditorProjectPayload | null> {
+  const res = await apiFetchAuth(
+    `${API_BASE}/api/projects/${encodeURIComponent(id)}`,
+    {},
+    { allowNonOk: true },
+  );
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function saveProjectTimeline(
+  id: string,
+  timeline: { tracks: EditorTrackDTO[]; clips: EditorClipDTO[] },
+): Promise<void> {
+  const res = await apiFetchAuth(
+    `${API_BASE}/api/projects/${encodeURIComponent(id)}/timeline`,
+    {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ timeline: { version: 2, ...timeline } }),
+    },
+    { allowNonOk: true },
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    const e = err as { reason?: string; error?: string };
+    throw new Error(e.reason || e.error || `Failed to save timeline (HTTP ${res.status})`);
+  }
 }
 
 export async function updateProject(

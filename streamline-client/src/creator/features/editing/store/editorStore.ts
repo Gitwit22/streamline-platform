@@ -5,7 +5,7 @@
 
 import { create } from 'zustand';
 import type { SourceAsset, TimelineClip, Track, DragState, HistoryEntry } from '../types';
-import { MAX_UNDO_HISTORY, generateId } from '../types';
+import { MAX_UNDO_HISTORY, clampVolume } from '../types';
 import { computeTotalDuration } from '../engine/playbackResolver';
 import {
   placeAssetOnTimeline,
@@ -286,8 +286,9 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     set({ clips: unlinkClipsOp(linkedGroupId, s.clips), isDirty: true });
   },
 
+  // Gain 0..MAX_CLIP_VOLUME, persisted with the timeline and applied by the export.
   setClipVolume: (clipId, volume) => set(s => ({
-    clips: s.clips.map(c => c.id === clipId ? { ...c, volume: Math.max(0, Math.min(1, volume)) } : c),
+    clips: s.clips.map(c => c.id === clipId ? { ...c, volume: clampVolume(volume) } : c),
     isDirty: true,
   })),
 
@@ -318,9 +319,10 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     });
   },
 
-  toggleMute: (trackId) => set(s => ({ tracks: toggleTrackMuteOp(trackId, s.tracks) })),
-  toggleSolo: (trackId) => set(s => ({ tracks: toggleTrackSoloOp(trackId, s.tracks) })),
-  toggleLock: (trackId) => set(s => ({ tracks: toggleTrackLockOp(trackId, s.tracks) })),
+  // Track mute / solo are part of the saved timeline (the export honors them).
+  toggleMute: (trackId) => set(s => ({ tracks: toggleTrackMuteOp(trackId, s.tracks), isDirty: true })),
+  toggleSolo: (trackId) => set(s => ({ tracks: toggleTrackSoloOp(trackId, s.tracks), isDirty: true })),
+  toggleLock: (trackId) => set(s => ({ tracks: toggleTrackLockOp(trackId, s.tracks), isDirty: true })),
 
   // ===== PLAYBACK ACTIONS =====
 

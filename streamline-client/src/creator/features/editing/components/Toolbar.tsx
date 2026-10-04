@@ -5,12 +5,13 @@
 import { useState, useCallback, useRef } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { editingApi } from '../../../../lib/editingApi';
+import { createProject, saveProjectTimeline } from '../../../../lib/projectsApi';
 import { useNavigate } from 'react-router-dom';
 import SavedVideosPicker from './SavedVideosPicker';
+import { editorStateToTimeline, mediaToSourceAsset } from '../engine/projectIO';
 
 export default function Toolbar() {
   const navigate = useNavigate();
-  const projectId = useEditorStore(s => s.projectId);
   const projectName = useEditorStore(s => s.projectName);
   const isDirty = useEditorStore(s => s.isDirty);
   const saveStatus = useEditorStore(s => s.saveStatus);
@@ -30,35 +31,20 @@ export default function Toolbar() {
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Save
-  const handleSave = useCallback(async () => {
-    if (!projectId) return;
+  // Save: PUT /api/projects/:id/timeline (creates the project on first save
+  // when the editor was opened from a library asset).
+  const handleSave = useCallback(async (): Promise<string | null> => {
     setSaveStatus('saving');
     try {
       const state = useEditorStore.getState();
-      // Convert clips to API format (new model → legacy format)
-      const apiClips = state.clips.map(c => ({
-        id: c.id,
-        assetId: c.assetId,
-        trackId: c.trackId,
-        startTime: c.timelineStart,
-        duration: c.timelineEnd - c.timelineStart,
-        inPoint: c.sourceStart,
-        outPoint: c.sourceEnd,
-        name: c.displayName || '',
-        videoUrl: state.assets.get(c.assetId)?.url || '',
-      }));
-      const apiTracks = state.tracks.map(t => ({
-        id: t.id,
-        name: t.name,
-        type: t.type as 'video' | 'audio',
-        muted: t.isMuted,
-        locked: t.isLocked,
-        solo: t.isSolo,
-        linkedTrackId: null,
-      }));
-
-      await editingApi.saveTimeline(projectId, apiClips, apiTracks);
+      let id = state.projectId;
+      if (!id) {
+        const created = await createProject(state.projectName || 'Untitled Project');
+        id = created.id;
+        useEditorStore.getState().setProjectId(id);
+      }
+      await saveProjectTimeline(id, editorStateToTimeline(state.clips, state.tracks));
+      useEditorStore.setState({ isDirty: false });
 
       setSaveStatus('saved');
       setTimeout(() => {
@@ -66,31 +52,33 @@ export default function Toolbar() {
           setSaveStatus('idle');
         }
       }, 2000);
+      if (!state.projectId) navigate(`/editing/editor/${encodeURIComponent(id)}`, { replace: true });
+      return id;
     } catch (err) {
       console.error('Save failed:', err);
       setSaveStatus('error');
+      return null;
     }
-  }, [projectId, setSaveStatus]);
+  }, [navigate, setSaveStatus]);
 
-  // Upload file
+  // Export: save pending changes first, then open the render page.
+  const handleExport = useCallback(async () => {
+    const state = useEditorStore.getState();
+    const id = state.isDirty || !state.projectId ? await handleSave() : state.projectId;
+    if (id) navigate(`/editing/export/${encodeURIComponent(id)}`);
+  }, [handleSave, navigate]);
+
+  // Upload file to the content library, then add it to this project's bin.
   const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !projectId) return;
+    if (!file) return;
     setUploading(true);
     setShowAddAssetMenu(false);
     try {
       const result = await editingApi.uploadAsset(file);
-      // Add to store assets
-      const addAsset = useEditorStore.getState().addAsset;
-      addAsset({
-        id: result.id || `asset_${Date.now()}`,
-        fileName: file.name,
-        type: file.type.startsWith('video/') ? 'video' : 'audio',
-        url: result.videoUrl || '',
-        duration: result.duration || 60,
-        hasVideo: file.type.startsWith('video/'),
-        hasAudio: true,
-      });
+      const media = result.asset ?? (await editingApi.getAsset(result.assetId));
+      if (!media) throw new Error('Upload finished but the asset could not be loaded');
+      useEditorStore.getState().addAsset(mediaToSourceAsset(media));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Upload failed';
       alert(message);
@@ -98,7 +86,7 @@ export default function Toolbar() {
       setUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
-  }, [projectId]);
+  }, []);
 
   const selectedCount = selectedClipIds.size;
   const hasClips = clips.length > 0;
@@ -110,7 +98,7 @@ export default function Toolbar() {
       <div className="h-12 px-4 flex items-center gap-2 border-b border-zinc-800 bg-zinc-900/80">
         {/* Back */}
         <button
-          onClick={() => navigate('/creator/projects')}
+          onClick={() => navigate('/projects')}
           className="text-zinc-400 hover:text-white text-sm transition mr-2"
           title="Back to Projects"
         >
@@ -186,7 +174,7 @@ export default function Toolbar() {
                 onClick={() => { setShowAddAssetMenu(false); setShowSavedVideosPicker(true); }}
                 className="w-full px-3 py-2 text-xs text-left text-zinc-200 hover:bg-zinc-700 transition"
               >
-                🎬 Saved Videos
+                🎬 From Library
               </button>
               <button
                 onClick={() => { setShowAddAssetMenu(false); fileInputRef.current?.click(); }}
@@ -200,7 +188,7 @@ export default function Toolbar() {
 
         {/* Save */}
         <button
-          onClick={handleSave}
+          onClick={() => { void handleSave(); }}
           disabled={saveStatus === 'saving'}
           className={`px-3 h-8 rounded text-xs font-medium transition border
             ${saveStatus === 'saved'
@@ -212,13 +200,23 @@ export default function Toolbar() {
         >
           {uploading ? 'Uploading…' : saveLabel}
         </button>
+
+        {/* Export */}
+        <button
+          onClick={handleExport}
+          disabled={!hasClips || saveStatus === 'saving'}
+          className="px-3 h-8 rounded text-xs font-medium transition border bg-red-600 hover:bg-red-500 text-white border-red-500/40 disabled:opacity-30 disabled:cursor-not-allowed"
+          title="Render the timeline (video + mixed audio)"
+        >
+          Export
+        </button>
       </div>
 
       {/* Hidden file input */}
       <input
         ref={fileInputRef}
         type="file"
-        accept="video/*,audio/*"
+        accept="video/*,audio/*,image/*"
         className="hidden"
         onChange={handleFileUpload}
       />

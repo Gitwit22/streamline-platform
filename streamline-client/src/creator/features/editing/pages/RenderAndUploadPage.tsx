@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { CheckCircle, XCircle, AlertCircle } from 'lucide-react';
-import { editingApi, type Project, type ExportJob, EXPORT_TERMINAL_STATUSES } from '../../../../lib/editingApi';
+import { editingApi, type ExportJob, EXPORT_TERMINAL_STATUSES } from '../../../../lib/editingApi';
+import { getProject, type Project } from '../../../../lib/projectsApi';
 
 export default function RenderAndUploadPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -10,6 +11,7 @@ export default function RenderAndUploadPage() {
   const [exportJob, setExportJob] = useState<ExportJob | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [library, setLibrary] = useState<{ state: 'idle' | 'saving' | 'saved' | 'error'; message?: string }>({ state: 'idle' });
   const cancelledRef = useRef(false);
 
   useEffect(() => {
@@ -26,14 +28,14 @@ export default function RenderAndUploadPage() {
       }
 
       try {
-        const proj = await editingApi.getProject(projectId);
+        const proj = await getProject(projectId).catch(() => null);
         if (cancelledRef.current) return;
         if (!proj) {
           setProject(null);
           setLoading(false);
           return;
         }
-        setProject(proj as Project);
+        setProject(proj);
 
         // Start the export job
         const started = await editingApi.startExport(
@@ -56,7 +58,12 @@ export default function RenderAndUploadPage() {
         if (!cancelledRef.current) setExportJob(finalJob);
       } catch (e: any) {
         if (cancelledRef.current) return;
-        setError(e?.message || String(e));
+        const message = e?.message || String(e);
+        setError(message);
+        // Start (or polling) failed: show the failed state instead of a spinner.
+        setExportJob((prev) => prev
+          ? { ...prev, status: prev.status === 'canceled' ? 'canceled' : 'failed', error: prev.error || message }
+          : { id: '', status: 'failed', progress: 0, error: message, createdAt: new Date().toISOString() });
         setLoading(false);
       }
     };
@@ -76,6 +83,20 @@ export default function RenderAndUploadPage() {
   const isSuccess = status === 'completed';
   const isFailed = status === 'failed';
   const isCanceled = status === 'canceled';
+
+  const handleSaveToLibrary = async () => {
+    if (!exportJob?.id) return;
+    setLibrary({ state: 'saving' });
+    try {
+      await editingApi.saveExportToLibrary(exportJob.id, project?.name);
+      setLibrary({ state: 'saved' });
+      setExportJob((prev) => prev ? { ...prev, outputUrl: undefined, downloadUrl: undefined } : prev);
+    } catch (e: unknown) {
+      setLibrary({ state: 'error', message: e instanceof Error ? e.message : 'Could not save to library' });
+    }
+  };
+
+  const savedToLibrary = library.state === 'saved' || !!exportJob?.savedVideoId;
 
   const handleCancel = async () => {
     if (!exportJob?.id) return;
@@ -112,7 +133,7 @@ export default function RenderAndUploadPage() {
             <p className="text-zinc-400 mb-6">Project not found</p>
           )}
           <button
-            onClick={() => navigate('/editing/projects')}
+            onClick={() => navigate('/projects')}
             className="px-6 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 transition"
           >
             Back to Projects
@@ -204,6 +225,37 @@ export default function RenderAndUploadPage() {
           </div>
         )}
 
+        {/* Save to library: keeps the export as a saved video (download links expire) */}
+        {isSuccess && (
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 mb-6">
+            {savedToLibrary ? (
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-sm text-emerald-300">Saved to your content library.</span>
+                <button
+                  onClick={() => navigate('/content')}
+                  className="text-sm text-blue-400 hover:text-blue-300 underline"
+                >
+                  Open library →
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center justify-between gap-4">
+                <span className="text-sm text-zinc-400">
+                  Export downloads expire. Save it to keep the video in your library.
+                </span>
+                <button
+                  onClick={handleSaveToLibrary}
+                  disabled={library.state === 'saving' || exportJob?.outputExpired}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-sm font-semibold whitespace-nowrap"
+                >
+                  {library.state === 'saving' ? 'Saving…' : 'Save to library'}
+                </button>
+              </div>
+            )}
+            {library.state === 'error' && <p className="text-xs text-red-300 mt-2">{library.message}</p>}
+          </div>
+        )}
+
         {/* Download section */}
         {isSuccess && downloadUrl && (
           <div className="bg-zinc-900 border border-emerald-500/30 rounded-2xl p-6 mb-6">
@@ -251,7 +303,7 @@ export default function RenderAndUploadPage() {
               </button>
             )}
             <button
-              onClick={() => navigate('/editing/projects')}
+              onClick={() => navigate('/projects')}
               className="flex-1 px-6 py-4 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 transition font-semibold"
             >
               Back to Projects

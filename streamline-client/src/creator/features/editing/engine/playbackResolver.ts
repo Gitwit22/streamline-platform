@@ -4,7 +4,7 @@
 // ============================================================================
 
 import type { TimelineClip, Track, PlaybackState } from '../types';
-import { MAX_SIMULTANEOUS_AUDIO } from '../types';
+import { MAX_SIMULTANEOUS_AUDIO, videoClipPlaysEmbeddedAudio } from '../types';
 
 /**
  * Given a playhead time, determine which clips are active and their source offsets.
@@ -46,7 +46,8 @@ export function resolvePlayback(
 
   for (const vt of videoTracks) {
     if (mutedTrackIds.has(vt.id)) continue;
-    const clip = activeClips.find(c => c.trackId === vt.id && c.type === 'video' && !c.isMuted);
+    // Clip mute silences audio only; hidden clips (isHidden) are already excluded.
+    const clip = activeClips.find(c => c.trackId === vt.id && c.type === 'video');
     if (clip) {
       activeVideoClip = clip;
       videoSourceTime = clip.sourceStart + (time - clip.timelineStart);
@@ -93,8 +94,14 @@ export function resolvePlayback(
     }
   }
 
+  const videoPlaysEmbeddedAudio = !!activeVideoClip
+    && !activeVideoClip.isMuted
+    && activeVideoClip.volume > 0
+    && videoClipPlaysEmbeddedAudio(activeVideoClip, clips);
+
   return {
     activeVideoClip,
+    videoPlaysEmbeddedAudio,
     activeAudioClips,
     videoSourceTime,
     audioSourceTimes,

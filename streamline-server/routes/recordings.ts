@@ -1401,53 +1401,6 @@ router.post(
 );
 
 // =============================================================================
-// GET /library - List ready platform recordings for My Content import
-// =============================================================================
-
-router.get("/library", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
-  try {
-    const uid = getAuthUserId(req);
-    if (!uid) {
-      return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
-    }
-
-    const snap = await firestore
-      .collection("recordings")
-      .where("userId", "==", uid)
-      .get();
-
-    const recordings = snap.docs
-      .map((doc) => {
-        const data = doc.data();
-        const status = String(data.status || "unknown").toLowerCase();
-        return {
-          id: doc.id,
-          title: data.title || data.roomName || "Untitled",
-          roomName: data.roomName || null,
-          status,
-          thumbnailUrl: data.thumbnailUrl || null,
-          videoUrl: data.videoUrl || null,
-          duration: data.duration || 0,
-          fileSize: data.fileSize || null,
-          createdAt: data.createdAt?.toDate?.()?.toISOString?.() || null,
-        };
-      })
-      // Show ready recordings enabled, processing ones disabled (handled client-side), hide failed
-      .filter((r) => r.status === "ready" || r.status === "processing")
-      .sort((a, b) => {
-        const aTime = new Date(a.createdAt || 0).getTime();
-        const bTime = new Date(b.createdAt || 0).getTime();
-        return bTime - aTime;
-      });
-
-    return res.json(recordings);
-  } catch (err: any) {
-    console.error("[recordings/library] Error:", err);
-    return res.status(500).json({ error: "Failed to fetch recordings library" });
-  }
-});
-
-// =============================================================================
 // GET /:id - Get recording status
 // =============================================================================
 

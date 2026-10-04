@@ -35,6 +35,8 @@ export interface ExportJobDoc {
   outputPath: string | null;
   settings: ExportSettingsInput | null;
   timeline: ExportTimeline | null;
+  /** saved_videos doc created from this export's output ("Save to library"). */
+  savedVideoId?: string | null;
   createdAt: Date;
   startedAt: Date | null;
   completedAt: Date | null;
@@ -72,16 +74,34 @@ export interface ExportTimelineClip {
    */
   sourceKey?: string;
   name: string;
+  // ── version 2 fields (absent on jobs queued by older servers) ──
+  /** Clip type in the editor ("video" = picture, "audio" = sound). */
+  kind?: "video" | "audio";
+  /** What the source file is (images are looped for the clip length). */
+  mediaType?: "video" | "audio" | "image";
+  /** Linear gain 0..2 (1 = unity). */
+  volume?: number;
+  /** Clip muted: contributes no audio. */
+  muted?: boolean;
+  /** Video clip hidden: contributes no picture. */
+  hidden?: boolean;
+  /** Video clip contributes its own embedded audio (no linked audio clip). */
+  embeddedAudio?: boolean;
 }
 
 export interface ExportTimelineTrack {
   id: string;
   kind: "video" | "audio";
+  /** Effective mute (track mute, or not soloed while another track is). */
   muted: boolean;
+  /** Editor track order: lower = drawn on top (video). */
+  order?: number;
   clips: ExportTimelineClip[];
 }
 
 export interface ExportTimeline {
+  /** 2 = canonical editor timeline with audio mixing fields. */
+  version?: 2;
   width: number;
   height: number;
   fps: number;
