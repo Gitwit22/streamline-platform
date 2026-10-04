@@ -10,6 +10,7 @@ import { useAuthMe } from "../../hooks/useAuthMe";
 import { useNavigate } from "react-router-dom";
 import { clearMeCache } from "../../lib/meCache";
 import { clearPlatformFlagsCache } from "../../lib/platformFlagsCache";
+import { ResetCodeDialog, type IssuedResetCode } from "../components/ResetCodeDialog";
 
 // Normalize base so if you set VITE_API_BASE to ".../api" it won't double up.
 const API_BASE = (import.meta.env.VITE_API_BASE || "")
@@ -386,6 +387,7 @@ export default function AdminDashboard() {
   const [seedingPlans, setSeedingPlans] = useState(false);
   const [selectedUser, setSelectedUser] = useState<User | null>(null);
   const [resetLoadingUserId, setResetLoadingUserId] = useState<string | null>(null);
+  const [issuedResetCode, setIssuedResetCode] = useState<IssuedResetCode | null>(null);
 
   const [searchQuery, setSearchQuery] = useState("");
   const [expandedPlan, setExpandedPlan] = useState<string | null>(null);
@@ -676,6 +678,12 @@ export default function AdminDashboard() {
       return;
     }
     if (resetLoadingUserId) return;
+    if (
+      user.passwordReset?.active &&
+      !window.confirm(`Issue a new reset code for ${user.email}? The previous code will stop working.`)
+    ) {
+      return;
+    }
 
     setResetLoadingUserId(user.uid);
     try {
@@ -699,6 +707,13 @@ export default function AdminDashboard() {
             : entry
         )
       );
+      if (typeof data?.resetSecret === "string" && data.resetSecret) {
+        setIssuedResetCode({
+          email: user.email,
+          code: data.resetSecret,
+          expiresAt: data?.passwordReset?.expiresAt ?? null,
+        });
+      }
       showToast(`Password reset enabled for ${user.email}`);
     } catch (err: any) {
       showToast(`Enable reset failed: ${err?.message || "unknown error"}`);
@@ -870,6 +885,9 @@ export default function AdminDashboard() {
       <div style={S.orb1} />
       <div style={S.orb2} />
       {toast && <div style={S.toast}>✓ {toast}</div>}
+      {issuedResetCode && (
+        <ResetCodeDialog issued={issuedResetCode} onClose={() => setIssuedResetCode(null)} />
+      )}
 
       {/* Header */}
       <header style={S.header}>
@@ -1069,21 +1087,21 @@ export default function AdminDashboard() {
                                     ? "1px solid rgba(245,158,11,0.45)"
                                     : "1px solid rgba(220,38,38,0.45)",
                                   opacity:
-                                    canEnablePasswordResetForUser(u) && !u.passwordReset?.active && resetLoadingUserId !== u.uid
+                                    canEnablePasswordResetForUser(u) && resetLoadingUserId !== u.uid
                                       ? 1
                                       : 0.55,
                                   cursor:
-                                    canEnablePasswordResetForUser(u) && !u.passwordReset?.active && resetLoadingUserId !== u.uid
+                                    canEnablePasswordResetForUser(u) && resetLoadingUserId !== u.uid
                                       ? "pointer"
                                       : "not-allowed",
                                 }}
-                                disabled={!canEnablePasswordResetForUser(u) || !!u.passwordReset?.active || resetLoadingUserId === u.uid}
+                                disabled={!canEnablePasswordResetForUser(u) || resetLoadingUserId === u.uid}
                                 title={
                                   !canEnablePasswordResetForUser(u)
                                     ? "Only available for other non-admin users"
                                     : u.passwordReset?.active
-                                    ? "Password reset already enabled"
-                                    : "Enable password reset"
+                                    ? "Reset enabled. Click to issue a new one-time code (voids the old one)"
+                                    : "Enable password reset and get a one-time code for the user"
                                 }
                               >
                                 {resetLoadingUserId === u.uid ? "⏳" : u.passwordReset?.active ? "✅" : "🔐"}

@@ -1,6 +1,7 @@
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiFetchAuth } from "../../lib/api";
+import { ResetCodeDialog, type IssuedResetCode } from "../components/ResetCodeDialog";
 
 interface UsageData {
   userId: string;
@@ -70,6 +71,7 @@ export default function AdminUsage() {
   const [newPlan, setNewPlan] = useState<string>("free");
   const [planChangeReason, setPlanChangeReason] = useState("");
   const [resetLoadingUserId, setResetLoadingUserId] = useState<string | null>(null);
+  const [issuedResetCode, setIssuedResetCode] = useState<IssuedResetCode | null>(null);
 
   // Get admin user ID (in production, extract from JWT)
   const adminUserId = localStorage.getItem("sl_userId") || "admin";
@@ -208,6 +210,12 @@ export default function AdminUsage() {
 
   const handleEnablePasswordReset = async (user: UsageData) => {
     if (!user.canEnablePasswordReset || resetLoadingUserId) return;
+    if (
+      user.passwordReset?.active &&
+      !window.confirm(`Issue a new reset code for ${user.email}? The previous code will stop working.`)
+    ) {
+      return;
+    }
 
     setResetLoadingUserId(user.userId);
     try {
@@ -236,6 +244,13 @@ export default function AdminUsage() {
             : entry
         )
       );
+      if (typeof data?.resetSecret === "string" && data.resetSecret) {
+        setIssuedResetCode({
+          email: user.email,
+          code: data.resetSecret,
+          expiresAt: data?.passwordReset?.expiresAt ?? null,
+        });
+      }
     } catch (err: any) {
       alert(`Error: ${err.message}`);
     } finally {
@@ -282,6 +297,9 @@ export default function AdminUsage() {
 
   return (
     <div className="min-h-screen bg-black text-white p-6">
+      {issuedResetCode && (
+        <ResetCodeDialog issued={issuedResetCode} onClose={() => setIssuedResetCode(null)} />
+      )}
       <div className="max-w-7xl mx-auto">
         {/* Header */}
         <div className="flex items-center justify-between mb-8">
@@ -487,26 +505,26 @@ export default function AdminUsage() {
                         </button>
                         <button
                           onClick={() => handleEnablePasswordReset(user)}
-                          disabled={!user.canEnablePasswordReset || resetLoadingUserId === user.userId || !!user.passwordReset?.active}
+                          disabled={!user.canEnablePasswordReset || resetLoadingUserId === user.userId}
                           className={`px-3 py-1 rounded text-xs transition ${
                             !user.canEnablePasswordReset
                               ? "bg-gray-800 text-gray-500 cursor-not-allowed"
                               : user.passwordReset?.active
-                                ? "bg-amber-700/60 text-amber-100 cursor-default"
+                                ? "bg-amber-700/60 hover:bg-amber-700 text-amber-100"
                                 : "bg-red-700 hover:bg-red-600"
                           }`}
                           title={
                             !user.canEnablePasswordReset
                               ? "You can only enable resets for non-admin users other than yourself."
                               : user.passwordReset?.active
-                                ? "Password reset already enabled"
-                                : "Enable one-time password reset for this user"
+                                ? "Reset enabled. Click to issue a new one-time code (voids the old one)."
+                                : "Enable a one-time password reset and get a code for this user"
                           }
                         >
                           {resetLoadingUserId === user.userId
                             ? "Enabling..."
                             : user.passwordReset?.active
-                              ? "Reset Enabled"
+                              ? "New Reset Code"
                               : "Reset Password"}
                         </button>
                       </div>

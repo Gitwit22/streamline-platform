@@ -1,10 +1,16 @@
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 
 export const PASSWORD_MIN_LENGTH = 6;
 export const ADMIN_PASSWORD_RESET_TTL_MS = 24 * 60 * 60 * 1000;
 export const EMERGENCY_CODE_LENGTH = 6;
 export const RECOVERY_MAX_FAILED_ATTEMPTS = 5;
 export const RECOVERY_LOCK_DURATION_MS = 15 * 60 * 1000;
+/** Failed admin-reset-secret attempts allowed before the reset is voided. */
+export const ADMIN_RESET_MAX_FAILED_ATTEMPTS = 5;
+/** Crockford base32 (no I, L, O, U), so codes are easy to read aloud and type. */
+const ADMIN_RESET_SECRET_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+export const ADMIN_RESET_SECRET_LENGTH = 10;
 
 export const SECURITY_QUESTIONS = [
   { id: "first_pet", text: "What was the name of your first pet?" },
@@ -27,6 +33,9 @@ export type PasswordResetState = {
   requestedBy: string | null;
   expiresAt: number | null;
   usedAt: number | null;
+  /** sha256 (hex) of the normalized single-use reset secret. Never exposed. */
+  secretHash: string | null;
+  failedAttempts: number;
 };
 
 export type RecoveryState = {
@@ -43,7 +52,7 @@ export type RecoveryState = {
   lastRecoveryMethodUsed: "question" | "code" | "admin" | null;
 };
 
-export type PublicPasswordResetState = PasswordResetState & {
+export type PublicPasswordResetState = Omit<PasswordResetState, "secretHash"> & {
   active: boolean;
 };
 
@@ -74,6 +83,8 @@ export function createEmptyPasswordResetState(): PasswordResetState {
     requestedBy: null,
     expiresAt: null,
     usedAt: null,
+    secretHash: null,
+    failedAttempts: 0,
   };
 }
 
@@ -100,6 +111,8 @@ export function normalizePasswordResetState(raw: any): PasswordResetState {
     requestedBy: asNullableString(raw?.requestedBy),
     expiresAt: asNullableNumber(raw?.expiresAt),
     usedAt: asNullableNumber(raw?.usedAt),
+    secretHash: asNullableString(raw?.secretHash),
+    failedAttempts: asNonNegativeNumber(raw?.failedAttempts),
   };
 }
 
@@ -178,16 +191,64 @@ export function isAdminPasswordResetActive(raw: any, now = Date.now()): boolean 
   if (!state.adminAllowed) return false;
   if (!state.expiresAt || state.expiresAt <= now) return false;
   if (state.usedAt) return false;
+  // Resets enabled before single-use secrets existed have no secret and are void.
+  if (!state.secretHash) return false;
+  if (state.failedAttempts >= ADMIN_RESET_MAX_FAILED_ATTEMPTS) return false;
   return true;
 }
 
-export function buildAdminPasswordResetState(adminUserId: string, now = Date.now()): PasswordResetState {
+/**
+ * Generates a random single-use admin reset secret, formatted "XXXXX-XXXXX"
+ * (10 Crockford base32 characters, 50 bits). The admin hands it to the user out
+ * of band; only its hash is stored.
+ */
+export function generateAdminResetSecret(): string {
+  // 32 symbols divide 256 evenly, so `byte & 31` is unbiased.
+  const bytes = crypto.randomBytes(ADMIN_RESET_SECRET_LENGTH);
+  let out = "";
+  for (let i = 0; i < ADMIN_RESET_SECRET_LENGTH; i++) {
+    out += ADMIN_RESET_SECRET_ALPHABET[bytes[i] & 31];
+  }
+  return `${out.slice(0, 5)}-${out.slice(5)}`;
+}
+
+/** Uppercases, drops separators/spaces, and maps look-alikes (O to 0, I/L to 1). */
+export function normalizeAdminResetSecret(value: unknown): string {
+  return String(value ?? "")
+    .toUpperCase()
+    .replace(/[^0-9A-Z]/g, "")
+    .replace(/O/g, "0")
+    .replace(/[IL]/g, "1");
+}
+
+export function hashAdminResetSecret(secret: unknown): string {
+  return crypto.createHash("sha256").update(normalizeAdminResetSecret(secret), "utf8").digest("hex");
+}
+
+/** Timing-safe check of a submitted secret against the stored sha256 hex hash. */
+export function verifyAdminResetSecret(submitted: unknown, storedHash: unknown): boolean {
+  const hashValue = asNullableString(storedHash);
+  if (!hashValue || !/^[0-9a-f]{64}$/i.test(hashValue)) return false;
+  const normalized = normalizeAdminResetSecret(submitted);
+  if (normalized.length !== ADMIN_RESET_SECRET_LENGTH) return false;
+  const a = Buffer.from(hashAdminResetSecret(normalized), "hex");
+  const b = Buffer.from(hashValue.toLowerCase(), "hex");
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+export function buildAdminPasswordResetState(
+  adminUserId: string,
+  secretHash: string,
+  now = Date.now()
+): PasswordResetState {
   return {
     adminAllowed: true,
     requestedAt: now,
     requestedBy: String(adminUserId),
     expiresAt: now + ADMIN_PASSWORD_RESET_TTL_MS,
     usedAt: null,
+    secretHash: String(secretHash),
+    failedAttempts: 0,
   };
 }
 
@@ -197,13 +258,25 @@ export function buildConsumedPasswordResetState(raw: any, now = Date.now()): Pas
     ...state,
     adminAllowed: false,
     usedAt: now,
+    secretHash: null,
   };
+}
+
+/** Records a failed secret attempt; the reset is voided once the limit is hit. */
+export function buildAdminResetFailureState(raw: any): PasswordResetState {
+  const state = normalizePasswordResetState(raw);
+  const failedAttempts = state.failedAttempts + 1;
+  if (failedAttempts >= ADMIN_RESET_MAX_FAILED_ATTEMPTS) {
+    return { ...state, failedAttempts, adminAllowed: false, secretHash: null };
+  }
+  return { ...state, failedAttempts };
 }
 
 export function buildPublicPasswordResetState(raw: any, now = Date.now()): PublicPasswordResetState {
   const state = normalizePasswordResetState(raw);
+  const { secretHash: _secretHash, ...publicState } = state;
   return {
-    ...state,
+    ...publicState,
     active: isAdminPasswordResetActive(state, now),
   };
 }
@@ -283,6 +356,25 @@ export function buildRecoveryFailureState(existingRaw: any, method: "question" |
     codeLockedUntil: nextAttempts >= RECOVERY_MAX_FAILED_ATTEMPTS ? now + RECOVERY_LOCK_DURATION_MS : existing.codeLockedUntil,
     updatedAt: now,
   };
+}
+
+/**
+ * Reserves one self-service verification attempt BEFORE the (slow) hash check.
+ * Callers run this inside a Firestore transaction and persist `next`, so
+ * concurrent guesses can't all read the same counter and slip past the lockout.
+ * After a successful verification, callers persist buildRecoveryVerifiedState().
+ */
+export function reserveRecoveryAttempt(
+  existingRaw: any,
+  method: "question" | "code",
+  now = Date.now()
+): { ok: true; next: RecoveryState } | { ok: false; reason: "locked" | "unavailable" } {
+  const existing = normalizeRecoveryState(existingRaw);
+  if (isRecoveryMethodLocked(existing, method, now)) return { ok: false, reason: "locked" };
+  const available =
+    method === "question" ? isQuestionRecoveryAvailable(existing, now) : isEmergencyCodeRecoveryAvailable(existing, now);
+  if (!available) return { ok: false, reason: "unavailable" };
+  return { ok: true, next: buildRecoveryFailureState(existing, method, now) };
 }
 
 export function buildRecoveryResetState(existingRaw: any, now = Date.now()): RecoveryState {

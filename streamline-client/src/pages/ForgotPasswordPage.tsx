@@ -8,7 +8,7 @@ import { refreshAndPersistAccountMe } from "../lib/sessionUser";
 type CheckResponse = {
   canReset?: boolean;
   message?: string;
-  method?: RecoveryMethod;
+  method?: RecoveryMethod | null;
   availableMethods?: RecoveryMethod[];
   recoveryQuestion?: {
     id: string;
@@ -30,6 +30,7 @@ export const ForgotPasswordPage: React.FC = () => {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [answer, setAnswer] = useState("");
   const [emergencyCode, setEmergencyCode] = useState("");
+  const [resetCode, setResetCode] = useState("");
   const [step, setStep] = useState<"lookup" | "reset">("lookup");
   const [availableMethods, setAvailableMethods] = useState<RecoveryMethod[]>([]);
   const [selectedMethod, setSelectedMethod] = useState<RecoveryMethod | null>(null);
@@ -56,6 +57,11 @@ export const ForgotPasswordPage: React.FC = () => {
         { allowNonOk: true }
       );
       const data = (await res.json().catch(() => ({}))) as CheckResponse;
+      if (res.status === 429) {
+        setError(rateLimitedMessage(res));
+        setLoading(false);
+        return;
+      }
       if (!res.ok) {
         setError("Password reset check failed. Try again.");
         setLoading(false);
@@ -103,12 +109,18 @@ export const ForgotPasswordPage: React.FC = () => {
             confirmPassword,
             answer,
             emergencyCode,
+            resetCode: selectedMethod === "admin" ? resetCode : undefined,
           }),
         },
         { allowNonOk: true }
       );
 
       const data = await res.json().catch(() => ({} as any));
+      if (res.status === 429 && data?.error === "rate_limited") {
+        setError(rateLimitedMessage(res));
+        setLoading(false);
+        return;
+      }
       if (!res.ok) {
         setError(String(data?.error || "Password reset failed."));
         setLoading(false);
@@ -289,6 +301,25 @@ export const ForgotPasswordPage: React.FC = () => {
                 </>
               )}
 
+              {selectedMethod === "admin" && (
+                <>
+                  <label style={{ display: "block", fontSize: 13, color: "#d4d4d4", marginTop: 18, marginBottom: 8 }}>
+                    Reset code from your administrator
+                  </label>
+                  <input
+                    type="text"
+                    autoComplete="one-time-code"
+                    autoCapitalize="characters"
+                    spellCheck={false}
+                    value={resetCode}
+                    onChange={(event) => setResetCode(event.target.value)}
+                    placeholder="XXXXX-XXXXX"
+                    disabled={loading}
+                    style={{ ...inputStyle, letterSpacing: "0.08em", fontFamily: "monospace" }}
+                  />
+                </>
+              )}
+
               {selectedMethod === "code" && (
                 <>
                   <label style={{ display: "block", fontSize: 13, color: "#d4d4d4", marginTop: 18, marginBottom: 8 }}>
@@ -357,6 +388,15 @@ export const ForgotPasswordPage: React.FC = () => {
     </div>
   );
 };
+
+function rateLimitedMessage(res: Response): string {
+  const seconds = Number(res.headers.get("Retry-After") || "");
+  if (Number.isFinite(seconds) && seconds > 0) {
+    const minutes = Math.ceil(seconds / 60);
+    return `Too many attempts. Try again in ${minutes} minute${minutes === 1 ? "" : "s"}.`;
+  }
+  return "Too many attempts. Please wait a few minutes and try again.";
+}
 
 const inputStyle: React.CSSProperties = {
   width: "100%",

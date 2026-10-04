@@ -254,6 +254,21 @@ export async function assertRoomPerm(
       }
     }
   } else {
+    // An invite only grants access to the room it was issued for.
+    const inviteRoomId = String(invite?.roomId || "").trim();
+    if (inviteRoomId) {
+      if (inviteRoomId !== trimmedRoomId) {
+        throw new RoomPermissionError(403, PERMISSION_ERRORS.ROOM_MISMATCH);
+      }
+    } else {
+      // Legacy invites may carry only a room name; require it to match this room.
+      const inviteRoomName = String(invite?.roomName || invite?.room || "").trim();
+      const docRoomName = String((roomData as any)?.roomName || (roomData as any)?.name || "").trim();
+      if (!inviteRoomName || !docRoomName || inviteRoomName !== docRoomName) {
+        throw new RoomPermissionError(403, PERMISSION_ERRORS.ROOM_MISMATCH);
+      }
+    }
+
     actorType = "invite";
     role = ((invite?.role as any) || "viewer") as RoomActorRole;
     if (role === "cohost" || role === "participant") {

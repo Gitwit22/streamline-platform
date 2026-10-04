@@ -6,7 +6,7 @@
 console.log("✅ admin.ts loaded");
 import express from "express";
 
-import { firestore } from "../firebaseAdmin";
+import { firestore, auth as firebaseAuth } from "../firebaseAdmin";
 import { requireAdmin, logAdminAction } from "../middleware/adminAuth";
 import { computeUsageSummaryResult } from "./usageRoutes";
 import { invalidatePlatformBillingCache } from "../lib/userAccount";
@@ -19,6 +19,8 @@ import {
   buildPublicPasswordResetState,
   buildPublicRecoveryState,
   canAdminManagePasswordReset,
+  generateAdminResetSecret,
+  hashAdminResetSecret,
 } from "../lib/accountRecovery";
 import { logAuthSecurityEvent } from "../lib/authAudit";
 import { resolveMaxDestinations } from "../lib/planLimits";
@@ -199,7 +201,11 @@ router.post("/users/:userId/enable-password-reset", async (req, res) => {
     }
 
     const now = Date.now();
-    const passwordReset = buildAdminPasswordResetState(adminUid, now);
+    // Single-use secret the admin hands to the user out of band. Only its hash
+    // is stored; the plaintext is returned once in this response and never again.
+    // Enabling again issues a new secret and invalidates the previous one.
+    const resetSecret = generateAdminResetSecret();
+    const passwordReset = buildAdminPasswordResetState(adminUid, hashAdminResetSecret(resetSecret), now);
 
     await targetRef.set(
       {
@@ -223,10 +229,14 @@ router.post("/users/:userId/enable-password-reset", async (req, res) => {
       },
     });
 
+    res.setHeader("Cache-Control", "no-store");
     return res.json({
       success: true,
+      resetSecret,
       passwordReset: buildPublicPasswordResetState(passwordReset),
-      canEnablePasswordReset: false,
+      // Still true: the code is shown only once, so an admin who lost it can
+      // issue a new one (which voids this one).
+      canEnablePasswordReset: true,
     });
   } catch (error: any) {
     console.error("Failed to enable password reset:", error);
@@ -563,24 +573,54 @@ router.get("/users", async (req, res) => {
 //delete user
 /**
  * DELETE /api/admin/users/:userId
- * Delete a user by userId
+ * Soft-deletes a user: marks the doc deleted (purged later by the maintenance
+ * job via deleteAfterMs, same as a self-service close), revokes all sessions,
+ * and disables the Firebase Auth user. The doc is kept so requireAuth, /me and
+ * login all see "deleted" and refuse the account instead of recreating it.
  */
+const ADMIN_DELETE_PURGE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 router.delete("/users/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
+    const adminUid = req.adminUser!.uid;
+    if (userId === adminUid) {
+      return res.status(400).json({ error: "You cannot delete your own account here" });
+    }
     const userRef = firestore.collection("users").doc(userId);
     const userDoc = await userRef.get();
     if (!userDoc.exists) {
       return res.status(404).json({ error: "User not found" });
     }
-    await userRef.delete();
-    // Optionally, delete related usage records
-    // const usageSnap = await firestore.collection("usage").where("userId", "==", userId).get();
-    // const batch = firestore.batch();
-    // usageSnap.forEach(doc => batch.delete(doc.ref));
-    // await batch.commit();
-    await logAdminAction(req.adminUser!.uid, "delete_user", { userId });
-    res.json({ success: true, userId });
+
+    const now = Date.now();
+    await userRef.set(
+      {
+        accountStatus: "deleted",
+        deletedAtMs: now,
+        deleteAfterMs: now + ADMIN_DELETE_PURGE_AFTER_MS,
+        authRevokedAtMs: now,
+        deletionRequestedAtMs: now,
+        deletionReason: "admin_deleted",
+        deletedBy: adminUid,
+        updatedAt: now,
+      },
+      { merge: true }
+    );
+
+    // Lock the Firebase identity too, so ID tokens and custom-token sign-in stop working.
+    let firebaseAuthLocked = true;
+    try {
+      await firebaseAuth.updateUser(userId, { disabled: true });
+      await firebaseAuth.revokeRefreshTokens(userId);
+    } catch (err: any) {
+      if (String(err?.code || "") !== "auth/user-not-found") {
+        firebaseAuthLocked = false;
+        console.warn("[admin] Failed to disable Firebase Auth user on delete:", err?.code || err?.message || err);
+      }
+    }
+
+    await logAdminAction(adminUid, "delete_user", { userId, mode: "soft", firebaseAuthLocked });
+    res.json({ success: true, userId, deletedAtMs: now, deleteAfterMs: now + ADMIN_DELETE_PURGE_AFTER_MS });
   } catch (error) {
     console.error("Failed to delete user:", error);
     res.status(500).json({ error: "Failed to delete user" });

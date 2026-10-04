@@ -71,6 +71,24 @@ export function tryGetLegacyInviteGuest(req: any, roomId: string): { inviteId: s
   }
 }
 
+/**
+ * True when the request carries a valid invite JWT for this room with any
+ * non-host role, cohost included (tryGetLegacyInviteGuest rejects cohost
+ * because guests must not get it, but an authenticated cohost holds it).
+ */
+function hasInviteTokenForRoom(req: any, roomId: string): boolean {
+  const raw = extractInviteToken(req);
+  if (!raw) return false;
+  try {
+    const claims = verifyInviteToken(raw) as any;
+    const claimRoomId = typeof claims?.roomId === "string" ? claims.roomId.trim() : "";
+    const role = String(claims?.role ?? "").trim().toLowerCase();
+    return !!claimRoomId && claimRoomId === roomId && role !== "host";
+  } catch {
+    return false;
+  }
+}
+
 async function getAccessTokenCtor() {
   const mod = await import("livekit-server-sdk");
   return mod.AccessToken;
@@ -250,7 +268,7 @@ function getRoomAccessSecret() {
   return raw || "dev-secret";
 }
 
-function roleGrant(role: "guest" | "participant" | "host", presenceMode?: PresenceMode) {
+function roleGrant(role: "viewer" | "guest" | "participant" | "host", presenceMode?: PresenceMode) {
   // Use canonical roleToParticipantPermission() for consistency
   const participantPerm = roleToParticipantPermission(role);
   const isHost = role === "host";
@@ -963,6 +981,26 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       return res.status(402).json({ error: "payment_required" });
     }
 
+    // Policy: publish rights for authenticated non-owners (opt-in, see below).
+    // Default (flag unset): any logged-in user gets a publishing "participant"
+    // token for a non-private room, as before. With
+    // ROOM_TOKEN_STRICT_AUTHED_PUBLISH=1 they can publish only with a guest
+    // session or invite for this room, or when the room is explicitly public
+    // and allows guests; otherwise they get a subscribe-only token.
+    // Not on by default: Room.tsx's authed token request does not forward the
+    // guest session (x-guest-session) and drops the invite token once a guest
+    // session exists, so an invited user who is also logged in is only
+    // recognisable via the cross-site sl_guest cookie, which browsers that
+    // block third-party cookies won't send. Enable after the client forwards it.
+    const strictAuthedPublish = String(process.env.ROOM_TOKEN_STRICT_AUTHED_PUBLISH || "").trim() === "1";
+    let authedSubscribeOnly = false;
+    if (user && !isPrivilegedProducer && strictAuthedPublish) {
+      const hasGuestSessionForRoom = !!guest && guest.roomId === roomId;
+      const hasRoomInvite = hasInviteAccess || hasInviteTokenForRoom(req, roomId);
+      const isOpenPublicRoom = visibility === "public" && allowGuestsPolicy !== false;
+      authedSubscribeOnly = !(hasGuestSessionForRoom || hasRoomInvite || isOpenPublicRoom);
+    }
+
     // First-time guests (no pre-existing session) can only join once room is live.
     // Guests with pre-existing sessions (already in the room via join-now) can
     // refresh tokens during brief room status changes to avoid disconnections.
@@ -1022,8 +1060,8 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
     // Determine LiveKit role based on authentication
     // - Authenticated users: host (if owner) or participant
     // - Guest sessions: "guest" (RTC participant with mic/cam)
-    const lkRole: "guest" | "participant" | "host" = user
-      ? (isPrivilegedProducer ? "host" : "participant")
+    const lkRole: "viewer" | "guest" | "participant" | "host" = user
+      ? (isPrivilegedProducer ? "host" : authedSubscribeOnly ? "viewer" : "participant")
       : guest?.role === "participant"
         ? "participant"
         : "guest";
@@ -1088,7 +1126,7 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
 
     const token = await at.toJwt();
 
-    const effectiveRoleKey: "guest" | "participant" | "host" = lkRole;
+    const effectiveRoleKey: "viewer" | "guest" | "participant" | "host" = lkRole;
     const basePerms =
       effectiveRoleKey === "host"
         ? isDelegatedProducer

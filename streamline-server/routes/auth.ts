@@ -5,26 +5,27 @@ import { requireAuth } from "../middleware/requireAuth";
 import { auth as firebaseAuth, firestore as db } from "../firebaseAdmin";
 import { logAuthSecurityEvent } from "../lib/authAudit";
 import {
+  buildAdminResetFailureState,
   buildConsumedPasswordResetState,
-  buildRecoveryFailureState,
   buildForgotPasswordStatus,
   buildRecoveryResetState,
   buildRecoverySetupState,
   buildRecoveryVerifiedState,
   hashEmergencyCode,
   hashSecurityAnswer,
-  isEmergencyCodeRecoveryAvailable,
   isAdminPasswordResetActive,
-  isQuestionRecoveryAvailable,
-  isRecoveryMethodLocked,
+  normalizePasswordResetState,
   normalizeRecoveryState,
+  reserveRecoveryAttempt,
   SECURITY_QUESTIONS,
   stripSensitiveRecoveryFields,
   validatePassword,
   validateRecoverySetupInput,
+  verifyAdminResetSecret,
   verifyEmergencyCode,
   verifySecurityAnswer,
 } from "../lib/accountRecovery";
+import { clientIp, normalizeRateLimitLogin, rateLimit, SlidingWindowLimiter } from "../lib/rateLimit";
 import { getUserAccount } from "../lib/userAccount";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
@@ -33,6 +34,54 @@ import { buildNewUserDoc } from "../lib/newUserDefaults";
 console.log("✅ auth router loaded");
 
 const router = Router();
+
+// --- rate limiting ---
+// In-memory sliding windows (per process). Keys: client IP, and the normalized
+// login identifier so one account can't be brute-forced from many IPs.
+const MINUTE_MS = 60_000;
+const loginIpLimiter = new SlidingWindowLimiter({ windowMs: 15 * MINUTE_MS, max: 50 });
+const loginAccountLimiter = new SlidingWindowLimiter({ windowMs: 15 * MINUTE_MS, max: 10 });
+const signupIpLimiter = new SlidingWindowLimiter({ windowMs: 60 * MINUTE_MS, max: 10 });
+const recoveryIpLimiter = new SlidingWindowLimiter({ windowMs: 15 * MINUTE_MS, max: 20 });
+const recoveryAccountLimiter = new SlidingWindowLimiter({ windowMs: 15 * MINUTE_MS, max: 10 });
+
+function accountKey(field: "email" | "login") {
+  return (req: any) => {
+    const login = normalizeRateLimitLogin(req.body?.[field]);
+    return login ? `acct:${login}` : null;
+  };
+}
+const ipKey = (req: any) => `ip:${clientIp(req)}`;
+
+const loginRateLimit = rateLimit([
+  { limiter: loginIpLimiter, key: ipKey },
+  { limiter: loginAccountLimiter, key: accountKey("email") },
+]);
+const signupRateLimit = rateLimit([{ limiter: signupIpLimiter, key: ipKey }]);
+const recoveryRateLimit = rateLimit([
+  { limiter: recoveryIpLimiter, key: ipKey },
+  { limiter: recoveryAccountLimiter, key: accountKey("login") },
+]);
+
+// Constant hash used to spend the same bcrypt time when a login is unknown,
+// so response timing doesn't reveal which emails have accounts.
+const DUMMY_BCRYPT_HASH = bcrypt.hashSync("streamline-dummy-password-not-a-real-account", 10);
+
+async function spendDummyPasswordCheck(password: unknown) {
+  try {
+    await bcrypt.compare(String(password ?? ""), DUMMY_BCRYPT_HASH);
+  } catch {
+    // ignore
+  }
+}
+
+function isDeletedAccount(raw: any): boolean {
+  if (!raw) return false;
+  if (String(raw.accountStatus || "").toLowerCase() === "deleted") return true;
+  const deletedAtMs =
+    typeof raw.deletedAtMs === "number" ? raw.deletedAtMs : typeof raw.deletedAt === "number" ? raw.deletedAt : 0;
+  return deletedAtMs > 0;
+}
 
 // --- helpers ---
 function cookieOptions() {
@@ -157,7 +206,8 @@ router.get("/ping", (_req, res) => res.json({ ok: true }));
  * Returns the authenticated user's normalized account document.
  *
  * Behavior:
- * - Never 404s due to missing user doc; auto-creates a minimal doc.
+ * - Never 404s due to missing user doc, but never writes one either (no resurrection).
+ * - 403 { error: "account_deleted" } for soft-deleted accounts.
  * - Exposes planId, billingEnabled, platformBillingEnabled, effectiveBillingEnabled, isAdmin.
  */
 router.get("/me", requireAuth, async (req, res) => {
@@ -169,15 +219,24 @@ router.get("/me", requireAuth, async (req, res) => {
 
     // Load the latest Firestore snapshot so we can strip sensitive fields
     const snap = await db.collection("users").doc(userId).get();
-    const raw = stripSensitiveUserFields(snap.data() || account.rawUser || {});
+    const snapData = snap.exists ? snap.data() || {} : null;
+
+    // Never serve (or resurrect) a soft-deleted account.
+    if (isDeletedAccount(snapData) || isDeletedAccount(account?.rawUser)) {
+      return res.status(403).json({ error: "account_deleted" });
+    }
+
+    const raw = stripSensitiveUserFields(snapData || account.rawUser || {});
 
     // Ensure billingTruth/planId are present for legacy docs.
     // This keeps admin + client display consistent even for free users.
+    // Only patch docs that exist: writing to a missing doc (e.g. a purged
+    // account whose session token is still valid) would recreate it.
     try {
       const planIdMissing = typeof (raw as any).planId !== "string" || !String((raw as any).planId).trim();
       const billingTruthMissing = !(raw as any).billingTruth;
 
-      if (planIdMissing || billingTruthMissing) {
+      if (snap.exists && (planIdMissing || billingTruthMissing)) {
         const now = Date.now();
         const nextPlanId = planIdMissing ? "free" : (raw as any).planId;
         const patch: any = { updatedAt: now };
@@ -185,7 +244,8 @@ router.get("/me", requireAuth, async (req, res) => {
         if (billingTruthMissing) {
           patch.billingTruth = normalizeBillingTruthFromUser({ ...raw, planId: nextPlanId }, now);
         }
-        await db.collection("users").doc(userId).set(patch, { merge: true });
+        // update() (not set/merge) fails instead of recreating a doc deleted meanwhile.
+        await db.collection("users").doc(userId).update(patch);
         // Keep response in sync without requiring another round-trip.
         if (planIdMissing) (raw as any).planId = "free";
         if (billingTruthMissing) (raw as any).billingTruth = patch.billingTruth;
@@ -245,7 +305,7 @@ async function verifyPasswordViaFirebaseAuth(email: string, password: string): P
   //Body: { email, password }
  //Sets httpOnly cookie "token" so requireAuth works.
  
-router.post("/login", async (req, res) => {
+router.post("/login", loginRateLimit, async (req, res) => {
   try {
     // ✅ never destructure blindly
     const { email, password } = (req.body || {}) as { email?: string; password?: string };
@@ -264,6 +324,7 @@ router.post("/login", async (req, res) => {
       .get();
 
     if (snap.empty) {
+      await spendDummyPasswordCheck(password);
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
@@ -271,7 +332,8 @@ router.post("/login", async (req, res) => {
     const user = doc.data() as any;
 
     // Reject login to deleted accounts
-    if (user.accountStatus === "deleted") {
+    if (isDeletedAccount(user)) {
+      await spendDummyPasswordCheck(password);
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
@@ -333,7 +395,9 @@ router.post("/login", async (req, res) => {
  * - Ensures Firebase Auth user exists using INTERNAL UID as the primary key
  * - Mints a Firebase custom token for client sign-in (signInWithCustomToken)
  */
-router.post("/legacy-login", async (req, res) => {
+// (This route used to be registered three times with identical bodies; Express
+// only ever ran the first, so the dead copies were removed.)
+router.post("/legacy-login", loginRateLimit, async (req, res) => {
   try {
     const { email, password } = (req.body || {}) as { email?: string; password?: string };
     if (!email || !password) return res.status(400).json({ error: "Missing email or password" });
@@ -342,20 +406,27 @@ router.post("/legacy-login", async (req, res) => {
 
     // 1) Find legacy user doc by email (legacy lookup). Canonical identity is doc.id (uid).
     const snap = await db.collection("users").where("email", "==", emailNorm).limit(1).get();
-    if (snap.empty) return res.status(401).json({ error: "Invalid credentials" });
+    if (snap.empty) {
+      await spendDummyPasswordCheck(password);
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
 
     const doc = snap.docs[0];
     const uid = doc.id;
     const user = (doc.data() || {}) as any;
 
     // Reject login to deleted accounts
-    if (user.accountStatus === "deleted") {
+    if (isDeletedAccount(user)) {
+      await spendDummyPasswordCheck(password);
       return res.status(401).json({ error: "Invalid credentials" });
     }
 
     // 2) Verify legacy password
     const storedHash = user.passwordHash;
-    if (!storedHash) return res.status(401).json({ error: "Invalid credentials" });
+    if (!storedHash) {
+      await spendDummyPasswordCheck(password);
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
     const ok = await bcrypt.compare(String(password), String(storedHash));
     if (!ok) return res.status(401).json({ error: "Invalid credentials" });
 
@@ -431,221 +502,7 @@ router.post("/legacy-login", async (req, res) => {
   }
 });
 
-/**
- * POST /api/auth/legacy-login
- * Body: { email, password }
- *
- * Lazy-migration bridge:
- * - Verifies legacy passwordHash in Firestore
- * - Ensures Firebase Auth user exists using INTERNAL UID as the primary key
- * - Mints a Firebase custom token for client sign-in (signInWithCustomToken)
- */
-router.post("/legacy-login", async (req, res) => {
-  try {
-    const { email, password } = (req.body || {}) as { email?: string; password?: string };
-    if (!email || !password) return res.status(400).json({ error: "Missing email or password" });
-
-    const emailNorm = String(email).trim().toLowerCase();
-
-    // 1) Find legacy user doc by email (legacy lookup). Canonical identity is doc.id (uid).
-    const snap = await db.collection("users").where("email", "==", emailNorm).limit(1).get();
-    if (snap.empty) return res.status(401).json({ error: "Invalid credentials" });
-
-    const doc = snap.docs[0];
-    const uid = doc.id;
-    const user = (doc.data() || {}) as any;
-
-    // Reject login to deleted accounts
-    if (user.accountStatus === "deleted") {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    // 2) Verify legacy password
-    const storedHash = user.passwordHash;
-    if (!storedHash) return res.status(401).json({ error: "Invalid credentials" });
-    const ok = await bcrypt.compare(String(password), String(storedHash));
-    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
-
-    // 3) Ensure Firebase Auth user exists BY UID (not by email)
-    let fbUser: any = null;
-    try {
-      fbUser = await firebaseAuth.getUser(uid);
-    } catch (err: any) {
-      const code = String(err?.code || "");
-      if (code !== "auth/user-not-found") throw err;
-    }
-
-    if (!fbUser) {
-      try {
-        await firebaseAuth.createUser({
-          uid,
-          email: emailNorm,
-          emailVerified: false,
-        });
-      } catch (err: any) {
-        // If a Firebase account already exists with this email but a different uid,
-        // we must NOT auto-bind; return a deterministic error so support can resolve.
-        const code = String(err?.code || "");
-        if (code === "auth/email-already-exists") {
-          if (process.env.AUTH_DEBUG === "1") {
-            try {
-              const existing = await firebaseAuth.getUserByEmail(emailNorm);
-              console.warn("[legacy-login] email conflict", {
-                internalUid: uid,
-                email: emailNorm,
-                firebaseUid: existing?.uid,
-              });
-            } catch {
-              console.warn("[legacy-login] email conflict (failed to lookup existing Firebase user)");
-            }
-          }
-          return res.status(409).json({ error: "email_conflict" });
-        }
-        throw err;
-      }
-    } else {
-      // Optional: keep Firebase email in sync (off by default)
-      const fbEmail = String(fbUser?.email || "").trim().toLowerCase();
-      if (fbEmail && fbEmail !== emailNorm && process.env.AUTH_SYNC_FIREBASE_EMAIL === "1") {
-        try {
-          await firebaseAuth.updateUser(uid, { email: emailNorm, emailVerified: false });
-        } catch (err: any) {
-          console.warn("[legacy-login] Failed to sync Firebase email for uid", uid, err?.code || err?.message || err);
-        }
-      }
-    }
-
-    // 4) Mint custom token for Firebase client sign-in
-    const customToken = await firebaseAuth.createCustomToken(uid);
-
-    // Optional: annotate user doc for audit/debugging.
-    try {
-      await db.collection("users").doc(uid).set(
-        {
-          firebaseAuthMigratedAtMs: Date.now(),
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      );
-    } catch {
-      // non-fatal
-    }
-
-    return res.json({ customToken });
-  } catch (err: any) {
-    console.error("POST /api/auth/legacy-login failed:", err?.message || err);
-    return res.status(500).json({ error: "legacy_login_failed" });
-  }
-});
-
-/**
- * POST /api/auth/legacy-login
- * Body: { email, password }
- *
- * Lazy-migration bridge:
- * - Verifies legacy passwordHash in Firestore
- * - Ensures Firebase Auth user exists using INTERNAL UID as the primary key
- * - Mints a Firebase custom token for client sign-in (signInWithCustomToken)
- */
-router.post("/legacy-login", async (req, res) => {
-  try {
-    const { email, password } = (req.body || {}) as { email?: string; password?: string };
-    if (!email || !password) return res.status(400).json({ error: "Missing email or password" });
-
-    const emailNorm = String(email).trim().toLowerCase();
-
-    // 1) Find legacy user doc by email (legacy lookup). Canonical identity is doc.id (uid).
-    const snap = await db.collection("users").where("email", "==", emailNorm).limit(1).get();
-    if (snap.empty) return res.status(401).json({ error: "Invalid credentials" });
-
-    const doc = snap.docs[0];
-    const uid = doc.id;
-    const user = (doc.data() || {}) as any;
-
-    // Reject login to deleted accounts
-    if (user.accountStatus === "deleted") {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    // 2) Verify legacy password
-    const storedHash = user.passwordHash;
-    if (!storedHash) return res.status(401).json({ error: "Invalid credentials" });
-    const ok = await bcrypt.compare(String(password), String(storedHash));
-    if (!ok) return res.status(401).json({ error: "Invalid credentials" });
-
-    // 3) Ensure Firebase Auth user exists BY UID (not by email)
-    let fbUser: any = null;
-    try {
-      fbUser = await firebaseAuth.getUser(uid);
-    } catch (err: any) {
-      const code = String(err?.code || "");
-      if (code !== "auth/user-not-found") throw err;
-    }
-
-    if (!fbUser) {
-      try {
-        await firebaseAuth.createUser({
-          uid,
-          email: emailNorm,
-          emailVerified: false,
-        });
-      } catch (err: any) {
-        // If a Firebase account already exists with this email but a different uid,
-        // we must NOT auto-bind; return a deterministic error so support can resolve.
-        const code = String(err?.code || "");
-        if (code === "auth/email-already-exists") {
-          if (process.env.AUTH_DEBUG === "1") {
-            try {
-              const existing = await firebaseAuth.getUserByEmail(emailNorm);
-              console.warn("[legacy-login] email conflict", {
-                internalUid: uid,
-                email: emailNorm,
-                firebaseUid: existing?.uid,
-              });
-            } catch {
-              console.warn("[legacy-login] email conflict (failed to lookup existing Firebase user)");
-            }
-          }
-          return res.status(409).json({ error: "email_conflict" });
-        }
-        throw err;
-      }
-    } else {
-      // Optional: keep Firebase email in sync (off by default)
-      const fbEmail = String(fbUser?.email || "").trim().toLowerCase();
-      if (fbEmail && fbEmail !== emailNorm && process.env.AUTH_SYNC_FIREBASE_EMAIL === "1") {
-        try {
-          await firebaseAuth.updateUser(uid, { email: emailNorm, emailVerified: false });
-        } catch (err: any) {
-          console.warn("[legacy-login] Failed to sync Firebase email for uid", uid, err?.code || err?.message || err);
-        }
-      }
-    }
-
-    // 4) Mint custom token for Firebase client sign-in
-    const customToken = await firebaseAuth.createCustomToken(uid);
-
-    // Optional: annotate user doc for audit/debugging.
-    try {
-      await db.collection("users").doc(uid).set(
-        {
-          firebaseAuthMigratedAtMs: Date.now(),
-          updatedAt: Date.now(),
-        },
-        { merge: true }
-      );
-    } catch {
-      // non-fatal
-    }
-
-    return res.json({ customToken });
-  } catch (err: any) {
-    console.error("POST /api/auth/legacy-login failed:", err?.message || err);
-    return res.status(500).json({ error: "legacy_login_failed" });
-  }
-});
-
-router.post("/signup", async (req, res) => {
+router.post("/signup", signupRateLimit, async (req, res) => {
   try {
     const { email, password, displayName, timeZone, tosAccepted } = (req.body || {}) as any;
 
@@ -729,39 +586,52 @@ router.get("/recovery/questions", (_req, res) => {
   return res.json({ questions: SECURITY_QUESTIONS });
 });
 
-router.post("/forgot-password/check", async (req, res) => {
+const FORGOT_PASSWORD_UNAVAILABLE_MESSAGE =
+  "Password reset is not currently available. Contact your administrator.";
+
+/**
+ * Uniform "nothing available" shape. Unknown logins, deleted accounts and
+ * accounts with no recovery method configured all get exactly this response,
+ * so /forgot-password/check can't be used to tell them apart.
+ */
+function forgotPasswordUnavailableBody() {
+  return {
+    canReset: false,
+    method: null,
+    availableMethods: [] as string[],
+    recoveryQuestion: null,
+    message: FORGOT_PASSWORD_UNAVAILABLE_MESSAGE,
+  };
+}
+
+router.post("/forgot-password/check", recoveryRateLimit, async (req, res) => {
   try {
     const login = normalizeLoginIdentifier((req.body || {}).login);
-    const genericMessage = "Password reset is not currently available. Contact your administrator.";
-
     if (!login) {
-      return res.json({ canReset: false, message: genericMessage, availableMethods: [] });
+      return res.json(forgotPasswordUnavailableBody());
     }
 
     const userDoc = await findUserByLogin(login);
-    if (!userDoc) {
-      return res.json({ canReset: false, message: genericMessage, availableMethods: [] });
-    }
-
-    const user = userDoc.data() || {};
-    if (user.accountStatus === "deleted") {
-      return res.json({ canReset: false, message: genericMessage, availableMethods: [] });
+    const user = userDoc ? userDoc.data() || {} : null;
+    if (!user || isDeletedAccount(user)) {
+      return res.json(forgotPasswordUnavailableBody());
     }
 
     const forgotPasswordStatus = buildForgotPasswordStatus(user);
     if (forgotPasswordStatus.availableMethods.length === 0) {
-      return res.json({ canReset: false, message: genericMessage, availableMethods: [] });
+      return res.json(forgotPasswordUnavailableBody());
     }
 
+    // Only what the form needs: which methods to offer and, for the question
+    // method, the question text. No expiry, attempt counts or lock state.
     return res.json({
       canReset: true,
       method: forgotPasswordStatus.availableMethods[0],
       availableMethods: forgotPasswordStatus.availableMethods,
       recoveryQuestion: forgotPasswordStatus.recoveryQuestion,
-      message:
-        forgotPasswordStatus.availableMethods.includes("admin")
-          ? "Reset enabled. You can choose a new password now."
-          : "Account recovery is available. Verify your identity to choose a new password.",
+      message: forgotPasswordStatus.availableMethods.includes("admin")
+        ? "Enter the reset code your administrator gave you, then choose a new password."
+        : "Account recovery is available. Verify your identity to choose a new password.",
     });
   } catch (err: any) {
     console.error("POST /api/auth/forgot-password/check failed:", err?.message || err);
@@ -769,17 +639,34 @@ router.post("/forgot-password/check", async (req, res) => {
   }
 });
 
-router.post("/forgot-password/reset", async (req, res) => {
+type ResetOutcome =
+  | { ok: false; status: number; error: string }
+  | {
+      ok: true;
+      user: any;
+      nextRecovery: ReturnType<typeof normalizeRecoveryState>;
+      nextPasswordReset: ReturnType<typeof normalizePasswordResetState>;
+      requiresRecoverySetup: boolean;
+    };
+
+const QUESTION_LOCKED_MESSAGE =
+  "Security question recovery is temporarily locked. Try again later or use your emergency recovery code.";
+const CODE_LOCKED_MESSAGE =
+  "Emergency recovery code verification is temporarily locked. Try again later or use your security question.";
+
+router.post("/forgot-password/reset", recoveryRateLimit, async (req, res) => {
   try {
-    const { login, newPassword, confirmPassword } = (req.body || {}) as {
+    const body = (req.body || {}) as {
       login?: string;
       newPassword?: string;
       confirmPassword?: string;
       method?: string;
       answer?: string;
       emergencyCode?: string;
+      resetCode?: string;
     };
-    const genericMessage = "Password reset is not currently available. Contact your administrator.";
+    const { login, newPassword, confirmPassword } = body;
+    const genericMessage = FORGOT_PASSWORD_UNAVAILABLE_MESSAGE;
     const loginNorm = normalizeLoginIdentifier(login);
 
     if (!loginNorm) {
@@ -800,122 +687,163 @@ router.post("/forgot-password/reset", async (req, res) => {
       return res.status(400).json({ error: genericMessage });
     }
 
-    const user = (userDoc.data() || {}) as any;
-    if (user.accountStatus === "deleted") {
+    const initialUser = (userDoc.data() || {}) as any;
+    if (isDeletedAccount(initialUser)) {
       return res.status(400).json({ error: genericMessage });
     }
 
-    const forgotPasswordStatus = buildForgotPasswordStatus(user, Date.now());
+    const forgotPasswordStatus = buildForgotPasswordStatus(initialUser, Date.now());
     if (forgotPasswordStatus.availableMethods.length === 0) {
       return res.status(400).json({ error: genericMessage });
     }
 
     const uid = userDoc.id;
+    const userRef = userDoc.ref;
     const now = Date.now();
-    const recovery = normalizeRecoveryState(user.recovery);
-    const selectedMethod = isSupportedRecoveryMethod((req.body || {}).method)
-      ? (req.body || {}).method
+    // Floor to the second: JWT iat is in seconds, and the new session token
+    // below is issued within this same second.
+    const authRevokedAtMs = Math.floor(now / 1000) * 1000;
+    const selectedMethod = isSupportedRecoveryMethod(body.method)
+      ? body.method
       : forgotPasswordStatus.availableMethods[0];
 
     if (!forgotPasswordStatus.availableMethods.includes(selectedMethod)) {
       return res.status(400).json({ error: "Selected recovery method is not available." });
     }
 
-    let nextRecovery = recovery;
-    let requiresRecoverySetup = false;
+    let outcome: ResetOutcome;
 
     if (selectedMethod === "admin") {
-      if (!isAdminPasswordResetActive(user.passwordReset, now)) {
-        return res.status(400).json({ error: genericMessage });
-      }
-      nextRecovery = buildRecoveryResetState(recovery, now);
-      requiresRecoverySetup = true;
-    }
+      // The secret is cheap to check (sha256 of a high-entropy code), so verify
+      // and consume it inside one transaction: exactly one request can use it,
+      // and every wrong guess is counted before the response goes out.
+      const passwordHash = await bcrypt.hash(String(newPassword), 10);
+      outcome = await db.runTransaction<ResetOutcome>(async (tx) => {
+        const fresh = await tx.get(userRef);
+        const data = (fresh.exists ? fresh.data() : null) as any;
+        if (!data || isDeletedAccount(data) || !isAdminPasswordResetActive(data.passwordReset, now)) {
+          return { ok: false, status: 400, error: genericMessage };
+        }
 
-    if (selectedMethod === "question") {
-      if (isRecoveryMethodLocked(recovery, "question", now)) {
-        return res.status(429).json({ error: "Security question recovery is temporarily locked. Try again later or use your emergency recovery code." });
-      }
-      if (!isQuestionRecoveryAvailable(recovery, now)) {
-        return res.status(400).json({ error: "Security question recovery is not available for this account." });
-      }
+        const passwordReset = normalizePasswordResetState(data.passwordReset);
+        if (!verifyAdminResetSecret(body.resetCode, passwordReset.secretHash)) {
+          const failed = buildAdminResetFailureState(passwordReset);
+          tx.set(userRef, { passwordReset: failed, updatedAt: now }, { merge: true });
+          return {
+            ok: false,
+            status: 400,
+            error: failed.secretHash
+              ? "Invalid reset code."
+              : "Too many invalid reset codes. Ask your administrator for a new one.",
+          };
+        }
 
-      const verified = await verifySecurityAnswer((req.body || {}).answer, recovery.answerHash);
-      if (!verified) {
-        nextRecovery = buildRecoveryFailureState(recovery, "question", now);
-        await userDoc.ref.set({ recovery: nextRecovery, updatedAt: now }, { merge: true });
+        const nextRecovery = buildRecoveryResetState(data.recovery, now);
+        const nextPasswordReset = buildConsumedPasswordResetState(passwordReset, now);
+        tx.set(
+          userRef,
+          {
+            passwordHash,
+            passwordReset: nextPasswordReset,
+            recovery: nextRecovery,
+            authRevokedAtMs,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+        return { ok: true, user: data, nextRecovery, nextPasswordReset, requiresRecoverySetup: true };
+      });
+
+      if (!outcome.ok) {
         await logAuthSecurityEvent({
           event: "recovery_verification_failed",
           actorUserId: uid,
           targetUserId: uid,
           ip: req.ip || null,
-          details: {
-            method: "question",
-            failedAttempts: nextRecovery.failedQuestionAttempts,
-            lockedUntil: nextRecovery.questionLockedUntil,
-          },
-        });
-        return res.status(400).json({
-          error:
-            nextRecovery.questionLockedUntil && nextRecovery.questionLockedUntil > now
-              ? "Security question recovery is temporarily locked. Try again later or use your emergency recovery code."
-              : "Recovery verification failed.",
+          details: { method: "admin" },
         });
       }
+    } else {
+      const method = selectedMethod as "question" | "code";
+      const lockedMessage = method === "question" ? QUESTION_LOCKED_MESSAGE : CODE_LOCKED_MESSAGE;
 
-      nextRecovery = buildRecoveryVerifiedState(recovery, "question", now);
+      // 1) Reserve the attempt (count it as failed) in a transaction BEFORE the
+      //    bcrypt check, so parallel guesses can't all pass the lockout check.
+      const reservation = await db.runTransaction(async (tx) => {
+        const fresh = await tx.get(userRef);
+        const data = (fresh.exists ? fresh.data() : null) as any;
+        if (!data || isDeletedAccount(data)) {
+          return { ok: false as const, status: 400, error: genericMessage };
+        }
+        const reserved = reserveRecoveryAttempt(data.recovery, method, now);
+        if (reserved.ok === false) {
+          return reserved.reason === "locked"
+            ? { ok: false as const, status: 429, error: lockedMessage }
+            : {
+                ok: false as const,
+                status: 400,
+                error:
+                  method === "question"
+                    ? "Security question recovery is not available for this account."
+                    : "Emergency recovery code recovery is not available for this account.",
+              };
+        }
+        tx.set(userRef, { recovery: reserved.next, updatedAt: now }, { merge: true });
+        return { ok: true as const, user: data, recovery: normalizeRecoveryState(data.recovery), reserved: reserved.next };
+      });
+
+      if (reservation.ok === false) {
+        outcome = reservation;
+      } else {
+        // 2) Verify outside the transaction (bcrypt is slow).
+        const verified =
+          method === "question"
+            ? await verifySecurityAnswer(body.answer, reservation.recovery.answerHash)
+            : await verifyEmergencyCode(body.emergencyCode, reservation.recovery.emergencyCodeHash);
+
+        if (!verified) {
+          const reserved = reservation.reserved;
+          await logAuthSecurityEvent({
+            event: "recovery_verification_failed",
+            actorUserId: uid,
+            targetUserId: uid,
+            ip: req.ip || null,
+            details: {
+              method,
+              failedAttempts: method === "question" ? reserved.failedQuestionAttempts : reserved.failedCodeAttempts,
+              lockedUntil: method === "question" ? reserved.questionLockedUntil : reserved.codeLockedUntil,
+            },
+          });
+          const lockedUntil = method === "question" ? reserved.questionLockedUntil : reserved.codeLockedUntil;
+          return res.status(400).json({
+            error: lockedUntil && lockedUntil > now ? lockedMessage : "Recovery verification failed.",
+          });
+        }
+
+        // 3) Success: set the password and clear the counters.
+        const passwordHash = await bcrypt.hash(String(newPassword), 10);
+        const nextRecovery = buildRecoveryVerifiedState(reservation.reserved, method, now);
+        const nextPasswordReset = buildConsumedPasswordResetState(reservation.user.passwordReset, now);
+        await userRef.set(
+          {
+            passwordHash,
+            passwordReset: nextPasswordReset,
+            recovery: nextRecovery,
+            // Invalidate sessions issued before the reset (e.g. an attacker's token).
+            authRevokedAtMs,
+            updatedAt: now,
+          },
+          { merge: true }
+        );
+        outcome = { ok: true, user: reservation.user, nextRecovery, nextPasswordReset, requiresRecoverySetup: false };
+      }
     }
 
-    if (selectedMethod === "code") {
-      if (isRecoveryMethodLocked(recovery, "code", now)) {
-        return res.status(429).json({ error: "Emergency recovery code verification is temporarily locked. Try again later or use your security question." });
-      }
-      if (!isEmergencyCodeRecoveryAvailable(recovery, now)) {
-        return res.status(400).json({ error: "Emergency recovery code recovery is not available for this account." });
-      }
-
-      const verified = await verifyEmergencyCode((req.body || {}).emergencyCode, recovery.emergencyCodeHash);
-      if (!verified) {
-        nextRecovery = buildRecoveryFailureState(recovery, "code", now);
-        await userDoc.ref.set({ recovery: nextRecovery, updatedAt: now }, { merge: true });
-        await logAuthSecurityEvent({
-          event: "recovery_verification_failed",
-          actorUserId: uid,
-          targetUserId: uid,
-          ip: req.ip || null,
-          details: {
-            method: "code",
-            failedAttempts: nextRecovery.failedCodeAttempts,
-            lockedUntil: nextRecovery.codeLockedUntil,
-          },
-        });
-        return res.status(400).json({
-          error:
-            nextRecovery.codeLockedUntil && nextRecovery.codeLockedUntil > now
-              ? "Emergency recovery code verification is temporarily locked. Try again later or use your security question."
-              : "Recovery verification failed.",
-        });
-      }
-
-      nextRecovery = buildRecoveryVerifiedState(recovery, "code", now);
+    if (outcome.ok === false) {
+      return res.status(outcome.status).json({ error: outcome.error });
     }
 
-    const passwordHash = await bcrypt.hash(String(newPassword), 10);
-    const nextPasswordReset = buildConsumedPasswordResetState(user.passwordReset, now);
-
-    await userDoc.ref.set(
-      {
-        passwordHash,
-        passwordReset: nextPasswordReset,
-        recovery: nextRecovery,
-        // Invalidate sessions issued before the reset (e.g. an attacker's token).
-        // Floor to the second: JWT iat is in seconds, and the new session token
-        // below is issued within this same second.
-        authRevokedAtMs: Math.floor(now / 1000) * 1000,
-        updatedAt: now,
-      },
-      { merge: true }
-    );
+    const { user, nextRecovery, nextPasswordReset, requiresRecoverySetup } = outcome;
 
     try {
       await firebaseAuth.revokeRefreshTokens(uid);
