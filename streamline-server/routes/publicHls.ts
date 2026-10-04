@@ -1,50 +1,14 @@
 import { Router } from "express";
 import { getRoom } from "../services/rooms";
-import { getLiveKitSdk } from "../lib/livekit";
+import { getCurrentViewers } from "../lib/viewerStats";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { roomHasActivePaidEvent } from "../lib/monetization";
 
 const router = Router();
 
-function deriveServiceUrl(): string | null {
-  const raw = process.env.LIVEKIT_URL || "";
-  if (!raw) return null;
-  // Convert wss://host to https://host for RoomServiceClient
-  return raw.replace(/^wss?:\/\//i, (m) => (m.toLowerCase() === "ws://" ? "http://" : "https://"));
-}
-
-async function getParticipantCount(livekitRoomName: string | undefined | null): Promise<number | null> {
-  const roomName = String(livekitRoomName || "").trim();
-  if (!roomName) return null;
-
-  const serviceUrl = deriveServiceUrl();
-  const apiKey = process.env.LIVEKIT_API_KEY;
-  const apiSecret = process.env.LIVEKIT_API_SECRET;
-  if (!serviceUrl || !apiKey || !apiSecret) return null;
-
-  try {
-    const { RoomServiceClient } = await getLiveKitSdk();
-    const client = new RoomServiceClient(serviceUrl, apiKey, apiSecret);
-    const participants = await client.listParticipants(roomName);
-    return participants?.length ?? 0;
-  } catch (err) {
-    const anyErr = err as any;
-    const message: string = typeof anyErr?.message === "string" ? anyErr.message : String(anyErr ?? "");
-    const statusCode = (typeof anyErr?.status === "number" && anyErr.status) || (typeof anyErr?.code === "number" && anyErr.code) || undefined;
-
-    // LiveKit returns 404 when a room does not exist yet or has already ended.
-    // Treat that as "no viewers" without spamming logs.
-    if (statusCode === 404 || message.includes("404")) {
-      return null;
-    }
-
-    console.warn("[publicHls] participant count failed", message || anyErr);
-    return null;
-  }
-}
-
 // Public viewer-safe endpoint: no auth, tiny payload.
 // GET /api/public/hls/:roomId -> { status, playlistUrl, viewerCount? }
+// viewerCount = current viewers (HLS heartbeats + RTC audience).
 router.get("/:roomId", async (req: any, res) => {
   const roomId = req.params.roomId;
   try {
@@ -56,8 +20,9 @@ router.get("/:roomId", async (req: any, res) => {
     let viewerCount: number | null = null;
     if (isLive) {
       try {
-        // Use the LiveKit room name when available; fall back to roomId.
-        viewerCount = await getParticipantCount((room as any).livekitRoomName || roomId);
+        // Current viewers = HLS viewers heartbeating + RTC audience (not the
+        // raw LiveKit participant count, which includes hosts and egress).
+        viewerCount = (await getCurrentViewers(roomId, { room })).total;
       } catch {
         viewerCount = null;
       }

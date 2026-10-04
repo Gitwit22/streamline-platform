@@ -18,6 +18,7 @@ import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { deletePrefix } from "../lib/storageClient";
 import { roomHasActivePaidEvent } from "../lib/monetization";
+import { getCurrentViewers, onHlsIdle, onHlsLive } from "../lib/viewerStats";
 
 const router = Router();
 
@@ -112,10 +113,19 @@ router.get("/public/:roomId", async (req: any, res) => {
         paywalled = true;
       }
     }
+    let viewerCount: number | undefined;
+    if (hls.status === "live") {
+      try {
+        viewerCount = (await getCurrentViewers(roomId, { room })).total;
+      } catch {
+        viewerCount = undefined;
+      }
+    }
     return res.json({
       status: hls.status || "idle",
       playlistUrl: paywalled ? null : hls.playlistUrl || null,
       paywalled: paywalled || undefined,
+      viewerCount,
     });
   } catch (e: any) {
     if (e?.message === PERMISSION_ERRORS.ROOM_NOT_FOUND) {
@@ -281,6 +291,8 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
 
       // 3) Mark live + store URLs (throws if the run was stopped/superseded meanwhile)
       await setHlsLive(roomRef, { egressId, playlistUrl, runId: claim.runId });
+      // Viewer counting: HLS going live starts (or joins) the live session.
+      void onHlsLive(roomId);
 
       // 4) If this room is bound to a Saved Embed, keep the
       // embed's activeRoomId in sync so /live/:savedEmbedId
@@ -448,6 +460,7 @@ router.get("/status/:roomId", requireAuth as any, requireRoomAccessToken as any,
         }
 
         await setHlsIdle(roomRef);
+        void onHlsIdle(roomId, room);
 
         return res.json({
           status: "idle",
@@ -547,6 +560,7 @@ router.post("/stop/:roomId", requireAuth as any, requireRoomAccessToken as any, 
     }
 
     await setHlsIdle(roomRef);
+    void onHlsIdle(roomId, room);
 
     const usageUid = (room as any).ownerId || uid;
     if (durationMinutes > 0 && usageUid) {

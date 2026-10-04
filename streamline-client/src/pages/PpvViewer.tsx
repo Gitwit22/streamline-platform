@@ -10,6 +10,7 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { apiFetch } from "../lib/api";
 import { HlsPlayer } from "./HlsPlayes";
+import type { HlsViewerCounts } from "../hooks/useHlsViewerHeartbeat";
 
 type MonetizationMode = "off" | "fixed" | "pwyw" | "donation";
 
@@ -71,6 +72,7 @@ export default function PpvViewer() {
   // HLS endpoint withholds it for paywalled rooms), so only poll once the
   // viewer has access.
   const [playlistUrl, setPlaylistUrl] = useState<string | null>(null);
+  const [viewerCounts, setViewerCounts] = useState<HlsViewerCounts | null>(null);
   const hlsPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
@@ -424,11 +426,20 @@ export default function PpvViewer() {
   // every render, which would remount HlsPlayer and the donation input.
   const playerArea =
     playlistUrl ? (
-      <HlsPlayer
-        playlistUrl={playlistUrl}
-        status={event.status}
-        autoPlay
-      />
+      <>
+        <HlsPlayer
+          playlistUrl={playlistUrl}
+          status={event.status}
+          autoPlay
+          viewerRoomId={event.roomId}
+          onViewerCounts={setViewerCounts}
+        />
+        {viewerCounts ? (
+          <div data-testid="ppv-viewer-count" style={{ marginTop: 8, fontSize: 13, color: "#aaa" }}>
+            👁 {viewerCounts.currentViewers.toLocaleString()} watching
+          </div>
+        ) : null}
+      </>
     ) : (
       <div style={{
         background: "#000",

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import Hls from "hls.js";
+import { useHlsViewerHeartbeat, useVideoPlaying, type HlsViewerCounts } from "../hooks/useHlsViewerHeartbeat";
 
 type Props = {
   playlistUrl: string;
@@ -7,6 +8,10 @@ type Props = {
   status?: string;
   className?: string;
   autoPlay?: boolean; // default true (muted)
+  /** When set, this player counts as a live viewer of the room while playing. */
+  viewerRoomId?: string | null;
+  /** Latest viewer counts from the heartbeat response. */
+  onViewerCounts?: (counts: HlsViewerCounts) => void;
 };
 
 export function HlsPlayer({
@@ -14,8 +19,22 @@ export function HlsPlayer({
   status,
   className,
   autoPlay = true,
+  viewerRoomId,
+  onViewerCounts,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null);
+  const setVideoNode = React.useCallback((el: HTMLVideoElement | null) => {
+    videoRef.current = el;
+    setVideoEl(el);
+  }, []);
+  const playing = useVideoPlaying(videoEl);
+  const viewerCounts = useHlsViewerHeartbeat(viewerRoomId, !!viewerRoomId && playing);
+  const onViewerCountsRef = useRef(onViewerCounts);
+  onViewerCountsRef.current = onViewerCounts;
+  useEffect(() => {
+    if (viewerCounts) onViewerCountsRef.current?.(viewerCounts);
+  }, [viewerCounts]);
   const hlsRef = useRef<Hls | null>(null);
   const [playerError, setPlayerError] = useState<string | null>(null);
 
@@ -123,7 +142,7 @@ export function HlsPlayer({
   return (
     <div className={className}>
       <video
-        ref={videoRef}
+        ref={setVideoNode}
         controls
         playsInline
         // recommended defaults for autoplay friendliness

@@ -14,6 +14,9 @@ import express from "express";
 import crypto from "crypto";
 import { deletePrefix } from "../lib/storageClient";
 import { setHlsIdle } from "../services/rooms";
+import { resolveRoomIdentity } from "../lib/roomIdentity";
+import { copyViewerStatsToRecording, ensureLiveSession, onHlsIdle, onRoomFinished, recordViewer } from "../lib/viewerStats";
+import { isCountableRtcViewer, viewerKeyFor } from "../lib/viewerStatsPure";
 import Stripe from "stripe";
 import { firestore as db } from "../firebaseAdmin";
 import { stripe } from "../lib/stripe";
@@ -1051,6 +1054,27 @@ router.post(
 // 5. Mark ready ONLY if no error AND R2 HEAD returns ContentLength > 0
 // =============================================================================
 
+/**
+ * Viewer counting for LiveKit events. Resolves the room by LiveKit room name.
+ * Hosts/producers, agents, egress and invisible participants are not viewers.
+ */
+async function handleViewerCountEvent(eventName: string, livekitRoomName: string, participant: any): Promise<void> {
+  const resolved = await resolveRoomIdentity({ roomName: livekitRoomName });
+  if (!resolved?.found) return;
+  const roomId = resolved.roomId;
+  if (eventName === "room_finished") {
+    await onRoomFinished(roomId);
+    return;
+  }
+  const identity = String(participant?.identity || "").trim();
+  if (!identity) return;
+  const roomSnap = await db.collection("rooms").doc(roomId).get();
+  const ownerUid = String((roomSnap.data() as any)?.ownerId || "").trim();
+  if (!isCountableRtcViewer(participant, ownerUid)) return;
+  await ensureLiveSession(roomId);
+  await recordViewer(roomId, viewerKeyFor("rtc", identity), "rtc", { identity });
+}
+
 router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
   console.log("[livekit-webhook] Received request");
 
@@ -1125,6 +1149,16 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       });
     }
 
+    // Viewer counting (best-effort; never affects the response):
+    // participant_joined -> unique RTC viewer, room_finished -> end session.
+    if ((eventName === "participant_joined" || eventName === "room_finished") && livekitRoomName) {
+      try {
+        await handleViewerCountEvent(eventName, String(livekitRoomName), event?.participant);
+      } catch (e: any) {
+        console.warn("[livekit-webhook] viewer count update failed", { event: eventName, error: e?.message || e });
+      }
+    }
+
     // =========================================================================
     // RULE: Only process "egress_ended" (case-insensitive)
     // =========================================================================
@@ -1179,6 +1213,7 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
         } catch (e: any) {
           console.warn("[livekit-webhook] setHlsIdle failed", { roomId: roomDoc.id, error: e?.message || e });
         }
+        await onHlsIdle(roomDoc.id, roomData);
 
         return res.status(200).json({ ok: true, handled: "hls_cleanup", roomId: roomDoc.id, prefix });
       }
@@ -1511,6 +1546,11 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       }
     } catch (e: any) {
       console.warn("[livekit-webhook] failed to update room latestRecording status", e?.message || e);
+    }
+
+    // Viewer numbers from the room's live session (best-effort).
+    if (typeof recordingData.roomId === "string" && recordingData.roomId.trim()) {
+      await copyViewerStatsToRecording(recordingRef, recordingData.roomId.trim());
     }
 
     // Ensure recording minutes are counted even if /recordings/stop wasn't called.

@@ -54,6 +54,7 @@ import { isLargeMinutesDiscrepancy } from "./lib/liveSessionMinutes";
 import admin from "firebase-admin";
 import hlsRoutes from "./routes/hls";
 import publicHlsRoutes from "./routes/publicHls";
+import { publicViewersRouter, roomViewersRouter } from "./routes/viewers";
 import publicRoomsHlsConfigRoutes from "./routes/publicRoomsHlsConfig";
 import monetizationRoutes from "./routes/monetization";
 import { resolveRoomIdentity } from "./lib/roomIdentity";
@@ -289,6 +290,8 @@ app.get("/api", (req, res) => {
 app.use("/api/hls", hlsRoutes);
 // Public viewer HLS status (no auth, tiny payload)
 app.use("/api/public/hls", publicHlsRoutes);
+// Public HLS viewer heartbeat (no auth, rate limited)
+app.use("/api/public/viewers", publicViewersRouter);
 // Public viewer-safe HLS config (no auth)
 app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
 
@@ -355,6 +358,8 @@ app.use("/api/rooms", roomsRecordingsRoutes);
 app.use("/api/rooms", roomsHlsConfigRoutes);
 // Room-level selection of which Saved Embed to use for HLS control
 app.use("/api/rooms", roomsActiveEmbedRoutes);
+// Host/cohost viewer counts: GET /api/rooms/:roomId/viewers
+app.use("/api/rooms", roomViewersRouter);
 // Destinations management (encrypted keys)
 app.use("/api/destinations", destinationsRoutes);
 // Live preflight

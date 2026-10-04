@@ -53,6 +53,7 @@ import { ErrorBoundary } from "../../components/ErrorBoundary";
 import { RoleChangeToast } from "../components/RoleChangeToast";
 import ProgramStage, { ProgramStateProvider, useProgramState } from "../components/ProgramStage";
 import AudioMixerModal from "../components/AudioMixerModal";
+import ViewerStatsChip from "../components/ViewerStatsChip";
 import MixerBridge from "../components/MixerBridge";
 import ScreenShareRouter, { type ScreenShareRouteMode } from "../components/ScreenShareRouter";
 import ScreenSharePopout from "../components/ScreenSharePopout";
@@ -1978,7 +1979,6 @@ function RoomPage() {
   const copiedInviteTimeoutRef = useRef<number | null>(null);
   const lastStopWasAutoRef = useRef<boolean>(false);
   const autoStopTriggeredRef = useRef(false);
-  const [viewerCount] = useState<number>(0);
   const [elapsedTime, setElapsedTime] = useState(0);
   const streamStartTimeRef = useRef<number | null>(null);
   const streamEgressRef = useRef<string | null>(null);
@@ -5080,6 +5080,10 @@ function RoomPage() {
               >
                 🎬 Layout
               </button>
+            )}
+
+            {(isHost || isCohost) && !isViewer && roomId && (
+              <ViewerStatsChip roomId={roomId} roomAccessToken={roomAccessToken} />
             )}
 
             {canManageStream && (

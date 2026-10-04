@@ -30,6 +30,7 @@ import { isAdmin } from "../middleware/adminAuth";
 import { resolveHostName } from "../lib/resolveHostName";
 import { logDelegatedRoomAction, resolveOwnerActingContext } from "../lib/collaborators";
 import { mergeCohostControlScopes } from "../lib/roomModerationPolicy";
+import { onHostGoingLive } from "../lib/viewerStats";
 
 /**
  * Invite JWT from x-invite-token, body.inviteToken or query inviteToken/t.
@@ -1242,6 +1243,12 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
         },
         { merge: true }
       );
+    }
+
+    // Viewer counting: the host/producer going live starts (or continues) the
+    // room's live viewer session. Fire-and-forget; never delays the token.
+    if (user && isPrivilegedProducer) {
+      void onHostGoingLive(roomId, room);
     }
 
     const AccessToken = await getAccessTokenCtor();

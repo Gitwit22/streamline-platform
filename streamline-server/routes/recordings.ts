@@ -48,6 +48,7 @@ import { releaseStorageUsage, reserveStorageUsage } from "../usageHelper";
 import { requireAdmin } from "../middleware/adminAuth";
 import { DOWNLOAD_LINK_TTL_SECONDS, evaluateDownloadRules, shouldClaimStorageCount } from "../lib/mediaPure";
 import { compositorUrl, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
+import { copyViewerStatsToRecording } from "../lib/viewerStats";
 
 const router = Router();
 
@@ -1622,6 +1623,9 @@ router.post(
     });
 
     console.log(`[recordings/stop] Recording ${recordingId} now processing`);
+
+    // Viewer numbers come from the server's live session, never the client.
+    await copyViewerStatsToRecording(recordingRef, roomId);
 
     // Release active recording lock for this (user, room)
     try {

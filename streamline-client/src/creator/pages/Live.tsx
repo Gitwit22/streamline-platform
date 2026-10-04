@@ -4,6 +4,7 @@ import Hls from "hls.js";
 import { API_BASE } from "../../lib/apiBase";
 import { getPublicHls } from "../../services/hls";
 import { useHlsReadiness } from "../../hooks/useHlsReadiness";
+import { useHlsViewerHeartbeat, useVideoPlaying } from "../../hooks/useHlsViewerHeartbeat";
 import {
   Radio,
   RefreshCw,
@@ -120,6 +121,13 @@ export default function Live() {
   const hlsRetryCountRef = useRef(0);
 
   const manifestReadiness = useHlsReadiness(playlistUrl, playerNonce);
+
+  // Viewer counting: heartbeat while the live stream is actually playing.
+  // The status poll's viewerCount (server: HLS heartbeats + RTC audience) is
+  // the fallback until the first heartbeat response arrives.
+  const videoPlaying = useVideoPlaying(videoEl);
+  const heartbeatCounts = useHlsViewerHeartbeat(roomId, status === "live" && videoPlaying);
+  const currentViewers = heartbeatCounts?.currentViewers ?? viewerCount;
 
   // Resolve savedEmbedId -> activeRoomId and basic viewer metadata
   useEffect(() => {
@@ -676,11 +684,14 @@ export default function Live() {
             </div>
 
             <div className="flex items-center gap-4">
-              {/* Placeholder viewer count (wire later) */}
               {status === "live" && (
-                <div className="flex items-center gap-2 text-neutral-400">
+                <div
+                  className="flex items-center gap-2 text-neutral-400"
+                  data-testid="live-viewer-count"
+                  title={heartbeatCounts ? `${heartbeatCounts.totalViewers.toLocaleString()} total viewers` : undefined}
+                >
                   <Users className="w-4 h-4" />
-                  <span className="text-sm font-medium">{viewerCount.toLocaleString()}</span>
+                  <span className="text-sm font-medium">{currentViewers.toLocaleString()} watching</span>
                 </div>
               )}
               <StatusBadge />

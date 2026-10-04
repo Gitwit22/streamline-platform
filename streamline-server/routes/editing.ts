@@ -11,6 +11,8 @@ import { requireAuth } from "../middleware/requireAuth";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { canAccessFeature } from "./featureAccess";
 import { logger } from "../lib/logger";
+import { copyViewerStatsToRecording } from "../lib/viewerStats";
+import { resolveRoomIdentity } from "../lib/roomIdentity";
 import {
   normalizeExportSettings,
   resolutionToDimensions,
@@ -1421,11 +1423,13 @@ router.post("/save", async (req: Request, res: Response) => {
   }
 });
 
-// PUT /api/editing/:recordingId - Update recording metadata (duration, status, viewer count)
+// PUT /api/editing/:recordingId - Update recording metadata (duration, status).
+// viewerCount/peakViewers are server-managed (copied from the room's live
+// viewer session) and ignored here.
 router.put("/:recordingId", async (req: Request, res: Response) => {
   try {
     const recordingId = String(req.params.recordingId ?? "");
-    const { duration, status, viewerCount, peakViewers } = req.body;
+    const { duration, status } = req.body;
     const userId = getAuthedUid(req);
 
     if (!userId) {
@@ -1463,8 +1467,6 @@ router.put("/:recordingId", async (req: Request, res: Response) => {
       }
       updateData.status = status;
     }
-    if (typeof viewerCount === 'number') updateData.viewerCount = viewerCount;
-    if (typeof peakViewers === 'number') updateData.peakViewers = peakViewers;
 
     await db.collection("recordings").doc(recordingId).update(updateData);
 
@@ -1601,7 +1603,7 @@ router.post("/render", async (req: Request, res: Response) => {
 // POST /api/editing/create-recording - Create a new recording document when stream starts
 router.post("/create-recording", async (req: Request, res: Response) => {
   try {
-    const { roomName, title, viewerCount, peakViewers } = req.body;
+    const { roomName, title } = req.body;
     const userId = getAuthedUid(req);
 
     if (!userId) {
@@ -1630,8 +1632,9 @@ router.post("/create-recording", async (req: Request, res: Response) => {
       title,
       status: "ready", // Immediately ready since we can't record the actual stream
       duration: 0,
-      viewerCount: viewerCount || 0,
-      peakViewers: peakViewers || 0,
+      // Server-managed; client-supplied viewer numbers are not trusted.
+      viewerCount: 0,
+      peakViewers: 0,
       createdAt: new Date(),
       updatedAt: new Date(),
       videoUrl: null, // Will be populated if video is uploaded
@@ -1723,7 +1726,7 @@ router.post("/recordings/start", async (req: Request, res: Response) => {
 // POST /api/recordings/stop - Stop recording and finalize metadata
 router.post("/recordings/stop", async (req: Request, res: Response) => {
   try {
-    const { recordingId, duration, viewerCount, peakViewers } = req.body;
+    const { recordingId, duration } = req.body;
     const userId = getAuthedUid(req);
 
     if (!userId) {
@@ -1751,10 +1754,20 @@ router.post("/recordings/stop", async (req: Request, res: Response) => {
       status: "ready",
       stoppedAt: new Date(),
       duration: duration || 0,
-      viewerCount: viewerCount || 0,
-      peakViewers: peakViewers || 0,
       progress: 100,
     });
+
+    // Viewer numbers from the room's live viewer session (best-effort).
+    try {
+      const resolved = data?.roomId
+        ? { roomId: String(data.roomId) }
+        : typeof data?.roomName === "string" && data.roomName.trim()
+          ? await resolveRoomIdentity({ roomName: data.roomName.trim() })
+          : null;
+      if (resolved?.roomId) await copyViewerStatsToRecording(recordingRef, resolved.roomId);
+    } catch (e: any) {
+      console.warn("[editing/recordings/stop] viewer stats copy failed", e?.message || e);
+    }
 
     console.log("✅ Recording stopped:", recordingId);
 

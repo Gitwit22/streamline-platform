@@ -513,7 +513,7 @@ router.post("/track-landing", async (req, res) => {
  * the session cookie) belonging to the owner, a platform admin, or a cohost.
  * Returns an HTTP status on failure, null when allowed.
  */
-async function checkRoomHostAccess(req: any, roomId: string, room: any): Promise<number | null> {
+export async function checkRoomHostAccess(req: any, roomId: string, room: any): Promise<number | null> {
   const hdr = (req?.headers as any) || {};
   const rawAccess = hdr["x-room-access-token"] ?? hdr["X-Room-Access-Token"];
   if (typeof rawAccess === "string" && rawAccess.trim()) {

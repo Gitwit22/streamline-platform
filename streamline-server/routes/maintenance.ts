@@ -7,6 +7,7 @@ import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { releaseStorageUsage } from "../usageHelper";
 import { stopEgress } from "../services/livekitEgress";
 import { setHlsIdleIfRun } from "../services/rooms";
+import { onHlsIdle } from "../lib/viewerStats";
 import { incrementHlsUsageMinutes } from "./hls";
 import { advanceablePrefixLength, computeHlsBilledMinutes, hlsLastSeenMs, isHlsSessionStale } from "../lib/mediaPure";
 
@@ -472,6 +473,8 @@ async function purgeStaleHls(now: Date, opts?: { ttlMinutes?: number; limit?: nu
       }
 
       if (flipped) {
+        // Viewer counting: end the live session if the room is empty (best-effort).
+        await onHlsIdle(roomId, data);
         purgedCount += 1;
         console.warn("[maintenance/purge-stale-hls] purged stale session", {
           roomId,
