@@ -31,35 +31,68 @@ Every finding below was confirmed against the code on branch `creator`.
 | 22 | Low | Sweep | `POST /api/recordings/sweep` requires `x-maintenance-key` or an admin. |
 | 23 | High | Tests | The server `npm test` glob is fixed (`dist/**/*.test.js`). The old `dist/lib` argument ran 0 tests on Node ≥21. The suite is now 237/238; the remaining failure is noted below. |
 
-## Open — needs a decision or larger change
+## Fixed in the follow-up pass
 
-### Do now (ops)
-- **Rotate credentials.** Git history contains `.env` files (commit `40a7f994`) and a Firebase service-account private key (before `f4f67702`). They include LiveKit, Stripe, R2, JWT, stream-key and internal tokens. Rotate everything, then purge history with `git filter-repo`.
-- **Set `NODE_ENV=production` on the prod Render service.** It is not in `streamline-server/render.yaml`. Without it, every "no dev-secret in production" guard is skipped.
-- **Untrack `node_modules`.** About 24k files are committed, and the server copy is stale (it is missing helmet, pino and ws). Run `git rm -r --cached node_modules streamline-server/node_modules`.
-- **`npm audit fix`.** There are 3 critical issues (fast-xml-parser pinned at 5.3.3 via `overrides`, protobufjs, websocket-driver) and 6 high. Upgrade multer to 2.x.
+All "open" items from the first pass were implemented except those listed under **Still open** below.
 
-### Security / correctness
-- **Admin password reset is an account-takeover window (High).** When an admin enables reset, anyone can call `/forgot-password/reset` with `method:"admin"` for that login within 24h. Require a single-use secret delivered out of band. `/forgot-password/check` also advertises the window.
-- **Live usage minutes are client-reported (Critical for billing).** `/api/usage/streamEnded` trusts `minutes` from the body. Compute them server-side from LiveKit room or egress timestamps.
-- **Stripe event idempotency and ordering for subscriptions.** Store `event.id`, and re-fetch the subscription instead of trusting payload order. A late `updated` after `deleted` can resurrect a plan.
-- **API version drift (`2025-12-15.clover`).** `current_period_end` moved to items, and `invoice.subscription` moved to `invoice.parent.subscription_details`. `invoice.payment_failed` and the `invoice.paid` usage reset may never fire.
-- **First `invoice.payment_failed` downgrades to free** while Stripe is still retrying.
-- **PPV raw codes live in an in-memory Map.** They are lost on restart or a second instance. Persist them encrypted with a TTL.
-- **PPV playlist URLs are static public R2 URLs.** Once leaked they are shareable. Move to signed, short-lived URLs.
-- **SSRF in the export worker.** Timeline `clips[].videoUrl` is fetched server-side with no host allowlist, timeout or size cap.
-- **Multistream leaks egress.** A partial failure, or calling start twice, leaves an untracked egress running. HLS start has the same race.
-- **No rate limiting on login, signup or forgot-password.** The recovery-code lockout is also racy (not transactional).
-- **Any logged-in user gets a publish token for any non-private room** (`visibility` defaults to `unlisted`). Direct guest join defaults to `allowGuests: true`. Decide the product default.
-- **Usage counters use read-modify-write without transactions** (`index.ts` streamEnded, `usageHelper` floor clamp). Use `FieldValue.increment`.
-- **Project asset uploads bypass the storage quota** and never delete their R2 objects.
-- **24h retention purge can stall** once 200+ old non-purgeable docs exist (no status filter or pagination).
-- **500 MB `multer.memoryStorage()` uploads on a 512 MB instance** risk running out of memory. Stream to disk or R2, or use presigned uploads.
-- **Admin hard-delete** doesn't lock the user out: `/me` recreates the doc.
-- **Stream keys** are stored in plaintext on `activeStreams` docs.
+- **Billing:**
+  - Stripe events are deduplicated (`stripeEvents/{event.id}`).
+  - Subscription events re-fetch the live subscription, so out-of-order delivery is harmless.
+  - Fields that moved in API version `2025-12-15.clover` are read from their new locations (`lib/stripeFields.ts`), and the version is pinned.
+  - `invoice.payment_failed` downgrades only on `unpaid`/`canceled`/`incomplete_expired`.
+  - PPV pending codes are stored AES-GCM encrypted in Firestore with a 10-minute expiry, and `async_payment_succeeded` is handled.
+  - `MONETIZATION_CODE_SALT` is required in production.
+- **Usage:** live minutes are computed server-side from `egressSessions`, billed once per session in one transaction, and charged to the room owner. Counters use `FieldValue.increment`, and the storage clamp is transactional.
+- **Auth:**
+  - Admin resets require a single-use code shown once to the admin.
+  - Login, signup and forgot-password are rate-limited.
+  - The recovery lockout is transactional.
+  - Login timing and the forgot-password check no longer reveal which accounts exist.
+  - Admin delete is a soft delete that disables the Firebase user, and `/me` no longer resurrects deleted users.
+  - Invites are bound to their room.
+  - Logged-in non-owners get publish rights only with an invite or guest session for the room, or when the room is public and allows guests. The client forwards `x-guest-session`, and `ROOM_TOKEN_STRICT_AUTHED_PUBLISH=0` disables this.
+- **Media:**
+  - Export sources are allowlisted, with download timeouts and size/redirect caps; ffmpeg has a timeout, stale jobs are reaped, and cancel is safe.
+  - Multistream rolls back partial starts, refuses double starts, and no longer stores plaintext keys.
+  - HLS start is transactional.
+  - Project uploads reserve quota and asset deletes remove their R2 objects.
+  - Uploads stream from disk instead of memory.
+  - Both retention purges page correctly.
+  - The stale-HLS purge uses a heartbeat and bills minutes.
+  - `latest-recording` reuses the `/download-link` rules.
+  - `storageCounted` flips transactionally.
+- **Build:**
+  - Firebase Admin initializes lazily (accepts `GOOGLE_APPLICATION_CREDENTIALS` and URL-safe base64), and the full server suite passes (314/314).
+  - Dependencies were upgraded and lockfiles regenerated.
+  - A CI workflow (`.github/workflows/ci.yml`) was added.
+  - Render config sets `NODE_ENV=production` and uses `npm ci --include=dev`.
+  - Client `tsc` is down to 0 errors (react-joyride v3 migration) and ESLint runs.
+  - `/api/health/config` is admin-only.
+  - Graceful shutdown stops the workers.
+  - `node_modules` is untracked.
+  - Stray scripts were removed or guarded.
 
-### Build / CI
-- `firebaseAdmin.ts` initializes at import time. It breaks `lib/roomGuestAccessInvite.test.ts` and scripts, and it ignores `GOOGLE_APPLICATION_CREDENTIALS`.
-- CI doesn't build or test server or client before Render auto-deploys.
-- Client: `tsconfig.json` sets `"ignoreDeprecations": "6.0"`, which TS 5.9 rejects, so `tsc` stops on a config error. With that removed there are 8 pre-existing type errors, mostly react-joyride v3 types. ESLint fails because `@eslint/js` is missing from devDependencies.
-- `Room.tsx` has 2 raw `fetch` calls that bypass `apiFetch`.
+## Deploy checklist
+
+1. **Rotate every credential** exposed in git history (`40a7f994` `.env` files, Firebase service account before `f4f67702`): Firebase SA key, LiveKit, Stripe, R2, JWT, stream-key secret, internal tokens. Then purge history (`git filter-repo`) — needs a coordinated force-push.
+2. **Production env vars:**
+   - `NODE_ENV=production` (set it in the Render dashboard too if the service isn't blueprint-synced)
+   - `STREAM_KEY_SECRET_V1` (base64 32 bytes, required for PPV code encryption)
+   - `MONETIZATION_CODE_SALT`
+   - `HORIZON_WEBHOOK_SECRET` (Horizon endpoints now fail closed)
+   - `GUEST_SESSION_SECRET` / `INVITE_TOKEN_SECRET`, or rely on `JWT_SECRET`
+3. **`LIVE_MINUTES_CUTOVER_ISO`:** set to the deploy time to avoid re-billing streams from the previous 24h that were billed from client figures.
+4. **`EXPORT_SOURCE_ALLOWED_HOSTS`:** set this if clips are served from a host other than the configured R2/HLS bases.
+5. **Ship client and server together:** `streamEnded` now requires `roomId`, and room tokens rely on the `x-guest-session` header.
+6. **Admin resets:** existing admin-enabled resets are void and must be re-issued (they now produce a code).
+7. **Firestore TTL policies (optional):** `monetizationPendingCodes.ttlAt`, and consider `stripeEvents`.
+
+## Still open
+
+- **Remaining `npm audit` findings need major upgrades.**
+  - Server/root: 8 moderate, all from `uuid` via firebase-admin 13 (fixed in firebase-admin 14).
+  - Client: 4 high and 10 moderate (`@grpc/grpc-js` needs firebase 12, `react-router` 7, `uuid`).
+- **Client ESLint:** 936 pre-existing errors, mostly `no-explicit-any` and `no-unused-vars`.
+- **Route params typing:** `@types/express-serve-static-core` is pinned to `~5.0.7` because 5.1 types route params as `string | string[]`. Narrow `req.params` in the route files, then drop the override.
+- **Unbilled crashed streams:** live minutes are still unbilled if `streamEnded` is never called (tab crash). Billing from stop-multistream or `egress_ended` with `billLiveStreamMinutes` would close that.
+- **Rate limits and the HLS heartbeat purge are per-instance / poll-driven.** Move limits to a shared store if you run multiple instances.

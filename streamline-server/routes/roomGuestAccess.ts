@@ -981,18 +981,13 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       return res.status(402).json({ error: "payment_required" });
     }
 
-    // Policy: publish rights for authenticated non-owners (opt-in, see below).
-    // Default (flag unset): any logged-in user gets a publishing "participant"
-    // token for a non-private room, as before. With
-    // ROOM_TOKEN_STRICT_AUTHED_PUBLISH=1 they can publish only with a guest
-    // session or invite for this room, or when the room is explicitly public
-    // and allows guests; otherwise they get a subscribe-only token.
-    // Not on by default: Room.tsx's authed token request does not forward the
-    // guest session (x-guest-session) and drops the invite token once a guest
-    // session exists, so an invited user who is also logged in is only
-    // recognisable via the cross-site sl_guest cookie, which browsers that
-    // block third-party cookies won't send. Enable after the client forwards it.
-    const strictAuthedPublish = String(process.env.ROOM_TOKEN_STRICT_AUTHED_PUBLISH || "").trim() === "1";
+    // Policy: publish rights for authenticated non-owners. Logged-in users who
+    // aren't the owner/delegate can publish only with a guest session or invite
+    // for this room, or when the room is explicitly public and allows guests;
+    // otherwise they get a subscribe-only token. The client forwards the guest
+    // session via x-guest-session on authed requests, so this doesn't depend on
+    // the cross-site sl_guest cookie. Escape hatch: ROOM_TOKEN_STRICT_AUTHED_PUBLISH=0.
+    const strictAuthedPublish = String(process.env.ROOM_TOKEN_STRICT_AUTHED_PUBLISH || "").trim() !== "0";
     let authedSubscribeOnly = false;
     if (user && !isPrivilegedProducer && strictAuthedPublish) {
       const hasGuestSessionForRoom = !!guest && guest.roomId === roomId;

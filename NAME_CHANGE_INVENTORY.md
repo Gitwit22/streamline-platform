@@ -157,8 +157,8 @@ support@streamline.app
 - `docs/PHASES_0-4_SUMMARY.md` - "# StreamLine Invite System - Phases 0-4 Complete"
 - `docs/PHASES_0-6_COMPLETE.md` - "# StreamLine Invite System - Phases 0-6 Complete"
 - `deployment/README.md` - "# StreamLine Editing Suite: Deployment & Ngrok Setup"
-- `future state/README.md` - "This folder contains plan documents and future-facing specs for StreamLine."
-- `future state/StreamLine_Room_Customization_HLS_Greenroom_Gating_PLAN.md`
+- `future-state/README.md` - "This folder contains plan documents and future-facing specs for StreamLine."
+- `future-state/StreamLine_Room_Customization_HLS_Greenroom_Gating_PLAN.md`
 
 ### Technical Documentation
 - Multiple `.md` files in `/docs/` folder (30+ files)

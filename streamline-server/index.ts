@@ -167,6 +167,9 @@ const corsOptions: CorsOptions = {
     // Legacy invite JWT (join links) used for guest RTC join/status without auth.
     "x-invite-token",
     "X-Invite-Token",
+    // Guest session JWT (invite-scoped) used by /api/rooms/:roomId/token.
+    "x-guest-session",
+    "X-Guest-Session",
     // Program-scoped context headers used by Support Hub and admin APIs.
     "x-program-id",
     "X-Program-Id",

@@ -210,7 +210,7 @@ npx vitest run src/lib/__tests__/roles.test.ts  # Run specific test
 
 ```bash
 # From root directory
-npm test                                    # Runs test-usage.js, test-r2-connection.js
+npm test                                    # Runs the streamline-server test suite
 ```
 
 ## Additional Scripts

@@ -2573,6 +2573,9 @@ function RoomPage() {
                 headers: {
                   ...(selectedOwnerContext.ownerUid ? { "x-owner-context-uid": selectedOwnerContext.ownerUid } : {}),
                   ...(inviteTokenForJoin ? { "x-invite-token": inviteTokenForJoin } : {}),
+                  // Logged-in invitees: forward the room's guest session so the
+                  // server can see the invite without the cross-site sl_guest cookie.
+                  ...(guestSessionToken ? { "x-guest-session": guestSessionToken } : {}),
                 },
                 body: JSON.stringify(payload),
               },

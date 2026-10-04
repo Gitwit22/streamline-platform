@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { firestore } from "../firebaseAdmin";
+import { FieldValue } from "firebase-admin/firestore";
 import { requireAdmin } from "../middleware/adminAuth";
 import { deleteFile, deleteFiles, deletePrefix } from "../lib/storageClient";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
@@ -331,7 +332,14 @@ async function purgeExpiredRecordings(now: Date, opts?: { limit?: number }): Pro
   for (const doc of snap.docs) {
     const data = (doc.data() || {}) as any;
     const status = String(data.status || "").toLowerCase();
-    if (status === "deleted") continue;
+    if (status === "deleted") {
+      // Older soft-deleted docs kept deleteAfterMs, so they matched this query
+      // forever and could fill every page (purge stalls). Drop the field.
+      try {
+        await doc.ref.update({ deleteAfterMs: FieldValue.delete() });
+      } catch {}
+      continue;
+    }
 
     // Capture file size and userId before deletion for storage accounting
     const fileSize = typeof data.fileSize === "number" ? data.fileSize : 0;
@@ -360,7 +368,15 @@ async function purgeExpiredRecordings(now: Date, opts?: { limit?: number }): Pro
 
     try {
       await doc.ref.set(
-        { status: "deleted", deleteReason: "expired_retention", deletedAt: now, updatedAt: now, storageReleased: true },
+        {
+          status: "deleted",
+          deleteReason: "expired_retention",
+          deletedAt: now,
+          updatedAt: now,
+          storageReleased: true,
+          // Leave the deleteAfterMs index so this doc stops matching the query.
+          deleteAfterMs: FieldValue.delete(),
+        },
         { merge: true }
       );
       deletedCount += 1;
