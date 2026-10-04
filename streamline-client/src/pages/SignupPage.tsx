@@ -91,7 +91,7 @@ export const SignupPage = () => {
       const data = await res.json();
 
       if (!res.ok) {
-        setError(data.error || "Signup failed");
+        setError(res.status === 429 ? "Too many attempts. Please wait a few minutes and try again." : data.error || "Signup failed");
         setLoading(false);
         return;
       }

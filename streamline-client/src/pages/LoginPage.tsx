@@ -117,7 +117,7 @@ export const LoginPage: React.FC = () => {
           const err = ct.includes("application/json")
             ? await res.json().catch(() => ({}))
             : { error: "Login failed: backend returned non-JSON (check API base / server)" };
-          setError((err as any)?.error || "Invalid credentials");
+          setError(res.status === 429 ? "Too many attempts. Please wait a few minutes and try again." : (err as any)?.error || "Invalid credentials");
           setLoading(false);
           return;
         }
@@ -189,7 +189,7 @@ export const LoginPage: React.FC = () => {
             const ct = res.headers.get("content-type") || "";
             const errBody = ct.includes("application/json") ? await res.json().catch(() => ({})) : {};
             const msg = (errBody as any)?.error || (res.status === 409 ? "Email conflict. Contact support." : "Invalid credentials");
-            setError(msg);
+            setError(res.status === 429 ? "Too many attempts. Please wait a few minutes and try again." : msg);
             setLoading(false);
             return;
           }
