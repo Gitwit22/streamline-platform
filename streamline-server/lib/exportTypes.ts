@@ -63,8 +63,14 @@ export interface ExportTimelineClip {
   sourceInMs: number;
   /** Source out-point in milliseconds */
   sourceOutMs: number;
-  /** Resolved download URL for the source media */
+  /** Resolved download URL for the source media (allowlisted storage host only) */
   sourceUrl: string;
+  /**
+   * R2 object key resolved server-side from the user's own recording /
+   * editing asset doc. When present the worker presigns it instead of using
+   * sourceUrl.
+   */
+  sourceKey?: string;
   name: string;
 }
 

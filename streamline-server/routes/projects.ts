@@ -30,7 +30,6 @@
  */
 
 import { Router } from "express";
-import multer from "multer";
 import crypto from "crypto";
 import { requireAuth } from "../middleware/requireAuth";
 import { firestore } from "../firebaseAdmin";
@@ -47,14 +46,16 @@ import {
   serializeProject,
   serializeAsset,
 } from "../lib/projectManager";
-import { getSignedDownloadUrl, uploadVideo } from "../lib/storageClient";
+import { getSignedDownloadUrl, uploadFileFromPath, deleteFile } from "../lib/storageClient";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
+import { LIMIT_ERRORS } from "../lib/limitErrors";
+import { reserveStorageIfAvailable, releaseReservedStorage } from "../usageHelper";
+import { createDiskUpload, cleanupUploadedFile, MAX_UPLOAD_BYTES } from "../lib/diskUpload";
+import { requireContentLibraryUploadsEnabled } from "./editing";
 
 const router = Router();
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 500 * 1024 * 1024 }, // 500MB
-});
+// Spool uploads to os.tmpdir() (not RAM) and stream them to R2.
+const upload = createDiskUpload(MAX_UPLOAD_BYTES);
 
 const db = firestore;
 
@@ -374,7 +375,13 @@ router.delete("/:projectId/assets/:assetId", requireAuth, async (req: any, res) 
     const assetRef = db.collection("editing_project_assets").doc(req.params.assetId);
     const assetSnap = await assetRef.get();
     if (!assetSnap.exists) {
-      return res.status(404).json({ error: "Project asset not found" });
+      // Uploaded assets live in project_assets and own an R2 object + quota bytes.
+      const uploaded = await getProjectAsset(req.params.assetId);
+      if (!uploaded || uploaded.projectId !== req.params.projectId || uploaded.ownerId !== uid) {
+        return res.status(404).json({ error: "Project asset not found" });
+      }
+      const result = await deleteProjectAsset(uploaded.id, req.params.projectId);
+      return res.json({ ok: true, clipsRemoved: 0, deleted: result.deleted, storageReleasedBytes: result.releasedBytes });
     }
 
     const assetData = assetSnap.data() as any;
@@ -694,7 +701,13 @@ router.delete("/:projectId/timeline/clips/:clipId", requireAuth, async (req: any
 // =============================================================================
 
 // ── POST /:id/assets/upload — upload video to existing project ──────────────
-router.post("/:id/assets/upload", requireAuth, upload.single("video") as any, async (req: any, res) => {
+router.post(
+  "/:id/assets/upload",
+  requireAuth,
+  requireContentLibraryUploadsEnabled as any,
+  upload.single("video") as any,
+  async (req: any, res) => {
+  const file = req.file as Express.Multer.File | undefined;
   try {
     const uid = getAuthUserId(req);
     if (!uid) return res.status(401).json({ error: "Unauthorized" });
@@ -704,7 +717,6 @@ router.post("/:id/assets/upload", requireAuth, upload.single("video") as any, as
       return res.status(404).json({ error: "Project not found" });
     }
 
-    const file = req.file;
     if (!file) return res.status(400).json({ error: "No file uploaded" });
 
     const allowedTypes = ["video/mp4", "video/webm", "video/quicktime", "video/x-msvideo"];
@@ -718,25 +730,56 @@ router.post("/:id/assets/upload", requireAuth, upload.single("video") as any, as
 
     const timestamp = Date.now();
     const safeName = title.replace(/[^a-z0-9]/gi, "-").toLowerCase();
-    const ext = file.originalname.split(".").pop() || "mp4";
+    const ext = (file.originalname.split(".").pop() || "mp4").replace(/[^a-z0-9]/gi, "").slice(0, 8) || "mp4";
     const storagePath = `projects/${uid}/${req.params.id}/${timestamp}-${safeName}.${ext}`;
 
-    await uploadVideo(file.buffer, storagePath, file.mimetype);
-
-    const asset = await addAssetToProject({
+    // Reserve quota before uploading (atomic check + increment), like the
+    // editing and My Content uploads.
+    const reservation = await reserveStorageIfAvailable(uid, file.size, {
+      caller: "projects.upload",
       projectId: req.params.id,
-      ownerId: uid,
-      type: "upload",
-      filename: `${title}.${ext}`,
-      storageKey: storagePath,
-      size: file.size,
-      processingStatus: "ready",
     });
+    if (!reservation.reserved) {
+      return res.status(409).json({
+        error: LIMIT_ERRORS.LIMIT_EXCEEDED,
+        details: reservation.reason || "Storage limit exceeded",
+      });
+    }
 
-    return res.status(201).json({ asset: serializeAsset(asset) });
+    let uploaded = false;
+    try {
+      await uploadFileFromPath(file.path, storagePath, file.mimetype);
+      uploaded = true;
+
+      const asset = await addAssetToProject({
+        projectId: req.params.id,
+        ownerId: uid,
+        type: "upload",
+        filename: `${title}.${ext}`,
+        storageKey: storagePath,
+        size: file.size,
+        storageBytes: file.size,
+        processingStatus: "ready",
+      });
+
+      return res.status(201).json({ asset: serializeAsset(asset) });
+    } catch (err: any) {
+      // Roll back: remove the object (if uploaded) and release the reservation.
+      if (uploaded) await deleteFile(storagePath).catch(() => {});
+      try {
+        await releaseReservedStorage(uid, file.size, { caller: "projects.upload.rollback", storagePath });
+      } catch (releaseErr: any) {
+        console.error("[projects] CRITICAL: failed to release reservation after upload failure", {
+          uid, storagePath, fileSizeBytes: file.size, uploadError: err?.message, releaseError: releaseErr?.message,
+        });
+      }
+      throw err;
+    }
   } catch (err: any) {
     console.error("[projects] upload asset error:", err?.message || err);
     return res.status(500).json({ error: "Failed to upload asset" });
+  } finally {
+    await cleanupUploadedFile(file);
   }
 });
 

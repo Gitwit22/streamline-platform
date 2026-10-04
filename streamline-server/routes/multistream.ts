@@ -16,6 +16,8 @@ import { evaluateUsageGate } from "../lib/usageOverages";
 import { upsertUsageMonthlyOverageTotals } from "../lib/usageOveragesWriter";
 import { OUTPUT_FORMAT_DIMENSIONS } from "../lib/roomLayout";
 import { logDelegatedRoomAction } from "../lib/collaborators";
+import { FieldValue } from "firebase-admin/firestore";
+import { decideMultistreamStart, maskSecretTail, redactRtmpUrl } from "../lib/mediaPure";
 
 // livekit-server-sdk is ESM; use dynamic import so CommonJS builds work on Render
 let _lkMod: any | null = null;
@@ -72,6 +74,63 @@ async function getPlanLimit(uid: string, field: string): Promise<number | undefi
 }
 
 const router = Router();
+
+/** A "starting" claim older than this is considered abandoned. */
+const MULTISTREAM_STARTING_TTL_MS = 2 * 60_000;
+
+async function getEgressClient() {
+  const { EgressClient } = await getLiveKitSdk();
+  return new EgressClient(process.env.LIVEKIT_URL, process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET);
+}
+
+/** Returns the subset of egress ids LiveKit still reports as active. Fails closed (treats unknown as active). */
+async function findActiveEgressIds(ids: string[]): Promise<string[]> {
+  if (ids.length === 0) return [];
+  const client = await getEgressClient();
+  const active: string[] = [];
+  for (const id of ids) {
+    try {
+      const list = await client.listEgress({ egressId: id, active: true });
+      if (Array.isArray(list) && list.length > 0) active.push(id);
+    } catch (e: any) {
+      console.warn("[multistream] listEgress failed; assuming active", { egressId: id, error: e?.message || e });
+      active.push(id);
+    }
+  }
+  return active;
+}
+
+/** Best-effort stop of egresses started by a failed start request. */
+async function stopEgressesQuietly(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  let client: any;
+  try {
+    client = await getEgressClient();
+  } catch (e: any) {
+    console.error("[multistream] cannot create egress client for rollback", e?.message || e);
+    return;
+  }
+  for (const id of ids) {
+    try {
+      await client.stopEgress(id);
+      console.warn("[multistream:start] rolled back egress after failed start", { egressId: id });
+    } catch (e: any) {
+      console.error("[multistream:start] CRITICAL: failed to stop egress during rollback", { egressId: id, error: e?.message || e });
+    }
+  }
+}
+
+/** Never persist plaintext stream keys; only a masked tail for display/debugging. */
+function streamKeyFieldsForDoc(keys: { youtube?: string; facebook?: string; twitch?: string }) {
+  return {
+    youtubeStreamKey: FieldValue.delete(),
+    facebookStreamKey: FieldValue.delete(),
+    twitchStreamKey: FieldValue.delete(),
+    youtubeKeyMasked: maskSecretTail(keys.youtube),
+    facebookKeyMasked: maskSecretTail(keys.facebook),
+    twitchKeyMasked: maskSecretTail(keys.twitch),
+  };
+}
 
 router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as any, async (req, res) => {
   try {
@@ -224,26 +283,6 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       return res.status(403).json({ error: DESTINATION_LIMIT_EXCEEDED, limit: maxDestinations });
     }
 
-    // Save intent / status (optional but useful)
-    await ref.set(
-      {
-        uid,
-        roomId,
-        roomName,
-        youtubeStreamKey: youtubeStreamKey || null,
-        facebookStreamKey: facebookStreamKey || null,
-        twitchStreamKey: twitchStreamKey || null,
-        destinationIds: destIds,
-        guestCount: Number(guestCount || 0),
-        status: "starting",
-        updatedAt: Date.now(),
-        presetRequestedId: requestedId,
-        presetEffectiveId: effectiveId,
-        usageType: "live",
-      },
-      { merge: true }
-    );
-
     // Build RTMP URLs for each platform and any stored destinations.
     // IMPORTANT: LiveKit applies a single encoding config per egress job,
     // so Instagram must be split into its own egress to allow 9:16.
@@ -252,18 +291,14 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
 
     const logEntries: Array<{ platform: string; url: string; keyLen: number; last4: string; source: string }> = [];
     const instagramLogEntries: Array<{ platform: string; url: string; keyLen: number; last4: string; source: string }> = [];
-    const maskUrl = (url: string) => {
-      const idx = url.lastIndexOf("/");
-      if (idx === -1) return "***";
-      return `${url.slice(0, idx + 1)}***`;
-    };
+    const maskUrl = (url: string) => redactRtmpUrl(url);
     const pushLog = (platform: string, url: string, key: string, source: string) => {
       urls.push(url);
-      logEntries.push({ platform, url: maskUrl(url), keyLen: key.length, last4: key.slice(-4), source });
+      logEntries.push({ platform, url: maskUrl(url), keyLen: key.length, last4: maskSecretTail(key) || "", source });
     };
     const pushInstagramLog = (platform: string, url: string, key: string, source: string) => {
       instagramUrls.push(url);
-      instagramLogEntries.push({ platform, url: maskUrl(url), keyLen: key.length, last4: key.slice(-4), source });
+      instagramLogEntries.push({ platform, url: maskUrl(url), keyLen: key.length, last4: maskSecretTail(key) || "", source });
     };
 
     if (youtubeStreamKey) {
@@ -376,13 +411,87 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       console.log("[multistream:start] Instagram RTMP URLs (masked):", instagramLogEntries);
     }
 
+    // Refuse to start a second set of egresses for the same room. A doc that
+    // claims running egress is verified against LiveKit so a stale doc (e.g.
+    // egress ended without /stop) doesn't block forever.
+    const existingSnap = await ref.get();
+    const existingDoc = existingSnap.exists ? (existingSnap.data() as any) : null;
+    const preDecision = decideMultistreamStart(existingDoc, Date.now(), MULTISTREAM_STARTING_TTL_MS);
+    if (preDecision.action === "in_progress") {
+      return res.status(409).json({ error: "multistream_start_in_progress" });
+    }
+    let verifiedInactiveIds: string[] = [];
+    if (preDecision.action === "conflict_check") {
+      const ids = preDecision.egressIds || [];
+      const stillActive = await findActiveEgressIds(ids);
+      if (stillActive.length > 0) {
+        return res.status(409).json({
+          error: "multistream_already_running",
+          egressId: existingDoc?.egressId || stillActive[0],
+          egressIds: existingDoc?.egressIds || null,
+          status: "started",
+        });
+      }
+      verifiedInactiveIds = ids;
+    }
+
+    // Transactional claim: only one request can move the doc to "starting".
+    const claimedAt = Date.now();
+    const claimed = await firestore.runTransaction(async (tx) => {
+      const snap = await tx.get(ref);
+      const cur = snap.exists ? (snap.data() as any) : null;
+      const decision = decideMultistreamStart(cur, Date.now(), MULTISTREAM_STARTING_TTL_MS);
+      if (decision.action === "in_progress") return false;
+      if (decision.action === "conflict_check") {
+        const ids = decision.egressIds || [];
+        // Someone else started new egress since our LiveKit check.
+        if (ids.some((id) => !verifiedInactiveIds.includes(id))) return false;
+      }
+      tx.set(
+        ref,
+        {
+          uid: ownerUid,
+          startedByUid: uid,
+          roomId,
+          roomName,
+          ...streamKeyFieldsForDoc({ youtube: youtubeStreamKey, facebook: facebookStreamKey, twitch: twitchStreamKey }),
+          destinationIds: destIds,
+          guestCount: Number(guestCount || 0),
+          status: "starting",
+          startingAt: claimedAt,
+          egressId: FieldValue.delete(),
+          egressIds: FieldValue.delete(),
+          updatedAt: claimedAt,
+          presetRequestedId: requestedId,
+          presetEffectiveId: effectiveId,
+          usageType: "live",
+        },
+        { merge: true }
+      );
+      return true;
+    });
+    if (!claimed) {
+      return res.status(409).json({ error: "multistream_start_in_progress" });
+    }
+
+    // Egresses started by THIS request; stopped again if anything fails.
+    const startedEgressIds: string[] = [];
+    const failStart = async (status: number, body: Record<string, any>) => {
+      await stopEgressesQuietly(startedEgressIds);
+      // Remove our claim: other code (recordings/start) treats the doc's
+      // existence as "a stream is live".
+      try {
+        await ref.delete();
+      } catch (e: any) {
+        console.warn("[multistream:start] failed to clear activeStreams claim", e?.message || e);
+      }
+      return res.status(status).json(body);
+    };
+
     try {
       // Import LiveKit egress client and types using dynamic helper
-      const { EgressClient, StreamOutput, StreamProtocol } = await getLiveKitSdk();
-      const livekitUrl = process.env.LIVEKIT_URL;
-      const livekitApiKey = process.env.LIVEKIT_API_KEY;
-      const livekitApiSecret = process.env.LIVEKIT_API_SECRET;
-      const egressClient = new EgressClient(livekitUrl, livekitApiKey, livekitApiSecret);
+      const { StreamOutput, StreamProtocol } = await getLiveKitSdk();
+      const egressClient = await getEgressClient();
 
       // Start separate egress jobs so Instagram can have a different encoder shape.
       const egressIds: { normal?: string; instagram?: string } = {};
@@ -409,14 +518,15 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         console.log("[multistream:start] Egress response (normal):", {
           egressId: (response as any)?.egressId,
           room: roomName,
-          raw: response,
+          status: (response as any)?.status,
         });
 
         if (!response.egressId) {
           console.error("[multistream:start] No egressId returned from LiveKit (normal)");
-          return res.status(500).json({ error: "Failed to start egress - no ID returned" });
+          return await failStart(500, { error: "Failed to start egress - no ID returned" });
         }
         egressIds.normal = response.egressId;
+        startedEgressIds.push(response.egressId);
       }
 
       if (instagramUrls.length > 0) {
@@ -443,7 +553,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         if (process.env.AUTH_DEBUG === "1") {
           console.log("[livekit-debug] startRoomCompositeEgress (instagram)", {
             livekitRoomName: roomName,
-            urls: instagramUrls,
+            urls: instagramUrls.map((u) => redactRtmpUrl(u)),
             instagramFit,
             instagramLayoutPreset: instagramLayoutPreset || null,
             igCustomBaseUrl: igCustomBaseUrl || "(fallback: single-speaker-dark)",
@@ -464,14 +574,15 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         console.log("[multistream:start] Egress response (instagram):", {
           egressId: (instagramResponse as any)?.egressId,
           room: roomName,
-          raw: instagramResponse,
+          status: (instagramResponse as any)?.status,
         });
 
         if (!instagramResponse.egressId) {
           console.error("[multistream:start] No egressId returned from LiveKit (instagram)");
-          return res.status(500).json({ error: "Failed to start instagram egress - no ID returned" });
+          return await failStart(500, { error: "Failed to start instagram egress - no ID returned" });
         }
         egressIds.instagram = instagramResponse.egressId;
+        startedEgressIds.push(instagramResponse.egressId);
       }
 
       const startedAt = Date.now();
@@ -481,7 +592,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       // Back-compat: keep top-level egressId for stop fallback + older clients.
       const primaryEgressId = egressIds.normal || egressIds.instagram;
       if (!primaryEgressId) {
-        return res.status(500).json({ error: "Failed to start egress - no ID returned" });
+        return await failStart(500, { error: "Failed to start egress - no ID returned" });
       }
 
       // Save to Firestore only after success
@@ -490,9 +601,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
           uid: ownerUid,
           roomId,
           roomName,
-          youtubeStreamKey: youtubeStreamKey || null,
-          facebookStreamKey: facebookStreamKey || null,
-          twitchStreamKey: twitchStreamKey || null,
+          ...streamKeyFieldsForDoc({ youtube: youtubeStreamKey, facebook: facebookStreamKey, twitch: twitchStreamKey }),
           guestCount: Number(guestCount || 0),
           status: "started",
           egressId: primaryEgressId,
@@ -571,8 +680,8 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         presetClamped: clamped,
       });
     } catch (err) {
-      console.error("[multistream:start] error:", err);
-      return res.status(500).json({ error: "Failed to start multistream", details: (err as any)?.message || String(err) });
+      console.error("[multistream:start] error:", (err as any)?.message || err);
+      return await failStart(500, { error: "Failed to start multistream" });
     }
   } catch (err) {
     console.error("[multistream:start] outer error:", err);

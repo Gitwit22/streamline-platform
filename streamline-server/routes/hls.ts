@@ -1,7 +1,8 @@
 import { Router } from "express";
 import admin from "firebase-admin";
 import { FieldValue } from "firebase-admin/firestore";
-import { getRoom, setHlsError, setHlsIdle, setHlsLive, setHlsStarting } from "../services/rooms";
+import { getRoom, setHlsError, setHlsIdle, setHlsLive, setHlsStarting, touchHlsHeartbeat, HLS_STALE_STARTING_MS } from "../services/rooms";
+import { decideHlsStart, shouldRefreshHlsHeartbeat } from "../lib/mediaPure";
 import { requireRoomAccessToken, type RoomAccessClaims, getRoomAccess } from "../middleware/roomAccessToken";
 import { requireAuth } from "../middleware/requireAuth";
 import { startHlsEgress, HlsPresetId, stopEgress } from "../services/livekitEgress";
@@ -20,7 +21,10 @@ import { roomHasActivePaidEvent } from "../lib/monetization";
 
 const router = Router();
 
-async function incrementHlsUsageMinutes(uid: string, minutes: number) {
+/** How often /status polling refreshes hls.heartbeatAt while live (purge uses its age). */
+const HLS_HEARTBEAT_INTERVAL_MS = 60_000;
+
+export async function incrementHlsUsageMinutes(uid: string, minutes: number) {
   const safeMinutes = Math.max(0, Math.round(Number(minutes || 0)));
   if (!uid || !safeMinutes) return;
 
@@ -215,8 +219,9 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
     if (room.roomType !== "rtc") return res.status(400).json({ error: "roomType must be rtc" });
 
     // IDEMPOTENT: if already starting/live, just return what we have
+    // (fast path; the transactional claim below is authoritative).
     const status = room.hls?.status || "idle";
-    if (status === "starting" || status === "live") {
+    if (decideHlsStart(room.hls, Date.now(), HLS_STALE_STARTING_MS).action === "existing") {
       return res.json({
         roomId,
         status,
@@ -249,12 +254,22 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
       // ignore cap lookup failures (treat as unlimited)
     }
 
-    // 1) Mark starting first (crash-safe)
-    await setHlsStarting(roomRef, { presetId, prefix, stopAt, capMinutes });
+    // 1) Atomically claim idle → starting (crash-safe). Concurrent starts:
+    // only one wins; the others get the existing state back.
+    const claim = await setHlsStarting(roomRef, { presetId, prefix, stopAt, capMinutes });
+    if (!claim.started) {
+      return res.json({
+        roomId,
+        status: claim.hls?.status || "starting",
+        egressId: claim.hls?.egressId || null,
+        playlistUrl: claim.hls?.playlistUrl || null,
+      });
+    }
 
+    let egressId: string | null = null;
     try {
       // 2) Start egress
-      const { egressId } = await startHlsEgress({
+      ({ egressId } = await startHlsEgress({
         roomName: livekitRoomName,
         layout: "speaker",
         prefix,
@@ -262,10 +277,10 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
         livePlaylistName,
         segmentDurationSec: 6,
         presetId,
-      });
+      }));
 
-      // 3) Mark live + store URLs
-      await setHlsLive(roomRef, { egressId, playlistUrl });
+      // 3) Mark live + store URLs (throws if the run was stopped/superseded meanwhile)
+      await setHlsLive(roomRef, { egressId, playlistUrl, runId: claim.runId });
 
       // 4) If this room is bound to a Saved Embed, keep the
       // embed's activeRoomId in sync so /live/:savedEmbedId
@@ -306,7 +321,19 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
         playlistUrl,
       });
     } catch (e: any) {
-      await setHlsError(roomRef, e?.message || "Failed to start HLS egress");
+      // Never leak an egress we started but could not record as live.
+      if (egressId) {
+        try {
+          await stopEgress(egressId);
+        } catch (stopErr: any) {
+          console.error("[hls] CRITICAL: failed to stop egress after start failure", { roomId, egressId, error: stopErr?.message || stopErr });
+        }
+        await cleanupHlsArtifacts({ roomId, prefix });
+      }
+      if (e?.message === "hls_run_superseded") {
+        return res.status(409).json({ error: "hls_start_superseded" });
+      }
+      await setHlsError(roomRef, e?.message || "Failed to start HLS egress", claim.runId).catch(() => {});
       return res.status(500).json({ error: "Failed to start HLS egress", details: e?.message });
     }
   } catch (e: any) {
@@ -429,6 +456,13 @@ router.get("/status/:roomId", requireAuth as any, requireRoomAccessToken as any,
           error: null,
         });
       }
+    }
+
+    // Heartbeat: host polling proves the session is attended. The stale-HLS
+    // purge decides by heartbeat age, so long streams are never killed while
+    // someone is polling. Throttled to one write per interval.
+    if (shouldRefreshHlsHeartbeat(hls, Date.now(), HLS_HEARTBEAT_INTERVAL_MS)) {
+      void touchHlsHeartbeat(firestore.collection("rooms").doc(roomId)).catch(() => {});
     }
 
     // Phase 3 spec: return flat shape so clients can

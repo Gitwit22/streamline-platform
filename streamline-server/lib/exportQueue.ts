@@ -11,6 +11,7 @@
 import { firestore as db } from "../firebaseAdmin";
 import { logger } from "./logger";
 import type { ExportJobDoc, ExportJobStatus, ExportSettingsInput, ExportTimeline } from "./exportTypes";
+import { ACTIVE_EXPORT_STATUSES, isStaleExportJob, isTerminalExportStatus } from "./mediaPure";
 
 const COLLECTION = "editing_exports";
 
@@ -132,11 +133,31 @@ export async function claimNextJob(): Promise<ExportJobDoc | null> {
   }
 }
 
+type JobPatch = Parameters<typeof updateExportJob>[1];
+
 /**
- * Mark a job as failed (terminal).
+ * Apply a patch only while the job is still non-terminal (queued/preparing/
+ * rendering/uploading). Returns false when the job was canceled, failed (e.g.
+ * reaped) or completed in the meantime — the caller must stop work.
  */
-export async function failJob(jobId: string, errorMessage: string): Promise<void> {
-  await updateExportJob(jobId, {
+export async function updateExportJobIfActive(jobId: string, patch: JobPatch): Promise<boolean> {
+  const ref = db.collection(COLLECTION).doc(jobId);
+  return db.runTransaction(async (txn) => {
+    const snap = await txn.get(ref);
+    if (!snap.exists) return false;
+    const status = (snap.data() as any)?.status;
+    if (isTerminalExportStatus(status)) return false;
+    txn.set(ref, patch, { merge: true });
+    return true;
+  });
+}
+
+/**
+ * Mark a job as failed (terminal). No-op if it already reached a terminal
+ * state (a canceled or completed job is never overwritten).
+ */
+export async function failJob(jobId: string, errorMessage: string): Promise<boolean> {
+  return updateExportJobIfActive(jobId, {
     status: "failed",
     currentStep: "Failed",
     errorMessage: (errorMessage || "Unknown error").slice(0, 500),
@@ -145,10 +166,11 @@ export async function failJob(jobId: string, errorMessage: string): Promise<void
 }
 
 /**
- * Mark a job as completed with output info.
+ * Mark a job as completed with output info. Returns false (and writes
+ * nothing) if the job was canceled or reaped while the worker was busy.
  */
-export async function completeJob(jobId: string, outputUrl: string, outputPath: string): Promise<void> {
-  await updateExportJob(jobId, {
+export async function completeJob(jobId: string, outputUrl: string, outputPath: string): Promise<boolean> {
+  return updateExportJobIfActive(jobId, {
     status: "completed",
     progressPercent: 100,
     currentStep: "Complete",
@@ -159,19 +181,56 @@ export async function completeJob(jobId: string, outputUrl: string, outputPath: 
 }
 
 /**
+ * Fail jobs stuck in preparing/rendering/uploading whose startedAt is older
+ * than maxAgeMs (the worker crashed or the instance restarted mid-job).
+ * Uses a single-field `in` query (no composite index needed).
+ */
+export async function reapStaleExportJobs(maxAgeMs: number, limit = 100): Promise<number> {
+  const snap = await db
+    .collection(COLLECTION)
+    .where("status", "in", [...ACTIVE_EXPORT_STATUSES])
+    .limit(limit)
+    .get();
+
+  const nowMs = Date.now();
+  let reaped = 0;
+  for (const doc of snap.docs) {
+    if (!isStaleExportJob(doc.data() as any, nowMs, maxAgeMs)) continue;
+    try {
+      const didReap = await db.runTransaction(async (txn) => {
+        const fresh = await txn.get(doc.ref);
+        if (!fresh.exists) return false;
+        if (!isStaleExportJob(fresh.data() as any, Date.now(), maxAgeMs)) return false;
+        txn.set(
+          doc.ref,
+          {
+            status: "failed",
+            currentStep: "Failed",
+            errorMessage: "Export timed out (worker stopped responding)",
+            completedAt: new Date(),
+          },
+          { merge: true }
+        );
+        return true;
+      });
+      if (didReap) {
+        reaped += 1;
+        logger.warn({ jobId: doc.id }, "Reaped stale export job");
+      }
+    } catch (err) {
+      logger.warn({ jobId: doc.id, err: (err as any)?.message }, "Failed to reap stale export job");
+    }
+  }
+  return reaped;
+}
+
+/**
  * Cancel a job (only if it's still in a non-terminal state).
  */
 export async function cancelJob(jobId: string): Promise<boolean> {
-  const job = await getExportJob(jobId);
-  if (!job) return false;
-
-  const terminalStates: ExportJobStatus[] = ["completed", "failed", "canceled"];
-  if (terminalStates.includes(job.status)) return false;
-
-  await updateExportJob(jobId, {
+  return updateExportJobIfActive(jobId, {
     status: "canceled",
     currentStep: "Canceled",
     completedAt: new Date(),
   });
-  return true;
 }

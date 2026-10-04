@@ -9,6 +9,7 @@ import {
   ListObjectsV2Command,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import fs from "fs";
 
 // Unified R2 env scheme
 const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
@@ -92,6 +93,40 @@ export async function uploadVideo(
   } catch (error) {
     console.error(`❌ Failed to upload ${remotePath}:`, error);
     throw new Error(`Failed to upload video to R2: ${error}`);
+  }
+}
+
+/**
+ * Upload a file from local disk to R2 by streaming it (never buffers the whole
+ * file in memory). Used for multipart uploads spooled to os.tmpdir() and for
+ * rendered exports.
+ * @returns Public URL of the uploaded file
+ */
+export async function uploadFileFromPath(
+  localPath: string,
+  remotePath: string,
+  contentType: string = "video/mp4"
+): Promise<string> {
+  const { size } = await fs.promises.stat(localPath);
+  const body = fs.createReadStream(localPath);
+  try {
+    const command = new PutObjectCommand({
+      Bucket: R2_BUCKET,
+      Key: remotePath,
+      Body: body,
+      ContentLength: size,
+      ContentType: contentType,
+    });
+
+    await s3Client.send(command);
+    console.log(`✅ Uploaded (stream): ${remotePath}`);
+
+    return getPublicUrl(remotePath);
+  } catch (error) {
+    console.error(`❌ Failed to upload ${remotePath}:`, error);
+    throw new Error(`Failed to upload video to R2: ${error}`);
+  } finally {
+    body.destroy();
   }
 }
 
@@ -317,6 +352,7 @@ export function generateThumbnailPath(userId: string, roomName: string, timestam
 
 export default {
   uploadVideo,
+  uploadFileFromPath,
   getSignedDownloadUrl,
   getSignedUploadUrl,
   deleteFile,

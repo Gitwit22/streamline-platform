@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { firestore } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
-import { getSignedDownloadUrl, headObjectSize, isR2Configured } from "../lib/storageClient";
+import { headObjectSize, isR2Configured } from "../lib/storageClient";
+import { buildRecordingDownloadLink } from "./recordings";
 import { resolveRoomIdentity } from "../lib/roomIdentity";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 
@@ -247,9 +248,38 @@ router.get("/:roomId/latest-recording", requireAuth, async (req, res) => {
       });
     }
 
-    const ttlSeconds = 3600;
-    const downloadUrl = await getSignedDownloadUrl(objectKey, ttlSeconds);
-    const expiresAtMs = Date.now() + ttlSeconds * 1000;
+    // Same rules as GET /api/recordings/:id/download-link (feature flag,
+    // ownership, strict ready, retention expiry, paywall, 15-minute TTL).
+    const link = await buildRecordingDownloadLink({ uid, recordingId, data: rec });
+    if (link.kind !== "ok" || !link.url) {
+      const errorByKind: Record<string, string> = {
+        feature_disabled: "feature_disabled",
+        forbidden: "forbidden",
+        not_ready: "not_ready",
+        expired: "expired",
+        paywall: "requires_payment",
+        missing_key: "missing_object_key",
+        sign_failed: "download_link_unavailable",
+      };
+      return res.status(200).json({
+        ok: true,
+        roomId,
+        state: (link.kind === "not_ready" ? "processing" : "ready") as LatestRecordingState,
+        recordingId,
+        downloadUrl: null,
+        signedUrl: null,
+        expiresAt: null,
+        expiresAtMs: null,
+        fileSize: typeof rec.fileSize === "number" ? rec.fileSize : null,
+        storageConfigured: true,
+        expired: link.kind === "expired" || undefined,
+        paywall: link.kind === "paywall" || undefined,
+        error: errorByKind[link.kind] || "download_link_unavailable",
+      });
+    }
+
+    const downloadUrl = link.url;
+    const expiresAtMs = Date.now() + (link.expiresIn || 0) * 1000;
     const expiresAt = new Date(expiresAtMs).toISOString();
 
     return res.status(200).json({

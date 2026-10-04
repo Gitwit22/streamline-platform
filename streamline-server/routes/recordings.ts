@@ -46,6 +46,7 @@ import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { createSavedVideoFromRecording } from "./myContent";
 import { releaseStorageUsage, reserveStorageUsage } from "../usageHelper";
 import { requireAdmin } from "../middleware/adminAuth";
+import { DOWNLOAD_LINK_TTL_SECONDS, evaluateDownloadRules, shouldClaimStorageCount } from "../lib/mediaPure";
 
 const router = Router();
 
@@ -341,20 +342,6 @@ async function incrementRecordingUsage(uid: string, minutes: number) {
       console.warn("[usage][recording] long single recording detected", { uid, minutes });
     }
   }
-}
-
-function computeExpiry(
-  readyAt?: Timestamp | Date | null,
-  retentionMinutes: number = DEFAULT_RETENTION_MINUTES
-): Date | null {
-  if (!readyAt) return null;
-  const readyDate = readyAt instanceof Timestamp ? readyAt.toDate() : readyAt;
-  return new Date(readyDate.getTime() + retentionMinutes * 60 * 1000);
-}
-
-function isExpired(readyAt?: Timestamp | Date | null, retentionMinutes?: number): boolean {
-  const expires = computeExpiry(readyAt, retentionMinutes);
-  return expires ? Date.now() >= expires.getTime() : false;
 }
 
 function mapRecordingDoc(id: string, data: any) {
@@ -1666,23 +1653,34 @@ router.post(
         try {
           const size = await r2HeadObjectSize(objectKey);
           if (size > 0) {
-            // Re-read the doc to check storageCounted flag (webhook may have arrived first)
-            const freshSnap = await recordingRef.get();
-            const freshData = freshSnap.exists ? (freshSnap.data() || {}) : {} as any;
-            const alreadyCounted = freshData.storageCounted === true;
-
-            await recordingRef.update({
-              status: "ready",
-              downloadReady: true,
-              readyAt: new Date(),
-              fileSize: size,
-              updatedAt: new Date(),
-              // Mark storage as counted to prevent double-counting by webhook
-              ...(!alreadyCounted ? { storageCounted: true } : {}),
+            // Flip storageCounted inside a transaction: the egress_ended
+            // webhook may race us, and only the call that performs the flip
+            // may count the bytes.
+            const flip = await firestore.runTransaction(async (tx) => {
+              const freshSnap = await tx.get(recordingRef);
+              if (!freshSnap.exists) return { skip: true, claimed: false };
+              const freshData = (freshSnap.data() || {}) as any;
+              const freshStatus = String(freshData.status || "").toLowerCase();
+              if (freshStatus === "deleted" || freshStatus === "deleting") return { skip: true, claimed: false };
+              const claimed = shouldClaimStorageCount(freshData, size);
+              tx.update(recordingRef, {
+                status: "ready",
+                downloadReady: true,
+                readyAt: freshData.readyAt || new Date(),
+                fileSize: size,
+                updatedAt: new Date(),
+                ...(claimed ? { storageCounted: true } : {}),
+              });
+              return { skip: false, claimed };
             });
+            if (flip.skip) {
+              console.warn(`[recordings/stop] head-check skipped: recording ${recordingId} missing or deleted`);
+              return;
+            }
+            const alreadyCounted = !flip.claimed;
             console.log(`[recordings/stop] ✅ File confirmed via head-check: ${objectKey} (${size} bytes)`);
 
-            // Count storage for this recording (only if not already counted by webhook)
+            // Count storage for this recording (only if this call flipped storageCounted)
             if (!alreadyCounted && accountUid) {
               try {
                 await reserveStorageUsage(accountUid, size, {
@@ -1950,6 +1948,98 @@ router.delete("/:id", requireAuth, requireMyContentRecordingsEnabled as any, asy
 // Per spec: 15-minute TTL, strict status === "ready" check
 // =============================================================================
 
+export type RecordingDownloadLinkOutcome = {
+  kind: "ok" | "feature_disabled" | "forbidden" | "not_ready" | "expired" | "paywall" | "missing_key" | "sign_failed";
+  httpStatus: number;
+  body: Record<string, any>;
+  url?: string;
+  expiresIn?: number;
+};
+
+/**
+ * Single implementation of the recording download-link rules, shared by
+ * GET /api/recordings/:id/download-link and GET /api/rooms/:roomId/latest-recording:
+ * platform feature flag, ownership, strict status === "ready" + downloadReady,
+ * retention expiry, paywall, and a 15-minute signed URL.
+ */
+export async function buildRecordingDownloadLink(params: {
+  uid: string | null;
+  recordingId: string;
+  data: any;
+  confirm?: boolean;
+}): Promise<RecordingDownloadLinkOutcome> {
+  const { uid, recordingId } = params;
+  const data = params.data || {};
+
+  const flags = await getMyContentPlatformFlags();
+  if (!flags.myContentRecordingsEnabled) {
+    return {
+      kind: "feature_disabled",
+      httpStatus: 403,
+      body: {
+        error: LIMIT_ERRORS.FEATURE_DISABLED,
+        feature: "myContentRecordingsEnabled",
+        reason: "Recordings are disabled by featureFlags/myContentRecordingsEnabled",
+        platformFlags: flags,
+      },
+    };
+  }
+
+  // Verify ownership
+  if (data.userId && data.userId !== uid) {
+    return { kind: "forbidden", httpStatus: 403, body: { error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS } };
+  }
+
+  // STRICT CHECK: only status === "ready" (webhook verified the file in R2),
+  // then retention expiry, then paywall.
+  const rules = evaluateDownloadRules(data, Date.now(), DEFAULT_RETENTION_MINUTES);
+  if (rules.kind === "not_ready") {
+    return {
+      kind: "not_ready",
+      httpStatus: 200,
+      body: { success: false, downloadReady: false, status: rules.status, message: rules.message },
+    };
+  }
+  if (rules.kind === "expired") {
+    return { kind: "expired", httpStatus: 410, body: { success: false, expired: true, message: "Recording link expired" } };
+  }
+  if (rules.kind === "paywall") {
+    return { kind: "paywall", httpStatus: 402, body: { success: false, paywall: true, message: "Upgrade required to download" } };
+  }
+  if (rules.kind === "missing_key" || !rules.objectKey) {
+    return { kind: "missing_key", httpStatus: 500, body: { success: false, error: "Missing recording file reference" } };
+  }
+
+  // Signed URL with 15-minute TTL per spec
+  let signedUrl: string;
+  try {
+    signedUrl = await getSignedDownloadUrl(rules.objectKey, DOWNLOAD_LINK_TTL_SECONDS);
+  } catch (e: any) {
+    console.error("[recordings/download-link] Signed URL error:", e);
+    return {
+      kind: "sign_failed",
+      httpStatus: 500,
+      body: { success: false, error: "Download link unavailable. Try Emergency Download." },
+    };
+  }
+
+  // Track download request
+  const updates: any = { lastDownloadRequestedAt: Timestamp.now() };
+  if (params.confirm) updates.downloadConfirmedAt = Timestamp.now();
+  await firestore.collection("recordings").doc(recordingId).set(updates, { merge: true });
+
+  return {
+    kind: "ok",
+    httpStatus: 200,
+    url: signedUrl,
+    expiresIn: DOWNLOAD_LINK_TTL_SECONDS,
+    body: {
+      success: true,
+      data: { url: signedUrl, downloadReady: true, expiresIn: DOWNLOAD_LINK_TTL_SECONDS },
+    },
+  };
+}
+
 router.get("/:id/download-link", requireAuth, requireMyContentRecordingsEnabled as any, async (req, res) => {
   try {
     const uid = getAuthUserId(req);
@@ -1960,85 +2050,9 @@ router.get("/:id/download-link", requireAuth, requireMyContentRecordingsEnabled 
       return res.status(404).json({ error: "Recording not found" });
     }
 
-    const data = snap.data() || {};
-    
-    // Verify ownership
-    if (data.userId && data.userId !== uid) {
-      return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
-    }
-
-    // STRICT CHECK: Only allow download if status is exactly "ready"
-    // This ensures webhook has verified file exists in R2
-    const status = String(data.status || "").toLowerCase();
-    const downloadReady = data.downloadReady === true && status === "ready";
-
-    if (!downloadReady) {
-      return res.json({
-        success: false,
-        downloadReady: false,
-        status: status,
-        message: status === "failed" 
-          ? `Recording failed: ${data.errorMessage || "Unknown error"}`
-          : "Recording is still processing",
-      });
-    }
-
-    // Check expiry
-    const readyAt = data.readyAt || data.stoppedAt || null;
-    if (isExpired(readyAt)) {
-      return res.status(410).json({
-        success: false,
-        expired: true,
-        message: "Recording link expired",
-      });
-    }
-
-    // Paywall hook (MVP: always "none")
-    if (data.paywallState === "requires_payment") {
-      return res.status(402).json({
-        success: false,
-        paywall: true,
-        message: "Upgrade required to download",
-      });
-    }
-
-    const objectKey = normalizeStorageKey(data.objectKey || data.downloadPath);
-    if (!objectKey) {
-      return res.status(500).json({
-        success: false,
-        error: "Missing recording file reference",
-      });
-    }
-
-    // Generate signed URL with 15-minute TTL per spec
-    const DOWNLOAD_TTL_SECONDS = 15 * 60; // 15 minutes
-    let signedUrl: string;
-    try {
-      signedUrl = await getSignedDownloadUrl(objectKey, DOWNLOAD_TTL_SECONDS);
-    } catch (e: any) {
-      console.error("[recordings/download-link] Signed URL error:", e);
-      return res.status(500).json({
-        success: false,
-        error: "Download link unavailable. Try Emergency Download.",
-      });
-    }
-
-    // Track download request
     const confirm = req.query.confirm === "true" || req.query.confirm === "1";
-    const updates: any = { lastDownloadRequestedAt: Timestamp.now() };
-    if (confirm) updates.downloadConfirmedAt = Timestamp.now();
-
-    await firestore.collection("recordings").doc(recordingId).set(updates, { merge: true });
-
-    return res.json({
-      success: true,
-      data: { 
-        url: signedUrl, 
-        downloadReady: true,
-        expiresIn: DOWNLOAD_TTL_SECONDS,
-      },
-    });
-
+    const outcome = await buildRecordingDownloadLink({ uid, recordingId, data: snap.data() || {}, confirm });
+    return res.status(outcome.httpStatus).json(outcome.body);
   } catch (err: any) {
     console.error("[recordings/download-link] Error:", err);
     return res.status(500).json({ error: "Failed to generate download link" });

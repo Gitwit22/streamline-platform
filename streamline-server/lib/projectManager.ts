@@ -11,6 +11,8 @@
 
 import { firestore } from "../firebaseAdmin";
 import { FieldValue } from "firebase-admin/firestore";
+import { deleteFile } from "./storageClient";
+import { releaseStorageUsage } from "../usageHelper";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -54,6 +56,12 @@ export interface ProjectAssetDoc {
   duration: number | null;  // seconds
   resolution: string | null;
   size: number | null;      // bytes
+  /**
+   * Bytes reserved against the owner's storage quota for an object this asset
+   * owns (uploads). Released exactly once when the asset is deleted.
+   * Absent on recording-backed assets (the recording owns the object/bytes).
+   */
+  storageBytes?: number | null;
   processingStatus: ProcessingStatus;
   createdAt: FirebaseFirestore.Timestamp;
   updatedAt: FirebaseFirestore.Timestamp;
@@ -180,6 +188,7 @@ export async function addAssetToProject(opts: {
   duration?: number | null;
   resolution?: string | null;
   size?: number | null;
+  storageBytes?: number | null;
   processingStatus?: ProcessingStatus;
 }): Promise<ProjectAssetDoc> {
   const ref = assetsColl().doc();
@@ -195,6 +204,7 @@ export async function addAssetToProject(opts: {
     duration: opts.duration ?? null,
     resolution: opts.resolution ?? null,
     size: opts.size ?? null,
+    ...(typeof opts.storageBytes === "number" && opts.storageBytes > 0 ? { storageBytes: opts.storageBytes } : {}),
     processingStatus: opts.processingStatus ?? "ready",
     createdAt: now,
     updatedAt: now,
@@ -244,12 +254,58 @@ export async function getProjectAsset(assetId: string): Promise<ProjectAssetDoc 
   return { id: snap.id, ...(snap.data() as any) } as ProjectAssetDoc;
 }
 
-export async function deleteProjectAsset(assetId: string, projectId: string): Promise<void> {
-  await assetsColl().doc(assetId).delete();
-  await projectsColl().doc(projectId).update({
-    assetCount: FieldValue.increment(-1),
-    updatedAt: FieldValue.serverTimestamp(),
+/**
+ * Delete a project asset. Uploaded assets own their R2 object: it is deleted
+ * first (idempotent), then the doc is removed in a transaction and the quota
+ * bytes are released only by the call that actually removed the doc, so
+ * concurrent deletes can't double-release. Recording-backed assets never
+ * delete the recording's object.
+ */
+export async function deleteProjectAsset(
+  assetId: string,
+  projectId: string,
+): Promise<{ deleted: boolean; releasedBytes: number }> {
+  const ref = assetsColl().doc(assetId);
+  const snap = await ref.get();
+  if (!snap.exists) return { deleted: false, releasedBytes: 0 };
+  const data = (snap.data() || {}) as Partial<ProjectAssetDoc>;
+
+  const ownsObject = data.type === "upload" && typeof data.storageKey === "string" && data.storageKey.trim().length > 0;
+  if (ownsObject) {
+    // Throws on failure: keep the doc so the delete can be retried.
+    await deleteFile(String(data.storageKey).trim());
+  }
+
+  const deleted = await firestore.runTransaction(async (tx) => {
+    const fresh = await tx.get(ref);
+    if (!fresh.exists) return false;
+    tx.delete(ref);
+    tx.set(
+      projectsColl().doc(projectId),
+      { assetCount: FieldValue.increment(-1), updatedAt: FieldValue.serverTimestamp() },
+      { merge: true },
+    );
+    return true;
   });
+
+  const bytes = Number(data.storageBytes) || 0;
+  let releasedBytes = 0;
+  if (deleted && ownsObject && bytes > 0 && data.ownerId) {
+    try {
+      await releaseStorageUsage(String(data.ownerId), bytes, {
+        caller: "projectManager.deleteProjectAsset",
+        assetId,
+        projectId,
+      });
+      releasedBytes = bytes;
+    } catch (e: any) {
+      console.error("[projects] STORAGE RELEASE FAILED for deleted asset — needs reconciliation", {
+        assetId, projectId, ownerId: data.ownerId, bytes, error: e?.message || e,
+      });
+    }
+  }
+
+  return { deleted, releasedBytes };
 }
 
 // ── Auto-project from recording ──────────────────────────────────────────────

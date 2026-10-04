@@ -5,7 +5,9 @@ import { deleteFile, deleteFiles, deletePrefix } from "../lib/storageClient";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { releaseStorageUsage } from "../usageHelper";
 import { stopEgress } from "../services/livekitEgress";
-import { setHlsIdle } from "../services/rooms";
+import { setHlsIdleIfRun } from "../services/rooms";
+import { incrementHlsUsageMinutes } from "./hls";
+import { advanceablePrefixLength, computeHlsBilledMinutes, hlsLastSeenMs, isHlsSessionStale } from "../lib/mediaPure";
 
 const router = Router();
 
@@ -371,12 +373,16 @@ async function purgeExpiredRecordings(now: Date, opts?: { limit?: number }): Pro
 }
 
 async function purgeStaleHls(now: Date, opts?: { ttlMinutes?: number; limit?: number }) {
-  const ttlMinutes = typeof opts?.ttlMinutes === "number" && Number.isFinite(opts.ttlMinutes) ? opts.ttlMinutes : 180;
+  // Staleness is measured from the last heartbeat (refreshed by host /status
+  // polling while live), so a long but attended stream is never purged.
+  const ttlMinutes = typeof opts?.ttlMinutes === "number" && Number.isFinite(opts.ttlMinutes) && opts.ttlMinutes > 0 ? opts.ttlMinutes : 180;
   const limit = typeof opts?.limit === "number" && Number.isFinite(opts.limit) ? Math.max(1, Math.min(500, opts.limit)) : 100;
-  const cutoffMs = now.getTime() - ttlMinutes * 60 * 1000;
+  const ttlMs = ttlMinutes * 60 * 1000;
+  const nowMs = now.getTime();
 
   let purgedCount = 0;
   let considered = 0;
+  let billedMinutesTotal = 0;
 
   // Prefer a targeted query; if Firestore complains about indexes, fall back to a bounded scan.
   let docs: FirebaseFirestore.QueryDocumentSnapshot[] = [];
@@ -403,22 +409,12 @@ async function purgeStaleHls(now: Date, opts?: { ttlMinutes?: number; limit?: nu
     if (status !== "starting" && status !== "live" && status !== "error") continue;
 
     considered += 1;
-
-    // Determine staleness from Firestore timestamps when available.
-    let updatedAtMs: number | null = null;
-    const updatedAt = hls.updatedAt;
-    try {
-      if (updatedAt?.toDate) updatedAtMs = updatedAt.toDate().getTime();
-      else if (updatedAt instanceof Date) updatedAtMs = updatedAt.getTime();
-      else if (typeof updatedAt === "number") updatedAtMs = updatedAt;
-    } catch {
-      updatedAtMs = null;
-    }
-    if (updatedAtMs && updatedAtMs > cutoffMs) continue;
+    if (!isHlsSessionStale(hls, nowMs, ttlMs)) continue;
 
     const roomId = doc.id;
     const prefix = String(hls.prefix || `hls/${roomId}/`).trim();
     const egressId = typeof hls.egressId === "string" ? hls.egressId : null;
+    const runId = typeof hls.runId === "string" ? hls.runId : null;
 
     try {
       if (egressId) {
@@ -435,19 +431,48 @@ async function purgeStaleHls(now: Date, opts?: { ttlMinutes?: number; limit?: nu
         console.warn("[maintenance/purge-stale-hls] deletePrefix failed", { roomId, prefix, error: e?.message || e });
       }
 
+      // Transition idle only if the same run still owns the room; exactly one
+      // of (stop, auto-stop, purge) bills for a run that we flip here.
+      let flipped = false;
       try {
-        await setHlsIdle(doc.ref);
+        flipped = await setHlsIdleIfRun(doc.ref, runId);
       } catch (e: any) {
         console.warn("[maintenance/purge-stale-hls] setHlsIdle failed", { roomId, error: e?.message || e });
       }
 
-      purgedCount += 1;
+      // Bill the egress time like /api/hls/stop does. The egress kept running
+      // (and costing transcode) until we stopped it now.
+      if (flipped && egressId && status === "live") {
+        const minutes = computeHlsBilledMinutes(hls.startedAt, nowMs);
+        const usageUid = String(data.ownerId || "").trim();
+        if (minutes > 0 && usageUid) {
+          try {
+            await incrementHlsUsageMinutes(usageUid, minutes);
+            billedMinutesTotal += minutes;
+          } catch (e: any) {
+            console.error("[maintenance/purge-stale-hls] failed to bill HLS minutes", { roomId, usageUid, minutes, error: e?.message || e });
+          }
+        }
+      }
+
+      if (flipped) {
+        purgedCount += 1;
+        console.warn("[maintenance/purge-stale-hls] purged stale session", {
+          roomId,
+          status,
+          egressId,
+          lastSeenAt: (() => {
+            const ms = hlsLastSeenMs(hls);
+            return ms ? new Date(ms).toISOString() : null;
+          })(),
+        });
+      }
     } catch (e: any) {
       console.warn("[maintenance/purge-stale-hls] failed", { roomId, error: e?.message || e });
     }
   }
 
-  return { ok: true, purgedCount, considered, ttlMinutes, limit };
+  return { ok: true, purgedCount, considered, ttlMinutes, limit, billedMinutes: billedMinutesTotal };
 }
 
 router.get("/expire-emergency-recordings", async (_req, res) => {
@@ -541,75 +566,146 @@ export async function purgeOldRecordings(
       : 200;
   const dryRun = opts?.dryRun === true;
 
-  let snap: FirebaseFirestore.QuerySnapshot;
-  try {
-    snap = await firestore
-      .collection("recordings")
-      .where("createdAt", "<", cutoff)
-      .limit(limit)
-      .get();
-  } catch (e: any) {
-    console.warn("[maintenance/purge-old-recordings] query failed", e?.message || e);
-    return { deletedCount: 0, skippedCount: 0, dryRun };
+  // Page through old recordings in createdAt order. Docs that can never be
+  // purged (already deleted) used to fill every 200-doc page forever and stall
+  // the purge; now we page with startAfter, and persist a cursor past the
+  // leading run of finished docs so each run starts where work remains.
+  // Single-field range + orderBy on createdAt: no composite index needed.
+  const cursorRef = firestore.collection("maintenanceState").doc("purgeOldRecordings");
+  let cursorMs: number | null = null;
+  if (!dryRun) {
+    try {
+      const cursorSnap = await cursorRef.get();
+      const raw = cursorSnap.exists ? (cursorSnap.data() as any)?.createdAtCursorMs : null;
+      cursorMs = typeof raw === "number" && Number.isFinite(raw) ? raw : null;
+    } catch (e: any) {
+      console.warn("[maintenance/purge-old-recordings] failed to read cursor", e?.message || e);
+    }
   }
+
+  const PAGE_SIZE = 200;
+  const MAX_SCANNED = 5000;
 
   let deletedCount = 0;
   let skippedCount = 0;
+  let scanned = 0;
+  // Leading run of "permanently done" docs (for cursor advance).
+  const doneFlags: boolean[] = [];
+  const createdAtMsList: (number | null)[] = [];
+  let lastDoc: FirebaseFirestore.QueryDocumentSnapshot | null = null;
 
-  for (const doc of snap.docs) {
-    const data = (doc.data() || {}) as any;
-    const status = String(data.status || "").toLowerCase();
+  const docCreatedMs = (d: any): number | null => {
+    const v = d?.createdAt;
+    if (!v) return null;
+    if (v instanceof Date) return v.getTime();
+    if (typeof v?.toDate === "function") return v.toDate().getTime();
+    if (typeof v === "number") return v;
+    return null;
+  };
 
-    // Never delete active or already-deleted recordings.
-    if (status === "deleted" || ACTIVE_STATUSES.has(status)) {
-      skippedCount += 1;
-      continue;
+  while (deletedCount < limit && scanned < MAX_SCANNED) {
+    let query: FirebaseFirestore.Query = firestore
+      .collection("recordings")
+      .where("createdAt", "<", cutoff)
+      .orderBy("createdAt", "asc");
+    if (lastDoc) {
+      query = query.startAfter(lastDoc);
+    } else if (cursorMs !== null) {
+      // startAt (not After): re-check docs sharing the cursor timestamp.
+      query = query.where("createdAt", ">=", new Date(cursorMs));
     }
 
-    if (dryRun) {
-      console.log(`[maintenance/purge-old-recordings] DRY RUN — would delete recording: ${doc.id}`);
-      deletedCount += 1;
-      continue;
-    }
-
-    const fileSize = typeof data.fileSize === "number" ? data.fileSize : 0;
-    const userId = typeof data.userId === "string" ? data.userId : null;
-    const storageReleased = data.storageReleased === true;
-
-    let storageDeleted = false;
+    let snap: FirebaseFirestore.QuerySnapshot;
     try {
-      await deleteRecordingStorage(data);
-      storageDeleted = true;
+      snap = await query.limit(PAGE_SIZE).get();
     } catch (e: any) {
-      console.warn(`[maintenance/purge-old-recordings] Failed to delete recording: ${doc.id}`, e?.message || e);
+      console.warn("[maintenance/purge-old-recordings] query failed", e?.message || e);
+      break;
     }
+    if (snap.empty) break;
 
-    if (storageDeleted && userId && fileSize > 0 && !storageReleased) {
+    for (const doc of snap.docs) {
+      scanned += 1;
+      lastDoc = doc;
+      const data = (doc.data() || {}) as any;
+      const status = String(data.status || "").toLowerCase();
+      createdAtMsList.push(docCreatedMs(data));
+
+      // Never delete active or already-deleted recordings.
+      if (status === "deleted" || ACTIVE_STATUSES.has(status)) {
+        skippedCount += 1;
+        doneFlags.push(status === "deleted");
+        continue;
+      }
+
+      if (deletedCount >= limit) {
+        doneFlags.push(false);
+        continue;
+      }
+
+      if (dryRun) {
+        console.log(`[maintenance/purge-old-recordings] DRY RUN — would delete recording: ${doc.id}`);
+        deletedCount += 1;
+        doneFlags.push(false);
+        continue;
+      }
+
+      const fileSize = typeof data.fileSize === "number" ? data.fileSize : 0;
+      const userId = typeof data.userId === "string" ? data.userId : null;
+      const storageReleased = data.storageReleased === true;
+
+      let storageDeleted = false;
       try {
-        await releaseStorageUsage(userId, fileSize, {
-          caller: "maintenance.purgeOldRecordings",
-          recordingId: doc.id,
-        });
+        await deleteRecordingStorage(data);
+        storageDeleted = true;
       } catch (e: any) {
-        console.warn("[maintenance/purge-old-recordings] storage release failed", {
-          userId, recordingId: doc.id, fileSize, error: e?.message || e,
-        });
+        console.warn(`[maintenance/purge-old-recordings] Failed to delete recording: ${doc.id}`, e?.message || e);
+      }
+
+      if (storageDeleted && userId && fileSize > 0 && !storageReleased) {
+        try {
+          await releaseStorageUsage(userId, fileSize, {
+            caller: "maintenance.purgeOldRecordings",
+            recordingId: doc.id,
+          });
+        } catch (e: any) {
+          console.warn("[maintenance/purge-old-recordings] storage release failed", {
+            userId, recordingId: doc.id, fileSize, error: e?.message || e,
+          });
+        }
+      }
+
+      try {
+        await doc.ref.set(
+          { status: "deleted", deleteReason: "expired_24h_retention", deletedAt: now, updatedAt: now, storageReleased: storageDeleted || storageReleased },
+          { merge: true }
+        );
+        deletedCount += 1;
+        doneFlags.push(true);
+        if (storageDeleted) {
+          console.log(`[maintenance/purge-old-recordings] Deleted expired recording: ${doc.id}`);
+        } else {
+          console.warn(`[maintenance/purge-old-recordings] Marked deleted in Firestore (R2 deletion had failed): ${doc.id}`);
+        }
+      } catch (e: any) {
+        doneFlags.push(false);
+        console.warn("[maintenance/purge-old-recordings] failed to update Firestore", { recordingId: doc.id, error: e?.message || e });
       }
     }
 
-    try {
-      await doc.ref.set(
-        { status: "deleted", deleteReason: "expired_24h_retention", deletedAt: now, updatedAt: now, storageReleased: storageDeleted || storageReleased },
-        { merge: true }
-      );
-      deletedCount += 1;
-      if (storageDeleted) {
-        console.log(`[maintenance/purge-old-recordings] Deleted expired recording: ${doc.id}`);
-      } else {
-        console.warn(`[maintenance/purge-old-recordings] Marked deleted in Firestore (R2 deletion had failed): ${doc.id}`);
+    if (snap.size < PAGE_SIZE) break;
+  }
+
+  // Advance the persisted cursor past the leading run of finished docs.
+  if (!dryRun) {
+    const n = advanceablePrefixLength(doneFlags);
+    const advanceTo = n > 0 ? createdAtMsList[n - 1] : null;
+    if (typeof advanceTo === "number" && (cursorMs === null || advanceTo > cursorMs)) {
+      try {
+        await cursorRef.set({ createdAtCursorMs: advanceTo, updatedAt: now }, { merge: true });
+      } catch (e: any) {
+        console.warn("[maintenance/purge-old-recordings] failed to persist cursor", e?.message || e);
       }
-    } catch (e: any) {
-      console.warn("[maintenance/purge-old-recordings] failed to update Firestore", { recordingId: doc.id, error: e?.message || e });
     }
   }
 

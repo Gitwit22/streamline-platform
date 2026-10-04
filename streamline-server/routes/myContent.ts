@@ -15,10 +15,10 @@
  */
 
 import { Router, Request, Response } from "express";
-import multer from "multer";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
-import { uploadVideo, deleteFile } from "../lib/storageClient";
+import { uploadFileFromPath, deleteFile } from "../lib/storageClient";
+import { createDiskUpload, cleanupUploadedFile } from "../lib/diskUpload";
 import { reserveStorageIfAvailable, releaseReservedStorage, releaseStorageUsage } from "../usageHelper";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
@@ -27,10 +27,8 @@ const router = Router();
 
 const MAX_FILE_SIZE = 500 * 1024 * 1024; // 500 MB
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: MAX_FILE_SIZE },
-});
+// Spool uploads to os.tmpdir() (not RAM) and stream them to R2.
+const upload = createDiskUpload(MAX_FILE_SIZE);
 
 function getAuthedUid(req: Request): string | null {
   const user = (req as any).user;
@@ -243,11 +241,11 @@ router.post(
   "/upload",
   upload.single("video") as any,
   async (req: Request, res: Response) => {
+    const file = (req as any).file as Express.Multer.File | undefined;
     try {
       const userId = getAuthedUid(req);
       if (!userId) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
 
-      const file = (req as any).file;
       if (!file) return res.status(400).json({ error: "No file uploaded" });
 
       // Enforce 500 MB limit
@@ -283,12 +281,12 @@ router.post(
 
       const timestamp = Date.now();
       const safeName = title.replace(/[^a-z0-9]/gi, "-").toLowerCase().replace(/-+/g, "-").replace(/^-+|-+$/g, "");
-      const ext = file.originalname.split(".").pop() || "mp4";
+      const ext = (file.originalname.split(".").pop() || "mp4").replace(/[^a-z0-9]/gi, "").slice(0, 8) || "mp4";
       const storagePath = `my-content/${userId}/${timestamp}-${safeName}.${ext}`;
 
-      let publicUrl: string;
+      let publicUrl: string | null = null;
       try {
-        publicUrl = await uploadVideo(file.buffer, storagePath, file.mimetype);
+        publicUrl = await uploadFileFromPath(file.path, storagePath, file.mimetype);
       } catch (uploadErr: any) {
         // Upload failed — release the reserved bytes so they aren't stranded.
         try {
@@ -321,7 +319,22 @@ router.post(
         createdAt: now,
       };
 
-      const ref = await db.collection("saved_videos").add(savedVideo);
+      let ref: FirebaseFirestore.DocumentReference;
+      try {
+        ref = await db.collection("saved_videos").add(savedVideo);
+      } catch (dbErr: any) {
+        // Record write failed after upload: remove the object and the bytes.
+        await deleteFile(storagePath).catch(() => {});
+        await releaseReservedStorage(userId, file.size, {
+          caller: "myContent.upload.rollback.record",
+          storagePath,
+        }).catch((releaseErr: any) => {
+          console.error("[my-content] CRITICAL: failed to release reservation after record failure", {
+            userId, storagePath, fileSizeBytes: file.size, error: releaseErr?.message,
+          });
+        });
+        throw dbErr;
+      }
 
       return res.status(201).json({
         id: ref.id,
@@ -331,6 +344,8 @@ router.post(
     } catch (err: any) {
       console.error("[my-content] upload error:", err?.message || err);
       return res.status(500).json({ error: "Failed to upload video" });
+    } finally {
+      await cleanupUploadedFile(file);
     }
   },
 );

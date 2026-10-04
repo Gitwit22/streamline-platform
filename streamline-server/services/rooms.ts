@@ -4,6 +4,7 @@ import { firestore as db } from "../firebaseAdmin";
 import type { HlsPresetId } from "./livekitEgress";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import type { RoomLayout } from "../lib/roomLayout";
+import { decideHlsStart } from "../lib/mediaPure";
 
 export type RoomHlsConfig = {
   enabled: boolean;
@@ -55,6 +56,7 @@ export type RoomDoc = {
     prefix?: string;
     startedAt?: FirebaseFirestore.Timestamp | null;
     updatedAt?: FirebaseFirestore.Timestamp | null;
+    heartbeatAt?: FirebaseFirestore.Timestamp | null;
   };
   hlsConfig?: RoomHlsConfig;
   /** Room-level monetization toggle (requires HLS). */
@@ -152,51 +154,108 @@ export async function getRoom(roomId: string): Promise<{
   return { ref, data };
 }
 
+/** A "starting" claim older than this is treated as abandoned and may be taken over. */
+export const HLS_STALE_STARTING_MS = 3 * 60_000;
+
+export type HlsStartClaim = {
+  /** true when this call moved the room to "starting" and owns the run. */
+  started: boolean;
+  runId: string | null;
+  /** Current hls state when started=false (existing starting/live session). */
+  hls: RoomDoc["hls"];
+};
+
+/**
+ * Atomically move hls idle/error → starting. If the room is already live, or
+ * another request claimed "starting" recently, nothing is written and the
+ * existing state is returned (started=false).
+ */
 export async function setHlsStarting(
   roomRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>,
   params: { presetId: HlsPresetId; prefix: string; stopAt?: string | null; capMinutes?: number | null }
-): Promise<void> {
+): Promise<HlsStartClaim> {
   const runId = randomUUID();
   const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
 
-  await roomRef.update({
-    "hls.status": "starting",
-    "hls.egressId": null,
-    "hls.playlistUrl": null,
-    "hls.error": null,
-    "hls.stopAt": params.stopAt ?? null,
-    "hls.capMinutes": params.capMinutes ?? null,
-    "hls.presetId": params.presetId,
-    "hls.prefix": params.prefix,
-    "hls.runId": runId,
-    "hls.startedAt": serverTimestamp,
-    "hls.updatedAt": serverTimestamp,
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(roomRef);
+    if (!snap.exists) throw new Error(PERMISSION_ERRORS.ROOM_NOT_FOUND);
+    const hls = ((snap.data() || {}) as RoomDoc).hls || {};
+    if (decideHlsStart(hls, Date.now(), HLS_STALE_STARTING_MS).action === "existing") {
+      return { started: false, runId: hls.runId ?? null, hls };
+    }
+
+    tx.update(roomRef, {
+      "hls.status": "starting",
+      "hls.egressId": null,
+      "hls.playlistUrl": null,
+      "hls.error": null,
+      "hls.stopAt": params.stopAt ?? null,
+      "hls.capMinutes": params.capMinutes ?? null,
+      "hls.presetId": params.presetId,
+      "hls.prefix": params.prefix,
+      "hls.runId": runId,
+      "hls.startedAt": serverTimestamp,
+      "hls.updatedAt": serverTimestamp,
+      "hls.heartbeatAt": serverTimestamp,
+    });
+    return { started: true, runId, hls: undefined };
   });
 }
 
+/**
+ * starting → live, only for the run that claimed "starting". Throws if the
+ * run was superseded (stopped / purged / taken over) so the caller can stop
+ * the egress it just started instead of leaking it.
+ */
 export async function setHlsLive(
   roomRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>,
-  params: { egressId: string; playlistUrl: string }
+  params: { egressId: string; playlistUrl: string; runId?: string | null }
 ): Promise<void> {
-  await roomRef.update({
+  const patch = {
     "hls.status": "live",
     "hls.egressId": params.egressId,
     "hls.playlistUrl": params.playlistUrl,
     "hls.error": null,
     "hls.updatedAt": admin.firestore.FieldValue.serverTimestamp(),
+    "hls.heartbeatAt": admin.firestore.FieldValue.serverTimestamp(),
+  };
+  if (!params.runId) {
+    await roomRef.update(patch);
+    return;
+  }
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(roomRef);
+    const hls = ((snap.data() || {}) as RoomDoc).hls || {};
+    if (!snap.exists || hls.runId !== params.runId || hls.status !== "starting") {
+      throw new Error("hls_run_superseded");
+    }
+    tx.update(roomRef, patch);
   });
 }
 
+/** Record a start failure. With runId, only writes if that run still owns the room. */
 export async function setHlsError(
   roomRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>,
-  message: string
+  message: string,
+  runId?: string | null
 ): Promise<void> {
-  await roomRef.update({
+  const patch = {
     "hls.status": "error",
     "hls.egressId": null,
     "hls.playlistUrl": null,
     "hls.error": message,
     "hls.updatedAt": admin.firestore.FieldValue.serverTimestamp(),
+  };
+  if (!runId) {
+    await roomRef.update(patch);
+    return;
+  }
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(roomRef);
+    const hls = ((snap.data() || {}) as RoomDoc).hls || {};
+    if (!snap.exists || hls.runId !== runId) return;
+    tx.update(roomRef, patch);
   });
 }
 
@@ -212,6 +271,45 @@ export async function setHlsIdle(
     "hls.startedAt": null,
     "hls.stopAt": null,
     "hls.capMinutes": null,
+    "hls.heartbeatAt": null,
     "hls.updatedAt": admin.firestore.FieldValue.serverTimestamp(),
   });
+}
+
+/**
+ * Atomically set idle only if `runId` still owns the room. Returns true when
+ * this call performed the transition (so exactly one caller bills minutes).
+ */
+export async function setHlsIdleIfRun(
+  roomRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>,
+  runId: string | null
+): Promise<boolean> {
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(roomRef);
+    if (!snap.exists) return false;
+    const hls = ((snap.data() || {}) as RoomDoc).hls || {};
+    const status = String(hls.status || "idle");
+    if (status === "idle") return false;
+    if ((hls.runId ?? null) !== (runId ?? null)) return false;
+    tx.update(roomRef, {
+      "hls.status": "idle",
+      "hls.egressId": null,
+      "hls.playlistUrl": null,
+      "hls.error": null,
+      "hls.runId": null,
+      "hls.startedAt": null,
+      "hls.stopAt": null,
+      "hls.capMinutes": null,
+      "hls.heartbeatAt": null,
+      "hls.updatedAt": admin.firestore.FieldValue.serverTimestamp(),
+    });
+    return true;
+  });
+}
+
+/** Liveness signal written while a host polls /api/hls/status. */
+export async function touchHlsHeartbeat(
+  roomRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>
+): Promise<void> {
+  await roomRef.update({ "hls.heartbeatAt": admin.firestore.FieldValue.serverTimestamp() });
 }

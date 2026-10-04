@@ -1451,17 +1451,30 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       updates.errorMessage = errorMessage;
     }
 
-    // Mark storage as counted if transitioning to ready with a known file size.
-    // This flag prevents double-counting if the post-stop head-check also fires.
-    const alreadyCounted = recordingData.storageCounted === true;
-    if (finalStatus === "ready" && typeof fileSize === "number" && fileSize > 0 && !alreadyCounted) {
-      updates.storageCounted = true;
-    }
-
     await recordingRef.update(updates);
 
-    // Count storage for this recording (only once, when transitioning to ready)
-    if (finalStatus === "ready" && typeof fileSize === "number" && fileSize > 0 && !alreadyCounted) {
+    // Count storage once. storageCounted is flipped inside a transaction (the
+    // post-stop head-check in recordings.ts races this webhook); only the call
+    // that performs the flip reserves the bytes.
+    let storageClaimed = false;
+    if (finalStatus === "ready" && typeof fileSize === "number" && fileSize > 0) {
+      try {
+        storageClaimed = await db.runTransaction(async (tx) => {
+          const fresh = await tx.get(recordingRef);
+          // Same rule as lib/mediaPure.shouldClaimStorageCount (inlined to keep
+          // this file's import block untouched).
+          const freshData = (fresh.data() || {}) as any;
+          const freshStatus = String(freshData.status || "").toLowerCase();
+          if (!fresh.exists || freshData.storageCounted === true) return false;
+          if (freshStatus === "deleted" || freshStatus === "deleting") return false;
+          tx.update(recordingRef, { storageCounted: true });
+          return true;
+        });
+      } catch (e: any) {
+        console.error("[livekit-webhook] storageCounted flip failed:", { recordingId, error: e?.message || e });
+      }
+    }
+    if (storageClaimed) {
       const recUserId = typeof recordingData.userId === "string" ? recordingData.userId : "";
       if (recUserId) {
         try {

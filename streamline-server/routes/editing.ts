@@ -1,8 +1,9 @@
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { Router, Request, Response } from "express";
 import { firestore as db } from "../firebaseAdmin";
-import multer from "multer";
-import { uploadVideo, getSignedDownloadUrl, deleteFile } from "../lib/storageClient";
+import { uploadVideo, uploadFileFromPath, getSignedDownloadUrl, deleteFile } from "../lib/storageClient";
+import { createDiskUpload, cleanupUploadedFile, MAX_UPLOAD_BYTES } from "../lib/diskUpload";
+import { getAllowedExportSourceHosts, validateExportSourceUrl } from "../lib/exportSourceUrl";
 import { deleteRecordingStorage } from "../lib/recordingDeletion";
 import { reserveStorageIfAvailable, releaseReservedStorage, releaseStorageUsage, reserveStorageUsage, getCurrentStorageUsage } from "../usageHelper";
 import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
@@ -206,28 +207,29 @@ async function assertEditingAccess(req: Request, res: Response): Promise<{ uid: 
   return { uid, plan };
 }
 
-// Configure multer for memory storage (files stored in RAM temporarily)
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits: { fileSize: 500 * 1024 * 1024 } // 500MB max
-});
+// Multipart uploads are spooled to os.tmpdir() (not RAM) and streamed to R2.
+const upload = createDiskUpload(MAX_UPLOAD_BYTES);
 
 router.use(requireAuth);
 
+/** Feature gate for uploads; runs before multer so a disabled feature never spools a file. */
+export async function requireContentLibraryUploadsEnabled(_req: Request, res: Response, next: () => void) {
+  if (!(await assertSegmentEnabled(res, "contentLibraryEnabled"))) return;
+  next();
+}
+
 // ============================================================================
-// UPLOAD ENDPOINT - ✅ FIXED WITH MULTER
+// UPLOAD ENDPOINT
 // ============================================================================
 
 router.post(
   "/upload",
-  upload.single('video') as any, // ✅ Parse file from FormData (typed as any for TS)
+  requireContentLibraryUploadsEnabled as any,
+  upload.single('video') as any,
   async (req: Request, res: Response) => {
+    const file = (req as any).file as Express.Multer.File | undefined;
     try {
-      console.log("📤 Upload request received");
-      
-      const file = (req as any).file;
       if (!file) {
-        console.log("❌ No file in request");
         return res.status(400).json({ error: "No file uploaded" });
       }
 
@@ -236,14 +238,9 @@ router.post(
         return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
       }
 
-      if (!(await assertSegmentEnabled(res, "contentLibraryEnabled"))) {
-        return;
-      }
       const title = req.body.title || file.originalname.replace(/\.[^/.]+$/, "");
 
-      console.log(`📹 Uploading: ${title}`);
-      console.log(`📦 Size: ${(file.size / 1024 / 1024).toFixed(2)} MB`);
-      console.log(`👤 User: ${userId}`);
+      console.log(`[editing] upload ${(file.size / 1024 / 1024).toFixed(2)} MB for user ${userId}`);
 
       // Transactional reservation: atomically check limit + increment counter.
       const reservation = await reserveStorageIfAvailable(userId, file.size, {
@@ -258,22 +255,43 @@ router.post(
 
       // Generate unique filename
       const timestamp = Date.now();
-      const safeName = title.replace(/[^a-z0-9]/gi, "-").toLowerCase();
-      const fileName = `${timestamp}-${safeName}.${file.originalname.split('.').pop()}`;
+      const safeName = String(title).replace(/[^a-z0-9]/gi, "-").toLowerCase();
+      const ext = (file.originalname.split('.').pop() || "mp4").replace(/[^a-z0-9]/gi, "").slice(0, 8) || "mp4";
+      const fileName = `${timestamp}-${safeName}.${ext}`;
       const path = `uploads/${userId}/${fileName}`;
 
-      console.log(`☁️ Uploading to: ${path}`);
-
-      // Upload to R2/S3
-      let publicUrl: string;
+      let publicUrl: string | null = null;
       try {
-        publicUrl = await uploadVideo(
-          file.buffer,
-          path,
-          file.mimetype
-        );
+        publicUrl = await uploadFileFromPath(file.path, path, file.mimetype);
+
+        const assetData = {
+          userId,
+          name: title,
+          type: 'video',
+          fileSize: file.size,
+          videoUrl: publicUrl,
+          storagePath: path,
+          thumbnailUrl: null,
+          duration: 0,
+          createdAt: new Date(),
+          source: 'upload'
+        };
+
+        const assetRef = await db.collection('editing_assets').add(assetData);
+
+        return res.json({
+          ok: true,
+          assetId: assetRef.id,
+          publicUrl,
+          storagePath: path,
+          message: "Upload successful"
+        });
       } catch (uploadErr: any) {
-        // Upload failed — release the reserved bytes so they aren't stranded.
+        // Upload (or the asset record) failed: remove the object and release
+        // the reserved bytes so they aren't stranded.
+        if (publicUrl) {
+          await deleteFile(path).catch(() => {});
+        }
         try {
           await releaseReservedStorage(userId, file.size, {
             caller: "editing.upload.rollback",
@@ -287,39 +305,11 @@ router.post(
         }
         throw uploadErr;
       }
-
-      console.log(`✅ Upload complete: ${publicUrl}`);
-
-      // Create asset in Firestore
-      const assetData = {
-        userId,
-        name: title,
-        type: 'video',
-        fileSize: file.size,
-        videoUrl: publicUrl,
-        storagePath: path,
-        thumbnailUrl: null,
-        duration: 0,
-        createdAt: new Date(),
-        source: 'upload'
-      };
-
-      const assetRef = await db.collection('editing_assets').add(assetData);
-      console.log(`💾 Asset saved: ${assetRef.id}`);
-
-      res.json({
-        ok: true,
-        assetId: assetRef.id,
-        publicUrl,
-        storagePath: path,
-        message: "Upload successful"
-      });
     } catch (err: any) {
-      console.error("❌ Upload error:", err);
-      res.status(500).json({ 
-        error: err.message || "Upload failed",
-        details: err.stack
-      });
+      console.error("[editing] upload error:", err?.message || err);
+      res.status(500).json({ error: "Upload failed" });
+    } finally {
+      await cleanupUploadedFile(file);
     }
   }
 );
@@ -981,6 +971,17 @@ router.put("/projects/:id/timeline", async (req: Request, res: Response) => {
       })
       .filter((c: any) => c.id && c.assetId);
 
+    // SSRF guard: the export worker downloads clip URLs server-side, so only
+    // URLs on our own storage hosts may be persisted.
+    const allowedHosts = getAllowedExportSourceHosts();
+    for (const c of sanitized) {
+      if (!c.videoUrl) continue;
+      const check = validateExportSourceUrl(c.videoUrl, allowedHosts);
+      if (!check.ok) {
+        return res.status(400).json({ error: "invalid_clip_source_url", clipId: c.id, reason: check.reason });
+      }
+    }
+
     // Persist track state if provided, otherwise default to track count
     let tracksData: any = 2;
     if (Array.isArray(rawTracks) && rawTracks.length > 0) {
@@ -1058,7 +1059,11 @@ router.post("/export", async (req: Request, res: Response) => {
     const savedTimeline = project?.timeline;
 
     if (savedTimeline && Array.isArray(savedTimeline.clips) && savedTimeline.clips.length > 0) {
-      // Resolve source URLs for each clip
+      // Resolve each clip's source from the caller's own recordings /
+      // editing_assets docs (storage key preferred; the worker presigns it).
+      // A client-supplied URL is used only when it is on an allowlisted
+      // storage host — anything else is rejected (SSRF guard).
+      const allowedHosts = getAllowedExportSourceHosts();
       const resolvedClips: ExportTimelineClip[] = [];
       for (const c of savedTimeline.clips) {
         const clip: ExportTimelineClip = {
@@ -1069,26 +1074,51 @@ router.post("/export", async (req: Request, res: Response) => {
           endMs: Math.round((Number(c.startTime || 0) + Number(c.duration || 0)) * 1000),
           sourceInMs: Math.round(Number(c.inPoint || 0) * 1000),
           sourceOutMs: Math.round(Number(c.outPoint || 0) * 1000),
-          sourceUrl: typeof c.videoUrl === "string" ? c.videoUrl : "",
+          sourceUrl: "",
           name: typeof c.name === "string" ? c.name : "Clip",
         };
 
-        // If videoUrl is missing, try to resolve from asset collections
-        if (!clip.sourceUrl && clip.assetId) {
+        let docUrl = "";
+        if (clip.assetId) {
           try {
             const recSnap = await db.collection("recordings").doc(clip.assetId).get();
             if (recSnap.exists) {
               const d = recSnap.data() as any;
-              if (d?.userId === userId) clip.sourceUrl = d?.videoUrl || d?.publicExportUrl || "";
+              const status = String(d?.status || "").toLowerCase();
+              if (d?.userId === userId && status !== "deleted" && status !== "deleting") {
+                const key = String(d?.objectKey || d?.downloadPath || "").trim().replace(/^\/+/, "");
+                if (key) clip.sourceKey = key;
+                docUrl = d?.videoUrl || d?.publicExportUrl || "";
+              }
             }
-            if (!clip.sourceUrl) {
+            if (!clip.sourceKey && !docUrl) {
               const assetSnap = await db.collection("editing_assets").doc(clip.assetId).get();
               if (assetSnap.exists) {
                 const d = assetSnap.data() as any;
-                if (d?.userId === userId) clip.sourceUrl = d?.videoUrl || "";
+                if (d?.userId === userId) {
+                  const key = String(d?.storagePath || "").trim().replace(/^\/+/, "");
+                  if (key) clip.sourceKey = key;
+                  docUrl = d?.videoUrl || "";
+                }
               }
             }
           } catch {}
+        }
+
+        const candidates = [docUrl, typeof c.videoUrl === "string" ? c.videoUrl : ""].filter(Boolean);
+        for (const candidate of candidates) {
+          if (validateExportSourceUrl(candidate, allowedHosts).ok) {
+            clip.sourceUrl = candidate;
+            break;
+          }
+        }
+
+        if (!clip.sourceKey && !clip.sourceUrl && candidates.length > 0) {
+          return res.status(400).json({
+            error: "invalid_clip_source_url",
+            clipId: clip.id,
+            reason: "Clip source is not on an allowed storage host",
+          });
         }
 
         resolvedClips.push(clip);
