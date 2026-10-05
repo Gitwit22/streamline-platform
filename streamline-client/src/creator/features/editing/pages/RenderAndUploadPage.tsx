@@ -1,8 +1,55 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { CheckCircle, XCircle, AlertCircle } from 'lucide-react';
-import { editingApi, type ExportJob, EXPORT_TERMINAL_STATUSES } from '../../../../lib/editingApi';
+import { CheckCircle, XCircle, AlertCircle, Zap } from 'lucide-react';
+import {
+  editingApi,
+  type ExportFormat,
+  type ExportJob,
+  type ExportOptions,
+  type ExportQuality,
+  type ExportResolution,
+  type ExportSettings,
+  EXPORT_TERMINAL_STATUSES,
+} from '../../../../lib/editingApi';
 import { getProject, type Project } from '../../../../lib/projectsApi';
+
+const SETTINGS_KEY = 'sl_export_settings_v1';
+
+const RES_LABEL: Record<ExportResolution, string> = { '720p': '720p', '1080p': '1080p', '4k': '4K' };
+const QUALITY_LABEL: Record<ExportQuality, string> = { draft: 'Draft (fast, smaller)', standard: 'Standard', high: 'High (slower, larger)' };
+const FORMAT_LABEL: Record<ExportFormat, string> = { mp4: 'MP4 (H.264)', webm: 'WebM (VP9)', mov: 'MOV (H.264)' };
+
+const FALLBACK_OPTIONS: ExportOptions = {
+  resolutions: ['720p', '1080p'],
+  maxResolution: null,
+  formats: ['mp4', 'webm', 'mov'],
+  qualities: ['draft', 'standard', 'high'],
+  fpsOptions: [24, 30, 60],
+  exportsUsed: 0,
+  exportsLimit: null,
+  priority: false,
+};
+
+function readSavedSettings(): Partial<ExportSettings> {
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    return raw ? (JSON.parse(raw) as Partial<ExportSettings>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Saved choice clamped to what the plan allows; default = best allowed up to 1080p. */
+function initialSettings(opts: ExportOptions): ExportSettings {
+  const saved = readSavedSettings();
+  const preferred: ExportResolution = opts.resolutions.includes('1080p') ? '1080p' : opts.resolutions[opts.resolutions.length - 1] || '720p';
+  return {
+    resolution: saved.resolution && opts.resolutions.includes(saved.resolution) ? saved.resolution : preferred,
+    format: saved.format && opts.formats.includes(saved.format) ? saved.format : 'mp4',
+    quality: saved.quality && opts.qualities.includes(saved.quality) ? saved.quality : 'standard',
+    fps: saved.fps && opts.fpsOptions.includes(saved.fps) ? saved.fps : 30,
+  };
+}
 
 export default function RenderAndUploadPage() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -12,68 +59,87 @@ export default function RenderAndUploadPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [library, setLibrary] = useState<{ state: 'idle' | 'saving' | 'saved' | 'error'; message?: string }>({ state: 'idle' });
+  const [options, setOptions] = useState<ExportOptions | null>(null);
+  const [settings, setSettings] = useState<ExportSettings | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
   const cancelledRef = useRef(false);
 
+  // Load the project and what the plan allows; the export starts on click.
   useEffect(() => {
     cancelledRef.current = false;
-
-    const start = async () => {
+    const load = async () => {
       setLoading(true);
       setError(null);
       setExportJob(null);
-
       if (!projectId) {
         setLoading(false);
         return;
       }
-
-      try {
-        const proj = await getProject(projectId).catch(() => null);
-        if (cancelledRef.current) return;
-        if (!proj) {
-          setProject(null);
-          setLoading(false);
-          return;
-        }
-        setProject(proj);
-
-        // Start the export job
-        const started = await editingApi.startExport(
-          projectId,
-          { format: 'mp4', resolution: '1080p', quality: 'standard' }
-        );
-
-        if (cancelledRef.current) return;
-        setExportJob(started);
-        setLoading(false);
-
-        // If already terminal, stop
-        if (EXPORT_TERMINAL_STATUSES.includes(started.status)) return;
-
-        // Poll for updates
-        const finalJob = await editingApi.waitForExport(started.id, (job) => {
-          if (!cancelledRef.current) setExportJob(job);
-        });
-
-        if (!cancelledRef.current) setExportJob(finalJob);
-      } catch (e: any) {
-        if (cancelledRef.current) return;
-        const message = e?.message || String(e);
-        setError(message);
-        // Start (or polling) failed: show the failed state instead of a spinner.
-        setExportJob((prev) => prev
-          ? { ...prev, status: prev.status === 'canceled' ? 'canceled' : 'failed', error: prev.error || message }
-          : { id: '', status: 'failed', progress: 0, error: message, createdAt: new Date().toISOString() });
-        setLoading(false);
-      }
+      const [proj, opts] = await Promise.all([
+        getProject(projectId).catch(() => null),
+        editingApi.getExportOptions().catch((e: unknown) => {
+          if (!cancelledRef.current) setStartError(e instanceof Error ? e.message : String(e));
+          return null;
+        }),
+      ]);
+      if (cancelledRef.current) return;
+      setProject(proj);
+      const effective = opts || FALLBACK_OPTIONS;
+      setOptions(effective);
+      setSettings(initialSettings(effective));
+      setLoading(false);
     };
-
-    start();
-
+    void load();
     return () => {
       cancelledRef.current = true;
     };
   }, [projectId]);
+
+  const updateSettings = (patch: Partial<ExportSettings>) => {
+    setSettings((prev) => {
+      const next = { ...(prev as ExportSettings), ...patch };
+      try {
+        localStorage.setItem(SETTINGS_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      return next;
+    });
+  };
+
+  const startExport = async () => {
+    if (!projectId || !settings) return;
+    setStarting(true);
+    setStartError(null);
+    setError(null);
+    let started: ExportJob | null = null;
+    try {
+      started = await editingApi.startExport(projectId, settings);
+      if (cancelledRef.current) return;
+      setExportJob(started);
+      setOptions((o) => (o ? { ...o, exportsUsed: o.exportsUsed + 1 } : o));
+      if (EXPORT_TERMINAL_STATUSES.includes(started.status)) return;
+      const finalJob = await editingApi.waitForExport(started.id, (job) => {
+        if (!cancelledRef.current) setExportJob(job);
+      });
+      if (!cancelledRef.current) setExportJob(finalJob);
+    } catch (e: unknown) {
+      if (cancelledRef.current) return;
+      const message = e instanceof Error ? e.message : String(e);
+      if (!started) {
+        // Refused before a job existed (plan limit, resolution, empty timeline): stay on the settings card.
+        setStartError(message);
+      } else {
+        setError(message);
+        setExportJob((prev) =>
+          prev ? { ...prev, status: prev.status === 'canceled' ? 'canceled' : 'failed', error: prev.error || message } : prev,
+        );
+      }
+    } finally {
+      if (!cancelledRef.current) setStarting(false);
+    }
+  };
 
   const progress = exportJob?.progressPercent ?? exportJob?.progress ?? 0;
   const currentStep = exportJob?.currentStep || '';
@@ -113,7 +179,7 @@ export default function RenderAndUploadPage() {
       <div className="min-h-screen bg-black text-white flex items-center justify-center">
         <div className="text-center">
           <div className="w-16 h-16 border-4 border-purple-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-          <p className="text-zinc-400">Loading project...</p>
+          <p className="text-zinc-400">Loading export settings...</p>
         </div>
       </div>
     );
@@ -138,6 +204,128 @@ export default function RenderAndUploadPage() {
           >
             Back to Projects
           </button>
+        </div>
+      </div>
+    );
+  }
+
+  if (!exportJob && options && settings) {
+    const limitReached = options.exportsLimit !== null && options.exportsUsed >= options.exportsLimit;
+    const pill = (active: boolean, disabled = false) =>
+      `px-4 py-2 rounded-lg text-sm font-semibold border transition ${
+        disabled
+          ? 'border-zinc-800 text-zinc-600 cursor-not-allowed'
+          : active
+            ? 'border-purple-500 bg-purple-600/20 text-white'
+            : 'border-zinc-700 text-zinc-300 hover:border-zinc-500'
+      }`;
+    return (
+      <div className="min-h-screen bg-black text-white flex items-center justify-center p-6">
+        <div className="max-w-xl w-full bg-zinc-900 border border-zinc-800 rounded-2xl p-8" data-testid="export-settings">
+          <h1 className="text-2xl font-bold mb-1">Export settings</h1>
+          <p className="text-zinc-400 text-sm mb-6">{project.name}</p>
+
+          <div className="mb-5">
+            <div className="text-xs uppercase tracking-wide text-zinc-500 mb-2">Resolution</div>
+            <div className="flex gap-2 flex-wrap">
+              {(['720p', '1080p', '4k'] as ExportResolution[]).map((r) => {
+                const allowed = options.resolutions.includes(r);
+                return (
+                  <button
+                    key={r}
+                    type="button"
+                    disabled={!allowed}
+                    onClick={() => updateSettings({ resolution: r })}
+                    className={pill(settings.resolution === r, !allowed)}
+                    title={allowed ? undefined : 'Not included in your plan'}
+                  >
+                    {RES_LABEL[r]}
+                  </button>
+                );
+              })}
+            </div>
+            {options.maxResolution && options.maxResolution !== '4k' && (
+              <p className="text-xs text-zinc-500 mt-2">Your plan exports up to {RES_LABEL[options.maxResolution]}. Upgrade for higher resolutions.</p>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-6">
+            <label className="text-xs uppercase tracking-wide text-zinc-500">
+              Format
+              <select
+                value={settings.format}
+                onChange={(e) => updateSettings({ format: e.target.value as ExportFormat })}
+                className="mt-2 w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white normal-case tracking-normal"
+              >
+                {options.formats.map((f) => (
+                  <option key={f} value={f}>{FORMAT_LABEL[f]}</option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs uppercase tracking-wide text-zinc-500">
+              Quality
+              <select
+                value={settings.quality}
+                onChange={(e) => updateSettings({ quality: e.target.value as ExportQuality })}
+                className="mt-2 w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white normal-case tracking-normal"
+              >
+                {options.qualities.map((q) => (
+                  <option key={q} value={q}>{QUALITY_LABEL[q]}</option>
+                ))}
+              </select>
+            </label>
+            <label className="text-xs uppercase tracking-wide text-zinc-500">
+              Frame rate
+              <select
+                value={settings.fps}
+                onChange={(e) => updateSettings({ fps: Number(e.target.value) as ExportSettings['fps'] })}
+                className="mt-2 w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white normal-case tracking-normal"
+              >
+                {options.fpsOptions.map((f) => (
+                  <option key={f} value={f}>{f} fps</option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div className="flex items-center justify-between text-sm text-zinc-400 mb-6">
+            <span data-testid="export-usage">
+              Exports this month:{' '}
+              <span className="text-white font-semibold">
+                {options.exportsLimit === null ? `${options.exportsUsed} (unlimited)` : `${options.exportsUsed} / ${options.exportsLimit}`}
+              </span>
+            </span>
+            {options.priority && (
+              <span className="flex items-center gap-1 text-amber-300">
+                <Zap className="w-4 h-4" /> Priority rendering
+              </span>
+            )}
+          </div>
+
+          {(startError || limitReached) && (
+            <div className="bg-red-950/30 border border-red-500/30 rounded-xl p-3 mb-4 text-sm text-red-300" role="alert">
+              {startError || "You've used all your exports for this month."}
+            </div>
+          )}
+
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={() => navigate(`/editing/editor/${projectId}`)}
+              className="flex-1 px-6 py-3 rounded-xl bg-zinc-800 hover:bg-zinc-700 transition font-semibold"
+            >
+              Back to Editor
+            </button>
+            <button
+              type="button"
+              onClick={() => void startExport()}
+              disabled={starting || limitReached}
+              data-testid="start-export"
+              className="flex-1 px-6 py-3 rounded-xl bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-500 hover:to-pink-500 disabled:opacity-40 transition font-semibold"
+            >
+              {starting ? 'Starting…' : 'Start export'}
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -296,7 +484,11 @@ export default function RenderAndUploadPage() {
             </button>
             {isFailed && (
               <button
-                onClick={() => window.location.reload()}
+                onClick={() => {
+                  setExportJob(null);
+                  setError(null);
+                  setLibrary({ state: 'idle' });
+                }}
                 className="flex-1 px-6 py-4 rounded-xl bg-gradient-to-r from-orange-600 to-red-600 hover:from-orange-500 hover:to-red-500 transition font-semibold"
               >
                 Retry Export

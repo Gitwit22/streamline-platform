@@ -37,6 +37,10 @@ export interface ExportJobDoc {
   timeline: ExportTimeline | null;
   /** saved_videos doc created from this export's output ("Save to library"). */
   savedVideoId?: string | null;
+  /** 1 = plan has priority rendering (claimed before FIFO jobs). */
+  priority?: 0 | 1;
+  /** Monthly export usage reservation (refunded on fail / cancel / reap). */
+  exportUsage?: { monthKey: string; counted: boolean; refunded: boolean };
   createdAt: Date;
   startedAt: Date | null;
   completedAt: Date | null;
@@ -47,6 +51,8 @@ export interface ExportSettingsInput {
   resolution?: "720p" | "1080p" | "4k";
   format?: "mp4" | "webm" | "mov";
   quality?: "draft" | "standard" | "high";
+  /** Output frame rate (default 30). */
+  fps?: 24 | 30 | 60;
 }
 
 // ============================================================================
@@ -155,5 +161,7 @@ export function normalizeExportSettings(raw: any): ExportSettingsInput {
     raw?.quality === "draft" || raw?.quality === "high"
       ? raw.quality
       : "standard";
-  return { resolution, format, quality } as ExportSettingsInput;
+  const fpsNum = Number(raw?.fps);
+  const fps = fpsNum === 24 || fpsNum === 60 ? fpsNum : 30;
+  return { resolution, format, quality, fps } as ExportSettingsInput;
 }

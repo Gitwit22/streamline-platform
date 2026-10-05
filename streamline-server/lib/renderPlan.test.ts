@@ -210,3 +210,23 @@ describe("buildRenderPlan — audio mixing", () => {
     assert.equal(clipSourceId({ sourceUrl: "https://x" }), "url:https://x");
   });
 });
+
+describe("buildRenderPlan — export quality / fps", () => {
+  const one = () => tl([{ id: "video_1", kind: "video", muted: false, order: 0, clips: [clip({ id: "v", startMs: 0, endMs: 2000 })] }]);
+  const argAfter = (args: string[], flag: string) => args[args.indexOf(flag) + 1];
+  it("maps quality to x264 CRF/preset and uses the chosen fps", () => {
+    const draft = buildRenderPlan(one(), inputs({ "k/a.mp4": av }), { ...opts, quality: "draft" });
+    assert.equal(argAfter(draft.args, "-crf"), "28");
+    assert.equal(argAfter(draft.args, "-preset"), "veryfast");
+    const high = buildRenderPlan(one(), inputs({ "k/a.mp4": av }), { ...opts, quality: "high", fps: 60 });
+    assert.equal(argAfter(high.args, "-crf"), "18");
+    assert.ok(high.filterComplex.includes(":r=60:"), "60fps canvas");
+    const std = buildRenderPlan(one(), inputs({ "k/a.mp4": av }), opts);
+    assert.equal(argAfter(std.args, "-crf"), "23");
+  });
+  it("webm uses VP9 CRF per quality", () => {
+    const p = buildRenderPlan(one(), inputs({ "k/a.mp4": av }), { ...opts, container: "webm", quality: "draft" });
+    assert.equal(argAfter(p.args, "-c:v"), "libvpx-vp9");
+    assert.equal(argAfter(p.args, "-crf"), "40");
+  });
+});

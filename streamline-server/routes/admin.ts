@@ -494,8 +494,9 @@ router.put("/plans/:planId", async (req, res) => {
     }
 
     // Non-entitlement fields are validated (name, description, priceMonthly
-    // (`price` alias), visibility, editing.maxTracks). Unknown keys and the
-    // editor sub-options nothing enforces yet are ignored.
+    // (`price` alias), visibility, editing.maxTracks / maxResolution /
+    // exportsPerMonth / export.priorityQueue). Unknown keys and the editor
+    // sub-options nothing enforces yet are ignored.
     const { meta, errors: metaErrors } = sanitizePlanMetaInput(body);
     if (metaErrors.length) {
       return res.status(400).json({ error: "invalid_plan_fields", details: metaErrors });
@@ -526,6 +527,10 @@ router.put("/plans/:planId", async (req, res) => {
       const mergeFields: Array<string | FieldPath> = Object.keys(updateData);
       if (Object.keys(editingFields).length) {
         writeData.editing = { ...(existing.editing || {}), ...(editingMeta || {}) };
+        // Only priorityQueue is editable under editing.export: keep its other keys.
+        if (editingMeta?.export) {
+          writeData.editing.export = { ...((existing.editing || {}).export || {}), ...editingMeta.export };
+        }
         for (const k of Object.keys(editingMeta || {})) mergeFields.push(new FieldPath("editing", k));
       }
       await planRef.set(writeData, { mergeFields });

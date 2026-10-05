@@ -192,8 +192,10 @@ interface Plan {
     maxStorageGB: number;
     maxStorageBytes: number;
     maxResolution: string | null;
-    exportsPerMonth: number;
+    /** v2 (limitsVersion 2): null = unlimited, 0 = none. */
+    exportsPerMonth: number | null;
     unlimitedExports: boolean;
+    limitsVersion?: number;
     ai: {
       autoCut: boolean;
       captions: boolean;
@@ -1753,9 +1755,39 @@ export default function AdminDashboard() {
                               onToggle={(next) => setSectionCollapsedValue("✂️ Editing Suite", next)}
                             >
                               {/* Editor access, projects and storage live in Features / Limits above.
-                                  Exports/month, AI, transitions and export options are not enforced by
-                                  the product yet, so they are not editable here. */}
+                                  AI, transitions and watermark / direct-upload export options are not
+                                  enforced by the product yet, so they are not editable here. */}
                               <EditRow label="Max Tracks" value={plan.editing?.maxTracks || 0} onChange={(v) => updatePlanField(plan.id, "editing.maxTracks", Number(v))} />
+                              <div style={S.editRow}>
+                                <label style={S.editLabel}>Max export resolution</label>
+                                <select
+                                  value={(plan.editing?.maxResolution || "").toLowerCase()}
+                                  onChange={(e) => updatePlanField(plan.id, "editing.maxResolution", e.target.value || null)}
+                                  style={{ ...S.editInput, width: 160 }}
+                                >
+                                  <option value="">No cap</option>
+                                  <option value="4k">4K</option>
+                                  <option value="1080p">1080p</option>
+                                  <option value="720p">720p</option>
+                                </select>
+                              </div>
+                              <LimitRow
+                                label="Exports per month"
+                                value={editingExportLimit(plan.editing)}
+                                onChange={(v) => {
+                                  updatePlanField(plan.id, "editing.exportsPerMonth", v);
+                                  updatePlanField(plan.id, "editing.limitsVersion", 2);
+                                }}
+                              />
+                              <div style={S.editRow}>
+                                <label style={S.editLabel}>Priority render queue</label>
+                                <input
+                                  type="checkbox"
+                                  checked={plan.editing?.export?.priorityQueue === true}
+                                  onChange={(e) => updatePlanField(plan.id, "editing.export.priorityQueue", e.target.checked)}
+                                  style={{ transform: "scale(1.3)", cursor: "pointer" }}
+                                />
+                              </div>
                             </PlanSection>
 
                             <PlanSection title="💰 Pricing" collapsible={false}>
@@ -1987,6 +2019,18 @@ function PlanSection({ title, children, defaultCollapsed = false, collapsible = 
       {(!collapsible || !currentCollapsed) && <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "2px 0 2px" }}>{children}</div>}
     </div>
   );
+}
+
+/**
+ * Monthly export cap in v2 terms (null = unlimited, 0 = none). Plans saved
+ * before the cap was editable used 0 / unlimitedExports for "no cap".
+ */
+function editingExportLimit(editing: Partial<Plan["editing"]> & { limitsVersion?: number } | undefined): number | null {
+  if (!editing) return null;
+  const raw = (editing as { exportsPerMonth?: number | null }).exportsPerMonth;
+  if (Number(editing.limitsVersion) === 2) return raw === null || raw === undefined ? null : Number(raw);
+  if (editing.unlimitedExports === true) return null;
+  return typeof raw === "number" && raw > 0 ? raw : null;
 }
 
 function EditRow({ label, value, onChange }: { label: string; value: string | number; onChange: (v: string) => void }) {

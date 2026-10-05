@@ -389,7 +389,14 @@ export async function processExportJob(job: ExportJobDoc): Promise<void> {
       });
     }
 
-    const plan = buildRenderPlan(timeline, renderInputs, { outputPath, width, height, fps, container });
+    const plan = buildRenderPlan(timeline, renderInputs, {
+      outputPath,
+      width,
+      height,
+      fps,
+      container,
+      quality: job.settings?.quality,
+    });
     const ffmpegArgs = plan.args;
     const totalDurationMs = plan.durationMs;
     logger.info(

@@ -89,10 +89,30 @@ export function mediaAssetToRecording(a: MediaAsset): Recording {
   };
 }
 
+export type ExportResolution = "720p" | "1080p" | "4k";
+export type ExportFormat = "mp4" | "webm" | "mov";
+export type ExportQuality = "draft" | "standard" | "high";
+export type ExportFps = 24 | 30 | 60;
+
 export type ExportSettings = {
-  resolution: "720p" | "1080p" | "4k";
-  format: "mp4" | "webm" | "mov";
-  quality?: "draft" | "standard" | "high";
+  resolution: ExportResolution;
+  format: ExportFormat;
+  quality?: ExportQuality;
+  fps?: ExportFps;
+};
+
+/** What the user's plan allows (GET /api/editing/export-options). */
+export type ExportOptions = {
+  resolutions: ExportResolution[];
+  /** null = no cap */
+  maxResolution: ExportResolution | null;
+  formats: ExportFormat[];
+  qualities: ExportQuality[];
+  fpsOptions: ExportFps[];
+  exportsUsed: number;
+  /** null = unlimited, 0 = none */
+  exportsLimit: number | null;
+  priority: boolean;
 };
 
 export type ExportJob = {
@@ -313,6 +333,11 @@ export const exportApi = {
     return handleResponse<ExportJob>(response);
   },
 
+  async getOptions(): Promise<ExportOptions> {
+    const response = await apiFetchAuth(`${API_BASE}/api/editing/export-options`, {}, { allowNonOk: true });
+    return handleResponse<ExportOptions>(response);
+  },
+
   async getStatus(exportId: string): Promise<ExportJob> {
     const response = await apiFetchAuth(`${API_BASE}/api/editing/exports/${encodeURIComponent(exportId)}`, {}, { allowNonOk: true });
     return handleResponse<ExportJob>(response);
@@ -384,6 +409,7 @@ export const editingApi = {
   getRecording: (id: string) => recordingsApi.getById(id),
 
   // Export
+  getExportOptions: () => exportApi.getOptions(),
   startExport: (projectId: string, settings: ExportSettings) => exportApi.start(projectId, settings),
   getExportStatus: (id: string) => exportApi.getStatus(id),
   waitForExport: (id: string, onProgress?: (job: ExportJob) => void) =>

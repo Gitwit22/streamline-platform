@@ -27,6 +27,8 @@
  */
 import type { ExportTimeline, ExportTimelineClip, ExportTimelineTrack } from "./exportTypes";
 
+import { qualityEncoding } from "./exportPolicyPure";
+
 export interface RenderInput {
   /** Local file path of the downloaded source. */
   path: string;
@@ -40,6 +42,8 @@ export interface RenderPlanOptions {
   height: number;
   fps: number;
   container: string;
+  /** "draft" | "standard" | "high" (default standard). */
+  quality?: string;
 }
 
 export interface RenderPlan {
@@ -188,10 +192,11 @@ export function buildRenderPlan(
   const filterComplex = parts.join(";");
   args.push("-filter_complex", filterComplex, "-map", "[outv]", "-map", "[outa]");
 
+  const enc = qualityEncoding(opts.quality, opts.container);
   if (opts.container === "webm") {
-    args.push("-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "33", "-row-mt", "1", "-c:a", "libopus", "-b:a", "128k");
+    args.push("-c:v", "libvpx-vp9", "-b:v", "0", "-crf", String(enc.crf), "-row-mt", "1", "-c:a", "libopus", "-b:a", "128k");
   } else {
-    args.push("-c:v", "libx264", "-preset", "fast", "-crf", "23", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k");
+    args.push("-c:v", "libx264", "-preset", enc.preset || "fast", "-crf", String(enc.crf), "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k");
   }
   args.push("-ar", "48000", "-ac", "2", "-t", T);
   if (opts.container !== "webm") args.push("-movflags", "+faststart");

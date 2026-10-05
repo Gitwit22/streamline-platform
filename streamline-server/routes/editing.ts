@@ -30,7 +30,19 @@ import { decideProjectCreate, projectCountNeeded } from "../lib/projectCreateGat
 import { getEffectiveEntitlements, getPlatformFlags } from "../lib/entitlements";
 import { logger } from "../lib/logger";
 import { normalizeExportSettings, resolutionToDimensions } from "../lib/exportTypes";
-import { createExportJob, getExportJob, cancelJob } from "../lib/exportQueue";
+import { createExportJobWithReservation, getExportJob, cancelJob, getMonthlyExportsUsed } from "../lib/exportQueue";
+import {
+  EXPORT_FORMATS,
+  EXPORT_FPS,
+  EXPORT_QUALITIES,
+  allowedResolutions,
+  parseMaxResolution,
+  readExportLimit,
+  readPriorityQueue,
+  resolutionAllowed,
+  type ExportResolution,
+} from "../lib/exportPolicyPure";
+import { monthKeyUTC } from "../lib/streamingMeterPure";
 import { countUserProjects, loadEditorProject } from "../lib/projectStore";
 import { buildExportTimeline, type ResolvedClipSource } from "../lib/editorTimeline";
 import { listMediaAssets, resolveMediaAsset, resolveMediaAssets, withPlayableUrl } from "../lib/mediaAssets";
@@ -95,7 +107,12 @@ type EditingPlanInfo = {
   /** null = unlimited, 0 = none. */
   maxStorageBytes: number | null;
   maxTracks?: number;
-  maxResolution?: string | null;
+  /** Export resolution cap; null = no cap. */
+  maxResolution: ExportResolution | null;
+  /** Monthly export cap; null = unlimited, 0 = none. */
+  exportsPerMonth: number | null;
+  /** Plan renders ahead of the FIFO queue. */
+  priorityQueue: boolean;
 };
 
 type EditingPlanFeature = "editing" | "projects" | "contentLibrary";
@@ -112,7 +129,9 @@ async function getEditingPlanInfo(uid: string): Promise<EditingPlanInfo> {
     maxProjects: ent.limits.projects,
     maxStorageBytes: ent.limits.storageBytes,
     maxTracks: typeof editing.maxTracks === "number" ? Math.max(0, Math.round(editing.maxTracks)) : undefined,
-    maxResolution: typeof editing.maxResolution === "string" ? editing.maxResolution : (editing.maxResolution ?? null),
+    maxResolution: parseMaxResolution(editing.maxResolution),
+    exportsPerMonth: readExportLimit(editing),
+    priorityQueue: readPriorityQueue(editing),
   };
 }
 
@@ -472,8 +491,16 @@ router.post("/export", async (req: Request, res: Response) => {
       return res.status(400).json({ error: "timeline_empty", reason: "Add clips and save the project before exporting" });
     }
 
-    // Normalise settings
+    // Normalise settings, then apply the plan's resolution cap (refuse,
+    // don't silently downgrade, so the UI and the output always agree).
     const settings = normalizeExportSettings(rawSettings);
+    if (!resolutionAllowed(settings.resolution, access.plan.maxResolution)) {
+      return res.status(403).json({
+        error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
+        reason: `Your plan exports up to ${String(access.plan.maxResolution).toUpperCase()}`,
+        maxResolution: access.plan.maxResolution,
+      });
+    }
     const { width, height } = resolutionToDimensions(settings.resolution);
 
     // Resolve every clip's source from the caller's own MediaAssets (storage
@@ -491,7 +518,7 @@ router.post("/export", async (req: Request, res: Response) => {
       }
     }
 
-    const built = buildExportTimeline(loaded.timeline, sources, { width, height, fps: 30 });
+    const built = buildExportTimeline(loaded.timeline, sources, { width, height, fps: settings.fps || 30 });
     if ("error" in built) {
       return res.status(400).json({
         error: built.error,
@@ -502,13 +529,25 @@ router.post("/export", async (req: Request, res: Response) => {
       });
     }
 
-    // Create the durable export job
-    const job = await createExportJob({
+    // Create the durable export job, counting it against the monthly cap.
+    const created = await createExportJobWithReservation({
       userId,
       projectId: loaded.project.id,
       settings,
       timeline: built.timeline,
+      monthKey: monthKeyUTC(),
+      limit: access.plan.exportsPerMonth,
+      priority: access.plan.priorityQueue,
     });
+    if ("limitReached" in created) {
+      return res.status(403).json({
+        error: LIMIT_ERRORS.LIMIT_EXCEEDED,
+        reason: `You've used all ${access.plan.exportsPerMonth} exports for this month`,
+        limit: access.plan.exportsPerMonth,
+        used: created.used,
+      });
+    }
+    const job = created.job;
 
     return res.json({
       id: job.id,
@@ -521,6 +560,29 @@ router.post("/export", async (req: Request, res: Response) => {
   } catch (err: any) {
     logger.error({ err: err?.message || String(err) }, "Export creation error");
     res.status(500).json({ error: "Failed to start export" });
+  }
+});
+
+// GET /api/editing/export-options - What this user's plan allows for exports
+router.get("/export-options", async (req: Request, res: Response) => {
+  try {
+    if (!(await assertSegmentEnabled(res, "editorEnabled"))) return;
+    const access = await assertEditingAccess(req, res);
+    if (!access) return;
+    const used = await getMonthlyExportsUsed(access.uid, monthKeyUTC());
+    return res.json({
+      resolutions: allowedResolutions(access.plan.maxResolution),
+      maxResolution: access.plan.maxResolution,
+      formats: [...EXPORT_FORMATS],
+      qualities: [...EXPORT_QUALITIES],
+      fpsOptions: [...EXPORT_FPS],
+      exportsUsed: used,
+      exportsLimit: access.plan.exportsPerMonth,
+      priority: access.plan.priorityQueue,
+    });
+  } catch (err: any) {
+    logger.error({ err: err?.message || String(err) }, "Export options error");
+    res.status(500).json({ error: "Failed to load export options" });
   }
 });
 

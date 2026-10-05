@@ -38,7 +38,7 @@ billing, jobs, admin, viewer-access, cleanup and content-consolidation stages.
 ## 3. External configuration
 
 1. **Rotate credentials** that were committed in git history (Firebase SA, LiveKit, Stripe, R2, JWT, stream-key secret, internal tokens).
-2. **Firestore indexes:** deploy `firestore.indexes.json` (e.g. `firebase deploy --only firestore:indexes` from a configured project).
+2. **Firestore indexes:** deploy `firestore.indexes.json` (e.g. `firebase deploy --only firestore:indexes` from a configured project). Includes `editing_exports (status, priority, createdAt)` for priority rendering; without it exports still run first-in-first-out.
 3. **R2:**
    - CORS rule allowing `GET` from the client origin(s) on the S3 endpoint (`<account>.r2.cloudflarestorage.com`) — needed for presigned HLS segments.
    - Bucket must not be publicly listable. For a fully private bucket set `HLS_PROXY_ALL=1`.

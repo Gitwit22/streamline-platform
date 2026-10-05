@@ -132,8 +132,8 @@ export function planResetDiff(planId: string, existing: any | null, canonical: P
 
 const VISIBILITIES = new Set(["public", "hidden", "admin"]);
 
-/** Editor sub-options nothing in the product reads yet (hidden in the editor; rejected on save). */
-export const UNENFORCED_EDITING_KEYS = ["exportsPerMonth", "unlimitedExports", "transitions", "export", "ai"];
+/** Editor sub-options not enforced yet (ignored on save). export.* other than priorityQueue is still pending. */
+export const UNENFORCED_EDITING_KEYS = ["unlimitedExports", "transitions", "ai"];
 
 /**
  * Validate the non-entitlement part of PUT /api/admin/plans/:id. Entitlement
@@ -178,6 +178,32 @@ export function sanitizePlanMetaInput(body: any): { meta: Record<string, any>; e
         const n = Number(body.editing.maxTracks);
         if (typeof body.editing.maxTracks === "boolean" || !Number.isFinite(n) || n < 0) errors.push("editing.maxTracks must be a number >= 0");
         else editing.maxTracks = Math.floor(n);
+      }
+      // Export resolution cap: "720p" | "1080p" | "4k"; null/"" = no cap.
+      const mr = body.editing.maxResolution;
+      if (mr !== undefined) {
+        if (mr === null || mr === "") editing.maxResolution = null;
+        else if (typeof mr === "string" && ["720p", "1080p", "4k"].includes(mr.trim().toLowerCase())) {
+          editing.maxResolution = mr.trim().toLowerCase();
+        } else errors.push('editing.maxResolution must be "720p", "1080p", "4k" or null');
+      }
+      // Monthly exports use the v2 convention (null = unlimited, 0 = none) and
+      // are only accepted when marked limitsVersion 2: older admin clients
+      // echo legacy values (where 0 meant unlimited) on every save.
+      if (body.editing.exportsPerMonth !== undefined && Number(body.editing.limitsVersion) === 2) {
+        const v = body.editing.exportsPerMonth;
+        if (v === null || v === "") editing.exportsPerMonth = null;
+        else {
+          const n = Number(v);
+          if (typeof v === "boolean" || !Number.isFinite(n) || n < 0) errors.push("editing.exportsPerMonth must be null or a number >= 0");
+          else editing.exportsPerMonth = Math.floor(n);
+        }
+        editing.limitsVersion = 2;
+      }
+      const ex = body.editing.export;
+      if (isPlainObject(ex) && ex.priorityQueue !== undefined) {
+        if (typeof ex.priorityQueue !== "boolean") errors.push("editing.export.priorityQueue must be boolean");
+        else editing.export = { priorityQueue: ex.priorityQueue };
       }
       if (Object.keys(editing).length) meta.editing = editing;
     }

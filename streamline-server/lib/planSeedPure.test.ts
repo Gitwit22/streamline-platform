@@ -108,3 +108,26 @@ test("sanitizePlanMetaInput: price alias -> priceMonthly, validation, unknown ke
   const bad = sanitizePlanMetaInput({ priceMonthly: -1, visibility: "secret", name: "", editing: { maxTracks: true } });
   assert.equal(bad.errors.length, 4);
 });
+
+test("sanitizePlanMetaInput: export caps (resolution, v2 monthly exports, priority queue)", () => {
+  const ok = sanitizePlanMetaInput({
+    editing: { maxResolution: "1080P", exportsPerMonth: 20, limitsVersion: 2, export: { priorityQueue: true, watermark: true } },
+  });
+  assert.deepEqual(ok.errors, []);
+  assert.deepEqual(ok.meta.editing, {
+    maxResolution: "1080p",
+    exportsPerMonth: 20,
+    limitsVersion: 2,
+    export: { priorityQueue: true },
+  });
+  // Unlimited / no cap.
+  assert.deepEqual(sanitizePlanMetaInput({ editing: { maxResolution: null, exportsPerMonth: null, limitsVersion: 2 } }).meta.editing, {
+    maxResolution: null,
+    exportsPerMonth: null,
+    limitsVersion: 2,
+  });
+  // A legacy echo (no limitsVersion 2) never writes exportsPerMonth (0 meant unlimited there).
+  assert.equal(sanitizePlanMetaInput({ editing: { exportsPerMonth: 0 } }).meta.editing, undefined);
+  const bad = sanitizePlanMetaInput({ editing: { maxResolution: "8k", exportsPerMonth: -1, limitsVersion: 2, export: { priorityQueue: "yes" } } });
+  assert.equal(bad.errors.length, 3);
+});

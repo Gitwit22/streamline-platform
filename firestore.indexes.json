@@ -47,6 +47,15 @@
         { "fieldPath": "roomId", "order": "ASCENDING" },
         { "fieldPath": "meterOpen", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "editing_exports",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "priority", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [
