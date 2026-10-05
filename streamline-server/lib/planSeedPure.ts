@@ -132,7 +132,7 @@ export function planResetDiff(planId: string, existing: any | null, canonical: P
 
 const VISIBILITIES = new Set(["public", "hidden", "admin"]);
 
-/** Editor sub-options not enforced yet (ignored on save). export.* other than priorityQueue is still pending. */
+/** Editor sub-options not enforced yet (ignored on save). export.directUpload / multiPlatform are pending. */
 export const UNENFORCED_EDITING_KEYS = ["unlimitedExports", "ai"];
 
 /**
@@ -211,9 +211,16 @@ export function sanitizePlanMetaInput(body: any): { meta: Record<string, any>; e
         if (Object.keys(transitions).length) editing.transitions = transitions;
       }
       const ex = body.editing.export;
-      if (isPlainObject(ex) && ex.priorityQueue !== undefined) {
-        if (typeof ex.priorityQueue !== "boolean") errors.push("editing.export.priorityQueue must be boolean");
-        else editing.export = { priorityQueue: ex.priorityQueue };
+      if (isPlainObject(ex)) {
+        // priorityQueue (render first), watermark (custom watermark allowed),
+        // forcedBrandMark ("Made with Streamline" always added).
+        const exportMeta: Record<string, boolean> = {};
+        for (const k of ["priorityQueue", "watermark", "forcedBrandMark"]) {
+          if (ex[k] === undefined) continue;
+          if (typeof ex[k] !== "boolean") errors.push(`editing.export.${k} must be boolean`);
+          else exportMeta[k] = ex[k];
+        }
+        if (Object.keys(exportMeta).length) editing.export = exportMeta;
       }
       if (Object.keys(editing).length) meta.editing = editing;
     }

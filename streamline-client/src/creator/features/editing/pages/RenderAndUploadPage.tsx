@@ -6,6 +6,9 @@ import {
   type ExportFormat,
   type ExportJob,
   type ExportOptions,
+  type MediaAsset,
+  type WatermarkPosition,
+  type WatermarkSettings,
   type ExportQuality,
   type ExportResolution,
   type ExportSettings,
@@ -48,7 +51,31 @@ function initialSettings(opts: ExportOptions): ExportSettings {
     format: saved.format && opts.formats.includes(saved.format) ? saved.format : 'mp4',
     quality: saved.quality && opts.qualities.includes(saved.quality) ? saved.quality : 'standard',
     fps: saved.fps && opts.fpsOptions.includes(saved.fps) ? saved.fps : 30,
+    // The saved watermark is kept (the image may no longer exist: the server re-checks it).
+    watermark: opts.watermark?.custom === false ? null : saved.watermark ?? null,
   };
+}
+
+const WM_POSITIONS: Array<{ value: WatermarkPosition; label: string }> = [
+  { value: 'top-left', label: 'Top left' },
+  { value: 'top-right', label: 'Top right' },
+  { value: 'bottom-left', label: 'Bottom left' },
+  { value: 'bottom-right', label: 'Bottom right' },
+  { value: 'center', label: 'Center' },
+];
+
+function defaultWatermark(kind: 'text' | 'image'): WatermarkSettings {
+  return kind === 'text'
+    ? { kind, text: '', position: 'bottom-right', sizePct: 5, opacityPct: 70 }
+    : { kind, assetId: '', position: 'top-right', sizePct: 15, opacityPct: 80 };
+}
+
+/** What is sent: an empty text / no image means no custom watermark. */
+function watermarkToSend(wm: WatermarkSettings | null | undefined): WatermarkSettings | null {
+  if (!wm) return null;
+  if (wm.kind === 'text' && !(wm.text || '').trim()) return null;
+  if (wm.kind === 'image' && !wm.assetId) return null;
+  return wm;
 }
 
 export default function RenderAndUploadPage() {
@@ -63,6 +90,7 @@ export default function RenderAndUploadPage() {
   const [settings, setSettings] = useState<ExportSettings | null>(null);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
+  const [images, setImages] = useState<MediaAsset[] | null>(null);
   const cancelledRef = useRef(false);
 
   // Load the project and what the plan allows; the export starts on click.
@@ -108,6 +136,24 @@ export default function RenderAndUploadPage() {
     });
   };
 
+  // Image watermarks pick from the user's own images (loaded on first use).
+  const wantImages = settings?.watermark?.kind === 'image';
+  useEffect(() => {
+    if (!wantImages || images) return;
+    let cancelled = false;
+    editingApi
+      .getMediaAssets()
+      .then((list) => {
+        if (!cancelled) setImages(list.filter((a) => a.type === 'image'));
+      })
+      .catch(() => {
+        if (!cancelled) setImages([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [wantImages, images]);
+
   const startExport = async () => {
     if (!projectId || !settings) return;
     setStarting(true);
@@ -115,7 +161,7 @@ export default function RenderAndUploadPage() {
     setError(null);
     let started: ExportJob | null = null;
     try {
-      started = await editingApi.startExport(projectId, settings);
+      started = await editingApi.startExport(projectId, { ...settings, watermark: watermarkToSend(settings.watermark) });
       if (cancelledRef.current) return;
       setExportJob(started);
       setOptions((o) => (o ? { ...o, exportsUsed: o.exportsUsed + 1 } : o));
@@ -286,6 +332,97 @@ export default function RenderAndUploadPage() {
                 ))}
               </select>
             </label>
+          </div>
+
+          <div className="mb-6 border-t border-zinc-800 pt-5" data-testid="export-watermark">
+            <div className="text-xs uppercase tracking-wide text-zinc-500 mb-2">Watermark</div>
+            {options.watermark?.custom === false ? (
+              <p className="text-xs text-zinc-500">Custom watermarks aren't included in your plan.</p>
+            ) : (
+              <>
+                <div className="flex gap-2 flex-wrap mb-3">
+                  {([['none', 'None'], ['text', 'Text'], ['image', 'Image']] as const).map(([k, label]) => {
+                    const active = (settings.watermark?.kind ?? 'none') === k;
+                    return (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={() => updateSettings({ watermark: k === 'none' ? null : settings.watermark?.kind === k ? settings.watermark : defaultWatermark(k) })}
+                        className={pill(active)}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {settings.watermark && (
+                  <div className="space-y-3">
+                    {settings.watermark.kind === 'text' ? (
+                      <input
+                        type="text"
+                        maxLength={60}
+                        value={settings.watermark.text || ''}
+                        placeholder="@yourchannel"
+                        aria-label="Watermark text"
+                        onChange={(e) => updateSettings({ watermark: { ...settings.watermark!, text: e.target.value } })}
+                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white"
+                      />
+                    ) : (
+                      <select
+                        value={settings.watermark.assetId || ''}
+                        aria-label="Watermark image"
+                        onChange={(e) => updateSettings({ watermark: { ...settings.watermark!, assetId: e.target.value } })}
+                        className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white"
+                      >
+                        <option value="">{images === null ? 'Loading your images…' : images.length ? 'Choose an image…' : 'No images in your library — upload a PNG logo first'}</option>
+                        {(images || []).map((img) => (
+                          <option key={img.id} value={img.id}>{img.name}</option>
+                        ))}
+                      </select>
+                    )}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <label className="text-xs uppercase tracking-wide text-zinc-500">
+                        Position
+                        <select
+                          value={settings.watermark.position}
+                          onChange={(e) => updateSettings({ watermark: { ...settings.watermark!, position: e.target.value as WatermarkPosition } })}
+                          className="mt-2 w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-white normal-case tracking-normal"
+                        >
+                          {WM_POSITIONS.map((p) => (
+                            <option key={p.value} value={p.value}>{p.label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      <label className="text-xs uppercase tracking-wide text-zinc-500">
+                        Size
+                        <input
+                          type="range"
+                          min={settings.watermark.kind === 'text' ? 2 : 5}
+                          max={settings.watermark.kind === 'text' ? 12 : 40}
+                          value={settings.watermark.sizePct}
+                          onChange={(e) => updateSettings({ watermark: { ...settings.watermark!, sizePct: Number(e.target.value) } })}
+                          className="mt-3 w-full accent-purple-500"
+                        />
+                      </label>
+                      <label className="text-xs uppercase tracking-wide text-zinc-500">
+                        Opacity {settings.watermark.opacityPct}%
+                        <input
+                          type="range"
+                          min={10}
+                          max={100}
+                          value={settings.watermark.opacityPct}
+                          onChange={(e) => updateSettings({ watermark: { ...settings.watermark!, opacityPct: Number(e.target.value) } })}
+                          className="mt-3 w-full accent-purple-500"
+                        />
+                      </label>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+            {options.watermark?.forced && (
+              <p className="text-xs text-zinc-500 mt-3">Your plan adds a small “Made with Streamline” mark in the bottom-right corner.</p>
+            )}
           </div>
 
           <div className="flex items-center justify-between text-sm text-zinc-400 mb-6">

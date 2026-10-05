@@ -210,6 +210,8 @@ interface Plan {
       directUpload: boolean;
       multiPlatform: boolean;
       priorityQueue: boolean;
+      /** Always add a "Made with Streamline" mark to exports. */
+      forcedBrandMark?: boolean;
     };
   };
   multistreamEnabled: boolean;
@@ -1755,9 +1757,9 @@ export default function AdminDashboard() {
                               onToggle={(next) => setSectionCollapsedValue("✂️ Editing Suite", next)}
                             >
                               {/* Editor access, projects and storage live in Features / Limits above.
-                                  AI and watermark / direct-upload export options are not enforced by
-                                  the product yet, so they are not editable here. Transitions default to
-                                  included when unset. */}
+                                  AI and direct-upload export options are not enforced by the product
+                                  yet, so they are not editable here. Transitions and custom watermarks
+                                  default to included when unset. */}
                               <EditRow label="Max Tracks" value={plan.editing?.maxTracks || 0} onChange={(v) => updatePlanField(plan.id, "editing.maxTracks", Number(v))} />
                               <div style={S.editRow}>
                                 <label style={S.editLabel}>Max export resolution</label>
@@ -1795,6 +1797,24 @@ export default function AdminDashboard() {
                                   type="checkbox"
                                   checked={plan.editing?.transitions?.advanced !== false}
                                   onChange={(e) => updatePlanField(plan.id, "editing.transitions.advanced", e.target.checked)}
+                                  style={{ transform: "scale(1.3)", cursor: "pointer" }}
+                                />
+                              </div>
+                              <div style={S.editRow}>
+                                <label style={S.editLabel}>Custom export watermark</label>
+                                <input
+                                  type="checkbox"
+                                  checked={plan.editing?.export?.watermark !== false}
+                                  onChange={(e) => updatePlanField(plan.id, "editing.export.watermark", e.target.checked)}
+                                  style={{ transform: "scale(1.3)", cursor: "pointer" }}
+                                />
+                              </div>
+                              <div style={S.editRow}>
+                                <label style={S.editLabel}>Force “Made with Streamline” mark</label>
+                                <input
+                                  type="checkbox"
+                                  checked={plan.editing?.export?.forcedBrandMark === true}
+                                  onChange={(e) => updatePlanField(plan.id, "editing.export.forcedBrandMark", e.target.checked)}
                                   style={{ transform: "scale(1.3)", cursor: "pointer" }}
                                 />
                               </div>

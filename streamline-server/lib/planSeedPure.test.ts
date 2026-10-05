@@ -118,7 +118,7 @@ test("sanitizePlanMetaInput: export caps (resolution, v2 monthly exports, priori
     maxResolution: "1080p",
     exportsPerMonth: 20,
     limitsVersion: 2,
-    export: { priorityQueue: true },
+    export: { priorityQueue: true, watermark: true },
   });
   // Unlimited / no cap.
   assert.deepEqual(sanitizePlanMetaInput({ editing: { maxResolution: null, exportsPerMonth: null, limitsVersion: 2 } }).meta.editing, {
@@ -130,4 +130,11 @@ test("sanitizePlanMetaInput: export caps (resolution, v2 monthly exports, priori
   assert.equal(sanitizePlanMetaInput({ editing: { exportsPerMonth: 0 } }).meta.editing, undefined);
   const bad = sanitizePlanMetaInput({ editing: { maxResolution: "8k", exportsPerMonth: -1, limitsVersion: 2, export: { priorityQueue: "yes" } } });
   assert.equal(bad.errors.length, 3);
+});
+
+test("sanitizePlanMetaInput: export watermark rules", () => {
+  const ok = sanitizePlanMetaInput({ editing: { export: { watermark: false, forcedBrandMark: true, directUpload: true } } });
+  assert.deepEqual(ok.errors, []);
+  assert.deepEqual(ok.meta.editing, { export: { watermark: false, forcedBrandMark: true } });
+  assert.equal(sanitizePlanMetaInput({ editing: { export: { forcedBrandMark: "on" } } }).errors.length, 1);
 });

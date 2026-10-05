@@ -28,6 +28,7 @@
 import type { ExportTimeline, ExportTimelineClip, ExportTimelineTrack } from "./exportTypes";
 
 import { qualityEncoding } from "./exportPolicyPure";
+import type { WatermarkPosition } from "./exportTypes";
 
 export interface RenderInput {
   /** Local file path of the downloaded source. */
@@ -44,6 +45,44 @@ export interface RenderPlanOptions {
   container: string;
   /** "draft" | "standard" | "high" (default standard). */
   quality?: string;
+  /** Overlays drawn on top of the finished picture, in order. */
+  watermarks?: RenderWatermark[];
+}
+
+/** A watermark with local files resolved by the worker. */
+export type RenderWatermark =
+  | { kind: "image"; path: string; position: WatermarkPosition; sizePct: number; opacityPct: number }
+  | { kind: "text"; textFile: string; fontFile: string; position: WatermarkPosition; sizePct: number; opacityPct: number };
+
+/**
+ * Quote a worker-controlled file path for a filter option. Inside single
+ * quotes ffmpeg takes ':' and ',' literally; quotes can't be escaped there,
+ * so they are dropped (the worker's temp paths never contain them).
+ */
+function quotePath(p: string): string {
+  return `'${p.replace(/\\/g, "/").replace(/'/g, "")}'`;
+}
+
+/** x/y expressions for an overlay (ow/oh) or drawtext (tw/th) of the given position. */
+export function watermarkXY(position: WatermarkPosition, kind: "image" | "text"): { x: string; y: string } {
+  const w = kind === "image" ? "overlay_w" : "text_w";
+  const h = kind === "image" ? "overlay_h" : "text_h";
+  const W = kind === "image" ? "main_w" : "w";
+  const H = kind === "image" ? "main_h" : "h";
+  const m = `(${H}*0.04)`;
+  switch (position) {
+    case "top-left":
+      return { x: m, y: m };
+    case "top-right":
+      return { x: `${W}-${w}-${m}`, y: m };
+    case "bottom-left":
+      return { x: m, y: `${H}-${h}-${m}` };
+    case "center":
+      return { x: `(${W}-${w})/2`, y: `(${H}-${h})/2` };
+    case "bottom-right":
+    default:
+      return { x: `${W}-${w}-${m}`, y: `${H}-${h}-${m}` };
+  }
 }
 
 export interface RenderPlan {
@@ -235,6 +274,14 @@ export function buildRenderPlan(
     }
     inputIndex.set(c, nextInput++);
   }
+  // Image watermarks: one looped input each, limited to the timeline length.
+  const watermarks = opts.watermarks || [];
+  const watermarkInput = new Map<RenderWatermark, number>();
+  for (const wm of watermarks) {
+    if (wm.kind !== "image") continue;
+    args.push("-loop", "1", "-t", sec(durationMs), "-i", wm.path);
+    watermarkInput.set(wm, nextInput++);
+  }
 
   const parts: string[] = [];
 
@@ -266,7 +313,29 @@ export function buildRenderPlan(
     parts.push(`[bg${bg}][v${k}]overlay=eof_action=pass:enable='between(t,${s},${e})'[bg${bg + 1}]`);
     bg++;
   });
-  parts.push(`[bg${bg}]null[outv]`);
+  // ── Watermarks (drawn over the finished picture) ──
+  let last = `bg${bg}`;
+  watermarks.forEach((wm, k) => {
+    const alpha = (Math.max(0, Math.min(100, wm.opacityPct)) / 100).toFixed(2);
+    const { x, y } = watermarkXY(wm.position, wm.kind);
+    const outLabel = `wm${k}`;
+    if (wm.kind === "image") {
+      const i = watermarkInput.get(wm)!;
+      const targetW = Math.max(2, Math.round((W * Math.max(1, Math.min(100, wm.sizePct))) / 100 / 2) * 2);
+      parts.push(`[${i}:v]scale=${targetW}:-2,format=rgba,colorchannelmixer=aa=${alpha}[wmi${k}]`);
+      parts.push(`[${last}][wmi${k}]overlay=x=${x}:y=${y}:eof_action=repeat:format=auto[${outLabel}]`);
+    } else {
+      const fontSize = Math.max(8, Math.round((H * Math.max(1, Math.min(30, wm.sizePct))) / 100));
+      parts.push(
+        // expansion=none: user text is literal (a "%" would otherwise start a %{...} code).
+        `[${last}]drawtext=fontfile=${quotePath(wm.fontFile)}:textfile=${quotePath(wm.textFile)}:expansion=none:` +
+          `fontsize=${fontSize}:fontcolor=white@${alpha}:shadowcolor=black@${(Number(alpha) * 0.6).toFixed(2)}:` +
+          `shadowx=2:shadowy=2:x=${x}:y=${y}[${outLabel}]`,
+      );
+    }
+    last = outLabel;
+  });
+  parts.push(`[${last}]format=yuv420p[outv]`);
 
   // ── Sound ──
   parts.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${T}[abase]`);

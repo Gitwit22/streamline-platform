@@ -27,8 +27,8 @@ import {
   getExportJob,
   reapStaleExportJobs,
 } from "./exportQueue";
-import type { ExportJobDoc, ExportTimelineClip } from "./exportTypes";
-import { buildRenderPlan, clipSourceId, type RenderInput } from "./renderPlan";
+import type { ExportJobDoc, ExportTimelineClip, ExportWatermark } from "./exportTypes";
+import { buildRenderPlan, clipSourceId, type RenderInput, type RenderWatermark } from "./renderPlan";
 import { probeMedia } from "./mediaProbe";
 import { resolutionToDimensions, formatToContainer } from "./exportTypes";
 import {
@@ -389,6 +389,8 @@ export async function processExportJob(job: ExportJobDoc): Promise<void> {
       });
     }
 
+    const watermarks = await prepareWatermarks(timeline.watermarks || [], workDir, allowedHosts, jobId);
+
     const plan = buildRenderPlan(timeline, renderInputs, {
       outputPath,
       width,
@@ -396,6 +398,7 @@ export async function processExportJob(job: ExportJobDoc): Promise<void> {
       fps,
       container,
       quality: job.settings?.quality,
+      watermarks,
     });
     const ffmpegArgs = plan.args;
     const totalDurationMs = plan.durationMs;
@@ -602,4 +605,71 @@ async function poll(): Promise<void> {
   if (_running) {
     _pollTimer = setTimeout(poll, POLL_INTERVAL_MS);
   }
+}
+
+// ============================================================================
+// Watermarks
+// ============================================================================
+
+const WATERMARK_FONT_CANDIDATES = [
+  path.join(process.cwd(), "assets", "fonts", "DejaVuSans-Bold.ttf"),
+  path.join(__dirname, "..", "assets", "fonts", "DejaVuSans-Bold.ttf"),
+  path.join(__dirname, "..", "..", "assets", "fonts", "DejaVuSans-Bold.ttf"),
+  "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+];
+
+function resolveWatermarkFont(): string | null {
+  for (const p of WATERMARK_FONT_CANDIDATES) {
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch {
+      // try next
+    }
+  }
+  return null;
+}
+
+/**
+ * Download image watermarks and write text watermarks to files (drawtext
+ * reads the text from a file, so user text never needs filter escaping).
+ * A custom image that can't be fetched fails the export; the plan-forced
+ * mark is required, so a missing font fails the export too.
+ */
+async function prepareWatermarks(
+  list: ExportWatermark[],
+  workDir: string,
+  allowedHosts: ReturnType<typeof getAllowedExportSourceHosts>,
+  jobId: string,
+): Promise<RenderWatermark[]> {
+  const out: RenderWatermark[] = [];
+  let n = 0;
+  for (const wm of list) {
+    n++;
+    const common = { position: wm.position, sizePct: wm.sizePct, opacityPct: wm.opacityPct };
+    if (wm.kind === "image") {
+      if (!wm.sourceKey && wm.sourceUrl) {
+        const check = validateExportSourceUrl(wm.sourceUrl, allowedHosts);
+        if (!check.ok) throw new Error(`Watermark image rejected (${check.reason})`);
+      }
+      if (!wm.sourceKey && !wm.sourceUrl) throw new Error("Watermark image is unavailable");
+      const url = wm.sourceKey ? await getSignedDownloadUrl(wm.sourceKey, 3600) : wm.sourceUrl!;
+      const nameForExt = (wm.sourceKey || wm.sourceUrl || "").split("?")[0];
+      const rawExt = nameForExt.split("/").pop()?.split(".").pop() || "png";
+      const ext = /^[a-z0-9]{1,5}$/i.test(rawExt) ? rawExt : "png";
+      const localPath = path.join(workDir, `watermark_${n}.${ext}`);
+      await downloadFile(url, localPath, { allowedHosts });
+      out.push({ kind: "image", path: localPath, ...common });
+    } else if (wm.text) {
+      const fontFile = resolveWatermarkFont();
+      if (!fontFile) {
+        if (wm.forced) throw new Error("Watermark font missing on the render host");
+        logger.warn({ jobId }, "Watermark font missing; skipping text watermark");
+        continue;
+      }
+      const textFile = path.join(workDir, `watermark_${n}.txt`);
+      await fs.promises.writeFile(textFile, wm.text, "utf8");
+      out.push({ kind: "text", textFile, fontFile, ...common });
+    }
+  }
+  return out;
 }

@@ -109,3 +109,13 @@ export function firstDisallowedTransition(
   }
   return null;
 }
+
+/**
+ * Watermark rules from the plan's editing.export block:
+ *   custom: may add their own watermark (explicit false respected; missing = included)
+ *   forced: a "Made with Streamline" mark is always added (missing = off)
+ */
+export function readWatermarkAccess(editing: any): { custom: boolean; forced: boolean } {
+  const ex = editing?.export;
+  return { custom: ex?.watermark === false ? false : true, forced: ex?.forcedBrandMark === true };
+}

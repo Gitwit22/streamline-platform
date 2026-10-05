@@ -29,7 +29,7 @@ import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { decideProjectCreate, projectCountNeeded } from "../lib/projectCreateGate";
 import { getEffectiveEntitlements, getPlatformFlags } from "../lib/entitlements";
 import { logger } from "../lib/logger";
-import { normalizeExportSettings, resolutionToDimensions } from "../lib/exportTypes";
+import { FORCED_BRAND_MARK, normalizeExportSettings, resolutionToDimensions, type ExportWatermark } from "../lib/exportTypes";
 import { createExportJobWithReservation, getExportJob, cancelJob, getMonthlyExportsUsed } from "../lib/exportQueue";
 import {
   EXPORT_FORMATS,
@@ -40,6 +40,7 @@ import {
   readExportLimit,
   readPriorityQueue,
   readTransitionAccess,
+  readWatermarkAccess,
   firstDisallowedTransition,
   resolutionAllowed,
   type ExportResolution,
@@ -117,6 +118,8 @@ type EditingPlanInfo = {
   priorityQueue: boolean;
   /** basic = fade / dip to black, advanced = crossfade. */
   transitions: { basic: boolean; advanced: boolean };
+  /** custom = may add own watermark; forced = "Made with Streamline" always added. */
+  watermark: { custom: boolean; forced: boolean };
 };
 
 type EditingPlanFeature = "editing" | "projects" | "contentLibrary";
@@ -137,6 +140,7 @@ async function getEditingPlanInfo(uid: string): Promise<EditingPlanInfo> {
     exportsPerMonth: readExportLimit(editing),
     priorityQueue: readPriorityQueue(editing),
     transitions: readTransitionAccess(editing),
+    watermark: readWatermarkAccess(editing),
   };
 }
 
@@ -534,6 +538,37 @@ router.post("/export", async (req: Request, res: Response) => {
       }
     }
 
+    // Watermarks: the user's own (plan permitting) + the plan-forced mark.
+    const watermarks: ExportWatermark[] = [];
+    const wmIn = settings.watermark;
+    if (wmIn) {
+      if (!access.plan.watermark.custom) {
+        return res.status(403).json({
+          error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
+          reason: "Custom watermarks aren't included in your plan",
+        });
+      }
+      const common = { position: wmIn.position, sizePct: wmIn.sizePct, opacityPct: wmIn.opacityPct };
+      if (wmIn.kind === "image") {
+        const wmAsset = (await resolveMediaAssets(userId, [wmIn.assetId!])).get(wmIn.assetId!);
+        const usable =
+          wmAsset &&
+          wmAsset.type === "image" &&
+          (wmAsset.storageKey || (wmAsset.videoUrl && validateExportSourceUrl(wmAsset.videoUrl, allowedHosts).ok));
+        if (!usable) {
+          return res.status(400).json({ error: "watermark_image_unavailable", reason: "Pick an image from your library for the watermark" });
+        }
+        watermarks.push({
+          kind: "image",
+          ...(wmAsset.storageKey ? { sourceKey: wmAsset.storageKey } : { sourceUrl: wmAsset.videoUrl }),
+          ...common,
+        });
+      } else {
+        watermarks.push({ kind: "text", text: wmIn.text, ...common });
+      }
+    }
+    if (access.plan.watermark.forced) watermarks.push({ ...FORCED_BRAND_MARK });
+
     const built = buildExportTimeline(loaded.timeline, sources, { width, height, fps: settings.fps || 30 });
     if ("error" in built) {
       return res.status(400).json({
@@ -544,6 +579,8 @@ router.post("/export", async (req: Request, res: Response) => {
           : "Nothing to export",
       });
     }
+
+    if (watermarks.length) built.timeline.watermarks = watermarks;
 
     // Create the durable export job, counting it against the monthly cap.
     const created = await createExportJobWithReservation({
@@ -596,6 +633,7 @@ router.get("/export-options", async (req: Request, res: Response) => {
       exportsLimit: access.plan.exportsPerMonth,
       priority: access.plan.priorityQueue,
       transitions: access.plan.transitions,
+      watermark: access.plan.watermark,
     });
   } catch (err: any) {
     logger.error({ err: err?.message || String(err) }, "Export options error");

@@ -4,6 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 const api = vi.hoisted(() => ({
   getExportOptions: vi.fn(),
+  getMediaAssets: vi.fn(async () => []),
   startExport: vi.fn(),
   waitForExport: vi.fn(),
   cancelExport: vi.fn(),
@@ -69,8 +70,41 @@ describe("RenderAndUploadPage export settings", () => {
     fireEvent.change(screen.getByLabelText(/Frame rate/), { target: { value: "60" } });
     fireEvent.click(screen.getByTestId("start-export"));
     await waitFor(() => expect(api.startExport).toHaveBeenCalledTimes(1));
-    expect(api.startExport).toHaveBeenCalledWith("p1", { resolution: "720p", format: "mp4", quality: "high", fps: 60 });
+    expect(api.startExport).toHaveBeenCalledWith("p1", { resolution: "720p", format: "mp4", quality: "high", fps: 60, watermark: null });
     await screen.findByText("Export Complete");
+  });
+
+  it("sends a text watermark and shows the plan-forced mark notice", async () => {
+    api.getExportOptions.mockResolvedValue({ ...OPTIONS, watermark: { custom: true, forced: true } });
+    api.startExport.mockResolvedValue({ id: "j1", status: "completed", progress: 100, createdAt: "" });
+    renderPage();
+    await screen.findByTestId("export-settings");
+    expect(screen.getByText(/Made with Streamline/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Text" }));
+    fireEvent.change(screen.getByLabelText("Watermark text"), { target: { value: "@mychannel" } });
+    fireEvent.click(screen.getByTestId("start-export"));
+    await waitFor(() => expect(api.startExport).toHaveBeenCalledTimes(1));
+    expect(api.startExport.mock.calls[0][1].watermark).toEqual({
+      kind: "text", text: "@mychannel", position: "bottom-right", sizePct: 5, opacityPct: 70,
+    });
+  });
+
+  it("an empty text watermark is not sent; plans without custom watermarks hide the picker", async () => {
+    api.getExportOptions.mockResolvedValue(OPTIONS);
+    api.startExport.mockResolvedValue({ id: "j1", status: "completed", progress: 100, createdAt: "" });
+    renderPage();
+    await screen.findByTestId("export-settings");
+    fireEvent.click(screen.getByRole("button", { name: "Text" }));
+    fireEvent.click(screen.getByTestId("start-export"));
+    await waitFor(() => expect(api.startExport).toHaveBeenCalledTimes(1));
+    expect(api.startExport.mock.calls[0][1].watermark).toBeNull();
+    cleanup();
+    localStorage.clear();
+    api.getExportOptions.mockResolvedValue({ ...OPTIONS, watermark: { custom: false, forced: false } });
+    renderPage();
+    await screen.findByTestId("export-settings");
+    expect(screen.getByText(/Custom watermarks aren't included/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Text" })).toBeNull();
   });
 
   it("blocks when the monthly limit is used and shows server refusals on the card", async () => {

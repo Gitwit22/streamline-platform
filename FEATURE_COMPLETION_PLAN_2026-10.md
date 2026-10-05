@@ -71,7 +71,7 @@ Each phase ships as its own commit (or small set of commits) on `creator`. Every
 
 **Verify:** render a 3-clip timeline with ffmpeg. Check the frames around each cut, and check that audio has no click.
 
-## Phase 5 — Editor: watermark
+## Phase 5 — Editor: watermark — ✅ DONE
 
 **Build:**
 1. **Export option:** watermark image (from the content library or an upload) or text, plus position, size and opacity.
@@ -136,8 +136,9 @@ This phase will be scoped separately.
 | 2 Advanced screen share | ✅ Done. Per-plan "Advanced screen share" feature + platform switch. The server refuses Main/Pop-out routing (controls PATCH) when the room owner isn't entitled; Off always works. A stale saved route falls back to Off, and a refused route resets with a message. |
 | 3 Export options | ✅ Done. Export settings card (resolution, format, quality, fps) before rendering. Plan max resolution and monthly exports are enforced on the server (failed/canceled exports are refunded). Priority render queue. Admin plan controls. Verified with real ffmpeg renders. |
 | 4 Transitions | ✅ Done. Fade, dip to black and crossfade per video clip (inspector picker + timeline marker + preview fade); linked audio fades with it. Rendered by ffmpeg (verified frame colours and audio levels). Plan tiers: basic (fade/dip) and advanced (crossfade), enforced on export; admin checkboxes. |
-| 5 Watermark | ⏳ Next |
-| 6–9 | Not started |
+| 5 Watermark | ✅ Done. Text or image (from your library) watermark with position, size and opacity on the export card; optional plan-forced "Made with Streamline" mark. Bundled font; text is drawn literally. Admin: custom watermark allowed / force brand mark. Verified with a real render. |
+| 6 Direct upload | ⏳ Next (needs Google OAuth setup) |
+| 7–9 | Not started |
 
 Phases 1–5 and 7 need no new outside accounts. Phase 6 needs the Google OAuth setup, so start that application early; it can run in parallel while the other phases are built.
 

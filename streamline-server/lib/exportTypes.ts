@@ -53,6 +53,37 @@ export interface ExportSettingsInput {
   quality?: "draft" | "standard" | "high";
   /** Output frame rate (default 30). */
   fps?: 24 | 30 | 60;
+  /** Custom watermark burned into the export (plan: editing.export.watermark). */
+  watermark?: WatermarkSettings | null;
+}
+
+export type WatermarkPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
+
+/** What the user picks. Images come from their own media assets. */
+export interface WatermarkSettings {
+  kind: "text" | "image";
+  /** kind text: up to 60 characters. */
+  text?: string;
+  /** kind image: the user's image asset id. */
+  assetId?: string;
+  position: WatermarkPosition;
+  /** Image: % of output width (5..40). Text: % of output height (2..12). */
+  sizePct: number;
+  /** 10..100 */
+  opacityPct: number;
+}
+
+/** Resolved overlay the worker renders (image source resolved server-side). */
+export interface ExportWatermark {
+  kind: "text" | "image";
+  text?: string;
+  sourceKey?: string;
+  sourceUrl?: string;
+  position: WatermarkPosition;
+  sizePct: number;
+  opacityPct: number;
+  /** Plan-forced "Made with Streamline" mark. */
+  forced?: boolean;
 }
 
 // ============================================================================
@@ -122,6 +153,8 @@ export interface ExportTimeline {
   fps: number;
   durationMs: number;
   tracks: ExportTimelineTrack[];
+  /** Watermarks drawn over the picture (custom + plan-forced). */
+  watermarks?: ExportWatermark[];
 }
 
 // ============================================================================
@@ -172,5 +205,43 @@ export function normalizeExportSettings(raw: any): ExportSettingsInput {
       : "standard";
   const fpsNum = Number(raw?.fps);
   const fps = fpsNum === 24 || fpsNum === 60 ? fpsNum : 30;
-  return { resolution, format, quality, fps } as ExportSettingsInput;
+  const watermark = normalizeWatermarkSettings(raw?.watermark);
+  return { resolution, format, quality, fps, ...(watermark ? { watermark } : {}) } as ExportSettingsInput;
 }
+
+const WATERMARK_POSITIONS: readonly WatermarkPosition[] = ["top-left", "top-right", "bottom-left", "bottom-right", "center"];
+export const WATERMARK_TEXT_MAX = 60;
+
+function clampNum(v: unknown, min: number, max: number, fallback: number): number {
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.max(min, Math.min(max, Math.round(n))) : fallback;
+}
+
+/** Validate a client watermark; null when absent or unusable (empty text / no image). */
+export function normalizeWatermarkSettings(raw: any): WatermarkSettings | null {
+  if (!raw || typeof raw !== "object") return null;
+  const position: WatermarkPosition = WATERMARK_POSITIONS.includes(raw.position) ? raw.position : "bottom-right";
+  const opacityPct = clampNum(raw.opacityPct, 10, 100, 70);
+  if (raw.kind === "text") {
+    // Control characters are dropped; the worker passes text via a file (no escaping issues).
+    const text = String(raw.text ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, WATERMARK_TEXT_MAX);
+    if (!text) return null;
+    return { kind: "text", text, position, sizePct: clampNum(raw.sizePct, 2, 12, 5), opacityPct };
+  }
+  if (raw.kind === "image") {
+    const assetId = typeof raw.assetId === "string" ? raw.assetId.trim().slice(0, 200) : "";
+    if (!assetId) return null;
+    return { kind: "image", assetId, position, sizePct: clampNum(raw.sizePct, 5, 40, 15), opacityPct };
+  }
+  return null;
+}
+
+/** The plan-forced brand mark. */
+export const FORCED_BRAND_MARK: ExportWatermark = {
+  kind: "text",
+  text: "Made with Streamline",
+  position: "bottom-right",
+  sizePct: 4,
+  opacityPct: 60,
+  forced: true,
+};

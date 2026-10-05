@@ -94,11 +94,26 @@ export type ExportFormat = "mp4" | "webm" | "mov";
 export type ExportQuality = "draft" | "standard" | "high";
 export type ExportFps = 24 | 30 | 60;
 
+export type WatermarkPosition = "top-left" | "top-right" | "bottom-left" | "bottom-right" | "center";
+
+/** Burned into the export. Image = one of the user's image assets. */
+export type WatermarkSettings = {
+  kind: "text" | "image";
+  text?: string;
+  assetId?: string;
+  position: WatermarkPosition;
+  /** Image: % of width (5..40). Text: % of height (2..12). */
+  sizePct: number;
+  /** 10..100 */
+  opacityPct: number;
+};
+
 export type ExportSettings = {
   resolution: ExportResolution;
   format: ExportFormat;
   quality?: ExportQuality;
   fps?: ExportFps;
+  watermark?: WatermarkSettings | null;
 };
 
 /** What the user's plan allows (GET /api/editing/export-options). */
@@ -115,6 +130,8 @@ export type ExportOptions = {
   priority: boolean;
   /** Transition tiers the plan includes (absent on older servers = all). */
   transitions?: { basic: boolean; advanced: boolean };
+  /** custom = may add own watermark; forced = "Made with Streamline" is always added. */
+  watermark?: { custom: boolean; forced: boolean };
 };
 
 export type ExportJob = {
