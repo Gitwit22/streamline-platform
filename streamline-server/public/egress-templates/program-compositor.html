@@ -37,7 +37,7 @@
     position: absolute; overflow: hidden; background: #111;
     outline: 1px solid #0a0a0a;
   }
-  .slot.screen { background: #000; }
+  .slot.screen, .slot.fit-contain { background: #000; }
   .slot video {
     position: absolute; inset: 0; width: 100%; height: 100%;
     display: block; background: transparent;
@@ -227,6 +227,7 @@
         entry.el.style.height = s.h * 100 + "%";
         entry.el.style.zIndex = String(s.z || 1);
         entry.el.classList.toggle("screen", rs.track === "screen");
+        entry.el.classList.toggle("fit-contain", rs.fit === "contain");
         entry.el.dataset.identity = rs.identity || "";
         entry.el.dataset.track = rs.track || "";
         entry.video.style.objectFit = rs.fit;

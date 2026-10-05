@@ -204,7 +204,7 @@ const STACK_3: FracSlot[] = [
 // of the height), face cam fills the rest: no black dead area.
 const SCREEN_FACECAM: FracSlot[] = [
   { id: "screen", x: 0, y: 0, w: 1, h: 0.3164, z: 1, source: S, fit: "contain" },
-  { id: "facecam", x: 0, y: 0.3164, w: 1, h: 0.6836, z: 1, source: A, fit: "cover" },
+  { id: "facecam", x: 0, y: 0.3164, w: 1, h: 0.6836, z: 1, source: A },
 ];
 
 export const PORTRAIT_PRESETS: ProgramPreset[] = [
@@ -496,7 +496,13 @@ export function resolveProgramLayout(input: {
       slot: s,
       identity: a.identity,
       track: a.track,
-      fit: s.fit || (a.track === "screen" || (!a.track && s.source.kind === "auto-screen") ? "contain" : "cover"),
+      // Vertical outputs letterbox cameras (full 16:9 picture, black bars)
+      // instead of cropping the middle third; landscape fills.
+      fit:
+        s.fit ||
+        (a.track === "screen" || (!a.track && s.source.kind === "auto-screen") || input.orientation === "portrait"
+          ? "contain"
+          : "cover"),
       label: p && s.label !== false ? String(p.name || p.identity) : null,
     };
   };

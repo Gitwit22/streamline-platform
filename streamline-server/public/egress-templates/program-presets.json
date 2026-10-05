@@ -696,8 +696,7 @@
           "z": 1,
           "source": {
             "kind": "auto"
-          },
-          "fit": "cover"
+          }
         }
       ]
     },
@@ -849,8 +848,7 @@
           "z": 1,
           "source": {
             "kind": "auto"
-          },
-          "fit": "cover"
+          }
         }
       ]
     },

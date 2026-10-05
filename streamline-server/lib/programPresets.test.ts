@@ -328,3 +328,22 @@ test("compositor module resolves identically to the TypeScript resolver", async 
     assert.deepEqual(mod.resolveProgramLayout(sc), resolveProgramLayout(sc));
   }
 });
+
+test("fit: vertical outputs letterbox cameras (contain); landscape fills (cover)", () => {
+  const portrait = resolve(buildOrientationLayout("solo_vertical", "portrait"), [P("host", 1)], { orientation: "portrait" });
+  assert.equal(portrait.slots[0].identity, "host");
+  assert.equal(portrait.slots[0].fit, "contain");
+
+  const landscape = resolve(buildOrientationLayout("solo", "landscape"), [P("host", 1)]);
+  assert.equal(landscape.slots[0].fit, "cover");
+
+  const facecam = resolve(
+    buildOrientationLayout("screenshare_facecam", "portrait"),
+    [P("host", 1, { screen: { publishedAt: 2 } })],
+    { orientation: "portrait" },
+  );
+  assert.deepEqual(facecam.slots.map((s) => s.fit), ["contain", "contain"]);
+
+  const grid = resolve(null, [P("host", 1), P("g1", 2)], { orientation: "portrait" });
+  assert.ok(grid.autoGrid && grid.slots.every((s) => s.fit === "contain"));
+});

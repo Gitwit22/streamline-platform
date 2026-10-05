@@ -148,7 +148,9 @@ describe("portrait presets", () => {
   it("screenshare_facecam: exact 16:9 screen on top, face cam fills the rest", () => {
     const l = buildOrientationLayout("screenshare_facecam", "portrait");
     expect(l.slots[0]).toMatchObject({ x: 0, y: 0, w: 1, h: 0.3164, fit: "contain", source: { kind: "auto-screen" } });
-    expect(l.slots[1]).toMatchObject({ x: 0, y: 0.3164, w: 1, h: 0.6836, fit: "cover", source: { kind: "auto" } });
+    // Face cam has no explicit fit: vertical outputs letterbox cameras (contain).
+    expect(l.slots[1]).toMatchObject({ x: 0, y: 0.3164, w: 1, h: 0.6836, source: { kind: "auto" } });
+    expect(l.slots[1].fit).toBeUndefined();
     // 16:9 content at full width of a 9:16 canvas
     expect(l.slots[0].h).toBeCloseTo((9 / 16) * (9 / 16), 4);
     expect(l.slots[1].y + l.slots[1].h).toBeCloseTo(1, 6);
