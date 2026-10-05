@@ -26,6 +26,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { recordTelemetry } from "../lib/telemetry";
 import { decideMultistreamStart, maskSecretTail, redactRtmpUrl } from "../lib/mediaPure";
 import { compositorUrl, instagramAspectFor, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
+import { summarizeEgressOutput, type MultistreamOutputKind } from "../lib/multistreamStatusPure";
 
 // livekit-server-sdk is ESM; use dynamic import so CommonJS builds work on Render
 let _lkMod: any | null = null;
@@ -684,6 +685,65 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
   }
 });
 
+
+// Live per-output status (main RTMP egress + Instagram egress) so the host
+// sees why a destination shows no video. RTMP URLs / keys are never returned.
+router.get("/:roomId/multistream-status", requireAuth, requireRoomAccessToken as any, async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    const { roomId: canonicalRoomId } = getRoomAccess(req as any);
+    if (!canonicalRoomId) return res.status(400).json({ error: "Missing roomId" });
+    const requestedRoomId = String((req.params as any).roomId || "").trim();
+    if (requestedRoomId && requestedRoomId !== canonicalRoomId) {
+      return res.status(400).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
+    }
+    const roomId = canonicalRoomId;
+
+    try {
+      await assertRoomPerm(req as any, roomId, "canDestinations");
+    } catch (err) {
+      if (err instanceof RoomPermissionError) {
+        return res.status(err.status).json({ error: err.code as ApiErrorCode });
+      }
+      throw err;
+    }
+
+    const roomSnap = await firestore.collection("rooms").doc(roomId).get();
+    const roomDoc = roomSnap.exists ? ((roomSnap.data() as any) || {}) : {};
+    const ownerUid = String(roomDoc.ownerId || uid).trim() || uid;
+    const snap = await firestore.collection("activeStreams").doc(`${ownerUid}_${roomId}`).get();
+    const data = snap.exists ? ((snap.data() as any) || {}) : null;
+    const egressIds: { normal?: string; instagram?: string } =
+      data?.egressIds || (data?.egressId ? { normal: data.egressId } : {});
+
+    const rows: Array<{ kind: MultistreamOutputKind; id: string }> = [];
+    if (egressIds.normal) rows.push({ kind: "multistream", id: egressIds.normal });
+    if (egressIds.instagram) rows.push({ kind: "instagram", id: egressIds.instagram });
+    if (rows.length === 0) return res.json({ ok: true, live: false, outputs: [] });
+
+    const client = await getEgressClient();
+    const outputs = await Promise.all(
+      rows.map(async (r) => {
+        try {
+          const list = await client.listEgress({ egressId: r.id });
+          return summarizeEgressOutput(r.kind, r.id, Array.isArray(list) ? list[0] : null);
+        } catch (e: any) {
+          console.warn("[multistream:status] listEgress failed", { egressId: r.id, error: e?.message || e });
+          return summarizeEgressOutput(r.kind, r.id, null);
+        }
+      })
+    );
+    for (const o of outputs) {
+      if (o.failed) console.warn("[multistream:status] output failed", { roomId, kind: o.kind, egressId: o.egressId, error: o.error });
+    }
+    return res.json({ ok: true, live: true, outputs });
+  } catch (err) {
+    console.error("[multistream:status] error:", (err as any)?.message || err);
+    return res.status(500).json({ error: "Failed to read multistream status" });
+  }
+});
 
 // The room OWNER's effective default preset (clamped to the owner's plan) so
 // hosts/cohosts/producers can show the right quality before going live.

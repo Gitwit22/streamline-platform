@@ -1959,6 +1959,9 @@ function RoomPage() {
   const [effectivePresetId, setEffectivePresetId] = useState<string | null>(null);
   const [presetClamped, setPresetClamped] = useState(false);
   const [presetAdjustment, setPresetAdjustment] = useState<string | null>(null);
+  // Failed multistream outputs reported by the server (e.g. Instagram rejected the push).
+  const [outputIssues, setOutputIssues] = useState<Array<{ kind: string; error: string | null }>>([]);
+  const [outputIssuesDismissed, setOutputIssuesDismissed] = useState(false);
   const [defaultRecordingModePref, setDefaultRecordingModePref] = useState<"cloud" | "dual">("cloud");
   const [firestoreRoomId, setFirestoreRoomId] = useState<string | null>(null);
   const [roomAccessToken, setRoomAccessToken] = useState<string | null>(null);
@@ -3420,6 +3423,42 @@ function RoomPage() {
     };
   }, [roomId, roomAccessToken, canManageStream, needsReauth]);
 
+  // While live, poll per-output egress status so a destination that silently
+  // fails (e.g. Instagram shows no video) surfaces its reason to the host.
+  useEffect(() => {
+    if (streamStatus !== "live" || !roomId || !roomAccessToken || !canManageStream) {
+      setOutputIssues([]);
+      setOutputIssuesDismissed(false);
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await apiFetchAuth(
+          `${API_BASE}/api/multistream/${encodeURIComponent(roomId)}/multistream-status`,
+          { method: "GET", headers: { "x-room-access-token": roomAccessToken } },
+          { allowNonOk: true }
+        );
+        if (!res.ok || cancelled) return;
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        const outputs: Array<{ kind: string; failed?: boolean; error?: string | null }> = Array.isArray(data?.outputs)
+          ? data.outputs
+          : [];
+        setOutputIssues(outputs.filter((o) => o.failed).map((o) => ({ kind: o.kind, error: o.error ?? null })));
+      } catch {
+        // transient; next poll retries
+      }
+    };
+    const first = setTimeout(poll, 8000);
+    const timer = setInterval(poll, 15000);
+    return () => {
+      cancelled = true;
+      clearTimeout(first);
+      clearInterval(timer);
+    };
+  }, [streamStatus, roomId, roomAccessToken, canManageStream]);
+
   // Preset availability follows the ROOM OWNER's ceiling once known (clamping
   // uses the owner's plan), else the caller's own `allowed` flags.
   const presetOptionsForUi = useMemo(
@@ -4821,6 +4860,51 @@ function RoomPage() {
               Enable tools
             </button>
           </div>
+        </div>
+      )}
+
+      {outputIssues.length > 0 && !outputIssuesDismissed && (
+        <div
+          role="alert"
+          style={{
+            position: "fixed",
+            top: 16,
+            left: "50%",
+            transform: "translateX(-50%)",
+            zIndex: 1300,
+            maxWidth: "min(560px, calc(100vw - 32px))",
+            padding: "10px 14px",
+            borderRadius: 10,
+            background: "rgba(127, 29, 29, 0.95)",
+            border: "1px solid #f87171",
+            color: "#fff",
+            fontSize: 13,
+            display: "flex",
+            gap: 10,
+            alignItems: "flex-start",
+          }}
+        >
+          <div style={{ flex: 1 }}>
+            {outputIssues.map((o, i) => (
+              <div key={i} style={{ marginBottom: i < outputIssues.length - 1 ? 6 : 0 }}>
+                <strong>{o.kind === "instagram" ? "Instagram" : "Stream destinations"} output failed.</strong>{" "}
+                {o.error || "The destination rejected or dropped the stream."}
+                {o.kind === "instagram" && (
+                  <div style={{ opacity: 0.85, marginTop: 2 }}>
+                    Instagram stream keys work once — copy a fresh Stream URL + key from Live Producer, then stop and
+                    restart the stream.
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <button
+            onClick={() => setOutputIssuesDismissed(true)}
+            aria-label="Dismiss"
+            style={{ background: "transparent", border: "none", color: "#fff", cursor: "pointer", fontSize: 16 }}
+          >
+            ×
+          </button>
         </div>
       )}
 
