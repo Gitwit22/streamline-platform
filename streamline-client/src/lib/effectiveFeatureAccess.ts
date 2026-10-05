@@ -339,7 +339,9 @@ function computeFromServerEntitlements(ent: ServerEntitlements): FeatureAccess {
       allowed: flags.advancedScreenShareEnabled === true,
     },
     audioMixer: {
-      allowed: flags.audioMixerEnabled === true,
+      // Plan feature AND platform switch (server combines both; older
+      // servers without the feature key fall back to the switch alone).
+      allowed: typeof f.audioMixer === "boolean" ? f.audioMixer : flags.audioMixerEnabled === true,
     },
     monetization: {
       allowed: f.monetization,

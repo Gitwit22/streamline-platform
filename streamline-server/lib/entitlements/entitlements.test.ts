@@ -575,3 +575,22 @@ test("user override migration converts legacy fields once", () => {
   assert.equal(planUserOverrideMigration("u", { adminOverridePlanId: "pro", planOverride: { planId: "x" } }, NOW).action, "skip");
   assert.equal(planUserOverrideMigration("u", {}, NOW).action, "skip");
 });
+
+test("audioMixer: plan feature (default on when missing) AND platform switch", () => {
+  // Legacy and v2 docs that predate the feature keep it.
+  assert.equal(normalizePlanDoc("pro", { name: "Pro" }).features.audioMixer, true);
+  assert.equal(normalizePlanDoc("pro", { limitsVersion: 2, features: { recording: true }, limits: {} }).features.audioMixer, true);
+  // Explicit false turns it off for the plan.
+  assert.equal(normalizePlanDoc("pro", { limitsVersion: 2, features: { audioMixer: false }, limits: {} }).features.audioMixer, false);
+  assert.equal(normalizePlanDoc("pro", { features: { audioMixer: false } }).features.audioMixer, false);
+
+  const plan = normalizePlanDoc("pro", PLAN_CATALOG_V2.pro).features;
+  assert.equal(plan.audioMixer, true);
+  assert.equal(combineFeatures(plan, flags({ audioMixerEnabled: false })).audioMixer, false);
+  assert.equal(combineFeatures(plan, flags({ audioMixerEnabled: true })).audioMixer, true);
+  assert.equal(combineFeatures({ ...plan, audioMixer: false }, flags({ audioMixerEnabled: true })).audioMixer, false);
+
+  const ent = resolveEntitlements(input({ planId: "pro" }, { flags: flags({ audioMixerEnabled: false }) }));
+  assert.equal(checkFeature(ent, "audioMixer").code, LIMIT_ERRORS.FEATURE_DISABLED);
+  assert.deepEqual(sanitizePlanV2Input({ features: { audioMixer: false } }).features, { audioMixer: false });
+});

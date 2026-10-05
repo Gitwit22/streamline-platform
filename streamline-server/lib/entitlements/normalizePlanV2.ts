@@ -38,6 +38,9 @@ import {
 
 const GB = 1024 * 1024 * 1024;
 
+/** Features added after plans were seeded: included until an admin turns them off. */
+const DEFAULT_ON_WHEN_MISSING: ReadonlySet<string> = new Set(["audioMixer"]);
+
 function toBool(value: unknown): boolean {
   return value === true || value === "true" || value === 1;
 }
@@ -159,6 +162,8 @@ export function readLegacyFeatures(id: string, data: any): EntitlementFeatures {
   out.monetization = toBool(firstDefined(f.monetization, data.monetizationEnabled, data.monetization));
   out.payPerView = toBool(firstDefined(f.payPerView, f.ppv, data.payPerViewEnabled, data.ppvEnabled));
   out.invisibleHost = toBool(firstDefined(f.invisibleHost, data.invisibleHostEnabled, data.invisibleHost));
+  // Client-side tool: included unless a plan explicitly turns it off.
+  out.audioMixer = toBool(firstDefined(f.audioMixer, data.audioMixerEnabled, true));
 
   const overages = firstDefined(f.allowsOverages, f.overagesAllowed, data.allowsOverages, data.overagesAllowed);
   out.overages = overages !== undefined ? toBool(overages) : LEGACY_OVERAGES_DEFAULT_ON.has(idLower);
@@ -247,7 +252,7 @@ export function readLegacyLimits(id: string, data: any, features: EntitlementFea
 function readV2Features(data: any): EntitlementFeatures {
   const f = (data.features || {}) as any;
   const out = emptyFeatures();
-  for (const k of FEATURE_KEYS) out[k] = toBool(f[k]);
+  for (const k of FEATURE_KEYS) out[k] = toBool(f[k] === undefined && DEFAULT_ON_WHEN_MISSING.has(k) ? true : f[k]);
   return out;
 }
 

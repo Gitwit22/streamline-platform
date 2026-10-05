@@ -57,6 +57,7 @@ const FEATURE_LABELS: Record<FeatureKey, string> = {
   monetization: "Monetization",
   payPerView: "Pay-per-view",
   invisibleHost: "Invisible host",
+  audioMixer: "Audio mixer",
   overages: "Overages",
   watermark: "Watermark",
 };

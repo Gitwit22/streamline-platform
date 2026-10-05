@@ -5,7 +5,7 @@
  * AudioMixer's bus-based gain-node graph.
  *
  * Track → Bus mapping:
- *   - Local microphone       → localMicBus
+ *   - Local microphone       → localMicBus (via useMixerBroadcast)
  *   - Remote participant mic  → guestBus
  *   - Screen-share audio      → screenShareBus
  *
@@ -17,6 +17,7 @@ import { useEffect, useRef } from "react";
 import { useRoomContext } from "@livekit/components-react";
 import { RoomEvent, Track, type RemoteTrackPublication } from "livekit-client";
 import { getMixer } from "./AudioMixerModal";
+import { useMixerBroadcast } from "../hooks/useMixerBroadcast";
 
 /**
  * Determine which mixer bus an audio track belongs to.
@@ -47,6 +48,8 @@ function sourceKey(participantIdentity: string, trackSid: string): string {
 export default function MixerBridge() {
   const room = useRoomContext();
   const connectedRef = useRef(new Set<string>());
+  // Host mic ownership + "Send mix to stream".
+  useMixerBroadcast();
 
   useEffect(() => {
     if (!room) return;
@@ -63,6 +66,11 @@ export default function MixerBridge() {
     ) => {
       // Only audio tracks
       if (!track.mediaStreamTrack || track.mediaStreamTrack.kind !== "audio") return;
+      // Never feed the mixer's own output back in (it can be the published
+      // mic while "Send mix to stream" is on).
+      if (mixer.isMixerOutputTrack(track.mediaStreamTrack)) return;
+      // The local mic is owned by useMixerBroadcast (raw track, stable key).
+      if (isLocal && track.source === Track.Source.Microphone) return;
 
       const bus = busForTrack(track.source, isLocal);
       if (!bus) return;
@@ -110,6 +118,12 @@ export default function MixerBridge() {
     };
 
     wireExisting();
+    // The AudioContext is created when the mixer is first opened; tracks that
+    // were already subscribed must be connected then.
+    const offInit = mixer.subscribeInit(() => {
+      connected.clear();
+      wireExisting();
+    });
 
     // ---- event handlers -------------------------------------------------
 
@@ -152,6 +166,7 @@ export default function MixerBridge() {
     room.on(RoomEvent.ParticipantDisconnected, onParticipantDisconnected);
 
     return () => {
+      offInit();
       room.off(RoomEvent.TrackSubscribed, onTrackSubscribed);
       room.off(RoomEvent.TrackUnsubscribed, onTrackUnsubscribed);
       room.off(RoomEvent.LocalTrackPublished, onLocalTrackPublished);

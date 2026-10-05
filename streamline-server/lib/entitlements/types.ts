@@ -26,6 +26,7 @@ export const FEATURE_KEYS = [
   "monetization",
   "payPerView",
   "invisibleHost",
+  "audioMixer",
   "overages",
   "watermark",
 ] as const;

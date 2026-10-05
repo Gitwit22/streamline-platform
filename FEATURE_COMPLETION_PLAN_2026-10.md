@@ -14,7 +14,7 @@ Each phase ships as its own commit (or small set of commits) on `creator`. Every
 
 ---
 
-## Phase 1 — Audio mixer: send the mix to the stream (`audioMixerEnabled`)
+## Phase 1 — Audio mixer: send the mix to the stream (`audioMixerEnabled`) — ✅ DONE
 
 **Today:** the mixer UI and engine work (`lib/audioMixer.ts`, `AudioMixerModal`, `MixerBridge`). The mixed output only reaches the host's own speakers and local recording; viewers never hear it.
 
@@ -127,5 +127,13 @@ This phase will be scoped separately.
 ---
 
 **Order:** 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8 → 9.
+
+## Progress
+
+| Phase | Status |
+|---|---|
+| 1 Audio mixer | ✅ Done. "Send mix to stream" swaps the host's published mic for the mix (mic + music; guests and screen share excluded). Toolbar mute mutes the mix. Per-plan "Audio mixer" feature. Verified in a two-browser LiveKit test (6/6 states). |
+| 2 Advanced screen share | ⏳ Next |
+| 3–9 | Not started |
 
 Phases 1–5 and 7 need no new outside accounts. Phase 6 needs the Google OAuth setup, so start that application early; it can run in parallel while the other phases are built.

@@ -3,6 +3,7 @@ import {
   AudioMixer,
   ALL_BUS_IDS,
   BUS_LABELS,
+  STREAM_LOCKED_BUSES,
   type BusId,
   type MixerState,
   type DuckingConfig,
@@ -16,6 +17,8 @@ import { useLocalRecording } from "../hooks/useLocalRecording";
 interface AudioMixerModalProps {
   open: boolean;
   onClose: () => void;
+  /** Host / canStream: may send the mix to the room and every output. */
+  canBroadcast?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -33,9 +36,20 @@ export function getMixer(): AudioMixer {
 // Component
 // ---------------------------------------------------------------------------
 
-export default function AudioMixerModal({ open, onClose }: AudioMixerModalProps) {
-  const mixer = useRef(getMixer()).current;
+export default function AudioMixerModal({ open, onClose, canBroadcast = false }: AudioMixerModalProps) {
+  const mixer = getMixer(); // tab-lifetime singleton (stable identity)
   const [state, setState] = useState<MixerState>(() => mixer.getState());
+  const [broadcasting, setBroadcasting] = useState(() => mixer.isBroadcasting());
+  useEffect(() => mixer.subscribeBroadcast(setBroadcasting), [mixer]);
+  // Losing permission mid-session stops the broadcast.
+  useEffect(() => {
+    if (!canBroadcast && mixer.isBroadcasting()) mixer.setBroadcasting(false);
+  }, [canBroadcast, mixer]);
+  const toggleBroadcast = useCallback(() => {
+    mixer.init();
+    void mixer.resume();
+    mixer.setBroadcasting(!mixer.isBroadcasting());
+  }, [mixer]);
 
   // Subscribe to mixer state updates
   useEffect(() => {
@@ -77,7 +91,7 @@ export default function AudioMixerModal({ open, onClose }: AudioMixerModalProps)
     [mixer, state],
   );
   const handleOutputToggle = useCallback(
-    (busId: BusId, output: "monitor" | "program") => {
+    (busId: BusId, output: "monitor" | "program" | "stream") => {
       const cur = state.buses[busId].outputs[output];
       mixer.setOutputFlag(busId, output, !cur);
     },
@@ -220,7 +234,7 @@ export default function AudioMixerModal({ open, onClose }: AudioMixerModalProps)
               🎛️ Audio Mixer
             </div>
             <div style={{ fontSize: "0.65rem", color: "#9ca3af", marginTop: 2 }}>
-              Monitor = your headphones &bull; Program = recording/export mix
+              Monitor = your headphones &bull; Program = local recording &bull; Stream = what viewers hear
             </div>
           </div>
           <button
@@ -245,11 +259,70 @@ export default function AudioMixerModal({ open, onClose }: AudioMixerModalProps)
         {/* ---- Content ---- */}
         <div style={{ padding: "0.75rem 1rem", display: "flex", flexDirection: "column", gap: "0.75rem" }}>
 
+          {canBroadcast && (
+            <div
+              data-testid="mixer-broadcast"
+              style={{
+                padding: "0.6rem 0.7rem",
+                borderRadius: "0.5rem",
+                border: `1px solid ${broadcasting ? "rgba(96,165,250,0.7)" : "rgba(55,65,81,0.6)"}`,
+                background: broadcasting ? "rgba(37,99,235,0.15)" : "rgba(15,23,42,0.7)",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                <div>
+                  <div style={{ fontSize: "0.75rem", fontWeight: 700, color: "#e5e7eb" }}>
+                    Send mix to stream{" "}
+                    <span
+                      style={{
+                        marginLeft: 4,
+                        padding: "1px 6px",
+                        borderRadius: 999,
+                        fontSize: "0.55rem",
+                        fontWeight: 800,
+                        background: broadcasting ? "#2563eb" : "rgba(55,65,81,0.8)",
+                        color: "#fff",
+                      }}
+                    >
+                      {broadcasting ? "LIVE" : "OFF"}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: "0.62rem", color: "#9ca3af", marginTop: 2 }}>
+                    Your mic + music (Stream column) replace your mic for the room, the stream and recordings.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={toggleBroadcast}
+                  aria-pressed={broadcasting}
+                  data-testid="mixer-broadcast-toggle"
+                  style={{
+                    padding: "0.35rem 0.7rem",
+                    borderRadius: "0.4rem",
+                    border: "none",
+                    cursor: "pointer",
+                    fontWeight: 700,
+                    fontSize: "0.7rem",
+                    background: broadcasting ? "#dc2626" : "#2563eb",
+                    color: "#fff",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {broadcasting ? "Stop sending" : "Send to stream"}
+                </button>
+              </div>
+              <div style={{ fontSize: "0.6rem", color: "#9ca3af", marginTop: 6 }}>
+                Use headphones — music from your speakers can be picked up by your mic. The toolbar mic button mutes
+                everything you send; the Host Mic mute below mutes only your voice.
+              </div>
+            </div>
+          )}
+
           {/* Output header labels */}
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "1fr 60px 60px",
+              gridTemplateColumns: "1fr 48px 48px 48px",
               gap: "0.4rem",
               alignItems: "center",
               paddingBottom: "0.25rem",
@@ -280,6 +353,17 @@ export default function AudioMixerModal({ open, onClose }: AudioMixerModalProps)
               }}
             >
               Program
+            </span>
+            <span
+              style={{
+                fontSize: "0.6rem",
+                color: "#60a5fa",
+                textTransform: "uppercase",
+                letterSpacing: "0.05em",
+                textAlign: "center",
+              }}
+            >
+              Stream
             </span>
           </div>
 
@@ -539,7 +623,7 @@ interface BusStripProps {
   onGain: (id: BusId, v: number) => void;
   onMute: (id: BusId) => void;
   onSolo: (id: BusId) => void;
-  onOutputToggle: (id: BusId, output: "monitor" | "program") => void;
+  onOutputToggle: (id: BusId, output: "monitor" | "program" | "stream") => void;
   isMaster?: boolean;
 }
 
@@ -556,7 +640,7 @@ function BusStrip({
     <div
       style={{
         display: "grid",
-        gridTemplateColumns: "1fr 60px 60px",
+        gridTemplateColumns: "1fr 48px 48px 48px",
         gap: "0.4rem",
         alignItems: "center",
         padding: "0.5rem",
@@ -694,6 +778,39 @@ function BusStrip({
         >
           PGM
         </button>
+      </div>
+
+      {/* Stream output toggle (guests / screen share are already in the room) */}
+      <div style={{ textAlign: "center" }}>
+        {(() => {
+          const locked = STREAM_LOCKED_BUSES.has(busId);
+          const on = !locked && bus.outputs.stream;
+          return (
+            <button
+              onClick={() => !locked && onOutputToggle(busId, "stream")}
+              disabled={locked}
+              title={
+                locked
+                  ? "Already sent to viewers as its own track"
+                  : `Stream (what viewers hear): ${on ? "ON" : "OFF"}`
+              }
+              style={{
+                width: 32,
+                height: 22,
+                fontSize: "0.55rem",
+                fontWeight: 700,
+                borderRadius: "0.25rem",
+                border: "none",
+                cursor: locked ? "not-allowed" : "pointer",
+                background: on ? "#2563eb" : "rgba(55,65,81,0.5)",
+                color: on ? "#fff" : "#6b7280",
+                opacity: locked ? 0.4 : 1,
+              }}
+            >
+              STR
+            </button>
+          );
+        })()}
       </div>
     </div>
   );

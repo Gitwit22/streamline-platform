@@ -5571,6 +5571,7 @@ function RoomPage() {
       <AudioMixerModal
         open={showMixer}
         onClose={() => setShowMixer(false)}
+        canBroadcast={!isAudience && (isHost || can("canStream"))}
       />
       )}
 

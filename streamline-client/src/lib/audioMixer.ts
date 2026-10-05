@@ -13,9 +13,12 @@
  * Each bus exposes: gain, mute, solo, ducking priority,
  * and target-output flags (monitor / program).
  *
- * Two outputs:
+ * Three outputs:
  *   monitor  – what the producer hears locally
- *   program  – what goes to stream / recording / viewers
+ *   program  – local recording / export mix (includes guests)
+ *   stream   – replaces the host's published mic when "Send mix to stream"
+ *              is on. Guests and screen-share audio stay OFF here: both are
+ *              already in the room as their own tracks (echo / doubling).
  */
 
 // ---------------------------------------------------------------------------
@@ -33,7 +36,11 @@ export type BusId =
 export interface OutputFlags {
   monitor: boolean;
   program: boolean;
+  stream: boolean;
 }
+
+/** Buses that must never feed the stream output (already published separately). */
+export const STREAM_LOCKED_BUSES: ReadonlySet<BusId> = new Set<BusId>(["guestBus", "screenShareBus"]);
 
 /** Per-bus state that the UI reads / writes. */
 export interface BusState {
@@ -73,35 +80,35 @@ const DEFAULT_BUS_STATE: Record<BusId, BusState> = {
     muted: false,
     solo: false,
     duckingPriority: 0,
-    outputs: { monitor: true, program: true },
+    outputs: { monitor: true, program: true, stream: false },
   },
   localMicBus: {
     gain: 1.0,
     muted: false,
     solo: false,
     duckingPriority: 2,
-    outputs: { monitor: true, program: true },
+    outputs: { monitor: true, program: true, stream: true },
   },
   screenShareBus: {
     gain: 0.85,
     muted: false,
     solo: false,
     duckingPriority: 0,
-    outputs: { monitor: true, program: true },
+    outputs: { monitor: true, program: true, stream: false },
   },
   musicBus: {
     gain: 0.5,
     muted: false,
     solo: false,
     duckingPriority: 0,
-    outputs: { monitor: true, program: false },
+    outputs: { monitor: true, program: false, stream: true },
   },
   masterBus: {
     gain: 1.0,
     muted: false,
     solo: false,
     duckingPriority: 0,
-    outputs: { monitor: true, program: true },
+    outputs: { monitor: true, program: true, stream: true },
   },
 };
 
@@ -166,6 +173,13 @@ export class AudioMixer {
   // Program output destination — produces a real MediaStream
   private programDest: MediaStreamAudioDestinationNode | null = null;
 
+  // Stream output (published as the host mic while broadcasting)
+  private streamGain: GainNode | null = null;
+  private streamDest: MediaStreamAudioDestinationNode | null = null;
+  private broadcasting = false;
+  private broadcastListeners = new Set<(on: boolean) => void>();
+  private initListeners = new Set<() => void>();
+
   // Ducking
   private analysers = new Map<BusId, AnalyserNode>();
   private duckGains = new Map<BusId, GainNode>(); // per-bus ducking gain (between bus gain and outputs)
@@ -212,6 +226,10 @@ export class AudioMixer {
     this.programDest = this.ctx.createMediaStreamDestination();
     this.programGain.connect(this.programDest);
 
+    this.streamGain = this.ctx.createGain();
+    this.streamDest = this.ctx.createMediaStreamDestination();
+    this.streamGain.connect(this.streamDest);
+
     // Create per-bus gain nodes, ducking gains, and analysers
     for (const busId of ALL_BUS_IDS) {
       const busGain = this.ctx.createGain();
@@ -251,6 +269,13 @@ export class AudioMixer {
 
     this.applyAllGains();
     this.startDuckingLoop();
+    for (const fn of this.initListeners) fn();
+  }
+
+  /** Called after init() creates the graph (sources can only connect then). */
+  subscribeInit(fn: () => void): () => void {
+    this.initListeners.add(fn);
+    return () => { this.initListeners.delete(fn); };
   }
 
   /** Tear down the AudioContext and disconnect everything. */
@@ -280,6 +305,9 @@ export class AudioMixer {
     this.monitorGain = null;
     this.programGain = null;
     this.programDest = null;
+    this.streamGain = null;
+    this.streamDest = null;
+    this.setBroadcasting(false);
   }
 
   // -----------------------------------------------------------------------
@@ -311,6 +339,52 @@ export class AudioMixer {
     if (!stream) return null;
     const tracks = stream.getAudioTracks();
     return tracks.length > 0 ? tracks[0] : null;
+  }
+
+  /** The stream-output track (host mic + music, no guests / screen share). */
+  getStreamAudioTrack(): MediaStreamTrack | null {
+    const tracks = this.streamDest?.stream.getAudioTracks() ?? [];
+    return tracks.length > 0 ? tracks[0] : null;
+  }
+
+  /** True for the mixer's own output tracks (never feed these back in). */
+  isMixerOutputTrack(track: MediaStreamTrack | null | undefined): boolean {
+    if (!track) return false;
+    const own = [
+      ...(this.programDest?.stream.getAudioTracks() ?? []),
+      ...(this.streamDest?.stream.getAudioTracks() ?? []),
+    ];
+    return own.some((t) => t === track || t.id === track.id);
+  }
+
+  /** Resume a suspended AudioContext (needs a prior user gesture). */
+  async resume(): Promise<void> {
+    if (this.ctx && this.ctx.state === "suspended") {
+      try { await this.ctx.resume(); } catch { /* still suspended */ }
+    }
+  }
+
+  isInitialized(): boolean {
+    return !!this.ctx;
+  }
+
+  // -----------------------------------------------------------------------
+  // "Send mix to stream" (consumed by useMixerBroadcast)
+  // -----------------------------------------------------------------------
+
+  isBroadcasting(): boolean {
+    return this.broadcasting;
+  }
+
+  setBroadcasting(on: boolean): void {
+    if (this.broadcasting === on) return;
+    this.broadcasting = on;
+    for (const fn of this.broadcastListeners) fn(on);
+  }
+
+  subscribeBroadcast(fn: (on: boolean) => void): () => void {
+    this.broadcastListeners.add(fn);
+    return () => { this.broadcastListeners.delete(fn); };
   }
 
   // -----------------------------------------------------------------------
@@ -405,6 +479,7 @@ export class AudioMixer {
   }
 
   setOutputFlag(busId: BusId, output: keyof OutputFlags, enabled: boolean): void {
+    if (output === "stream" && enabled && STREAM_LOCKED_BUSES.has(busId)) return;
     this.state.buses[busId].outputs[output] = enabled;
     this.applyBusRouting(busId);
     this.notify();
@@ -498,6 +573,7 @@ export class AudioMixer {
     const flags = this.state.buses[busId].outputs;
     if (flags.monitor && this.monitorGain) duckNode.connect(this.monitorGain);
     if (flags.program && this.programGain) duckNode.connect(this.programGain);
+    if (flags.stream && this.streamGain && !STREAM_LOCKED_BUSES.has(busId)) duckNode.connect(this.streamGain);
   }
 
   // -----------------------------------------------------------------------
