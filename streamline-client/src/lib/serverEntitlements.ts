@@ -66,9 +66,9 @@ export type ServerPlanOverride = {
 export type ServerEntitlements = {
   planId: string;
   planName: string;
-  // audioMixer is optional: servers older than this client don't send it.
-  features: Record<ServerFeatureKey, boolean> & { audioMixer?: boolean };
-  planFeatures: Record<ServerFeatureKey, boolean> & { audioMixer?: boolean };
+  // Newer feature keys are optional: servers older than this client don't send them.
+  features: Record<ServerFeatureKey, boolean> & { audioMixer?: boolean; advancedScreenShare?: boolean };
+  planFeatures: Record<ServerFeatureKey, boolean> & { audioMixer?: boolean; advancedScreenShare?: boolean };
   limits: Record<ServerLimitKey, Limit> & { maxPresetId: string };
   source: {
     basePlan: string;

@@ -178,6 +178,7 @@ export function combineFeatures(plan: EntitlementFeatures, flags: PlatformFlags)
     payPerView: plan.payPerView && flags.payPerViewEnabled && monetization,
     invisibleHost: plan.invisibleHost && flags.invisibleHostEnabled,
     audioMixer: plan.audioMixer && flags.audioMixerEnabled,
+    advancedScreenShare: plan.advancedScreenShare && flags.advancedScreenShareEnabled,
     overages: plan.overages,
     watermark: plan.watermark,
   };
@@ -208,6 +209,8 @@ export function platformSwitchFor(feature: FeatureKey, flags: PlatformFlags): bo
       return flags.invisibleHostEnabled;
     case "audioMixer":
       return flags.audioMixerEnabled;
+    case "advancedScreenShare":
+      return flags.advancedScreenShareEnabled;
     default:
       return true;
   }

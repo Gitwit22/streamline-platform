@@ -47,6 +47,7 @@ export function toLegacyEntitlementsPayload(ent: EffectiveEntitlements & { plan?
       payPerView: pf.payPerView,
       invisibleHost: pf.invisibleHost,
       audioMixer: pf.audioMixer,
+      advancedScreenShare: pf.advancedScreenShare,
       editing: pf.editing,
       contentLibrary: pf.contentLibrary,
       projects: pf.projects,

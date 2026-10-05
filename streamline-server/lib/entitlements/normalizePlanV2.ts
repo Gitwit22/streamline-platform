@@ -39,7 +39,7 @@ import {
 const GB = 1024 * 1024 * 1024;
 
 /** Features added after plans were seeded: included until an admin turns them off. */
-const DEFAULT_ON_WHEN_MISSING: ReadonlySet<string> = new Set(["audioMixer"]);
+const DEFAULT_ON_WHEN_MISSING: ReadonlySet<string> = new Set(["audioMixer", "advancedScreenShare"]);
 
 function toBool(value: unknown): boolean {
   return value === true || value === "true" || value === 1;
@@ -164,6 +164,7 @@ export function readLegacyFeatures(id: string, data: any): EntitlementFeatures {
   out.invisibleHost = toBool(firstDefined(f.invisibleHost, data.invisibleHostEnabled, data.invisibleHost));
   // Client-side tool: included unless a plan explicitly turns it off.
   out.audioMixer = toBool(firstDefined(f.audioMixer, data.audioMixerEnabled, true));
+  out.advancedScreenShare = toBool(firstDefined(f.advancedScreenShare, data.advancedScreenShareEnabled, true));
 
   const overages = firstDefined(f.allowsOverages, f.overagesAllowed, data.allowsOverages, data.overagesAllowed);
   out.overages = overages !== undefined ? toBool(overages) : LEGACY_OVERAGES_DEFAULT_ON.has(idLower);

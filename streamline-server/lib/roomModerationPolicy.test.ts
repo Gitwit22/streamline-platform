@@ -11,6 +11,7 @@ import {
   isStaffActor,
   mergeCohostControlScopes,
   missingPermForControlsPatch,
+  screenShareLayoutNeedsFeature,
   moderationActorRole,
 } from "./roomModerationPolicy";
 
@@ -149,4 +150,11 @@ test("mergeCohostControlScopes folds preset/host-granted scopes (streaming inclu
   );
   assert.deepEqual(mergeCohostControlScopes(base, null), base);
   assert.deepEqual(mergeCohostControlScopes(base, { role: "cohost" }), base);
+});
+
+test("screen-share routing beyond off needs Advanced screen share", () => {
+  assert.equal(screenShareLayoutNeedsFeature("off"), false);
+  assert.equal(screenShareLayoutNeedsFeature(undefined), false);
+  assert.equal(screenShareLayoutNeedsFeature("main"), true);
+  assert.equal(screenShareLayoutNeedsFeature("popout"), true);
 });

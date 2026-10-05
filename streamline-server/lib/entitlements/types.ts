@@ -27,6 +27,7 @@ export const FEATURE_KEYS = [
   "payPerView",
   "invisibleHost",
   "audioMixer",
+  "advancedScreenShare",
   "overages",
   "watermark",
 ] as const;

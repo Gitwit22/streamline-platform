@@ -23,7 +23,10 @@ import {
   isProtectedRoomIdentity,
   isStaffActor,
   missingPermForControlsPatch,
+  screenShareLayoutNeedsFeature,
 } from "../lib/roomModerationPolicy";
+import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { checkFeature } from "../lib/entitlements/service";
 import { normalizeRolePresetId, type RolePresetId } from "../lib/permissions/roleDefaults";
 import {
   getRoomOwnerUid as getRoomOwnerUidShared,
@@ -635,6 +638,17 @@ router.patch("/:roomId/controls", requireRoomAccessToken as any, async (req: any
   const missingRoomPerm = missingPermForControlsPatch(access, access.permissions, Object.keys(cleaned));
   if (missingRoomPerm) {
     return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS, required: missingRoomPerm });
+  }
+
+  // Advanced screen-share routing (Main / Pop-out) follows the room OWNER's
+  // plan and the platform switch, not just the actor's canLayout.
+  if (screenShareLayoutNeedsFeature(cleaned.screenShareLayout)) {
+    const ownerUid = (await getRoomOwnerUid(roomId)) || uid;
+    if (!ownerUid) return res.status(403).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    const check = checkFeature(await getEffectiveEntitlements(ownerUid), "advancedScreenShare");
+    if (!check.allowed) {
+      return res.status(403).json({ error: check.code, feature: "advancedScreenShare", reason: check.reason });
+    }
   }
 
   const ref = controlsDocRef(roomId, "default");

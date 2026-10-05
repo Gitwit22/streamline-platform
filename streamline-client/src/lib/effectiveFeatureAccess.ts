@@ -336,7 +336,9 @@ function computeFromServerEntitlements(ent: ServerEntitlements): FeatureAccess {
       allowed: flags.myContentEnabled === true && flags.myContentRecordingsEnabled === true,
     },
     advancedScreenShare: {
-      allowed: flags.advancedScreenShareEnabled === true,
+      // Plan feature AND platform switch (combined on the server).
+      allowed:
+        typeof f.advancedScreenShare === "boolean" ? f.advancedScreenShare : flags.advancedScreenShareEnabled === true,
     },
     audioMixer: {
       // Plan feature AND platform switch (server combines both; older

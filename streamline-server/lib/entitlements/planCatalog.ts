@@ -40,6 +40,7 @@ function features(on: Partial<EntitlementFeatures>): EntitlementFeatures {
     payPerView: false,
     invisibleHost: false,
     audioMixer: true,
+    advancedScreenShare: true,
     overages: false,
     watermark: false,
     ...on,
@@ -59,6 +60,7 @@ const ALL_FEATURES_ON = features({
   payPerView: true,
   invisibleHost: true,
   audioMixer: true,
+  advancedScreenShare: true,
   overages: true,
 });
 

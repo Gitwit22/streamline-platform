@@ -224,3 +224,12 @@ export function collaboratorToRoomAccessPermissions(raw: unknown): Record<RoomAc
     canRemoveGuests: manage,
   };
 }
+
+/**
+ * Screen-share routes beyond the default ("off") are the Advanced screen
+ * share feature (room owner's plan AND the platform switch). "off" is always
+ * accepted so any client can reset routing.
+ */
+export function screenShareLayoutNeedsFeature(layout: unknown): boolean {
+  return layout === "main" || layout === "popout";
+}

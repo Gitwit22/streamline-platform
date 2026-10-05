@@ -2109,8 +2109,22 @@ function RoomPage() {
         headers: { "x-room-access-token": roomAccessToken },
         body: JSON.stringify({ screenShareLayout: mode }),
       })
-        .then((res) => {
-          if (!res.ok) console.warn("[Room] screenShareLayout broadcast rejected", res.status);
+        .then(async (res) => {
+          if (res.ok) return;
+          console.warn("[Room] screenShareLayout broadcast rejected", res.status);
+          if (res.status === 403) {
+            const data = await res.json().catch(() => ({}));
+            if (data?.feature === "advancedScreenShare") {
+              // Server refused (plan / platform switch): fall back to Off.
+              setScreenShareModeRaw("off");
+              try {
+                localStorage.setItem(`${SCREEN_SHARE_MODE_KEY}:${roomId}`, "off");
+              } catch {
+                // ignore
+              }
+              alert(data?.reason || "Advanced screen share isn't available for this room's plan.");
+            }
+          }
         })
         .catch((err: unknown) => {
           console.warn("[Room] screenShareLayout broadcast failed", err);
@@ -2160,6 +2174,11 @@ function RoomPage() {
     [planHlsEnabled, planHlsCustomizationEnabled, rtmpCap],
   );
   const { access: featureAccess } = useFeatureAccess(roomEffectiveEntitlementsForAccess);
+  // A saved/broadcast Main or Pop-out route only applies while the room owner
+  // has Advanced screen share; otherwise the stage behaves as "off".
+  const effectiveScreenShareMode: ScreenShareRouteMode = featureAccess.advancedScreenShare.allowed
+    ? screenShareMode
+    : "off";
 
   useEffect(() => {
     // When navigating between rooms in a single SPA session, always
@@ -5296,7 +5315,7 @@ function RoomPage() {
           controlsAllowPublishAudio={controlsAllowPublishAudio}
           controlsTileVisible={controlsTileVisible}
           controlsAllowScreenShare={controlsAllowScreenShare}
-          screenShareMode={screenShareMode}
+          screenShareMode={effectiveScreenShareMode}
           screenShareRouteNonce={screenShareRouteNonce}
           watermarkEnabled={watermarkEnabled}
           dashboardOpen={dashboardOpen}

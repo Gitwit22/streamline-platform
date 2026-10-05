@@ -246,6 +246,7 @@ const V2_FEATURE_FIELDS: Array<{ key: string; label: string }> = [
   { key: "payPerView", label: "Pay-per-view" },
   { key: "invisibleHost", label: "Invisible host" },
   { key: "audioMixer", label: "Audio mixer" },
+  { key: "advancedScreenShare", label: "Advanced screen share" },
   { key: "overages", label: "Overages allowed" },
   { key: "watermark", label: "Watermark recordings" },
 ];

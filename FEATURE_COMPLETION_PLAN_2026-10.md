@@ -30,7 +30,7 @@ Each phase ships as its own commit (or small set of commits) on `creator`. Every
 
 **Verify:** a browser smoke test with two clients on a local LiveKit server. The host plays music through the mixer, and the guest's received audio track contains it. Mute and unmute still work.
 
-## Phase 2 — Advanced screen share: consistent gating (`advancedScreenShareEnabled`)
+## Phase 2 — Advanced screen share: consistent gating (`advancedScreenShareEnabled`) — ✅ DONE
 
 **Today:** the pop-out window and screen routing are hidden in the UI. The basic auto/manual screen-share mode, also reachable from the Layout panel, is meant to stay available to everyone.
 
@@ -133,7 +133,8 @@ This phase will be scoped separately.
 | Phase | Status |
 |---|---|
 | 1 Audio mixer | ✅ Done. "Send mix to stream" swaps the host's published mic for the mix (mic + music; guests and screen share excluded). Toolbar mute mutes the mix. Per-plan "Audio mixer" feature. Verified in a two-browser LiveKit test (6/6 states). |
-| 2 Advanced screen share | ⏳ Next |
-| 3–9 | Not started |
+| 2 Advanced screen share | ✅ Done. Per-plan "Advanced screen share" feature + platform switch. The server refuses Main/Pop-out routing (controls PATCH) when the room owner isn't entitled; Off always works. A stale saved route falls back to Off, and a refused route resets with a message. |
+| 3 Export options | ⏳ Next |
+| 4–9 | Not started |
 
 Phases 1–5 and 7 need no new outside accounts. Phase 6 needs the Google OAuth setup, so start that application early; it can run in parallel while the other phases are built.

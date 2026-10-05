@@ -594,3 +594,20 @@ test("audioMixer: plan feature (default on when missing) AND platform switch", (
   assert.equal(checkFeature(ent, "audioMixer").code, LIMIT_ERRORS.FEATURE_DISABLED);
   assert.deepEqual(sanitizePlanV2Input({ features: { audioMixer: false } }).features, { audioMixer: false });
 });
+
+test("advancedScreenShare: plan feature (default on when missing) AND platform switch", () => {
+  assert.equal(normalizePlanDoc("pro", { name: "Pro" }).features.advancedScreenShare, true);
+  assert.equal(normalizePlanDoc("pro", { limitsVersion: 2, features: {}, limits: {} }).features.advancedScreenShare, true);
+  assert.equal(
+    normalizePlanDoc("pro", { limitsVersion: 2, features: { advancedScreenShare: false }, limits: {} }).features.advancedScreenShare,
+    false
+  );
+  const plan = normalizePlanDoc("pro", PLAN_CATALOG_V2.pro).features;
+  assert.equal(combineFeatures(plan, flags({ advancedScreenShareEnabled: false })).advancedScreenShare, false);
+  assert.equal(combineFeatures(plan, flags({ advancedScreenShareEnabled: true })).advancedScreenShare, true);
+
+  const disabled = resolveEntitlements(input({ planId: "pro" }, { flags: flags({ advancedScreenShareEnabled: false }) }));
+  assert.equal(checkFeature(disabled, "advancedScreenShare").code, LIMIT_ERRORS.FEATURE_DISABLED);
+  const allowed = resolveEntitlements(input({ planId: "pro" }, { flags: flags({ advancedScreenShareEnabled: true }) }));
+  assert.equal(checkFeature(allowed, "advancedScreenShare").allowed, true);
+});

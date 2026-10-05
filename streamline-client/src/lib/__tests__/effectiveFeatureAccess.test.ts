@@ -152,3 +152,34 @@ describe("limit formatting: null = Unlimited, 0 = none", () => {
     expect(hasRoomFor(3, 3)).toBe(false);
   });
 });
+
+describe("plan-gated client tools (audio mixer, advanced screen share)", () => {
+  it("uses the server's combined plan feature when present", () => {
+    const on = computeEffectiveFeatureAccess({
+      effectiveEntitlements: ent({ features: { ...FEATURES_OFF, audioMixer: true, advancedScreenShare: true } }),
+      platformFlags: {},
+    });
+    expect(on.audioMixer.allowed).toBe(true);
+    expect(on.advancedScreenShare.allowed).toBe(true);
+
+    // Plan excludes them even though the platform switches are on.
+    const planOff = computeEffectiveFeatureAccess({
+      effectiveEntitlements: ent({
+        features: { ...FEATURES_OFF, audioMixer: false, advancedScreenShare: false },
+        platformFlags: { ...FLAGS, audioMixerEnabled: true, advancedScreenShareEnabled: true },
+      }),
+      platformFlags: {},
+    });
+    expect(planOff.audioMixer.allowed).toBe(false);
+    expect(planOff.advancedScreenShare.allowed).toBe(false);
+  });
+
+  it("falls back to the platform switch for servers without the feature keys", () => {
+    const a = computeEffectiveFeatureAccess({
+      effectiveEntitlements: ent({ platformFlags: { ...FLAGS, audioMixerEnabled: true, advancedScreenShareEnabled: false } }),
+      platformFlags: {},
+    });
+    expect(a.audioMixer.allowed).toBe(true);
+    expect(a.advancedScreenShare.allowed).toBe(false);
+  });
+});
