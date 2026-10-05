@@ -36,7 +36,31 @@ export interface TimelineClip {
   volume: number;
   /** Video clips only: embedded audio split off (unlinked from its audio clip). */
   audioDetached?: boolean;
+  /** Video clips only: how the clip enters. Its linked audio clip fades with it on export. */
+  transitionIn?: ClipTransition;
 }
+
+export type TransitionType = 'fade' | 'dip_to_black' | 'crossfade';
+
+export interface ClipTransition {
+  type: TransitionType;
+  /** 100..3000 ms */
+  durationMs: number;
+}
+
+export const TRANSITION_LABELS: Record<TransitionType, string> = {
+  fade: 'Fade in',
+  dip_to_black: 'Dip to black',
+  crossfade: 'Crossfade',
+};
+
+/** Plan tier needed for a transition (basic = fade / dip, advanced = crossfade). */
+export function transitionTier(type: TransitionType): 'basic' | 'advanced' {
+  return type === 'crossfade' ? 'advanced' : 'basic';
+}
+
+export const TRANSITION_MIN_MS = 100;
+export const TRANSITION_MAX_MS = 3000;
 
 /** A lane on the timeline */
 export interface Track {

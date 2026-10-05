@@ -78,3 +78,34 @@ export function qualityEncoding(
   if (q === "high") return { crf: 18, preset: "medium" };
   return { crf: 23, preset: "fast" };
 }
+
+/**
+ * Transition tiers from the plan's editing.transitions block. Explicit
+ * booleans are respected; missing means included (new feature, admins opt
+ * plans out). basic = fade / dip to black, advanced = crossfade.
+ */
+export function readTransitionAccess(editing: any): { basic: boolean; advanced: boolean } {
+  const t = editing?.transitions;
+  return {
+    basic: t?.basic === false ? false : true,
+    advanced: t?.advanced === false ? false : true,
+  };
+}
+
+export function transitionTier(type: unknown): "basic" | "advanced" | null {
+  if (type === "fade" || type === "dip_to_black") return "basic";
+  if (type === "crossfade") return "advanced";
+  return null;
+}
+
+/** First transition in the timeline the plan doesn't include (null = all allowed). */
+export function firstDisallowedTransition(
+  clips: Array<{ transitionIn?: { type: string } | null }>,
+  access: { basic: boolean; advanced: boolean },
+): string | null {
+  for (const c of clips) {
+    const tier = transitionTier(c.transitionIn?.type);
+    if (tier && !access[tier]) return c.transitionIn!.type;
+  }
+  return null;
+}

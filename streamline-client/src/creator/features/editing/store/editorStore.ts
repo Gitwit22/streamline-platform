@@ -4,8 +4,8 @@
 // ============================================================================
 
 import { create } from 'zustand';
-import type { SourceAsset, TimelineClip, Track, DragState, HistoryEntry } from '../types';
-import { MAX_UNDO_HISTORY, clampVolume } from '../types';
+import type { SourceAsset, TimelineClip, Track, DragState, HistoryEntry, ClipTransition } from '../types';
+import { MAX_UNDO_HISTORY, TRANSITION_MAX_MS, TRANSITION_MIN_MS, clampVolume } from '../types';
 import { computeTotalDuration } from '../engine/playbackResolver';
 import {
   placeAssetOnTimeline,
@@ -85,6 +85,8 @@ export interface EditorStore {
   unlinkClips: (linkedGroupId: string) => void;
   setClipVolume: (clipId: string, volume: number) => void;
   setClipMuted: (clipId: string, muted: boolean) => void;
+  /** Set or clear (null) a video clip's transition in. */
+  setClipTransition: (clipId: string, transition: ClipTransition | null) => void;
 
   // --- Actions: Tracks ---
   addTrack: (type: 'video' | 'audio') => void;
@@ -296,6 +298,23 @@ export const useEditorStore = create<EditorStore>((set, get) => ({
     clips: s.clips.map(c => c.id === clipId ? { ...c, isMuted: muted } : c),
     isDirty: true,
   })),
+
+  setClipTransition: (clipId, transition) => {
+    get().pushUndoSnapshot(transition ? 'Set transition' : 'Remove transition');
+    set(s => ({
+      clips: s.clips.map(c => {
+        if (c.id !== clipId || c.type !== 'video') return c;
+        if (!transition) {
+          const next = { ...c };
+          delete next.transitionIn;
+          return next;
+        }
+        const durationMs = Math.round(Math.max(TRANSITION_MIN_MS, Math.min(TRANSITION_MAX_MS, transition.durationMs)));
+        return { ...c, transitionIn: { type: transition.type, durationMs } };
+      }),
+      isDirty: true,
+    }));
+  },
 
   // ===== TRACK ACTIONS =====
 

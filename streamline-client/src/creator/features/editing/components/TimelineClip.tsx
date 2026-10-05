@@ -169,6 +169,16 @@ export default function TimelineClipComponent({ clip }: Props) {
         </div>
       )}
 
+      {/* Transition-in marker: a fade wedge at the clip start */}
+      {clip.transitionIn && (
+        <div
+          className="absolute left-0 top-0 bottom-0 pointer-events-none bg-gradient-to-r from-black/70 to-transparent"
+          style={{ width: `${Math.max(6, Math.min(widthPx, (clip.transitionIn.durationMs / 1000) * PIXELS_PER_SECOND * zoom))}px` }}
+          title={`Transition in: ${clip.transitionIn.type.replace(/_/g, ' ')} (${(clip.transitionIn.durationMs / 1000).toFixed(2)}s)`}
+          data-testid="clip-transition-marker"
+        />
+      )}
+
       {/* Linked indicator */}
       {clip.linkedGroupId && (
         <div className="absolute top-0.5 right-1 text-[8px] opacity-40 pointer-events-none" title="Linked A/V">

@@ -93,6 +93,15 @@ export interface ExportTimelineClip {
   hidden?: boolean;
   /** Video clip contributes its own embedded audio (no linked audio clip). */
   embeddedAudio?: boolean;
+  /** How this clip enters (audio clips inherit their linked video clip's). */
+  transitionIn?: ClipTransition;
+}
+
+export type TransitionType = "fade" | "dip_to_black" | "crossfade";
+
+export interface ClipTransition {
+  type: TransitionType;
+  durationMs: number;
 }
 
 export interface ExportTimelineTrack {

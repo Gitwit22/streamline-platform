@@ -56,7 +56,7 @@ Each phase ships as its own commit (or small set of commits) on `creator`. Every
    - The admin plan editor exposes these fields; they come off `UNENFORCED_EDITING_KEYS`.
 3. **Priority queue:** paid plans with `editing.export.priorityQueue` jump ahead in `exportQueue`.
 
-## Phase 4 — Editor: transitions
+## Phase 4 — Editor: transitions — ✅ DONE
 
 **Build:**
 1. Add a `transitionIn` field to each clip (`{ type: "fade" | "crossfade" | "dip_to_black", durationMs }`) in:
@@ -135,8 +135,9 @@ This phase will be scoped separately.
 | 1 Audio mixer | ✅ Done. "Send mix to stream" swaps the host's published mic for the mix (mic + music; guests and screen share excluded). Toolbar mute mutes the mix. Per-plan "Audio mixer" feature. Verified in a two-browser LiveKit test (6/6 states). |
 | 2 Advanced screen share | ✅ Done. Per-plan "Advanced screen share" feature + platform switch. The server refuses Main/Pop-out routing (controls PATCH) when the room owner isn't entitled; Off always works. A stale saved route falls back to Off, and a refused route resets with a message. |
 | 3 Export options | ✅ Done. Export settings card (resolution, format, quality, fps) before rendering. Plan max resolution and monthly exports are enforced on the server (failed/canceled exports are refunded). Priority render queue. Admin plan controls. Verified with real ffmpeg renders. |
-| 4 Transitions | ⏳ Next |
-| 5–9 | Not started |
+| 4 Transitions | ✅ Done. Fade, dip to black and crossfade per video clip (inspector picker + timeline marker + preview fade); linked audio fades with it. Rendered by ffmpeg (verified frame colours and audio levels). Plan tiers: basic (fade/dip) and advanced (crossfade), enforced on export; admin checkboxes. |
+| 5 Watermark | ⏳ Next |
+| 6–9 | Not started |
 
 Phases 1–5 and 7 need no new outside accounts. Phase 6 needs the Google OAuth setup, so start that application early; it can run in parallel while the other phases are built.
 

@@ -2,8 +2,54 @@
 // CLIP INSPECTOR — Right panel: selected clip properties, volume, unlink
 // ============================================================================
 
+import { useEffect, useState } from 'react';
 import { useEditorStore } from '../store/editorStore';
-import { MAX_CLIP_VOLUME, clipDuration, formatTimecode, videoClipPlaysEmbeddedAudio } from '../types';
+import {
+  MAX_CLIP_VOLUME,
+  TRANSITION_LABELS,
+  TRANSITION_MAX_MS,
+  TRANSITION_MIN_MS,
+  clipDuration,
+  formatTimecode,
+  transitionTier,
+  videoClipPlaysEmbeddedAudio,
+  type TransitionType,
+} from '../types';
+import { editingApi } from '../../../../lib/editingApi';
+
+type TransitionAccess = { basic: boolean; advanced: boolean };
+const ALL_TRANSITIONS: TransitionAccess = { basic: true, advanced: true };
+let transitionAccessPromise: Promise<TransitionAccess> | null = null;
+
+/** Which transition tiers the user's plan includes (fetched once per page load). */
+function useTransitionAccess(): TransitionAccess {
+  const [access, setAccess] = useState<TransitionAccess>(ALL_TRANSITIONS);
+  useEffect(() => {
+    let cancelled = false;
+    if (!transitionAccessPromise) {
+      transitionAccessPromise = editingApi
+        .getExportOptions()
+        .then((o) => o.transitions ?? ALL_TRANSITIONS)
+        .catch(() => {
+          transitionAccessPromise = null;
+          return ALL_TRANSITIONS;
+        });
+    }
+    void transitionAccessPromise.then((a) => {
+      if (!cancelled) setAccess(a);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return access;
+}
+
+const TRANSITION_HELP: Record<TransitionType, string> = {
+  fade: 'Fades in from black (or from the track below).',
+  dip_to_black: 'The previous clip fades to black, then this clip fades in.',
+  crossfade: 'This clip dissolves over the previous clip.',
+};
 
 export default function ClipInspector() {
   const selectedClipIds = useEditorStore(s => s.selectedClipIds);
@@ -13,6 +59,8 @@ export default function ClipInspector() {
   const unlinkClips = useEditorStore(s => s.unlinkClips);
   const setClipVolume = useEditorStore(s => s.setClipVolume);
   const setClipMuted = useEditorStore(s => s.setClipMuted);
+  const setClipTransition = useEditorStore(s => s.setClipTransition);
+  const transitionAccess = useTransitionAccess();
 
   const selectedIds = Array.from(selectedClipIds);
   const selectedClips = clips.filter(c => selectedIds.includes(c.id));
@@ -156,6 +204,60 @@ export default function ClipInspector() {
             <p className="text-[10px] text-zinc-500 mt-1">Sound for this clip is on its linked audio clip.</p>
           )}
         </div>
+
+        {/* Transition in (video clips) */}
+        {clip.type === 'video' && (
+          <div className="border-t border-zinc-800 pt-2" data-testid="clip-transition">
+            <label htmlFor={`clip-transition-${clip.id}`} className="text-zinc-500 text-[10px] uppercase tracking-wider">
+              Transition in
+            </label>
+            <select
+              id={`clip-transition-${clip.id}`}
+              value={clip.transitionIn?.type ?? ''}
+              onChange={(e) => {
+                const type = e.target.value as TransitionType | '';
+                setClipTransition(
+                  clip.id,
+                  type ? { type, durationMs: clip.transitionIn?.durationMs ?? 1000 } : null,
+                );
+              }}
+              className="mt-1 w-full bg-zinc-800 border border-zinc-700 rounded px-2 py-1 text-zinc-200"
+            >
+              <option value="">None (cut)</option>
+              {(Object.keys(TRANSITION_LABELS) as TransitionType[]).map((t) => {
+                const allowed = transitionAccess[transitionTier(t)];
+                return (
+                  <option key={t} value={t} disabled={!allowed && clip.transitionIn?.type !== t}>
+                    {TRANSITION_LABELS[t]}{allowed ? '' : ' (upgrade)'}
+                  </option>
+                );
+              })}
+            </select>
+            {clip.transitionIn && (
+              <>
+                <div className="flex items-center gap-2 mt-2">
+                  <input
+                    type="range"
+                    min={TRANSITION_MIN_MS}
+                    max={Math.min(TRANSITION_MAX_MS, Math.max(TRANSITION_MIN_MS, Math.round(duration * 1000)))}
+                    step={50}
+                    value={clip.transitionIn.durationMs}
+                    onChange={(e) => setClipTransition(clip.id, { type: clip.transitionIn!.type, durationMs: Number(e.target.value) })}
+                    className="flex-1 accent-indigo-500 h-1"
+                    aria-label="Transition duration"
+                  />
+                  <span className="text-zinc-400 font-mono w-12 text-right">{(clip.transitionIn.durationMs / 1000).toFixed(2)}s</span>
+                </div>
+                <p className="text-[10px] text-zinc-500 mt-1">
+                  {TRANSITION_HELP[clip.transitionIn.type]} Applied on export{isLinked ? '; the linked audio fades with it' : ''}.
+                </p>
+                {!transitionAccess[transitionTier(clip.transitionIn.type)] && (
+                  <p className="text-[10px] text-amber-400 mt-1">Your plan doesn't include this transition, so export will be refused.</p>
+                )}
+              </>
+            )}
+          </div>
+        )}
 
         {/* Actions */}
         <div className="border-t border-zinc-800 pt-2 space-y-1.5">

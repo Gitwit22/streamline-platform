@@ -104,6 +104,7 @@ export function editorStateToTimeline(
       displayName: c.displayName,
       volume: clampVolume(c.volume),
       ...(c.audioDetached ? { audioDetached: true } : {}),
+      ...(c.type === 'video' && c.transitionIn ? { transitionIn: { ...c.transitionIn } } : {}),
     })),
   };
 }

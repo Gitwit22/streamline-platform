@@ -113,6 +113,8 @@ export type ExportOptions = {
   /** null = unlimited, 0 = none */
   exportsLimit: number | null;
   priority: boolean;
+  /** Transition tiers the plan includes (absent on older servers = all). */
+  transitions?: { basic: boolean; advanced: boolean };
 };
 
 export type ExportJob = {

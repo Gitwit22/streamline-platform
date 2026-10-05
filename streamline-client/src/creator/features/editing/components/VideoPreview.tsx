@@ -5,6 +5,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useEditorStore } from '../store/editorStore';
 import { resolvePlayback } from '../engine/playbackResolver';
+import { transitionOpacityAt } from '../engine/transitionPreview';
 
 export default function VideoPreview() {
   const clips = useEditorStore(s => s.clips);
@@ -162,6 +163,8 @@ export default function VideoPreview() {
   }, []);
 
   const hasClips = clips.length > 0;
+  const playback = resolvePlayback(playheadTime, clips, tracks);
+  const pictureOpacity = transitionOpacityAt(playheadTime, playback.activeVideoClip, clips);
 
   return (
     <div className="bg-black flex items-center justify-center relative" style={{ maxHeight: '45vh', minHeight: '120px', aspectRatio: '16/9' }}>
@@ -170,19 +173,19 @@ export default function VideoPreview() {
           <video
             ref={videoARef}
             className="max-h-full max-w-full object-contain rounded"
-            style={{ position: 'absolute', inset: 0, margin: 'auto', maxHeight: '100%', maxWidth: '100%' }}
+            style={{ position: 'absolute', inset: 0, margin: 'auto', maxHeight: '100%', maxWidth: '100%', opacity: pictureOpacity }}
             playsInline
             muted
           />
           <video
             ref={videoBRef}
             className="max-h-full max-w-full object-contain rounded"
-            style={{ position: 'absolute', inset: 0, margin: 'auto', maxHeight: '100%', maxWidth: '100%', display: 'none' }}
+            style={{ position: 'absolute', inset: 0, margin: 'auto', maxHeight: '100%', maxWidth: '100%', display: 'none', opacity: pictureOpacity }}
             playsInline
             muted
           />
           {/* Black overlay when no video clip is active */}
-          {resolvePlayback(playheadTime, clips, tracks).isBlack && (
+          {playback.isBlack && (
             <div className="absolute inset-0 bg-black flex items-center justify-center">
               <span className="text-zinc-600 text-sm">No video at playhead</span>
             </div>

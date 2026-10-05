@@ -54,6 +54,7 @@ export interface EditorClipDTO {
   /** Linear gain 0..2 (1 = unity). */
   volume: number;
   audioDetached?: boolean;
+  transitionIn?: { type: 'fade' | 'dip_to_black' | 'crossfade'; durationMs: number };
 }
 
 export interface EditorTimelineDTO {

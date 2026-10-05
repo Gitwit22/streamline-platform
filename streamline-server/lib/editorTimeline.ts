@@ -13,7 +13,7 @@
  *   - Layer 3 timeline_clips (ms) + editing_project_assets -> saved_videos
  * and the builder from the canonical timeline to the render worker contract.
  */
-import type { ExportTimeline, ExportTimelineClip, ExportTimelineTrack } from "./exportTypes";
+import type { ClipTransition, ExportTimeline, ExportTimelineClip, ExportTimelineTrack, TransitionType } from "./exportTypes";
 
 export const EDITOR_TIMELINE_VERSION = 2;
 export const MAX_TIMELINE_CLIPS = 500;
@@ -49,6 +49,19 @@ export interface EditorClip {
   volume: number;
   /** Video clips only: the clip's own (embedded) audio was split off. */
   audioDetached?: boolean;
+  /** Video clips only: how the clip enters (fade / dip to black / crossfade). */
+  transitionIn?: ClipTransition;
+}
+
+export const TRANSITION_TYPES: readonly TransitionType[] = ["fade", "dip_to_black", "crossfade"];
+export const TRANSITION_MIN_MS = 100;
+export const TRANSITION_MAX_MS = 3000;
+
+/** Validate a stored / client transition; null when absent or invalid. */
+export function normalizeTransition(raw: any): ClipTransition | null {
+  if (!raw || typeof raw !== "object" || !TRANSITION_TYPES.includes(raw.type)) return null;
+  const ms = num(raw.durationMs, 1000);
+  return { type: raw.type, durationMs: Math.round(Math.max(TRANSITION_MIN_MS, Math.min(TRANSITION_MAX_MS, ms))) };
 }
 
 export interface EditorTimeline {
@@ -147,6 +160,10 @@ export function sanitizeEditorTimeline(raw: any): SanitizeResult {
       displayName: str(c?.displayName, 200),
       volume: clampVolume(c?.volume),
       ...(type === "video" && c?.audioDetached === true ? { audioDetached: true } : {}),
+      ...(() => {
+        const tr = type === "video" ? normalizeTransition(c?.transitionIn) : null;
+        return tr ? { transitionIn: tr } : {};
+      })(),
     });
   }
 
@@ -341,6 +358,11 @@ export function buildExportTimeline(
     tracks.push({ id: track.id, kind: track.type, muted: muted.has(track.id), order: track.order, clips: [] });
   }
   const byId = new Map(tracks.map((tr) => [tr.id, tr]));
+  // Linked audio clips fade with their video clip.
+  const transitionByGroup = new Map<string, ClipTransition>();
+  for (const c of t.clips) {
+    if (c.type === "video" && c.linkedGroupId && c.transitionIn) transitionByGroup.set(c.linkedGroupId, c.transitionIn);
+  }
 
   for (const c of t.clips) {
     const track = byId.get(c.trackId);
@@ -367,6 +389,9 @@ export function buildExportTimeline(
       hidden: c.isHidden === true,
       embeddedAudio: videoClipPlaysEmbeddedAudio(c, t.clips),
     };
+    const transition =
+      c.type === "video" ? c.transitionIn : c.linkedGroupId ? transitionByGroup.get(c.linkedGroupId) : undefined;
+    if (transition) clip.transitionIn = transition;
     track.clips.push(clip);
   }
 

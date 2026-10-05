@@ -64,6 +64,104 @@ export function clipSourceId(clip: Pick<ExportTimelineClip, "sourceKey" | "sourc
 }
 
 const sec = (ms: number) => (Math.max(0, ms) / 1000).toFixed(3);
+
+/** Clips this close are treated as touching (a cut, eligible for a transition). */
+const ADJACENT_MS = 40;
+
+/** Per-clip effects derived from transitions (all in ms; 0 = none). */
+export interface ClipEffects {
+  /** Picture fades in over this long. */
+  fadeInMs: number;
+  /** Fade in via alpha (reveals what is underneath) instead of from black. */
+  fadeInAlpha: boolean;
+  /** Picture fades out to black over the last fadeOutMs (dip to black). */
+  fadeOutMs: number;
+  /** Last frame is held this long past the clip's end (crossfade under the next clip). */
+  holdMs: number;
+  /** Sound fades in / out. */
+  afadeInMs: number;
+  afadeOutMs: number;
+}
+
+const NO_EFFECTS: ClipEffects = { fadeInMs: 0, fadeInAlpha: false, fadeOutMs: 0, holdMs: 0, afadeInMs: 0, afadeOutMs: 0 };
+
+/**
+ * Resolve clip transitions into concrete fades:
+ *   fade          picture alpha-fades in over D; sound fades in over D.
+ *   dip_to_black  previous touching clip fades out to black over D/2, this
+ *                 clip fades in from black over D/2 (sound the same).
+ *                 With no previous clip: fade in from black over D.
+ *   crossfade     previous touching clip holds its last frame for D while
+ *                 this clip alpha-fades in over it; sound dips over D/2 each
+ *                 side. With no previous clip: same as fade.
+ * Durations are clamped to the clips involved.
+ */
+export function planClipEffects(
+  clips: Array<Pick<NormalizedClip, "clip" | "track" | "durMs" | "picture" | "audio">>,
+): Map<string, ClipEffects> {
+  const fx = new Map<string, ClipEffects>();
+  const get = (id: string) => {
+    let e = fx.get(id);
+    if (!e) {
+      e = { ...NO_EFFECTS };
+      fx.set(id, e);
+    }
+    return e;
+  };
+  const prevTouching = (c: (typeof clips)[number], want: "picture" | "audio") =>
+    clips
+      .filter(
+        (o) =>
+          o !== c &&
+          o[want] &&
+          o.track.id === c.track.id &&
+          Math.abs(o.clip.endMs - c.clip.startMs) <= ADJACENT_MS,
+      )
+      .sort((a, b) => b.clip.endMs - a.clip.endMs)[0];
+
+  for (const c of clips) {
+    const tr = c.clip.transitionIn;
+    if (!tr) continue;
+    const D = Math.max(0, Math.min(tr.durationMs, c.durMs));
+    if (D <= 0) continue;
+
+    if (c.picture) {
+      const prev = prevTouching(c, "picture");
+      const e = get(c.clip.id);
+      if (tr.type === "dip_to_black" && prev) {
+        const half = Math.min(D / 2, prev.durMs);
+        e.fadeInMs = D / 2;
+        e.fadeInAlpha = false;
+        const pe = get(prev.clip.id);
+        pe.fadeOutMs = Math.max(pe.fadeOutMs, half);
+      } else if (tr.type === "dip_to_black") {
+        e.fadeInMs = D;
+        e.fadeInAlpha = false;
+      } else {
+        // fade, or crossfade (prev frame held underneath)
+        e.fadeInMs = D;
+        e.fadeInAlpha = true;
+        if (tr.type === "crossfade" && prev) {
+          const pe = get(prev.clip.id);
+          pe.holdMs = Math.max(pe.holdMs, D);
+        }
+      }
+    }
+
+    if (c.audio) {
+      const prev = tr.type === "fade" ? undefined : prevTouching(c, "audio");
+      const e = get(c.clip.id);
+      if (prev) {
+        e.afadeInMs = D / 2;
+        const pe = get(prev.clip.id);
+        pe.afadeOutMs = Math.max(pe.afadeOutMs, Math.min(D / 2, prev.durMs));
+      } else {
+        e.afadeInMs = D;
+      }
+    }
+  }
+  return fx;
+}
 const gain = (v: number) => (Math.round(v * 1000) / 1000).toString();
 
 interface NormalizedClip {
@@ -145,15 +243,25 @@ export function buildRenderPlan(
   const pictureClips = clips
     .filter((c) => c.picture)
     .sort((a, b) => (b.track.order ?? 0) - (a.track.order ?? 0) || a.clip.startMs - b.clip.startMs);
+  const effects = planClipEffects(clips);
   let bg = 0;
   pictureClips.forEach((c, k) => {
     const i = inputIndex.get(c)!;
+    const fxc = effects.get(c.clip.id) || NO_EFFECTS;
     const s = sec(c.clip.startMs);
-    const e = sec(c.clip.endMs);
+    const e = sec(c.clip.endMs + fxc.holdMs);
+    // Fades run on clip-local time, before the clip is shifted to its start.
+    let fades = "";
+    if (fxc.holdMs > 0) fades += `tpad=stop_mode=clone:stop_duration=${sec(fxc.holdMs)},`;
+    if (fxc.fadeOutMs > 0) fades += `fade=t=out:st=${sec(c.durMs - fxc.fadeOutMs)}:d=${sec(fxc.fadeOutMs)},`;
+    const pixfmt = fxc.fadeInMs > 0 && fxc.fadeInAlpha ? "yuva420p" : "yuv420p";
+    if (fxc.fadeInMs > 0) {
+      fades += `format=${pixfmt},fade=t=in:st=0:d=${sec(fxc.fadeInMs)}${fxc.fadeInAlpha ? ":alpha=1" : ""},`;
+    }
     parts.push(
       `[${i}:v]trim=duration=${sec(c.durMs)},setpts=PTS-STARTPTS,` +
         `scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2,setsar=1,` +
-        `fps=${fps},format=yuv420p,setpts=PTS+${s}/TB[v${k}]`,
+        `fps=${fps},${fades}format=${pixfmt},setpts=PTS+${s}/TB[v${k}]`,
     );
     parts.push(`[bg${bg}][v${k}]overlay=eof_action=pass:enable='between(t,${s},${e})'[bg${bg + 1}]`);
     bg++;
@@ -170,10 +278,14 @@ export function buildRenderPlan(
     const label = `a${k}`;
     if (c.input.hasAudio) {
       const i = inputIndex.get(c)!;
+      const fxc = effects.get(c.clip.id) || NO_EFFECTS;
+      let afades = "";
+      if (fxc.afadeInMs > 0) afades += `afade=t=in:st=0:d=${sec(fxc.afadeInMs)},`;
+      if (fxc.afadeOutMs > 0) afades += `afade=t=out:st=${sec(c.durMs - fxc.afadeOutMs)}:d=${sec(fxc.afadeOutMs)},`;
       parts.push(
         `[${i}:a]atrim=duration=${sec(c.durMs)},asetpts=PTS-STARTPTS,aresample=48000,` +
           `aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,` +
-          `volume=${gain(c.volume)},adelay=${delay}|${delay}[${label}]`,
+          `${afades}volume=${gain(c.volume)},adelay=${delay}|${delay}[${label}]`,
       );
     } else {
       silent++;

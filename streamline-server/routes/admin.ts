@@ -531,6 +531,9 @@ router.put("/plans/:planId", async (req, res) => {
         if (editingMeta?.export) {
           writeData.editing.export = { ...((existing.editing || {}).export || {}), ...editingMeta.export };
         }
+        if (editingMeta?.transitions) {
+          writeData.editing.transitions = { ...((existing.editing || {}).transitions || {}), ...editingMeta.transitions };
+        }
         for (const k of Object.keys(editingMeta || {})) mergeFields.push(new FieldPath("editing", k));
       }
       await planRef.set(writeData, { mergeFields });

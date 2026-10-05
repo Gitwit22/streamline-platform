@@ -39,6 +39,8 @@ import {
   parseMaxResolution,
   readExportLimit,
   readPriorityQueue,
+  readTransitionAccess,
+  firstDisallowedTransition,
   resolutionAllowed,
   type ExportResolution,
 } from "../lib/exportPolicyPure";
@@ -113,6 +115,8 @@ type EditingPlanInfo = {
   exportsPerMonth: number | null;
   /** Plan renders ahead of the FIFO queue. */
   priorityQueue: boolean;
+  /** basic = fade / dip to black, advanced = crossfade. */
+  transitions: { basic: boolean; advanced: boolean };
 };
 
 type EditingPlanFeature = "editing" | "projects" | "contentLibrary";
@@ -132,6 +136,7 @@ async function getEditingPlanInfo(uid: string): Promise<EditingPlanInfo> {
     maxResolution: parseMaxResolution(editing.maxResolution),
     exportsPerMonth: readExportLimit(editing),
     priorityQueue: readPriorityQueue(editing),
+    transitions: readTransitionAccess(editing),
   };
 }
 
@@ -502,6 +507,17 @@ router.post("/export", async (req: Request, res: Response) => {
       });
     }
     const { width, height } = resolutionToDimensions(settings.resolution);
+    const blockedTransition = firstDisallowedTransition(loaded.timeline.clips, access.plan.transitions);
+    if (blockedTransition) {
+      return res.status(403).json({
+        error: LIMIT_ERRORS.FEATURE_NOT_ENTITLED,
+        reason:
+          blockedTransition === "crossfade"
+            ? "Crossfade transitions aren't included in your plan"
+            : "Transitions aren't included in your plan",
+        transition: blockedTransition,
+      });
+    }
 
     // Resolve every clip's source from the caller's own MediaAssets (storage
     // key preferred; the worker presigns it). A stored URL is used only when
@@ -579,6 +595,7 @@ router.get("/export-options", async (req: Request, res: Response) => {
       exportsUsed: used,
       exportsLimit: access.plan.exportsPerMonth,
       priority: access.plan.priorityQueue,
+      transitions: access.plan.transitions,
     });
   } catch (err: any) {
     logger.error({ err: err?.message || String(err) }, "Export options error");

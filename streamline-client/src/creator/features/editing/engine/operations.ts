@@ -237,7 +237,8 @@ export function splitAtPlayhead(
       rightLinkedGroupId = linkedGroups.get(clip.linkedGroupId)!;
     }
 
-    // Right half (new ID, new linked group)
+    // Right half (new ID, new linked group). The transition stays on the
+    // left half: the cut created by a split is a plain cut.
     const right: TimelineClip = {
       ...clip,
       id: generateId('clip'),
@@ -245,6 +246,7 @@ export function splitAtPlayhead(
       sourceStart: clip.sourceStart + splitOffset,
       linkedGroupId: rightLinkedGroupId,
     };
+    delete right.transitionIn;
 
     result.push(left, right);
   }

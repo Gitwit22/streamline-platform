@@ -133,7 +133,7 @@ export function planResetDiff(planId: string, existing: any | null, canonical: P
 const VISIBILITIES = new Set(["public", "hidden", "admin"]);
 
 /** Editor sub-options not enforced yet (ignored on save). export.* other than priorityQueue is still pending. */
-export const UNENFORCED_EDITING_KEYS = ["unlimitedExports", "transitions", "ai"];
+export const UNENFORCED_EDITING_KEYS = ["unlimitedExports", "ai"];
 
 /**
  * Validate the non-entitlement part of PUT /api/admin/plans/:id. Entitlement
@@ -199,6 +199,16 @@ export function sanitizePlanMetaInput(body: any): { meta: Record<string, any>; e
           else editing.exportsPerMonth = Math.floor(n);
         }
         editing.limitsVersion = 2;
+      }
+      const tr = body.editing.transitions;
+      if (isPlainObject(tr)) {
+        const transitions: Record<string, boolean> = {};
+        for (const k of ["basic", "advanced"]) {
+          if (tr[k] === undefined) continue;
+          if (typeof tr[k] !== "boolean") errors.push(`editing.transitions.${k} must be boolean`);
+          else transitions[k] = tr[k];
+        }
+        if (Object.keys(transitions).length) editing.transitions = transitions;
       }
       const ex = body.editing.export;
       if (isPlainObject(ex) && ex.priorityQueue !== undefined) {

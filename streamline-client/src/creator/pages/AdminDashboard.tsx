@@ -1755,8 +1755,9 @@ export default function AdminDashboard() {
                               onToggle={(next) => setSectionCollapsedValue("✂️ Editing Suite", next)}
                             >
                               {/* Editor access, projects and storage live in Features / Limits above.
-                                  AI, transitions and watermark / direct-upload export options are not
-                                  enforced by the product yet, so they are not editable here. */}
+                                  AI and watermark / direct-upload export options are not enforced by
+                                  the product yet, so they are not editable here. Transitions default to
+                                  included when unset. */}
                               <EditRow label="Max Tracks" value={plan.editing?.maxTracks || 0} onChange={(v) => updatePlanField(plan.id, "editing.maxTracks", Number(v))} />
                               <div style={S.editRow}>
                                 <label style={S.editLabel}>Max export resolution</label>
@@ -1779,6 +1780,24 @@ export default function AdminDashboard() {
                                   updatePlanField(plan.id, "editing.limitsVersion", 2);
                                 }}
                               />
+                              <div style={S.editRow}>
+                                <label style={S.editLabel}>Transitions: fade &amp; dip to black</label>
+                                <input
+                                  type="checkbox"
+                                  checked={plan.editing?.transitions?.basic !== false}
+                                  onChange={(e) => updatePlanField(plan.id, "editing.transitions.basic", e.target.checked)}
+                                  style={{ transform: "scale(1.3)", cursor: "pointer" }}
+                                />
+                              </div>
+                              <div style={S.editRow}>
+                                <label style={S.editLabel}>Transitions: crossfade</label>
+                                <input
+                                  type="checkbox"
+                                  checked={plan.editing?.transitions?.advanced !== false}
+                                  onChange={(e) => updatePlanField(plan.id, "editing.transitions.advanced", e.target.checked)}
+                                  style={{ transform: "scale(1.3)", cursor: "pointer" }}
+                                />
+                              </div>
                               <div style={S.editRow}>
                                 <label style={S.editLabel}>Priority render queue</label>
                                 <input
