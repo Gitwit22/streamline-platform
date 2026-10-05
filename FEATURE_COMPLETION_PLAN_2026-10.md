@@ -138,3 +138,47 @@ This phase will be scoped separately.
 | 4–9 | Not started |
 
 Phases 1–5 and 7 need no new outside accounts. Phase 6 needs the Google OAuth setup, so start that application early; it can run in parallel while the other phases are built.
+
+---
+
+## Secondary improvements (paused — scheduled after the main phases)
+
+The owner chose these on 2026-10-05. **Don't start them until the owner says so.**
+
+### S1. Audio: soundboard + playlist (through the mixer)
+
+**Today:** the mixer has one music slot.
+- It uses a file picker and always loops, with play, stop and remove.
+- It plays through the Music channel, and viewers hear it when "Send mix to stream" is on.
+- There's no drag and drop, no queue, no progress bar or seek, and no per-clip volume.
+- The file is lost on refresh, and the player is only reachable inside the mixer pop-up.
+
+**Build:**
+- **Drag and drop** audio files onto the room or the mixer.
+- **Playlist** for background music: queue, next/previous, progress and seek, loop toggle.
+- **Soundboard** pads for one-shot sounds: intros, applause, stingers.
+- **Per-item volume** on both.
+- **Mixer routing:** everything stays on the mixer's Music channel, so volume, mute, ducking and "Send mix to stream" all apply.
+- **Persistence:** files are saved to the content library so they're still there next session.
+
+### S2. Room customization
+
+**Today:**
+- Channel branding (title, subtitle, logo, offline message, theme) appears only on the `/live/...` viewer page.
+- Room layout reaches every output.
+- Nothing brands the video itself: the compositor background is hard-coded black.
+
+**Build:**
+1. **Branding on the video.** Logo or watermark (position, size, opacity) and a background color or image drawn by the program compositor. It reaches YouTube, Facebook, Twitch, Instagram, the HLS video and recordings.
+2. **Lower thirds and banners.** Name tags and a static or scrolling text banner, shown or hidden live from the room, on all outputs.
+3. **Rename room + join page branding.** Rename a room after creation. Show the channel logo and title on the join page and in the room header.
+4. **Fix the bugs found in the audit:**
+   - A co-host with `canLayout` can rewrite the owner's channel branding (`roomsHlsConfig.ts`). Restrict it to the owner, or add a dedicated permission.
+   - `POST /api/saved-embeds` accepts `hlsConfig` without the branding validation (no length limits, no logo URL check). Validate it or drop it.
+   - An offline message equal to the old default text is silently replaced on the viewer page (`hlsBranding.ts`).
+   - Branding changes only reach open viewer pages on reload. Re-fetch the channel branding live.
+   - Branding can only be edited for a channel's home room; other rooms that go live on the channel show the home room's branding.
+   - Minor:
+     - `hlsConfig.enabled` has no UI.
+     - The room theme is never used.
+     - The editor's "platform disabled" notice can't be reached.
