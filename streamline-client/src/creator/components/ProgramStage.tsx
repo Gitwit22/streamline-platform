@@ -13,12 +13,15 @@
  */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
+  Chat,
   ControlBar,
+  LayoutContextProvider,
   ParticipantTile,
   RoomAudioRenderer,
   useRoomContext,
   useRoomInfo,
   type TrackReferenceOrPlaceholder,
+  type WidgetState,
 } from "@livekit/components-react";
 import { RoomEvent, Track, type Participant } from "livekit-client";
 import { apiGetProgramState, apiUpdateProgramState } from "../../lib/api";
@@ -394,6 +397,9 @@ export default function ProgramStage() {
   const state = ctx?.state ?? null;
   const [view, setView] = useState<"program" | "gallery">(readView);
   const { ref, box } = useFittedBox(16 / 9);
+  // Chat side panel for the program view, wired like LiveKit's VideoConference
+  // (Gallery view): the ControlBar's Chat button toggles widget.showChat.
+  const [widget, setWidget] = useState<WidgetState>({ showChat: false, unreadMessages: 0 });
 
   const toggleView = () => {
     setView((v) => {
@@ -434,6 +440,8 @@ export default function ProgramStage() {
   }
 
   return (
+    <LayoutContextProvider onWidgetChange={setWidget}>
+    <div className="sl-stage-shell">
     <div className="sl-stage-root" data-testid="program-stage">
       <div className="sl-stage-area" ref={ref}>
         <div
@@ -449,8 +457,11 @@ export default function ProgramStage() {
         </div>
         {toggle}
       </div>
-      <ControlBar controls={{ chat: false }} />
-      <RoomAudioRenderer />
+      <ControlBar controls={{ chat: true }} />
     </div>
+    <Chat style={{ display: widget.showChat ? "grid" : "none" }} />
+    </div>
+    <RoomAudioRenderer />
+    </LayoutContextProvider>
   );
 }

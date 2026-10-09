@@ -207,7 +207,15 @@ button:focus-visible {
 /* ======================================
    PROGRAM STAGE (live program layout, everyone in-room)
    ====================================== */
+/* Program view + LiveKit Chat panel side by side (as in Gallery view). */
+.sl-stage-shell {
+  width: 100%;
+  height: 100%;
+  display: flex;
+}
 .sl-stage-root {
+  flex: 1;
+  min-width: 0;
   width: 100%;
   height: 100%;
   display: flex;
