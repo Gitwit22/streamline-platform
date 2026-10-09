@@ -1806,7 +1806,7 @@ function RoomPage() {
     canPublishAudio: true,
     tileVisible: true,
     canPublishVideo: true,
-    canScreenShare: false,
+    canScreenShare: undefined,
     canMuteGuests: false,
     canRemoveGuests: false,
     canInviteLinks: false,
@@ -1880,7 +1880,7 @@ function RoomPage() {
             canPublishAudio: typeof c.canPublishAudio === "boolean" ? c.canPublishAudio : true,
             tileVisible: typeof c.tileVisible === "boolean" ? c.tileVisible : true,
             canPublishVideo: typeof c.canPublishVideo === "boolean" ? c.canPublishVideo : true,
-            canScreenShare: typeof c.canScreenShare === "boolean" ? c.canScreenShare : false,
+            canScreenShare: typeof c.canScreenShare === "boolean" ? c.canScreenShare : undefined,
             canMuteGuests: typeof c.canMuteGuests === "boolean" ? c.canMuteGuests : false,
                 canRemoveGuests: typeof c.canRemoveGuests === "boolean" ? c.canRemoveGuests : false,
             canInviteLinks: typeof c.canInviteLinks === "boolean" ? c.canInviteLinks : false,
@@ -2066,7 +2066,15 @@ function RoomPage() {
   const controlsAllowPublishAudio = !subjectToControls || effectiveControls.canPublishAudio !== false;
   const controlsAllowPublishVideo = !subjectToControls || effectiveControls.canPublishVideo !== false;
   const controlsTileVisible = !subjectToControls || effectiveControls.tileVisible !== false;
-  const controlsAllowScreenShare = !subjectToControls || effectiveControls.canScreenShare !== false;
+  // Screen share: an explicit controls value wins (host restriction or the
+  // applied role preset). Without one (e.g. an invite guest whose token was
+  // minted from the owner's participant preset), the LiveKit grant decides,
+  // since LiveKit's ControlBar shows the Screen button for any publisher.
+  const controlsAllowScreenShare =
+    !subjectToControls ||
+    (typeof effectiveControls.canScreenShare === "boolean"
+      ? effectiveControls.canScreenShare
+      : livekitPublish?.canPublish === true && livekitPublish.canScreenShare);
   const controlsAudioBlocked =
     subjectToControls && (!controlsAllowPublishAudio || !!effectiveControls.forcedMute || !!effectiveControls.muteLocked);
   const controlsVideoBlocked = subjectToControls && (!controlsAllowPublishVideo || !!effectiveControls.forcedVideoOff);
@@ -2300,7 +2308,7 @@ function RoomPage() {
           canPublishAudio: typeof data?.canPublishAudio === "boolean" ? data.canPublishAudio : true,
           tileVisible: typeof data?.tileVisible === "boolean" ? data.tileVisible : true,
           canPublishVideo: typeof data?.canPublishVideo === "boolean" ? data.canPublishVideo : true,
-          canScreenShare: typeof data?.canScreenShare === "boolean" ? data.canScreenShare : false,
+          canScreenShare: typeof data?.canScreenShare === "boolean" ? data.canScreenShare : undefined,
           canMuteGuests: typeof data?.canMuteGuests === "boolean" ? data.canMuteGuests : false,
           canRemoveGuests: typeof data?.canRemoveGuests === "boolean" ? data.canRemoveGuests : false,
           canInviteLinks: typeof data?.canInviteLinks === "boolean" ? data.canInviteLinks : false,

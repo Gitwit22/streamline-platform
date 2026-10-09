@@ -1516,8 +1516,13 @@ function ParticipantList({
                     >
                       <option value="participant">Participant</option>
                       {/* Co-host needs a StreamLine account: anonymous guests can't be promoted. */}
-                      {(isAccountIdentity(p.identity) || currentRole === "cohost") && (
+                      {/* Shown disabled for guests so hosts can see why it's unavailable. */}
+                      {isAccountIdentity(p.identity) || currentRole === "cohost" ? (
                         <option value="cohost">Co-host</option>
+                      ) : (
+                        <option value="cohost" disabled>
+                          Co-host (needs account)
+                        </option>
                       )}
                     </select>
                     {roleStatus && roleStatus[p.identity] === 'saving' && (
