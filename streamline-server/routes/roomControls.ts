@@ -170,7 +170,18 @@ export async function enforceRoomControlsForIdentity(opts: {
     } else {
       const fallback = normalizeBaseRole(opts.fallbackRole);
       if (fallback) {
-        base = roleToParticipantPermission(fallback);
+        // Same screen-share rule as the join token (roomGuestAccess): an
+        // explicit identity value, else the owner's participant preset.
+        // Without this, enforcing controls on (re)join stripped screen share
+        // from guests/participants whose token had it.
+        let screenShare = false;
+        if (fallback === "guest" || fallback === "participant") {
+          screenShare =
+            typeof identityDoc.canScreenShare === "boolean"
+              ? identityDoc.canScreenShare
+              : (await loadOwnerRolePreset(await getRoomOwnerUid(roomId), "participant")).canScreenShare === true;
+        }
+        base = roleToParticipantPermission(fallback, { screenShare });
       } else {
         base = toLiveKitParticipantPermission((lkParticipant as any)?.permission || {});
       }
