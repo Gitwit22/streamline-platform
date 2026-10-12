@@ -1,5 +1,6 @@
 import express from "express";
 import { firestore } from "../firebaseAdmin";
+import { streamedMinutesFromUsage } from "../lib/publicStats";
 
 const router = express.Router();
 
@@ -49,10 +50,7 @@ router.get("/public", async (_req, res) => {
     usageSnap.docs.forEach((doc) => {
       const data = doc.data() as any;
       const usage = data?.usage || data?.totals || {};
-      const participantMinutes = Number(
-        usage?.participantMinutes ?? usage?.streamMinutes ?? usage?.minutes ?? 0
-      );
-      totalMinutes += participantMinutes;
+      totalMinutes += streamedMinutesFromUsage(usage);
 
       // Consider a usageMonthly doc "active" if updated within the last hour
       const updatedAt = (data?.updatedAt as any);

@@ -3371,15 +3371,24 @@ function RoomPage() {
     name: displayName || pendingName || "",
   };
   const presenceStageRef = useRef<"join_page" | "entered_room" | "left" | null>(null);
-  const sendPresence = React.useCallback((stage: "join_page" | "entered_room" | "left", beacon = false) => {
+  // Identity the last join_page ping was keyed by (null = server fingerprint),
+  // so a later "left" removes that same entry.
+  const joinPagePingIdentityRef = useRef<string | null>(null);
+  const sendPresence = React.useCallback((
+    stage: "join_page" | "entered_room" | "left",
+    beacon = false,
+    identityOverride?: string | null,
+  ) => {
     const ctx = presenceCtxRef.current;
     if (!ctx.roomId) return;
     presenceStageRef.current = stage;
+    const identity = identityOverride !== undefined ? identityOverride : ctx.identity;
+    if (stage === "join_page") joinPagePingIdentityRef.current = identity;
     postGuestPresence(
       {
         roomId: ctx.roomId,
         stage,
-        identity: ctx.identity,
+        identity,
         displayName: ctx.name,
         guestSessionToken: readStoredGuestSession(ctx.roomId),
       },
@@ -3981,7 +3990,14 @@ function RoomPage() {
 
   const handleLiveKitConnected = () => {
     setConnectionIssue(null);
-    if (!isHost) sendPresence("entered_room");
+    if (!isHost) {
+      sendPresence("entered_room");
+    } else if (presenceStageRef.current === "join_page") {
+      // The host's page sat on the join gate until its role was known and
+      // pinged join_page as a guest; clear that entry so the host's own
+      // "is viewing the join page" pill doesn't show them.
+      sendPresence("left", false, joinPagePingIdentityRef.current);
+    }
   };
 
   // Retry after a drop / failed connect: re-mint and build a fresh LiveKit room.
