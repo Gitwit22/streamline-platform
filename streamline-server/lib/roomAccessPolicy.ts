@@ -148,6 +148,20 @@ export function decideDirectGuestJoin(access: RoomAccessMode, room: Record<strin
   return { allow: true, role: "viewer" };
 }
 
+/**
+ * Free (no-invite) viewers of the RTC production room must also pass the
+ * channel's viewer access (rooms.viewerAccess, resolved with the channel
+ * home room and paid events). Otherwise a pay-per-view, subscriber or
+ * private channel could be watched for free through a link/public room
+ * (audit P1-1). Paying viewers watch through the channel page, which checks
+ * purchases. Hosts, cohosts and invited guests are not affected.
+ */
+export function rtcLinkViewerAllowed(viewerAccessMode: string, signedIn: boolean): boolean {
+  if (viewerAccessMode === "public") return true;
+  if (viewerAccessMode === "registered") return signedIn;
+  return false;
+}
+
 /** Public /info flag: can someone without an invite join from the room link right now? */
 export function directJoinAllowed(access: RoomAccessMode, room: Record<string, unknown> | null | undefined, isLive: boolean): boolean {
   return isLive && allowsLinkViewers(access) && anonymousGuestsAllowed(room);

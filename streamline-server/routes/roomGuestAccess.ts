@@ -39,9 +39,11 @@ import {
   directJoinAllowed,
   isInviteSessionId,
   resolveRoomAccessMode,
+  rtcLinkViewerAllowed,
 } from "../lib/roomAccessPolicy";
 import { applyOwnerPresetToControls, loadOwnerRolePreset } from "../lib/permissions/rolePresetStore";
 import { roomDisplayName } from "../lib/roomDisplayPure";
+import { resolveRoomViewerAccess } from "../lib/viewerAccessStore";
 import { getRoomKitBranding } from "../services/brandKits";
 
 /**
@@ -1049,6 +1051,13 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       return res.status(accessDecision.status).json({ error: accessDecision.error, access: roomAccessMode });
     }
     const viewerOnly = accessDecision.maxRole === "viewer";
+    if (viewerOnly) {
+      // Free link viewer: the channel's viewer access applies (audit P1-1).
+      const viewerAccess = await resolveRoomViewerAccess(roomId, { room });
+      if (!rtcLinkViewerAllowed(viewerAccess.access.mode, !!user)) {
+        return res.status(403).json({ error: "channel_access_required", viewerAccess: viewerAccess.access.mode });
+      }
+    }
 
     if (isCohost && inviteClaimIsCohost && acceptance?.role !== "cohost") {
       // Persist so the cohost keeps the role after the invite link is gone
@@ -1553,6 +1562,14 @@ router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
     }
     if (room.requiresPayment === true) {
       return res.status(402).json({ error: "payment_required" });
+    }
+    // The channel's viewer access applies to free room viewers too (fails
+    // closed: resolveRoomViewerAccess answers "private" on lookup errors).
+    {
+      const viewerAccess = await resolveRoomViewerAccess(roomId, { room });
+      if (!rtcLinkViewerAllowed(viewerAccess.access.mode, false)) {
+        return res.status(403).json({ error: "channel_access_required", viewerAccess: viewerAccess.access.mode });
+      }
     }
 
     // Policy: room must be live for direct guest join (unless env override)

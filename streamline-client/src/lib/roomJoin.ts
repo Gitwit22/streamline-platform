@@ -240,6 +240,8 @@ export function isAccessDeniedCode(code: string | null | undefined): boolean {
     c === "not_invited" ||
     c === "room_access_denied" ||
     c === "guests_not_allowed" ||
+    // Paid / subscriber / private channel: watch on the channel page instead.
+    c === "channel_access_required" ||
     c === "banned" ||
     c === ""
   );

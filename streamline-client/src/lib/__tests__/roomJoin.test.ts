@@ -140,6 +140,7 @@ describe("misc helpers", () => {
   });
   it("classifies 403 codes", () => {
     expect(isAccessDeniedCode("not_allowed")).toBe(true);
+    expect(isAccessDeniedCode("channel_access_required")).toBe(true);
     expect(isAccessDeniedCode(null)).toBe(true);
     expect(isAccessDeniedCode("login_required")).toBe(false);
   });

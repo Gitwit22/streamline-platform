@@ -9,6 +9,7 @@
  */
 import { firestore as db } from "../firebaseAdmin";
 import { listActivePaidEvents, getMonetizedEvent, isActivePaidEvent, type MonetizedEvent } from "./monetization";
+import { channelBindingAllowed } from "./channelBindingPure";
 import {
   hasExplicitViewerAccess,
   legacyViewerAccess,
@@ -55,6 +56,10 @@ async function resolveHomeRoomId(roomId: string, room: any): Promise<{ homeRoomI
   if (!channelId) return { homeRoomId: null, channelId: null };
   try {
     const embed = await db.collection("savedEmbeds").doc(channelId).get();
+    // Only the room owner's own channel counts (rooms could once be bound to any channel id).
+    if (!channelBindingAllowed(embed.exists ? embed.data() : null, room?.ownerId)) {
+      return { homeRoomId: null, channelId: null };
+    }
     const home = String((embed.data() as any)?.roomId || "").trim();
     return { homeRoomId: home || null, channelId };
   } catch {

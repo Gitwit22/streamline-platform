@@ -12,6 +12,7 @@ import { checkFeature } from "../lib/entitlements";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { normalizeStoredHlsConfig, publicBranding, validateHlsConfigBranding } from "../lib/hlsBrandingPure";
 import { chooseChannelBranding } from "../lib/brandKitsPure";
+import { newRoomNaming } from "../lib/roomNamingPure";
 import { getRoomKitBranding } from "../services/brandKits";
 
 const router = Router();
@@ -153,9 +154,10 @@ router.post("/", requireAuth as any, async (req: any, res) => {
     return errorResponse(res, 400, "invalid_input");
   }
 
-  // Create a NEW Firestore roomId (canonical), and create a friendly LiveKit room name.
+  // Create a NEW Firestore roomId (canonical). The LiveKit room name is the
+  // roomId (unique); the friendly "<host> – <channel>" name is display-only.
   const roomId = db.collection("rooms").doc().id;
-  const livekitRoomName = buildFriendlyLivekitRoomName(req, resolvedName, roomId);
+  const { livekitRoomName, displayName } = newRoomNaming(roomId, buildFriendlyLivekitRoomName(req, resolvedName, roomId));
 
   // Pre-create the embed document reference so we know its id up front.
   const embedRef = db.collection("savedEmbeds").doc();
@@ -169,6 +171,7 @@ router.post("/", requireAuth as any, async (req: any, res) => {
       roomType: "rtc",
       initialStatus: "idle",
       savedEmbedId,
+      displayName,
     });
 
     // Initialize rooms/{roomId}.hlsConfig via merge update.

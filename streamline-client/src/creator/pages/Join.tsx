@@ -710,7 +710,11 @@ export default function Join() {
         }
 
         nav(`/room/${encodeURIComponent(roomId)}`, {
-          state: { livekitRoomName, presenceMode: hostPresenceMode },
+          state: {
+            livekitRoomName,
+            presenceMode: hostPresenceMode,
+            displayName: typeof data?.displayName === "string" ? data.displayName : roomLabel,
+          },
         });
         return;
       } catch (err) {

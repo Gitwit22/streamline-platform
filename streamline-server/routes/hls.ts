@@ -27,6 +27,7 @@ import { hlsProxyAll, hlsRunPrefix } from "../lib/hlsPlayback";
 import { onHlsIdle, onHlsLive } from "../lib/viewerStats";
 import { recordTelemetry } from "../lib/telemetry";
 import { syncRoomProgramOverlay } from "../services/programOverlay";
+import { channelBindingAllowed } from "../lib/channelBindingPure";
 
 const router = Router();
 
@@ -250,13 +251,22 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
       } else {
         try {
           const embedRef = firestore.collection("savedEmbeds").doc(savedEmbedId);
-          await embedRef.set(
-            {
-              activeRoomId: roomId,
-              updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            },
-            { merge: true }
-          );
+          // Never point another owner's channel at this room (audit P0-2).
+          const embedSnap = await embedRef.get();
+          if (!channelBindingAllowed(embedSnap.exists ? embedSnap.data() : null, (room as any).ownerId)) {
+            console.warn("[hls] start: savedEmbedId is not the room owner's channel; activeRoomId not synced", {
+              roomId,
+              savedEmbedId,
+            });
+          } else {
+            await embedRef.set(
+              {
+                activeRoomId: roomId,
+                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+              },
+              { merge: true }
+            );
+          }
         } catch (err) {
           // Do not fail HLS start if this bookkeeping write fails.
           console.error("[hls] failed to sync activeRoomId on Saved Embed", err);

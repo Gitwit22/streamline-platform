@@ -1816,7 +1816,11 @@ function RoomPage() {
   // Room header: display name (owner's rename) + brand kit logo/title. Kept
   // apart from publicRoomInfo (join-gate state) and from roomName, which is
   // identity data used for invites and tokens.
-  const [headerInfo, setHeaderInfo] = useState<{ displayName: string | null; branding: JoinPageBranding | null } | null>(null);
+  const [headerInfo, setHeaderInfo] = useState<{ displayName: string | null; branding: JoinPageBranding | null } | null>(() => {
+    // Shown until GET /info answers: the name typed on the Join page.
+    const fromState = (location.state as { displayName?: unknown } | null)?.displayName;
+    return typeof fromState === "string" && fromState.trim() ? { displayName: fromState.trim(), branding: null } : null;
+  });
   const [renaming, setRenaming] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);

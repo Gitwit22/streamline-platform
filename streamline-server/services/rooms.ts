@@ -95,6 +95,8 @@ export async function ensureRoomDoc(params: {
   requiresPayment?: boolean;
   // Brand kit for a NEW room (rooms/{id}.brandKitId). Existing rooms keep theirs.
   brandKitId?: string;
+  // Display name for a NEW room (the typed label; see lib/roomNamingPure.ts).
+  displayName?: string;
 }): Promise<{
   ref: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
   data: RoomDoc;
@@ -119,6 +121,7 @@ export async function ensureRoomDoc(params: {
       requiresPayment,
       ...(savedEmbedId ? { savedEmbedId } : {}),
       ...(params.brandKitId ? { brandKitId: params.brandKitId } : {}),
+      ...(params.displayName ? { displayName: params.displayName } : {}),
       createdAt: serverTimestamp,
       updatedAt: serverTimestamp,
       status: initialStatus || "live",

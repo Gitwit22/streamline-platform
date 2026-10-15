@@ -14,6 +14,8 @@ import {
   type RoomAccessMode,
 } from "../lib/roomAccessPolicy";
 import { pickCreateBrandKit } from "../lib/brandKitsPure";
+import { newRoomNaming } from "../lib/roomNamingPure";
+import { channelBindingAllowed } from "../lib/channelBindingPure";
 import { getBrandKitAccess, getDefaultBrandKitId, getOwnedBrandKit } from "../services/brandKits";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 
@@ -64,6 +66,20 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
   // page when a host chooses "Join Saved Room".
   const savedEmbedIdRaw = req.body?.savedEmbedId;
   const savedEmbedId = typeof savedEmbedIdRaw === "string" ? savedEmbedIdRaw.trim() : "";
+  // Only the owner's own channel can be bound (otherwise HLS start would take
+  // over someone else's /live page).
+  if (savedEmbedId) {
+    if (savedEmbedId.includes("/")) return res.status(400).json({ error: "invalid_saved_embed" });
+    try {
+      const embedSnap = await db.collection("savedEmbeds").doc(savedEmbedId).get();
+      if (!channelBindingAllowed(embedSnap.exists ? embedSnap.data() : null, ownerUid)) {
+        return res.status(403).json({ error: "saved_embed_not_owned" });
+      }
+    } catch (err) {
+      console.error("/api/rooms/create saved embed lookup failed", err);
+      return res.status(500).json({ error: "server_error" });
+    }
+  }
 
   // Brand kit: an explicit choice must be the owner's kit and within the
   // owner's plan (errors are reported); the owner's default kit is applied
@@ -104,7 +120,8 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
   // Generate a new Firestore document id for the room.
   const roomId = db.collection("rooms").doc().id;
 
-  const livekitRoomName = rawName || roomId;
+  // The LiveKit room name is always the roomId; the typed name is display-only.
+  const { livekitRoomName, displayName } = newRoomNaming(roomId, rawName);
 
   // Seed roomLayout from account defaults (users/{uid}.mediaPrefs.defaultRoomLayout)
   // so new rooms inherit the user's preferred layout without requiring per-room setup.
@@ -133,11 +150,14 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
       access,
       requiresPayment,
       brandKitId,
+      displayName,
     });
 
     return res.status(201).json({
       roomId,
       livekitRoomName: data.livekitRoomName || livekitRoomName,
+      // What to show for the room (the typed name); livekitRoomName is the roomId.
+      displayName: displayName || null,
       roomType: data.roomType || roomType,
       access: resolveRoomAccessMode(data as any),
       brandKitId: brandKitId || null,

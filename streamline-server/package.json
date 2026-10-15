@@ -20,6 +20,7 @@
     "cron:run-jobs": "node dist/scripts/runJobsCron.js",
     "cron:expire-emergency": "node dist/scripts/runJobsCron.js",
     "auth:audit-duplicate-emails": "tsx scripts/auditDuplicateEmails.ts",
+    "rooms:audit-duplicate-livekit-names": "tsx scripts/auditDuplicateLivekitRoomNames.ts",
     "auth:backfill-firebase-users": "tsx scripts/backfillFirebaseAuthUsers.ts",
     "plans:migrate-v2": "tsx scripts/migratePlansToV2.ts",
     "content:migrate": "tsx scripts/migrateContentToProjects.ts"

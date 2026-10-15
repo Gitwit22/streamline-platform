@@ -46,6 +46,7 @@ import { requireAdmin } from "../middleware/adminAuth";
 import { DOWNLOAD_LINK_TTL_SECONDS, evaluateDownloadRules, shouldClaimStorageCount } from "../lib/mediaPure";
 import { compositorUrl, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
 import { syncRoomProgramOverlay } from "../services/programOverlay";
+import { roomDisplayName } from "../lib/roomDisplayPure";
 import { copyViewerStatsToRecording } from "../lib/viewerStats";
 import { getPlatformFlags } from "../lib/entitlements";
 
@@ -753,7 +754,9 @@ router.post(
       billingUid: ownerUid,
       ...(orgId ? { orgId } : {}),
       roomId,
-      roomName: roomAccess.roomName || roomId,
+      // Title shown in the library: the room's display name (rooms created
+      // after the room-naming fix have a roomId as their LiveKit name).
+      roomName: roomDisplayName(roomDoc, roomId),
       livekitRoomName,
       layout: layout || "grid",
       mode,
@@ -916,7 +919,7 @@ router.post(
         {
           uid,
           roomId,
-          roomName: roomAccess.roomName || roomId,
+          roomName: roomDisplayName(roomDoc, roomId),
           recordingId,
           status: "starting",
           createdAt: now,
