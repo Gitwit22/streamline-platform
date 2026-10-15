@@ -91,6 +91,9 @@ function snapToLiveEdge(video: HTMLVideoElement) {
   }
 }
 
+/** How often an open viewer page re-checks channel branding. */
+const BRANDING_REFRESH_MS = 60_000;
+
 export default function Live() {
   const params = useParams<{ savedEmbedId?: string }>();
   const location = useLocation();
@@ -232,7 +235,8 @@ export default function Live() {
   }, [savedEmbedId]);
 
   // Fetch public viewer configuration (title/subtitle/logo/theme/offline message)
-  const reloadViewerConfig = useCallback(async () => {
+  // keepOnError: background refreshes keep the current branding on a failed fetch.
+  const reloadViewerConfig = useCallback(async (opts: { keepOnError?: boolean } = {}) => {
     const currentRoomId = (roomId || "").trim();
     if (!currentRoomId) return;
 
@@ -245,13 +249,13 @@ export default function Live() {
       const res = await fetch(`${API_BASE}/api/public/rooms/${encodeURIComponent(currentRoomId)}/hls-config`);
 
       if (!res.ok) {
-        setViewerConfig(null);
+        if (!opts.keepOnError) setViewerConfig(null);
         return;
       }
 
       const data = (await res.json().catch(() => null)) as PublicRoomHlsConfigResponse | null;
       if (!data?.hlsConfig) {
-        setViewerConfig(null);
+        if (!opts.keepOnError) setViewerConfig(null);
         return;
       }
 
@@ -264,6 +268,30 @@ export default function Live() {
   useEffect(() => {
     void reloadViewerConfig();
   }, [reloadViewerConfig]);
+
+  // Branding edits reach open viewer pages without a reload: re-check about
+  // once a minute while the tab is visible. Only branding/meta is updated;
+  // the room being played is never switched here.
+  useEffect(() => {
+    if (!savedEmbedId && !roomId) return;
+    const timer = setInterval(() => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+      void reloadViewerConfig({ keepOnError: true });
+      if (!savedEmbedId) return;
+      void (async () => {
+        try {
+          const res = await fetch(`${API_BASE}/api/saved-embeds/public/${encodeURIComponent(savedEmbedId)}`);
+          if (!res.ok) return;
+          const data = (await res.json().catch(() => null)) as PublicSavedEmbedResponse | null;
+          if (!data) return;
+          setSavedEmbedMeta((prev) => (prev && JSON.stringify(prev) === JSON.stringify(data) ? prev : data));
+        } catch {
+          // keep the current branding
+        }
+      })();
+    }, BRANDING_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [savedEmbedId, roomId, reloadViewerConfig]);
 
   // Fetch HLS status + playlist URL by roomId using the public viewer-safe endpoint.
   const fetchHlsStatus = useCallback(async () => {

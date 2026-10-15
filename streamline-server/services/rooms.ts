@@ -18,6 +18,8 @@ export type RoomHlsConfig = {
   subtitle?: string;
   logoUrl?: string;
   offlineMessage?: string;
+  /** True once the owner saved an offline message (see hlsBrandingPure.normalizeStoredHlsConfig). */
+  offlineMessageCustom?: boolean;
   theme?: "light" | "dark";
   updatedAt?: string; // ISO
 };
@@ -30,7 +32,9 @@ export const DEFAULT_ROOM_HLS_CONFIG: RoomHlsConfig = {
   subtitle: "",
   logoUrl: "",
   theme: "dark",
-  offlineMessage: "This stream is offline.",
+  // Empty = viewers see the default hint. (Older channels stored "This stream
+  // is offline." here; normalizeStoredHlsConfig hides that placeholder.)
+  offlineMessage: "",
 };
 
 export type RoomDoc = {

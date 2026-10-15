@@ -68,3 +68,30 @@ export function publicBranding(cfg: any): {
     theme: cfg.theme === "light" ? "light" : "dark",
   };
 }
+
+/**
+ * Older channels were created with this placeholder stored as their offline
+ * message. It is not something the owner typed, so viewers get the friendly
+ * default instead. A message the owner saves through the editor is marked
+ * `offlineMessageCustom` and always shown as typed, even if it's this text.
+ */
+export const LEGACY_OFFLINE_PLACEHOLDER = "This stream is offline.";
+
+/** Stored hlsConfig with the seeded (never typed) placeholder removed. */
+export function normalizeStoredHlsConfig<T extends Record<string, any>>(cfg: T): T {
+  if (!cfg || typeof cfg !== "object") return cfg;
+  if (cfg.offlineMessage === LEGACY_OFFLINE_PLACEHOLDER && cfg.offlineMessageCustom !== true) {
+    return { ...cfg, offlineMessage: "" };
+  }
+  return cfg;
+}
+
+/** Same checks as validateBrandingInput, for an hlsConfig override object (theme validated by the caller). */
+export function validateHlsConfigBranding(cfg: { title?: unknown; subtitle?: unknown; logoUrl?: unknown; offlineMessage?: unknown }): BrandingValidation {
+  return validateBrandingInput({
+    title: cfg.title,
+    subtitle: cfg.subtitle,
+    logoUrl: cfg.logoUrl,
+    offlineMessage: cfg.offlineMessage,
+  });
+}

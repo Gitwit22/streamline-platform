@@ -10,7 +10,7 @@ import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { checkFeature } from "../lib/entitlements";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
-import { publicBranding } from "../lib/hlsBrandingPure";
+import { normalizeStoredHlsConfig, publicBranding, validateHlsConfigBranding } from "../lib/hlsBrandingPure";
 import { chooseChannelBranding } from "../lib/brandKitsPure";
 import { getRoomKitBranding } from "../services/brandKits";
 
@@ -110,12 +110,18 @@ function parseHlsConfigOverrides(input: unknown):
   const themeRes = asOptionalEnum(obj.theme, ["dark", "light"] as const);
   if (!themeRes.ok) return { ok: false, error: "invalid_input" };
 
+  // Same length / logo URL rules as the branding editor (PUT /hls-config).
+  if (!validateHlsConfigBranding(obj).ok) return { ok: false, error: "invalid_input" };
+
   const overrides: Partial<RoomHlsConfig> = {};
   if (enabledRes.value !== undefined) overrides.enabled = enabledRes.value;
   if (titleRes.value !== undefined) overrides.title = titleRes.value;
   if (subtitleRes.value !== undefined) overrides.subtitle = subtitleRes.value;
   if (logoUrlRes.value !== undefined) overrides.logoUrl = logoUrlRes.value;
-  if (offlineMessageRes.value !== undefined) overrides.offlineMessage = offlineMessageRes.value;
+  if (offlineMessageRes.value !== undefined) {
+    overrides.offlineMessage = offlineMessageRes.value;
+    overrides.offlineMessageCustom = true;
+  }
   if (themeRes.value !== undefined) overrides.theme = themeRes.value;
 
   return { ok: true, value: overrides };
@@ -326,7 +332,7 @@ router.get("/public/:savedEmbedId", async (req: any, res) => {
       branding = chooseChannelBranding({
         activeRoomKit,
         homeRoomKit,
-        homeLegacy: homeRoom ? publicBranding(homeRoom.hlsConfig) : null,
+        homeLegacy: homeRoom ? publicBranding(normalizeStoredHlsConfig(homeRoom.hlsConfig || {})) : null,
       });
     } catch (e: any) {
       console.warn("GET /api/saved-embeds/public: branding lookup failed", { savedEmbedId, error: e?.message || e });

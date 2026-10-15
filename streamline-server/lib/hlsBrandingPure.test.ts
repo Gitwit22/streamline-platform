@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { HLS_BRANDING_LIMITS, isValidLogoUrl, publicBranding, validateBrandingInput } from "./hlsBrandingPure";
+import {
+  HLS_BRANDING_LIMITS,
+  LEGACY_OFFLINE_PLACEHOLDER,
+  isValidLogoUrl,
+  normalizeStoredHlsConfig,
+  publicBranding,
+  validateBrandingInput,
+  validateHlsConfigBranding,
+} from "./hlsBrandingPure";
 
 test("isValidLogoUrl accepts empty and http(s) only", () => {
   assert.equal(isValidLogoUrl(""), true);
@@ -32,4 +40,18 @@ test("publicBranding normalizes and drops unsafe logos", () => {
     theme: "light",
   });
   assert.equal(publicBranding({ theme: "neon" })!.theme, "dark");
+});
+
+test("normalizeStoredHlsConfig hides only the seeded placeholder", () => {
+  assert.equal(normalizeStoredHlsConfig({ enabled: true, offlineMessage: LEGACY_OFFLINE_PLACEHOLDER }).offlineMessage, "");
+  // Typed by the owner: kept even when it matches the old placeholder text.
+  assert.equal(
+    normalizeStoredHlsConfig({ offlineMessage: LEGACY_OFFLINE_PLACEHOLDER, offlineMessageCustom: true }).offlineMessage,
+    LEGACY_OFFLINE_PLACEHOLDER
+  );
+  assert.equal(normalizeStoredHlsConfig({ offlineMessage: "Back Friday" }).offlineMessage, "Back Friday");
+  // Channel creation now validates branding like the editor does.
+  assert.equal(validateHlsConfigBranding({ title: "x".repeat(81) }).ok, false);
+  assert.equal(validateHlsConfigBranding({ logoUrl: "javascript:alert(1)" }).ok, false);
+  assert.equal(validateHlsConfigBranding({ title: "Show", logoUrl: "https://a.example/l.png" }).ok, true);
 });

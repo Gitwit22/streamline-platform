@@ -59,8 +59,11 @@ describe("hlsBranding", () => {
       isLightTheme: true,
     });
 
-    // Server placeholder default and unsafe logos are not shown.
-    const legacy = resolveViewerBranding({ roomConfig: { enabled: false, offlineMessage: "This stream is offline.", logoUrl: "javascript:x" } });
+    // An offline message is shown exactly as stored, even the old placeholder
+    // text (the server strips the seeded one); unsafe logos are not shown.
+    const typed = resolveViewerBranding({ roomConfig: { enabled: false, offlineMessage: "This stream is offline." } });
+    expect(typed.offlineMessage).toBe("This stream is offline.");
+    const legacy = resolveViewerBranding({ roomConfig: { enabled: false, offlineMessage: "", logoUrl: "javascript:x" } });
     expect(legacy.offlineMessage).toBe(DEFAULT_OFFLINE_MESSAGE);
     expect(legacy.logoUrl).toBe("");
     expect(legacy.title).toBe("StreamLine");

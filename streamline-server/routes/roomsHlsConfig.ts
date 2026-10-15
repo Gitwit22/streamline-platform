@@ -7,7 +7,7 @@ import { DEFAULT_ROOM_HLS_CONFIG } from "../services/rooms";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { checkFeature, type EffectiveEntitlements, type FeatureKey } from "../lib/entitlements";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
-import { validateBrandingInput } from "../lib/hlsBrandingPure";
+import { normalizeStoredHlsConfig, validateBrandingInput } from "../lib/hlsBrandingPure";
 import { roomBrandKitId } from "../lib/brandKitsPure";
 
 const router = Router();
@@ -20,7 +20,7 @@ const BRANDING_KEYS = ["title", "subtitle", "logoUrl", "offlineMessage", "theme"
 
 /** True when the PUT body changes any viewer-branding field of the stored hlsConfig. Exported for tests. */
 export function hlsBrandingChanged(existing: { hlsConfig?: any }, body: any): boolean {
-  const stored = (existing?.hlsConfig || {}) as Record<string, unknown>;
+  const stored = normalizeStoredHlsConfig((existing?.hlsConfig || {}) as Record<string, unknown>);
   const prev = { ...DEFAULT_ROOM_HLS_CONFIG, ...stored } as Record<string, unknown>;
   const norm = (v: unknown) => (v === undefined || v === null ? "" : String(v));
   return BRANDING_KEYS.some((k) => body?.[k] !== undefined && norm(body[k]) !== norm(prev[k]));
@@ -78,7 +78,7 @@ router.get("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
   try {
     const ctx = await assertRoomPerm(req as any, roomId, "canLayout");
     const raw = (ctx.room as any).hlsConfig as RoomHlsConfig | undefined;
-    const hlsConfig: RoomHlsConfig = raw && typeof raw === "object" ? raw : DEFAULT_ROOM_HLS_CONFIG;
+    const hlsConfig: RoomHlsConfig = normalizeStoredHlsConfig(raw && typeof raw === "object" ? raw : DEFAULT_ROOM_HLS_CONFIG);
 
     return res.json({
       roomId: ctx.roomId,
@@ -172,7 +172,11 @@ router.put("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
     if (title !== undefined) nextConfig.title = title;
     if (subtitle !== undefined) nextConfig.subtitle = subtitle;
     if (logoUrl !== undefined) nextConfig.logoUrl = logoUrl;
-    if (offlineMessage !== undefined) nextConfig.offlineMessage = offlineMessage;
+    if (offlineMessage !== undefined) {
+      nextConfig.offlineMessage = offlineMessage;
+      // Typed by the owner: show as-is, even if it matches the old placeholder.
+      nextConfig.offlineMessageCustom = true;
+    }
     if (theme !== undefined) nextConfig.theme = theme;
 
     // Build the merge payload — always update hlsConfig, optionally update monetization toggles.

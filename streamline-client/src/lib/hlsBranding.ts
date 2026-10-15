@@ -61,7 +61,6 @@ export function brandingFromConfig(cfg: Partial<RoomHlsConfig> | Partial<HlsBran
     title: s(cfg?.title),
     subtitle: s(cfg?.subtitle),
     logoUrl: s(cfg?.logoUrl),
-    // The server default "This stream is offline." is the old placeholder; keep it as typed.
     offlineMessage: s(cfg?.offlineMessage),
     theme: cfg?.theme === "light" ? "light" : "dark",
   };
@@ -140,8 +139,9 @@ export function resolveViewerBranding(params: {
     title: pick("title") || String(params.embedName || params.roomName || "").trim() || "StreamLine",
     subtitle: pick("subtitle") || String(params.embedDescription || "").trim() || "Live Viewer",
     logoUrl: logo && !validateLogoUrl(logo) ? logo : "",
-    // "This stream is offline." was the server's placeholder default; show the friendlier hint instead.
-    offlineMessage: offline && offline !== "This stream is offline." ? offline : DEFAULT_OFFLINE_MESSAGE,
+    // Shown as typed. (The server hides the old seeded "This stream is
+    // offline." placeholder itself, so an owner who types it keeps it.)
+    offlineMessage: offline || DEFAULT_OFFLINE_MESSAGE,
     isLightTheme: theme === "light",
   };
 }

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { getRoom, DEFAULT_ROOM_HLS_CONFIG, type RoomHlsConfig } from "../services/rooms";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { overlayKitOnHlsConfig } from "../lib/brandKitsPure";
+import { normalizeStoredHlsConfig } from "../lib/hlsBrandingPure";
 import { getRoomKitBranding } from "../services/brandKits";
 
 const router = Router();
@@ -27,7 +28,7 @@ router.get("/:roomId/hls-config", async (req: any, res) => {
   try {
     const { data: room } = await getRoom(roomId);
     const raw = (room as any).hlsConfig as RoomHlsConfig | undefined;
-    const stored: RoomHlsConfig = raw && typeof raw === "object" ? raw : DEFAULT_ROOM_HLS_CONFIG;
+    const stored: RoomHlsConfig = normalizeStoredHlsConfig(raw && typeof raw === "object" ? raw : DEFAULT_ROOM_HLS_CONFIG);
     // A room with a brand kit shows the kit's branding (enabled etc. unchanged).
     const hlsConfig = overlayKitOnHlsConfig(stored, await getRoomKitBranding(room));
 
