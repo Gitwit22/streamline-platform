@@ -63,3 +63,6 @@ jobs:
         run: npx vitest run
       - name: Build
         run: npm run build
+        env:
+          # The production build refuses to run without it (vite.config.ts).
+          VITE_API_BASE: https://api.ci.invalid
