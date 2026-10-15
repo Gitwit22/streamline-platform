@@ -3771,6 +3771,29 @@ function RoomPage() {
         const status = String(payload?.data?.status ?? payload?.status ?? "unknown").toLowerCase();
         const downloadReady = payload?.data?.downloadReady === true || status === "ready";
 
+        // Terminal failure: stop polling and say so, instead of showing
+        // "processing" until the 6-minute timeout (audit P3).
+        if (status === "failed" && !downloadReady) {
+          if (!cancelled) {
+            setPostStopStatus(status);
+            setPostStopProcessing(false);
+            setPostStopReady(false);
+            if (!readyEmitted) {
+              readyEmitted = true;
+              recordingEvents.emit({
+                type: "recording.failed",
+                recordingId: recordingId!,
+                message: "Recording failed to save. Check Settings → Usage, or try recording again.",
+              });
+            }
+          }
+          if (postStopIntervalRef.current) {
+            clearInterval(postStopIntervalRef.current);
+            postStopIntervalRef.current = null;
+          }
+          return;
+        }
+
         if (!cancelled) {
           setPostStopStatus(status);
           setPostStopProcessing(!downloadReady);
