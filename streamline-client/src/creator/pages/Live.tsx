@@ -8,6 +8,7 @@ import { useHlsReadiness } from "../../hooks/useHlsReadiness";
 import { useHlsViewerHeartbeat, useVideoPlaying } from "../../hooks/useHlsViewerHeartbeat";
 import { usePlaybackAuthorization } from "../../hooks/usePlaybackAuthorization";
 import { asAccessMode, swapPlaybackToken, type ViewerAccessMode } from "../../lib/playbackAccess";
+import { channelPlayRoomId, shouldSwitchChannelRoom } from "../../lib/channelRoom";
 import PlaybackGatePanel, { gateBlocksPlayback } from "../../components/viewer/PlaybackGatePanel";
 import {
   Radio,
@@ -56,6 +57,8 @@ type PublicSavedEmbedResponse = {
   name: string;
   description?: string;
   activeRoomId: string | null;
+  /** Room played before the first HLS start (null/absent on older servers). */
+  homeRoomId?: string | null;
   /** Channel branding from the embed's own room (null on older servers). */
   branding?: Partial<HlsBranding> | null;
   viewerPath: string;
@@ -121,9 +124,15 @@ export default function Live() {
   const wasLiveRef = useRef(false);
 
   const [savedEmbedMeta, setSavedEmbedMeta] = useState<PublicSavedEmbedResponse | null>(null);
+  const roomIdRef = useRef("");
 
   // UI state
   const [status, setStatus] = useState<StreamStatus>("loading");
+  const liveNowRef = useRef(false);
+  useEffect(() => {
+    roomIdRef.current = roomId;
+    liveNowRef.current = status === "live" || status === "starting";
+  }, [roomId, status]);
   const [isMuted, setIsMuted] = useState(true);
   const [volume, setVolume] = useState(0.6);
   const [isRetrying, setIsRetrying] = useState(false);
@@ -220,7 +229,7 @@ export default function Live() {
         const data = (await res.json().catch(() => null)) as PublicSavedEmbedResponse | null;
         if (!data || cancelled) return;
 
-        const nextRoomId = String(data.activeRoomId || "").trim();
+        const nextRoomId = channelPlayRoomId(data);
         setSavedEmbedMeta(data);
         if (nextRoomId) setRoomId(nextRoomId);
       } catch {
@@ -270,8 +279,8 @@ export default function Live() {
   }, [reloadViewerConfig]);
 
   // Branding edits reach open viewer pages without a reload: re-check about
-  // once a minute while the tab is visible. Only branding/meta is updated;
-  // the room being played is never switched here.
+  // once a minute while the tab is visible. The played room only changes
+  // when nothing is playing (shouldSwitchChannelRoom).
   useEffect(() => {
     if (!savedEmbedId && !roomId) return;
     const timer = setInterval(() => {
@@ -285,6 +294,10 @@ export default function Live() {
           const data = (await res.json().catch(() => null)) as PublicSavedEmbedResponse | null;
           if (!data) return;
           setSavedEmbedMeta((prev) => (prev && JSON.stringify(prev) === JSON.stringify(data) ? prev : data));
+          // The host went live from another room: follow it, but only while
+          // nothing is playing here.
+          const nextRoomId = channelPlayRoomId(data);
+          if (shouldSwitchChannelRoom(roomIdRef.current, nextRoomId, liveNowRef.current)) setRoomId(nextRoomId);
         } catch {
           // keep the current branding
         }

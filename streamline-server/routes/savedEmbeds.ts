@@ -346,6 +346,9 @@ router.get("/public/:savedEmbedId", async (req: any, res) => {
       name,
       description,
       activeRoomId,
+      // Room the channel plays before its first HLS start (activeRoomId is
+      // null until then); same fallback as POST /api/public/channels/:id/playback.
+      homeRoomId: homeRoomId && !homeRoomId.includes("/") ? homeRoomId : null,
       branding,
       viewerPath: viewerPath(savedEmbedId),
     });
