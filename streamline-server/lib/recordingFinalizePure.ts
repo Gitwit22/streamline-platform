@@ -79,3 +79,22 @@ export function recordingLockBlocks(
   }
   return false;
 }
+
+/**
+ * The recording a reloaded host page should adopt (audit P1-3): the room's
+ * lock points at it, it belongs to this room and it is actually recording.
+ * "starting" is not adopted — it has no egress to stop yet and either becomes
+ * "recording" or is cleaned up by the stuck-recordings job.
+ */
+export function activeRecordingFromLock(
+  lock: { recordingId?: unknown } | null,
+  recording: { roomId?: unknown; status?: unknown; startedAtMs?: number | null } | null,
+  roomId: string
+): { recordingId: string; startedAtMs: number | null } | null {
+  if (!lock || typeof lock.recordingId !== "string" || !lock.recordingId) return null;
+  if (!recording) return null;
+  if (typeof recording.roomId === "string" && recording.roomId && recording.roomId !== roomId) return null;
+  if (String(recording.status || "").toLowerCase() !== "recording") return null;
+  const startedAtMs = typeof recording.startedAtMs === "number" && Number.isFinite(recording.startedAtMs) ? recording.startedAtMs : null;
+  return { recordingId: lock.recordingId, startedAtMs };
+}

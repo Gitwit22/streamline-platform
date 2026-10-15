@@ -47,7 +47,7 @@ import { DOWNLOAD_LINK_TTL_SECONDS, evaluateDownloadRules, shouldClaimStorageCou
 import { compositorUrl, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
 import { syncRoomProgramOverlay } from "../services/programOverlay";
 import { roomDisplayName } from "../lib/roomDisplayPure";
-import { recordingLockBlocks } from "../lib/recordingFinalizePure";
+import { recordingLockBlocks, activeRecordingFromLock } from "../lib/recordingFinalizePure";
 import { copyViewerStatsToRecording } from "../lib/viewerStats";
 import { getPlatformFlags } from "../lib/entitlements";
 
@@ -1357,6 +1357,40 @@ router.post(
   }
   }
 );
+
+// =============================================================================
+// GET /room/active - The room's running recording, so a reloaded host page can
+// show it and stop it (audit P1-3). Same access rules as /stop.
+// =============================================================================
+
+router.get("/room/active", requireAuth, requireRoomAccessToken as any, async (req, res) => {
+  try {
+    const uid = getAuthUserId(req);
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+    const { roomId } = getRoomAccess(req as any);
+    if (!roomId) return res.status(400).json({ error: "Missing roomId" });
+    try {
+      await assertRoomPerm(req as any, roomId, "canRecord");
+    } catch (err: any) {
+      if (err instanceof RoomPermissionError) return res.status(err.status).json({ error: err.code });
+      throw err;
+    }
+    const lockSnap = await firestore.collection("recordingLocks").doc(roomId).get();
+    const lock = lockSnap.exists ? ((lockSnap.data() || {}) as any) : null;
+    let recording: { roomId?: unknown; status?: unknown; startedAtMs?: number | null } | null = null;
+    if (lock && typeof lock.recordingId === "string" && lock.recordingId) {
+      const recSnap = await firestore.collection("recordings").doc(lock.recordingId).get();
+      if (recSnap.exists) {
+        const r = (recSnap.data() || {}) as any;
+        recording = { roomId: r.roomId, status: r.status, startedAtMs: toMillis(r.startedAt) };
+      }
+    }
+    return res.json({ recording: activeRecordingFromLock(lock, recording, roomId) });
+  } catch (err: any) {
+    console.error("[recordings/room/active] Error:", err?.message || err);
+    return res.status(500).json({ error: "Failed to read active recording" });
+  }
+});
 
 // =============================================================================
 // GET /:id - Get recording status

@@ -9,6 +9,7 @@ import {
   mayApplyRecordingStatus,
   recordingOutcomeFromEgress,
   stuckRecordingAction,
+  activeRecordingFromLock,
 } from "./recordingFinalizePure";
 
 // Regression (audit P1-2): the webhook compared the SDK's numeric status (3)
@@ -56,4 +57,22 @@ test("a room's running recording blocks a second start; ended or abandoned ones 
   // Double click: the first start hasn't created its doc yet.
   assert.equal(recordingLockBlocks(lock, null, now), true);
   assert.equal(recordingLockBlocks({ recordingId: "r1", claimedAtMs: now - LOCK_INFLIGHT_MS }, null, now), false);
+});
+
+test("activeRecordingFromLock: adopts only this room's running recording", () => {
+  const lock = { recordingId: "rec1" };
+  assert.deepEqual(activeRecordingFromLock(lock, { roomId: "r1", status: "recording", startedAtMs: 5 }, "r1"), {
+    recordingId: "rec1",
+    startedAtMs: 5,
+  });
+  assert.equal(activeRecordingFromLock(null, { roomId: "r1", status: "recording" }, "r1"), null);
+  assert.equal(activeRecordingFromLock(lock, null, "r1"), null);
+  assert.equal(activeRecordingFromLock(lock, { roomId: "other", status: "recording" }, "r1"), null);
+  for (const status of ["starting", "processing", "ready", "failed", "stopped"]) {
+    assert.equal(activeRecordingFromLock(lock, { roomId: "r1", status }, "r1"), null, status);
+  }
+  assert.deepEqual(activeRecordingFromLock(lock, { status: "RECORDING", startedAtMs: null }, "r1"), {
+    recordingId: "rec1",
+    startedAtMs: null,
+  });
 });

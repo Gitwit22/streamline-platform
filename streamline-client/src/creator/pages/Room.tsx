@@ -77,6 +77,7 @@ import { useEffectiveEntitlements } from "../../hooks/useEffectiveEntitlements";
 import { getSelectedOwnerContext } from "../../lib/producerDelegation";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
 import { useHlsStatus } from "../hooks/useHlsStatus";
+import { alreadyRunningEgressId, runningMultistreamEgressId, runningRecordingFromResponse } from "../../lib/egressHydration";
 import { normalizeStartLivePayloadFromDestinationsKeys } from "../hooks/useDestinationsStartPayload";
 import {
   RECONNECT_MEDIA_MESSAGE_TYPE,
@@ -3576,6 +3577,52 @@ function RoomPage() {
     };
   }, [streamStatus, roomId, roomAccessToken, canManageStream]);
 
+  // Reload recovery (audit P1-3): a stream or recording this room is already
+  // running is shown as live with its id, so it can be stopped from here.
+  // Runs once per room; never overrides state this tab already has.
+  const egressHydratedRoomRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!roomId || !roomAccessToken || !canManageStream || needsReauth) return;
+    if (egressHydratedRoomRef.current === roomId) return;
+    egressHydratedRoomRef.current = roomId;
+    let cancelled = false;
+    const headers = { "x-room-access-token": roomAccessToken };
+    (async () => {
+      try {
+        const res = await apiFetchAuth(
+          `${API_BASE}/api/multistream/${encodeURIComponent(roomId)}/multistream-status`,
+          { method: "GET", headers },
+          { allowNonOk: true }
+        );
+        const running = res.ok ? runningMultistreamEgressId(await res.json().catch(() => null)) : null;
+        if (!cancelled && running && !streamEgressRef.current && !streamLiveRef.current) {
+          streamEgressRef.current = running;
+          setDidStreamThisSession(true);
+          setStreamStatus((prev) => (prev === "idle" ? "live" : prev));
+        }
+      } catch {
+        // best-effort; the host can still start/stop normally
+      }
+      try {
+        const res = await apiFetchAuth(`${API_BASE}/api/recordings/room/active`, { method: "GET", headers }, { allowNonOk: true });
+        const rec = res.ok ? runningRecordingFromResponse(await res.json().catch(() => null)) : null;
+        if (!cancelled && rec && !recordingRef.current) {
+          recordingRef.current = rec.recordingId;
+          setRecordingId(rec.recordingId);
+          recordingStartRef.current = rec.startedAtMs ?? Date.now();
+          setRecordingStatus((prev) => (prev === "idle" ? "recording" : prev));
+        }
+      } catch {
+        // best-effort
+      }
+    })();
+    return () => {
+      cancelled = true;
+      // Let a remount (StrictMode / token refresh) retry if this run was cut short.
+      egressHydratedRoomRef.current = null;
+    };
+  }, [roomId, roomAccessToken, canManageStream, needsReauth]);
+
   // Preset availability follows the ROOM OWNER's ceiling once known (clamping
   // uses the owner's plan), else the caller's own `allowed` flags.
   const presetOptionsForUi = useMemo(
@@ -4454,6 +4501,16 @@ function RoomPage() {
           console.warn("start-multistream empty response body");
           data = { raw: "" };
         }
+        const adoptEgressId = res.status === 409 ? alreadyRunningEgressId(data) : null;
+        if (adoptEgressId) {
+          // Already live (another producer, or this tab before a reload): show
+          // that stream here so it can be stopped instead of failing.
+          streamEgressRef.current = adoptEgressId;
+          setStreamStatus("live");
+          setDidStreamThisSession(true);
+          alert("This room is already live. It's shown here now, so you can stop it.");
+          return;
+        }
         if (!res.ok) {
           const code = data?.error ?? data?.code ?? data?.data?.error ?? data?.data?.code;
           const mapped = getFeatureErrorMessage(code, code === "TRANSCODE_DISABLED" ? "transcode" : "multistream");
@@ -4537,11 +4594,9 @@ function RoomPage() {
       alert("You don't have permission to manage streaming in this room.");
       return;
     }
+    // The server finds the room's stream itself; the id is only a fallback
+    // for legacy stream docs, so a missing local id must not block Stop.
     const streamEgressId = streamEgressRef.current;
-    if (!streamEgressId) {
-      alert("No active stream");
-      return;
-    }
     if (!roomId) {
       alert("No room id");
       return;
@@ -4551,6 +4606,7 @@ function RoomPage() {
       console.warn("stop-multistream request timed out; aborting");
       controller.abort();
     }, 10000);
+    let stopped = false;
     try {
       setStreamStatus("stopping");
       const res = await apiFetchAuth(
@@ -4561,16 +4617,19 @@ function RoomPage() {
             "Content-Type": "application/json",
             ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
           },
-          body: JSON.stringify({ egressId: streamEgressId }),
+          body: JSON.stringify(streamEgressId ? { egressId: streamEgressId } : {}),
           signal: controller.signal,
         },
         { allowNonOk: true }
       );
-      if (!res.ok) {
+      // 404 = nothing running for this room any more.
+      if (res.ok || res.status === 404) {
+        stopped = true;
+      } else {
         const text = await res.text().catch(() => "");
         console.error("Failed to stop multistream", res.status, text);
         alert(
-          "We couldn't confirm that the stream fully stopped. If it still appears live, try refreshing or stopping it from the platform dashboard."
+          "We couldn't confirm that the stream fully stopped. It's still shown as live, so you can press Stop again."
         );
       }
     } catch (err) {
@@ -4580,16 +4639,22 @@ function RoomPage() {
         console.error("Error stopping multistream", err);
       }
       alert(
-        "We couldn't confirm that the stream fully stopped. If it still appears live, try refreshing or stopping it from the platform dashboard."
+        "We couldn't confirm that the stream fully stopped. It's still shown as live, so you can press Stop again."
       );
     } finally {
       window.clearTimeout(timeoutId);
-      setEgressId(null);
-      setStreamStatus("idle");
-      streamEgressRef.current = null;
-      void bestEffortStopHls("stop-multistream");
-      if (recordingStatus === "recording") {
-        console.log("ℹ️ Stream stopped but recording still active");
+      if (!stopped) {
+        // Keep the id and the Stop button: resetting to idle here used to
+        // leave a still-running egress with no way to stop it (audit P1-3).
+        setStreamStatus("live");
+      } else {
+        setEgressId(null);
+        setStreamStatus("idle");
+        streamEgressRef.current = null;
+        void bestEffortStopHls("stop-multistream");
+        if (recordingStatus === "recording") {
+          console.log("ℹ️ Stream stopped but recording still active");
+        }
       }
     }
   };
