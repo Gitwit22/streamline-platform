@@ -166,6 +166,13 @@ The owner chose these on 2026-10-05. **Don't start them until the owner says so.
 
 ### S2. Room customization
 
+**Status (2026-10-15):** started by the owner. Step 1 is done:
+- Brand kits: Settings → Branding (create, edit, delete, default kit). Stored in `brandKits`; the default is `users/{uid}.brandKitDefaultId`.
+- Kit picker on the create-room form (default pre-selected); `rooms/{id}.brandKitId`. Channels pick a kit in Settings → HLS → Channel branding.
+- Viewer page order: kit of the live room → kit of the channel's home room → the home room's own hlsConfig branding (unchanged for rooms without a kit). This fixes "other rooms show the home room's branding" for rooms with a kit.
+- Fixed: a co-host with `canLayout` can no longer change branding (owner or platform admin only).
+- Next: branding on the video (compositor), lower thirds and banners, rename + join page branding, the remaining audit bugs below.
+
 **Today:**
 - Channel branding (title, subtitle, logo, offline message, theme) appears only on the `/live/...` viewer page.
 - Room layout reaches every output.

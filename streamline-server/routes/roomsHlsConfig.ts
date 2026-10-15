@@ -8,6 +8,7 @@ import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { checkFeature, type EffectiveEntitlements, type FeatureKey } from "../lib/entitlements";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { validateBrandingInput } from "../lib/hlsBrandingPure";
+import { roomBrandKitId } from "../lib/brandKitsPure";
 
 const router = Router();
 
@@ -16,6 +17,23 @@ function normalizeRoomId(raw: string | undefined): string {
 }
 
 const BRANDING_KEYS = ["title", "subtitle", "logoUrl", "offlineMessage", "theme"] as const;
+
+/** True when the PUT body changes any viewer-branding field of the stored hlsConfig. Exported for tests. */
+export function hlsBrandingChanged(existing: { hlsConfig?: any }, body: any): boolean {
+  const stored = (existing?.hlsConfig || {}) as Record<string, unknown>;
+  const prev = { ...DEFAULT_ROOM_HLS_CONFIG, ...stored } as Record<string, unknown>;
+  const norm = (v: unknown) => (v === undefined || v === null ? "" : String(v));
+  return BRANDING_KEYS.some((k) => body?.[k] !== undefined && norm(body[k]) !== norm(prev[k]));
+}
+
+/**
+ * Branding belongs to the room owner: co-hosts (including delegated
+ * collaborators) with canLayout may still toggle HLS / monetization here, but
+ * only the owner or a platform admin may change title/logo/etc.
+ */
+export function canEditHlsBranding(role: string): boolean {
+  return role === "owner" || role === "admin";
+}
 
 /**
  * Which entitlement a PUT needs, given the stored room state. Only CHANGES
@@ -27,12 +45,9 @@ export function requiredHlsConfigFeatures(
   body: any
 ): FeatureKey[] {
   const stored = (existing?.hlsConfig || {}) as Record<string, unknown>;
-  const prev = { ...DEFAULT_ROOM_HLS_CONFIG, ...stored } as Record<string, unknown>;
   const out: FeatureKey[] = [];
   if (body?.enabled === true && stored.enabled !== true) out.push("hls");
-  const norm = (v: unknown) => (v === undefined || v === null ? "" : String(v));
-  const brandingChanged = BRANDING_KEYS.some((k) => body?.[k] !== undefined && norm(body[k]) !== norm(prev[k]));
-  if (brandingChanged) out.push("hlsCustomization");
+  if (hlsBrandingChanged(existing, body)) out.push("hlsCustomization");
   if (body?.monetizationEnabled === true && existing?.monetizationEnabled !== true) out.push("monetization");
   if (body?.payPerViewEnabled === true && existing?.payPerViewEnabled !== true) out.push("payPerView");
   return out;
@@ -70,6 +85,8 @@ router.get("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
       hlsConfig,
       monetizationEnabled: (ctx.room as any).monetizationEnabled === true,
       payPerViewEnabled: (ctx.room as any).payPerViewEnabled === true,
+      // Brand kit assigned to this room (null = the hlsConfig branding above is used).
+      brandKitId: roomBrandKitId(ctx.room) || null,
     });
   } catch (err: any) {
     if (err instanceof RoomPermissionError) {
@@ -123,6 +140,10 @@ router.put("/:roomId/hls-config", requireAuth as any, async (req: any, res) => {
     const ctx = await assertRoomPerm(req as any, roomId, "canLayout");
 
     const existing = ((ctx.room as any).hlsConfig || {}) as RoomHlsConfig;
+
+    if (!canEditHlsBranding(ctx.role) && hlsBrandingChanged(ctx.room as any, req.body || {})) {
+      return res.status(403).json({ error: "branding_owner_only" });
+    }
 
     // Entitlements of the ROOM OWNER (effective plan + platform kill switches).
     const needed = requiredHlsConfigFeatures(ctx.room as any, req.body || {});

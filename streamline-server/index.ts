@@ -32,6 +32,7 @@ import statsRoutes from "./routes/stats";
 import telemetryRoutes from "./routes/telemetry";
 import { entitlementDenialTelemetry } from "./lib/telemetry";
 import savedEmbedsRoutes from "./routes/savedEmbeds";
+import brandKitsRoutes, { roomBrandKitRouter } from "./routes/brandKits";
 import editingRoutes from "./routes/editing";
 import projectsRoutes from "./routes/projects";
 import myContentRoutes from "./routes/myContent";
@@ -347,6 +348,8 @@ app.use("/api/rooms", roomsProgramStateRoutes);
 app.use("/api/rooms", roomsRecordingsRoutes);
 // Room-level persistent HLS config (NOT runtime HLS state)
 app.use("/api/rooms", roomsHlsConfigRoutes);
+// Room brand kit assignment (owner only): PUT /api/rooms/:roomId/brand-kit
+app.use("/api/rooms", roomBrandKitRouter);
 // Channel viewer access mode (public/registered/subscriber/pay_per_view/private)
 app.use("/api/rooms", roomsViewerAccessRoutes);
 // Room-level selection of which Saved Embed to use for HLS control
@@ -360,6 +363,8 @@ app.use("/api/live", liveRoutes);
 
 // Saved embeds (user-owned) -> stable Firestore rooms
 app.use("/api/saved-embeds", savedEmbedsRoutes);
+// Brand kits (account-owned reusable viewer branding)
+app.use("/api/brand-kits", brandKitsRoutes);
 
 // Reject legacy EDU/Corporate lane requests
 app.use("/api/edu", (_req, res) => res.status(404).json({ error: "lane_removed" }));

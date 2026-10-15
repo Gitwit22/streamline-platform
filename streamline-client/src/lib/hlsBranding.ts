@@ -9,6 +9,10 @@
  * gated by entitlements.features.hlsCustomization). The public saved-embed
  * resolver returns it as `branding`, so it applies whichever room is live on
  * the channel and while the channel is offline.
+ *
+ * Brand kits (lib/brandKits.ts) take precedence: when the live room (or the
+ * channel's home room) has a kit, the server returns the kit's branding as
+ * `branding` instead. Rooms without a kit keep using hlsConfig as above.
  */
 
 export type HlsTheme = "light" | "dark";

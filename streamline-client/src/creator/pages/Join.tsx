@@ -5,6 +5,7 @@ import { API_BASE } from "../../lib/apiBase";
 import { logAuthDebugContext } from "../../lib/logAuthDebug";
 import { useNavigate, useSearchParams,} from "react-router-dom";
 import { apiFetchAuth } from "../../lib/api";
+import { listBrandKits, type BrandKitList } from "../../lib/brandKits";
 import { loginUrlReturningHere, optionalAuthHeaders } from "../../lib/guestSession";
 import { logout } from "../../lib/logout";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
@@ -180,6 +181,10 @@ export default function Join() {
   // Production-room access for new rooms (invite-only by default).
   const [newRoomAccess, setNewRoomAccess] = useState<RoomAccessMode>(DEFAULT_ROOM_ACCESS);
 
+  // Brand kit for a new room ("" = none). Pre-selected to the account's default kit.
+  const [brandKits, setBrandKits] = useState<BrandKitList | null>(null);
+  const [newRoomKitId, setNewRoomKitId] = useState<string>("");
+
   // Platform-level HLS flag (controls enablement of Saved Room join when HLS is disabled)
   // Default to false so HLS-only UI is disabled until account flags load.
   const [platformHlsEnabled, setPlatformHlsEnabled] = useState<boolean>(false);
@@ -349,6 +354,30 @@ export default function Join() {
       return null;
     }
   }, []);
+
+  // Load the host's brand kits for the new-room picker. On failure the picker
+  // stays hidden and the server applies the default kit itself.
+  useEffect(() => {
+    if (isParticipant) return;
+    let cancelled = false;
+    listBrandKits({ quiet: true })
+      .then((list) => {
+        if (cancelled) return;
+        setBrandKits(list);
+        setNewRoomKitId(list.defaultKitId || "");
+      })
+      .catch(() => {
+        if (!cancelled) setBrandKits(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isParticipant]);
+
+  // The picker lists the signed-in user's kits, so it's hidden while creating a
+  // room for another owner (collaborator delegation): that owner's default applies.
+  const showBrandKitPicker =
+    !isParticipant && !selectedOwnerUid && !!brandKits && brandKits.canEdit && brandKits.kits.length > 0;
 
   // Load Saved Embeds for host flow so they can optionally
   // bind the room to a Saved Embed at creation time.
@@ -619,6 +648,8 @@ export default function Join() {
             savedEmbedId: undefined,
             presenceMode: hostPresenceMode,
             access: newRoomAccess,
+            // Omitted when the picker is hidden: the server applies the owner's default kit.
+            ...(showBrandKitPicker ? { brandKitId: newRoomKitId || null } : {}),
           }),
         }, { allowNonOk: true });
 
@@ -626,7 +657,19 @@ export default function Join() {
           const text = await res.text().catch(() => "");
           console.error("Failed to create room", res.status, text);
 
-          alert("Failed to create room. Please try again.");
+          let code = "";
+          try {
+            code = String(JSON.parse(text)?.error || "");
+          } catch {
+            // non-JSON error body
+          }
+          if (code === "invalid_brand_kit") {
+            alert("The selected brand kit no longer exists. Pick another kit (or None) and try again.");
+          } else if (code === "brand_kits_not_in_plan") {
+            alert("Brand kits are not included in your plan. Choose None for the brand kit and try again.");
+          } else {
+            alert("Failed to create room. Please try again.");
+          }
           return;
         }
 
@@ -1484,6 +1527,41 @@ export default function Join() {
                 </div>
                 <div style={{ marginTop: "6px", fontSize: "11px", color: "#9ca3af" }}>
                   {ROOM_ACCESS_HLS_NOTE} You can change this later from the host dashboard.
+                </div>
+              </div>
+            )}
+
+            {/* HOST: Brand kit for a new room (default kit pre-selected) */}
+            {joinMode === "new" && showBrandKitPicker && brandKits && (
+              <div style={{ marginBottom: "20px" }}>
+                <label htmlFor="new-room-brand-kit" style={{ display: "block", fontSize: "12px", color: "#9ca3af", marginBottom: "6px" }}>
+                  Brand kit
+                </label>
+                <select
+                  id="new-room-brand-kit"
+                  data-testid="new-room-brand-kit"
+                  value={newRoomKitId}
+                  onChange={(e) => setNewRoomKitId(e.target.value)}
+                  style={{
+                    width: "100%",
+                    padding: "10px 12px",
+                    borderRadius: "10px",
+                    border: "1px solid rgba(55,65,81,0.9)",
+                    background: "rgba(15,23,42,0.85)",
+                    color: "#e5e7eb",
+                    fontSize: "13px",
+                  }}
+                >
+                  <option value="">None</option>
+                  {brandKits.kits.map((k) => (
+                    <option key={k.id} value={k.id}>
+                      {k.name}
+                      {k.id === brandKits.defaultKitId ? " (default)" : ""}
+                    </option>
+                  ))}
+                </select>
+                <div style={{ marginTop: "6px", fontSize: "11px", color: "#9ca3af" }}>
+                  Sets the title, logo and theme viewers see on this room's live page. Manage kits in Settings → Branding.
                 </div>
               </div>
             )}

@@ -67,6 +67,8 @@ export type RoomDoc = {
     heartbeatAt?: FirebaseFirestore.Timestamp | null;
   };
   hlsConfig?: RoomHlsConfig;
+  /** Brand kit (brandKits/{id}) whose branding this room's viewer page uses; see lib/brandKitsPure.ts. */
+  brandKitId?: string | null;
   /** Room-level monetization toggle (requires HLS). */
   monetizationEnabled?: boolean;
   /** Room-level PPV toggle (requires HLS + monetizationEnabled). */
@@ -87,6 +89,8 @@ export async function ensureRoomDoc(params: {
   // to invite_only; visibility/requiresAuth are derived from it.
   access?: RoomAccessMode | string;
   requiresPayment?: boolean;
+  // Brand kit for a NEW room (rooms/{id}.brandKitId). Existing rooms keep theirs.
+  brandKitId?: string;
 }): Promise<{
   ref: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
   data: RoomDoc;
@@ -110,6 +114,7 @@ export async function ensureRoomDoc(params: {
       requiresAuth: policy.requiresAuth,
       requiresPayment,
       ...(savedEmbedId ? { savedEmbedId } : {}),
+      ...(params.brandKitId ? { brandKitId: params.brandKitId } : {}),
       createdAt: serverTimestamp,
       updatedAt: serverTimestamp,
       status: initialStatus || "live",

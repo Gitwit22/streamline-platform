@@ -11,6 +11,7 @@ import {
   validateBranding,
   type HlsBranding,
 } from "../../lib/hlsBranding";
+import { listBrandKits, setRoomBrandKit, type BrandKitList } from "../../lib/brandKits";
 
 /**
  * Branding editor for one Streamline Channel (saved embed). Edits the
@@ -46,6 +47,10 @@ export default function HlsBrandingEditor({
   const [saved, setSaved] = useState<HlsBranding>(EMPTY_BRANDING);
   const [draft, setDraft] = useState<HlsBranding>(EMPTY_BRANDING);
   const [logoBroken, setLogoBroken] = useState(false);
+  // Brand kit assigned to this channel's room (null = the fields below apply).
+  const [roomKitId, setRoomKitId] = useState<string | null>(null);
+  const [kitList, setKitList] = useState<BrandKitList | null>(null);
+  const [kitSaving, setKitSaving] = useState(false);
 
   useEffect(() => {
     if (!roomId) return;
@@ -65,6 +70,7 @@ export default function HlsBrandingEditor({
         const cfg = payload?.hlsConfig && typeof payload.hlsConfig === "object" ? payload.hlsConfig : {};
         if (cancelled) return;
         const b = brandingFromConfig(cfg);
+        setRoomKitId(typeof payload?.brandKitId === "string" && payload.brandKitId ? payload.brandKitId : null);
         setEnabled(cfg.enabled === true);
         setSaved(b);
         setDraft(b);
@@ -79,7 +85,40 @@ export default function HlsBrandingEditor({
     };
   }, [roomId]);
 
+  useEffect(() => {
+    let cancelled = false;
+    listBrandKits()
+      .then((list) => {
+        if (!cancelled) setKitList(list);
+      })
+      // Kits are optional here; without the list the picker is just hidden.
+      .catch(() => {
+        if (!cancelled) setKitList(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => setLogoBroken(false), [draft.logoUrl]);
+
+  const activeKit = roomKitId ? kitList?.kits.find((k) => k.id === roomKitId) || null : null;
+
+  const handleKitChange = async (next: string | null) => {
+    if (!roomId || kitSaving || next === roomKitId) return;
+    setKitSaving(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const saved = await setRoomBrandKit(roomId, next);
+      setRoomKitId(saved);
+      setMessage(saved ? "Brand kit applied — viewers see it on their next load." : "Brand kit removed — the channel branding below applies.");
+    } catch (e) {
+      setError(e instanceof Error && e.message ? e.message : "Failed to change the brand kit.");
+    } finally {
+      setKitSaving(false);
+    }
+  };
 
   const errors = useMemo(() => validateBranding(draft), [draft]);
   const hasErrors = Object.keys(errors).length > 0;
@@ -156,72 +195,48 @@ export default function HlsBrandingEditor({
 
       {loading && <div style={{ fontSize: 12, color: "#9ca3af" }}>Loading branding…</div>}
 
-      <div style={{ display: "grid", gap: 10 }}>
-        <TextField
-          label="Title"
-          placeholder={embedName || "StreamLine"}
-          value={draft.title}
-          max={HLS_BRANDING_LIMITS.title}
-          disabled={disabled}
-          error={errors.title}
-          onChange={(v) => setField("title", v)}
-        />
-        <TextField
-          label="Subtitle"
-          placeholder={embedDescription || "Live Viewer"}
-          value={draft.subtitle}
-          max={HLS_BRANDING_LIMITS.subtitle}
-          disabled={disabled}
-          error={errors.subtitle}
-          onChange={(v) => setField("subtitle", v)}
-        />
-        <TextField
-          label="Logo image URL"
-          placeholder="https://example.com/logo.png"
-          value={draft.logoUrl}
-          max={HLS_BRANDING_LIMITS.logoUrl}
-          disabled={disabled}
-          error={errors.logoUrl || (logoBroken && draft.logoUrl.trim() ? "Couldn't load this image — check the URL." : undefined)}
-          hint="Square PNG/SVG works best. Leave empty for the StreamLine logo."
-          onChange={(v) => setField("logoUrl", v)}
-        />
-
-        <div style={{ display: "grid", gap: 6 }}>
-          <span style={labelStyle}>Theme</span>
-          <div style={{ display: "flex", gap: 8 }} role="radiogroup" aria-label="Viewer theme">
-            {(["dark", "light"] as const).map((t) => (
-              <button
-                key={t}
-                type="button"
-                role="radio"
-                aria-checked={draft.theme === t}
-                disabled={disabled}
-                onClick={() => setField("theme", t)}
-                style={pillStyle(draft.theme === t, disabled)}
-              >
-                {t === "dark" ? "Dark" : "Light"}
-              </button>
+      {kitList && (kitList.kits.length > 0 || roomKitId) && (
+        <label style={{ display: "grid", gap: 6 }}>
+          <span style={labelStyle}>Brand kit</span>
+          <select
+            data-testid="channel-brand-kit"
+            value={roomKitId || ""}
+            disabled={loading || kitSaving}
+            onChange={(e) => void handleKitChange(e.target.value || null)}
+            style={selectStyle}
+          >
+            <option value="">None — use the channel branding below</option>
+            {kitList.kits.map((k) => (
+              <option key={k.id} value={k.id} disabled={!kitList.canEdit && k.id !== roomKitId}>
+                {k.name}
+              </option>
             ))}
-          </div>
-        </div>
+            {roomKitId && !activeKit && <option value={roomKitId}>Deleted kit (channel branding applies)</option>}
+          </select>
+          <span style={{ fontSize: 11, color: "#6b7280" }}>
+            {activeKit
+              ? `Viewers see the “${activeKit.name}” kit. The branding below is kept and applies again if you choose None.`
+              : "Pick a reusable kit from Settings → Branding, or edit this channel's own branding below."}
+          </span>
+        </label>
+      )}
 
-        <TextField
-          label="Offline message"
-          placeholder="When the host goes live, playback will start automatically."
-          value={draft.offlineMessage}
-          max={HLS_BRANDING_LIMITS.offlineMessage}
-          disabled={disabled}
-          error={errors.offlineMessage}
-          multiline
-          hint="Shown on the viewer page while you're not live (e.g. your schedule)."
-          onChange={(v) => setField("offlineMessage", v)}
-        />
-      </div>
+      {activeKit && <div style={{ ...labelStyle, marginTop: 4 }}>Channel branding (used when no kit is selected)</div>}
+
+      <BrandingFields
+        draft={draft}
+        errors={errors}
+        disabled={disabled}
+        logoBroken={logoBroken}
+        titlePlaceholder={embedName || "StreamLine"}
+        subtitlePlaceholder={embedDescription || "Live Viewer"}
+        onChange={setField}
+      />
 
       <div>
-        <div style={{ ...labelStyle, marginBottom: 6 }}>Preview</div>
+        <div style={{ ...labelStyle, marginBottom: 6 }}>{activeKit ? `Preview — “${activeKit.name}” kit` : "Preview"}</div>
         <HlsViewerPreview
-          branding={draft}
+          branding={activeKit || draft}
           embedName={embedName}
           embedDescription={embedDescription}
           onLogoError={() => setLogoBroken(true)}
@@ -257,6 +272,89 @@ export default function HlsBrandingEditor({
           {saving ? "Saving…" : "Save branding"}
         </button>
       </div>
+    </div>
+  );
+}
+
+/** The viewer-branding inputs (title / subtitle / logo / theme / offline message). Shared with the brand kit editor. */
+export function BrandingFields({
+  draft,
+  errors,
+  disabled,
+  logoBroken,
+  titlePlaceholder,
+  subtitlePlaceholder,
+  onChange,
+}: {
+  draft: HlsBranding;
+  errors: Partial<Record<keyof HlsBranding, string>>;
+  disabled: boolean;
+  logoBroken: boolean;
+  titlePlaceholder: string;
+  subtitlePlaceholder: string;
+  onChange: <K extends keyof HlsBranding>(key: K, value: HlsBranding[K]) => void;
+}) {
+  return (
+    <div style={{ display: "grid", gap: 10 }}>
+      <TextField
+        label="Title"
+        placeholder={titlePlaceholder}
+        value={draft.title}
+        max={HLS_BRANDING_LIMITS.title}
+        disabled={disabled}
+        error={errors.title}
+        onChange={(v) => onChange("title", v)}
+      />
+      <TextField
+        label="Subtitle"
+        placeholder={subtitlePlaceholder}
+        value={draft.subtitle}
+        max={HLS_BRANDING_LIMITS.subtitle}
+        disabled={disabled}
+        error={errors.subtitle}
+        onChange={(v) => onChange("subtitle", v)}
+      />
+      <TextField
+        label="Logo image URL"
+        placeholder="https://example.com/logo.png"
+        value={draft.logoUrl}
+        max={HLS_BRANDING_LIMITS.logoUrl}
+        disabled={disabled}
+        error={errors.logoUrl || (logoBroken && draft.logoUrl.trim() ? "Couldn't load this image — check the URL." : undefined)}
+        hint="Square PNG/SVG works best. Leave empty for the StreamLine logo."
+        onChange={(v) => onChange("logoUrl", v)}
+      />
+
+      <div style={{ display: "grid", gap: 6 }}>
+        <span style={labelStyle}>Theme</span>
+        <div style={{ display: "flex", gap: 8 }} role="radiogroup" aria-label="Viewer theme">
+          {(["dark", "light"] as const).map((t) => (
+            <button
+              key={t}
+              type="button"
+              role="radio"
+              aria-checked={draft.theme === t}
+              disabled={disabled}
+              onClick={() => onChange("theme", t)}
+              style={pillStyle(draft.theme === t, disabled)}
+            >
+              {t === "dark" ? "Dark" : "Light"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <TextField
+        label="Offline message"
+        placeholder="When the host goes live, playback will start automatically."
+        value={draft.offlineMessage}
+        max={HLS_BRANDING_LIMITS.offlineMessage}
+        disabled={disabled}
+        error={errors.offlineMessage}
+        multiline
+        hint="Shown on the viewer page while you're not live (e.g. your schedule)."
+        onChange={(v) => onChange("offlineMessage", v)}
+      />
     </div>
   );
 }
@@ -359,7 +457,7 @@ export function HlsViewerPreview({
   );
 }
 
-function TextField({
+export function TextField({
   label,
   value,
   placeholder,
@@ -461,6 +559,15 @@ const btnPrimary: CSSProperties = {
   fontSize: 13,
   fontWeight: 700,
   cursor: "pointer",
+};
+const selectStyle: CSSProperties = {
+  width: "100%",
+  padding: "10px 12px",
+  borderRadius: 10,
+  border: "1px solid rgba(63,63,70,0.6)",
+  background: "rgba(0,0,0,0.25)",
+  color: "#e5e7eb",
+  fontSize: 13,
 };
 const btnSecondary: CSSProperties = {
   padding: "10px 14px",

@@ -11,6 +11,8 @@ import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { checkFeature } from "../lib/entitlements";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { publicBranding } from "../lib/hlsBrandingPure";
+import { chooseChannelBranding } from "../lib/brandKitsPure";
+import { getRoomKitBranding } from "../services/brandKits";
 
 const router = Router();
 
@@ -297,18 +299,37 @@ router.get("/public/:savedEmbedId", async (req: any, res) => {
     const description = (data.description || "") as string | undefined;
     const activeRoomId = typeof data.activeRoomId === "string" ? data.activeRoomId : null;
 
-    // Channel branding lives on the embed's own room (rooms/{roomId}.hlsConfig,
-    // edited in Settings -> HLS). It applies whichever room is live on the
-    // channel, and also while the channel is offline.
+    // Channel branding: the brand kit of the room live on the channel, else
+    // the home room's kit, else the home room's own hlsConfig branding
+    // (edited in Settings -> HLS; the pre-kit behavior). See chooseChannelBranding.
     let branding: ReturnType<typeof publicBranding> = null;
     const homeRoomId = typeof data.roomId === "string" ? data.roomId.trim() : "";
-    if (homeRoomId && !homeRoomId.includes("/")) {
-      try {
-        const homeSnap = await db.collection("rooms").doc(homeRoomId).get();
-        branding = homeSnap.exists ? publicBranding((homeSnap.data() as any)?.hlsConfig) : null;
-      } catch (e: any) {
-        console.warn("GET /api/saved-embeds/public: branding lookup failed", { savedEmbedId, error: e?.message || e });
-      }
+    try {
+      const homeRoom =
+        homeRoomId && !homeRoomId.includes("/")
+          ? await db.collection("rooms").doc(homeRoomId).get().then((s) => (s.exists ? (s.data() as any) : null))
+          : null;
+      const activeRoom =
+        activeRoomId && activeRoomId !== homeRoomId && !activeRoomId.includes("/")
+          ? await db
+              .collection("rooms")
+              .doc(activeRoomId)
+              .get()
+              .then((s) => (s.exists ? (s.data() as any) : null))
+              // Live-room lookup failing must not drop the channel's own branding.
+              .catch(() => null)
+          : homeRoom;
+      const [activeRoomKit, homeRoomKit] = await Promise.all([
+        activeRoom ? getRoomKitBranding(activeRoom) : Promise.resolve(null),
+        homeRoom && homeRoom !== activeRoom ? getRoomKitBranding(homeRoom) : Promise.resolve(null),
+      ]);
+      branding = chooseChannelBranding({
+        activeRoomKit,
+        homeRoomKit,
+        homeLegacy: homeRoom ? publicBranding(homeRoom.hlsConfig) : null,
+      });
+    } catch (e: any) {
+      console.warn("GET /api/saved-embeds/public: branding lookup failed", { savedEmbedId, error: e?.message || e });
     }
 
     return res.json({

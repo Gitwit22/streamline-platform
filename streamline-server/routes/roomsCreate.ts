@@ -13,6 +13,11 @@ import {
   resolveRoomAccessMode,
   type RoomAccessMode,
 } from "../lib/roomAccessPolicy";
+import { pickCreateBrandKit } from "../lib/brandKitsPure";
+import { getDefaultBrandKitId, getOwnedBrandKit } from "../services/brandKits";
+import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { checkFeature } from "../lib/entitlements";
+import { LIMIT_ERRORS } from "../lib/limitErrors";
 
 const router = Router();
 
@@ -20,7 +25,8 @@ const router = Router();
  * POST /api/rooms/create
  * Creates a new Firestore room document and returns its id.
  * Body: { livekitRoomName?: string, roomType?: "rtc" | "hls", presenceMode?: PresenceMode,
- *         access?: "invite_only" | "link" | "public" }  (default invite_only)
+ *         access?: "invite_only" | "link" | "public",   (default invite_only)
+ *         brandKitId?: string | null }  (omitted = owner's default kit, null = none)
  *
  * roomId is generated from Firestore (roomsRef.doc().id).
  */
@@ -61,6 +67,41 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
   const savedEmbedIdRaw = req.body?.savedEmbedId;
   const savedEmbedId = typeof savedEmbedIdRaw === "string" ? savedEmbedIdRaw.trim() : "";
 
+  // Brand kit: an explicit choice must be the owner's kit and within the
+  // owner's plan (errors are reported); the owner's default kit is applied
+  // best-effort (any problem just creates the room without a kit).
+  const defaultKitId =
+    req.body?.brandKitId === undefined ? await getDefaultBrandKitId(ownerUid).catch(() => null) : null;
+  const kitPick = pickCreateBrandKit(req.body?.brandKitId, defaultKitId);
+  if (kitPick.source === "invalid") {
+    return res.status(400).json({ error: "invalid_brand_kit" });
+  }
+  let brandKitId: string | undefined = undefined;
+  if (kitPick.source === "explicit" || kitPick.source === "default") {
+    const explicit = kitPick.source === "explicit";
+    try {
+      const kit = await getOwnedBrandKit(kitPick.kitId, ownerUid);
+      const check = kit ? checkFeature(await getEffectiveEntitlements(ownerUid), "hlsCustomization") : null;
+      if (!kit) {
+        if (explicit) return res.status(400).json({ error: "invalid_brand_kit" });
+      } else if (!check!.allowed) {
+        if (explicit) {
+          return res.status(403).json({
+            error: check!.code === LIMIT_ERRORS.FEATURE_DISABLED ? LIMIT_ERRORS.FEATURE_DISABLED : "brand_kits_not_in_plan",
+          });
+        }
+      } else {
+        brandKitId = kitPick.kitId;
+      }
+    } catch (err) {
+      if (explicit) {
+        console.error("/api/rooms/create brand kit lookup failed", err);
+        return res.status(500).json({ error: "server_error" });
+      }
+      console.warn("/api/rooms/create default brand kit skipped", err);
+    }
+  }
+
   // Generate a new Firestore document id for the room.
   const roomId = db.collection("rooms").doc().id;
 
@@ -92,6 +133,7 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
       savedEmbedId: savedEmbedId || undefined,
       access,
       requiresPayment,
+      brandKitId,
     });
 
     return res.status(201).json({
@@ -99,6 +141,7 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
       livekitRoomName: data.livekitRoomName || livekitRoomName,
       roomType: data.roomType || roomType,
       access: resolveRoomAccessMode(data as any),
+      brandKitId: brandKitId || null,
       presenceMode,
       actingContext: {
         ownerUid,

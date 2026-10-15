@@ -12,6 +12,7 @@ import { useAuthMe, isAuthUserInTestMode } from "../../hooks/useAuthMe";
 import { formatLimitLabel } from "../../lib/entitlements";
 import { isServerEntitlements } from "../../lib/serverEntitlements";
 import SettingsHlsSetup from "./settings/SettingsHlsSetup";
+import SettingsBrandKits from "./settings/SettingsBrandKits";
 import RoomMonetizationSetup from "./settings/RoomMonetizationSetup";
 import { getMeCached, clearMeCache } from "../../lib/meCache";
 import { clearPlatformFlagsCache } from "../../lib/platformFlagsCache";
@@ -376,7 +377,7 @@ export default function SettingsBilling() {
   const [closeDeleteConfirmed, setCloseDeleteConfirmed] = useState(false);
   const [closeDeleteText, setCloseDeleteText] = useState("");
 
-  const [activeTab, setActiveTab] = useState<"plan" | "usage" | "destinations" | "hls" | "defaults" | "roles" | "collaborators" | "close">("plan");
+  const [activeTab, setActiveTab] = useState<"plan" | "usage" | "destinations" | "hls" | "branding" | "defaults" | "roles" | "collaborators" | "close">("plan");
   const [collaboratorsData, setCollaboratorsData] = useState<CollaboratorsPayload | null>(null);
   const [collaboratorsLoading, setCollaboratorsLoading] = useState(false);
   const [collaboratorsError, setCollaboratorsError] = useState<string | null>(null);
@@ -1936,6 +1937,13 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
           )}
           <button
             type="button"
+            style={activeTab === "branding" ? { ...S.tab, ...S.tabActive } : S.tab}
+            onClick={() => setActiveTab("branding")}
+          >
+            Branding
+          </button>
+          <button
+            type="button"
             style={activeTab === "defaults" ? { ...S.tab, ...S.tabActive } : S.tab}
             onClick={() => setActiveTab("defaults")}
           >
@@ -3103,6 +3111,15 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
         {/* ================================================================ */}
         {/* SECTION 3: MEDIA DEFAULTS */}
         {/* ================================================================ */}
+        {activeTab === "branding" && (
+          <div style={S.card}>
+            <div style={S.cardHeader}>
+              <h2 style={S.cardTitle}>Branding</h2>
+            </div>
+            <SettingsBrandKits onUpgrade={() => setActiveTab("plan")} />
+          </div>
+        )}
+
         {activeTab === "defaults" && (
           <div style={{ ...S.card, opacity: isBlocked ? 0.6 : 1 }}>
             <div style={S.cardHeader}>
