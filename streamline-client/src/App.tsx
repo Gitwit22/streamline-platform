@@ -25,8 +25,9 @@ function App() {
   const nav = useNavigate();
   const location = useLocation();
   const [showUnauthorized, setShowUnauthorized] = useState(false);
-  const { effectiveEntitlements } = useEffectiveEntitlements();
-  const { access } = useFeatureAccess(effectiveEntitlements);
+  const { effectiveEntitlements, loading: entitlementsLoading } = useEffectiveEntitlements();
+  const { access, platformFlagsLoading } = useFeatureAccess(effectiveEntitlements);
+  const accessLoading = entitlementsLoading || platformFlagsLoading;
 
   const canContentLibrary = access.contentLibrary.allowed;
   const canProjects = access.projects.allowed;
@@ -197,7 +198,7 @@ function App() {
       <Route path="/ppv/:eventId" element={<PpvViewer />} />
 
       {/* Creator lane */}
-      {creatorRoutes({ canContentLibrary, canMyContentRecordings, canProjects, canEditor, canMyContent, canMonetization, myContentTarget })}
+      {creatorRoutes({ canContentLibrary, canMyContentRecordings, canProjects, canEditor, canMyContent, canMonetization, myContentTarget, accessLoading })}
 
       </Routes>
     </>

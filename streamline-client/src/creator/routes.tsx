@@ -7,6 +7,7 @@
  *
  * Route paths are UNCHANGED — this is purely an organisational move.
  */
+import type { ReactElement } from "react";
 import { Route, Navigate } from "react-router-dom";
 
 // ── Creator pages ─────────────────────────────────────────────────────
@@ -61,7 +62,19 @@ export interface CreatorRouteFlags {
   canMyContent: boolean;
   canMonetization: boolean;
   myContentTarget: string | null;
+  /**
+   * True until entitlements and platform flags have loaded. Gated routes wait
+   * instead of redirecting: every can* flag is false before then, so a
+   * refresh or deep link used to bounce to /join (audit P1-6).
+   */
+  accessLoading?: boolean;
 }
+
+const accessLoadingElement = (
+  <div className="min-h-screen flex items-center justify-center text-sm text-gray-400" role="status">
+    Loading…
+  </div>
+);
 
 export function creatorRoutes(flags: CreatorRouteFlags) {
   const {
@@ -72,7 +85,11 @@ export function creatorRoutes(flags: CreatorRouteFlags) {
     canMyContent,
     canMonetization,
     myContentTarget,
+    accessLoading = false,
   } = flags;
+  // Picks the gated element or its fallback once access is known.
+  const gate = (allowed: boolean, element: ReactElement, fallback: ReactElement) =>
+    accessLoading ? accessLoadingElement : allowed ? element : fallback;
 
   return (
     <>
@@ -98,11 +115,11 @@ export function creatorRoutes(flags: CreatorRouteFlags) {
       <Route path="/join" element={<Join />} />
       <Route
         path="/my-content"
-        element={
-          canMyContent && myContentTarget
-            ? <Navigate to={myContentTarget} replace />
-            : <MyContentDisabled />
-        }
+        element={gate(
+          !!(canMyContent && myContentTarget),
+          <Navigate to={myContentTarget || "/content"} replace />,
+          <MyContentDisabled />
+        )}
       />
       <Route path="/room" element={<Room />} />
       <Route path="/room/:roomName" element={<Room />} />
@@ -112,7 +129,7 @@ export function creatorRoutes(flags: CreatorRouteFlags) {
       <Route path="/settings/destinations" element={<SettingsDestinations />} />
       <Route
         path="/settings/monetization"
-        element={canMonetization ? <MonetizationSetup /> : <Navigate to="/join" replace />}
+        element={gate(canMonetization, <MonetizationSetup />, <Navigate to="/join" replace />)}
       />
       <Route path="/room-exit/:recordingId" element={<RoomExitPage />} />
 
@@ -130,41 +147,33 @@ export function creatorRoutes(flags: CreatorRouteFlags) {
       {/* Content library / projects */}
       <Route
         path="/content"
-        element={
-          canContentLibrary || canMyContentRecordings
-            ? <AssetLibrary />
-            : <Navigate to="/join" replace />
-        }
+        element={gate(canContentLibrary || canMyContentRecordings, <AssetLibrary />, <Navigate to="/join" replace />)}
       />
       <Route
         path="/projects"
-        element={canEditor ? <ProjectsDashboard /> : <Navigate to="/content" replace />}
+        element={gate(canEditor, <ProjectsDashboard />, <Navigate to="/content" replace />)}
       />
       <Route
         path="/projects/:projectId"
-        element={canEditor ? <ProjectDetail /> : <Navigate to="/content" replace />}
+        element={gate(canEditor, <ProjectDetail />, <Navigate to="/content" replace />)}
       />
 
       {/* Legacy editing aliases */}
       <Route
         path="/editing/assets"
-        element={
-          canContentLibrary || canMyContentRecordings
-            ? <Navigate to="/content" replace />
-            : <Navigate to="/join" replace />
-        }
+        element={gate(canContentLibrary || canMyContentRecordings, <Navigate to="/content" replace />, <Navigate to="/join" replace />)}
       />
       <Route
         path="/editing/projects"
-        element={canProjects ? <Navigate to="/projects" replace /> : <Navigate to="/join" replace />}
+        element={gate(canProjects, <Navigate to="/projects" replace />, <Navigate to="/join" replace />)}
       />
       <Route
         path="/editing/editor/:projectId"
-        element={canEditor ? <EditorPage /> : <EditorDisabled />}
+        element={gate(canEditor, <EditorPage />, <EditorDisabled />)}
       />
       <Route
         path="/editing/export/:projectId"
-        element={canEditor ? <RenderAndUploadPage /> : <EditorDisabled />}
+        element={gate(canEditor, <RenderAndUploadPage />, <EditorDisabled />)}
       />
 
       {/* Billing */}
