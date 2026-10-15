@@ -8,6 +8,7 @@ import {
   isDeletedStatus,
   mergeMediaAssets,
   projectAssetToMediaAsset,
+  recordingAccessibleBy,
   recordingToMediaAsset,
   savedVideoToMediaAsset,
   uploadToMediaAsset,
@@ -31,12 +32,14 @@ export async function listMediaAssets(
   uid: string,
   opts: { recordings: boolean; uploads: boolean },
 ): Promise<MediaAsset[]> {
-  const [recSnap, upSnap, svSnap] = await Promise.all([
+  const [recSnap, ownedRecSnap, upSnap, svSnap] = await Promise.all([
     opts.recordings ? db.collection("recordings").where("userId", "==", uid).get() : null,
+    // Recordings a cohost made in this user's rooms (billed + stored here).
+    opts.recordings ? db.collection("recordings").where("ownerUid", "==", uid).get() : null,
     opts.uploads ? db.collection("editing_assets").where("userId", "==", uid).get() : null,
     opts.uploads ? db.collection("saved_videos").where("userId", "==", uid).get() : null,
   ]);
-  const recordings = recSnap ? recSnap.docs.map((d) => recordingToMediaAsset(d.id, d.data())) : [];
+  const recordings = [...(recSnap?.docs || []), ...(ownedRecSnap?.docs || [])].map((d) => recordingToMediaAsset(d.id, d.data()));
   const uploads = upSnap ? upSnap.docs.map((d) => uploadToMediaAsset(d.id, d.data())) : [];
   const saved = svSnap
     ? (svSnap.docs.map((d) => savedVideoToMediaAsset(d.id, d.data())).filter(Boolean) as MediaAsset[])
@@ -55,7 +58,7 @@ export async function resolveMediaAsset(uid: string, id: string): Promise<MediaA
   const rec = await db.collection("recordings").doc(id).get();
   if (rec.exists) {
     const d = rec.data() as any;
-    if (d?.userId !== uid || isDeletedStatus(d?.status)) return null;
+    if (!recordingAccessibleBy(d, uid) || isDeletedStatus(d?.status)) return null;
     return recordingToMediaAsset(rec.id, d);
   }
   const up = await db.collection("editing_assets").doc(id).get();

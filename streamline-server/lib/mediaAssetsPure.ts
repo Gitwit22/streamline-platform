@@ -201,3 +201,14 @@ export function publicMediaAsset(a: MediaAsset): Omit<MediaAsset, "storageKey"> 
   const { storageKey: _k, ...rest } = a;
   return rest;
 }
+
+/**
+ * Who may list / play / delete a recording: the user who started it (userId)
+ * and the room owner it is billed and stored under (ownerUid). Before, a
+ * cohost's recording counted against the owner's storage but only the cohost
+ * could see or delete it (audit P2).
+ */
+export function recordingAccessibleBy(d: { userId?: unknown; ownerUid?: unknown } | null | undefined, uid: string): boolean {
+  if (!d || !uid) return false;
+  return d.userId === uid || d.ownerUid === uid;
+}

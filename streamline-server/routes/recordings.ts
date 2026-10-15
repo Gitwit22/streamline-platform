@@ -48,6 +48,7 @@ import { compositorUrl, warnBuiltInLayoutFallback } from "../lib/egressTemplate"
 import { syncRoomProgramOverlay } from "../services/programOverlay";
 import { roomDisplayName } from "../lib/roomDisplayPure";
 import { recordingLockBlocks, activeRecordingFromLock } from "../lib/recordingFinalizePure";
+import { recordingAccessibleBy } from "../lib/mediaAssetsPure";
 import { copyViewerStatsToRecording } from "../lib/viewerStats";
 import { getPlatformFlags } from "../lib/entitlements";
 
@@ -1407,7 +1408,7 @@ router.get("/:id", requireAuth, async (req, res) => {
     }
 
     const data = snap.data() || {};
-    if (data.userId && data.userId !== uid) {
+    if (data.userId && !recordingAccessibleBy(data, uid)) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -1435,7 +1436,7 @@ router.delete("/:id", requireAuth, async (req, res) => {
     }
 
     const data = snap.data() || {};
-    if (data.userId && data.userId !== uid) {
+    if (data.userId && !recordingAccessibleBy(data, uid)) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 
@@ -1668,7 +1669,7 @@ export async function buildRecordingDownloadLink(params: {
   }
 
   // Verify ownership
-  if (data.userId && data.userId !== uid) {
+  if (data.userId && !recordingAccessibleBy(data, uid)) {
     return { kind: "forbidden", httpStatus: 403, body: { error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS } };
   }
 
@@ -1756,7 +1757,7 @@ router.post("/:id/report-download-issue", requireAuth, requireMyContentRecording
     }
 
     const data = snap.data() || {};
-    if (data.userId && data.userId !== uid) {
+    if (data.userId && !recordingAccessibleBy(data, uid)) {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
 

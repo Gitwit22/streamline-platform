@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   inferMediaType,
   mergeMediaAssets,
+  recordingAccessibleBy,
   projectAssetToMediaAsset,
   publicMediaAsset,
   recordingToMediaAsset,
@@ -69,5 +70,17 @@ describe("parseProbeOutput", () => {
     }));
     assert.deepEqual(p, { durationMs: 3500, hasVideo: false, hasAudio: true });
     assert.equal(parseProbeOutput("not json"), null);
+  });
+});
+
+describe("recordingAccessibleBy", () => {
+  it("allows the starter and the billed room owner, nobody else", () => {
+    const rec = { userId: "cohost", ownerUid: "owner" };
+    assert.equal(recordingAccessibleBy(rec, "cohost"), true);
+    assert.equal(recordingAccessibleBy(rec, "owner"), true);
+    assert.equal(recordingAccessibleBy(rec, "stranger"), false);
+    assert.equal(recordingAccessibleBy({ userId: "u1" }, "u1"), true);
+    assert.equal(recordingAccessibleBy({ userId: "u1" }, ""), false);
+    assert.equal(recordingAccessibleBy(null, "u1"), false);
   });
 });

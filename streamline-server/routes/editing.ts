@@ -49,7 +49,7 @@ import { monthKeyUTC } from "../lib/streamingMeterPure";
 import { countUserProjects, loadEditorProject } from "../lib/projectStore";
 import { buildExportTimeline, type ResolvedClipSource } from "../lib/editorTimeline";
 import { listMediaAssets, resolveMediaAsset, resolveMediaAssets, withPlayableUrl } from "../lib/mediaAssets";
-import { inferMediaType, publicMediaAsset, uploadToMediaAsset } from "../lib/mediaAssetsPure";
+import { inferMediaType, publicMediaAsset, recordingAccessibleBy, uploadToMediaAsset } from "../lib/mediaAssetsPure";
 import { probeMedia } from "../lib/mediaProbe";
 import { deleteSavedVideo } from "../lib/savedVideos";
 import { deleteExportOutput, saveExportToLibrary } from "../lib/exportLibrary";
@@ -390,8 +390,8 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
     if (recordingSnap.exists) {
       const data = recordingSnap.data();
 
-      // Verify ownership
-      if (data?.userId !== userId) {
+      // Verify ownership (the starter or the room owner it's billed to)
+      if (!recordingAccessibleBy(data, userId)) {
         return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
       }
 
