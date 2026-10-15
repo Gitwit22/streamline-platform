@@ -165,6 +165,21 @@ export function buildProgramOverlay(
  * a JSON object, so the caller skips the write instead of clobbering it.
  */
 export function mergeOverlayIntoMetadata(existingJson: string | null | undefined, overlay: ProgramOverlay | null): string | null {
+  return mergeRoomMetadata(existingJson, { programOverlay: overlay });
+}
+
+/**
+ * Sets the given LiveKit room-metadata keys, keeping every other key. Both
+ * writers (layout PATCH and overlay sync) pass BOTH keys from Firestore, so
+ * whichever read-modify-write lands last still carries current values
+ * instead of reverting the other writer's change (audit P2 lost updates).
+ * A key that is absent from `patch` is left as it is.
+ * Null when the existing metadata isn't a JSON object.
+ */
+export function mergeRoomMetadata(
+  existingJson: string | null | undefined,
+  patch: { programState?: unknown; programOverlay?: ProgramOverlay | null }
+): string | null {
   let base: Record<string, unknown> = {};
   if (existingJson) {
     try {
@@ -175,5 +190,8 @@ export function mergeOverlayIntoMetadata(existingJson: string | null | undefined
       return null;
     }
   }
-  return JSON.stringify({ ...base, programOverlay: overlay });
+  const next: Record<string, unknown> = { ...base };
+  if (patch.programState !== undefined) next.programState = patch.programState;
+  if (patch.programOverlay !== undefined) next.programOverlay = patch.programOverlay;
+  return JSON.stringify(next);
 }

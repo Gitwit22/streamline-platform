@@ -15,6 +15,7 @@ import {
 } from "../lib/programState";
 import { getLiveKitSdk } from "../lib/livekit";
 import { getRoomProgramOverlay } from "../services/programOverlay";
+import { mergeRoomMetadata, type ProgramOverlay } from "../lib/programOverlayPure";
 
 const router = Router();
 
@@ -27,6 +28,8 @@ const BROADCAST_BASE_DELAY_MS = 200;
 async function broadcastProgramStateOnce(
   livekitRoomName: string,
   programState: ProgramStateV2,
+  // The room's current overlay (undefined = leave the metadata's as is).
+  programOverlay?: ProgramOverlay | null,
 ): Promise<void> {
   const sdk = await getLiveKitSdk();
   const RoomServiceClient = (sdk as any).RoomServiceClient;
@@ -47,23 +50,19 @@ async function broadcastProgramStateOnce(
   const rooms = await svc.listRooms([livekitRoomName]);
   if (!rooms || rooms.length === 0) return;
 
-  const existing = rooms[0].metadata
-    ? JSON.parse(rooms[0].metadata)
-    : {};
-  const merged = { ...existing, programState };
-  await svc.updateRoomMetadata(
-    livekitRoomName,
-    JSON.stringify(merged),
-  );
+  const next = mergeRoomMetadata(rooms[0].metadata, { programState, programOverlay });
+  if (next === null) throw new Error("room metadata is not a JSON object");
+  await svc.updateRoomMetadata(livekitRoomName, next);
 }
 
 async function broadcastProgramStateWithRetry(
   livekitRoomName: string,
   programState: ProgramStateV2,
+  programOverlay?: ProgramOverlay | null,
 ): Promise<void> {
   for (let attempt = 1; attempt <= BROADCAST_MAX_RETRIES; attempt++) {
     try {
-      await broadcastProgramStateOnce(livekitRoomName, programState);
+      await broadcastProgramStateOnce(livekitRoomName, programState, programOverlay);
       return; // success
     } catch (err) {
       const isLastAttempt = attempt === BROADCAST_MAX_RETRIES;
@@ -170,34 +169,45 @@ router.patch(
 
       // Read current state, apply the (v2 or legacy v1) patch, persist v2 +
       // legacy mirror fields.
+      // In a transaction so two concurrent edits (host + producer, two
+      // tabs) can't each apply their patch to the same old state and drop
+      // the other's change (audit P2).
       const roomRef = db.collection("rooms").doc(roomId);
-      const snap = await roomRef.get();
-      const roomData = snap.exists ? ((snap.data() as any) || {}) : {};
-      const result = applyProgramStatePatch(
-        roomData.programState,
-        req.body,
-        roomHostIdentity(roomData),
-        Date.now(),
-      );
-      if (!result.ok) {
-        return res.status(400).json({ error: "invalid_program_state", detail: result.error });
+      const txResult = await db.runTransaction(async (tx) => {
+        const snap = await tx.get(roomRef);
+        const roomData = snap.exists ? ((snap.data() as any) || {}) : {};
+        const result = applyProgramStatePatch(
+          roomData.programState,
+          req.body,
+          roomHostIdentity(roomData),
+          Date.now(),
+        );
+        if (!result.ok) return { error: result.error, roomData, merged: null as ProgramStateV2 | null };
+        tx.set(
+          roomRef,
+          { programState: result.value, updatedAt: serverTimestamp } as any,
+          { merge: true },
+        );
+        return { error: null as string | null, roomData, merged: result.value };
+      });
+      if (txResult.error || !txResult.merged) {
+        return res.status(400).json({ error: "invalid_program_state", detail: txResult.error });
       }
-      const merged = result.value;
-
-      await roomRef.set(
-        { programState: merged, updatedAt: serverTimestamp } as any,
-        { merge: true },
-      );
+      const merged = txResult.merged;
+      const roomData = txResult.roomData;
 
       // Broadcast to LiveKit room metadata for real-time sync.
       // Await the broadcast so the HTTP response only returns once the
       // compositor has (or will imminently have) the updated metadata.
       const livekitRoomName =
         access.livekitRoomName ||
-        ((snap.data() as any)?.livekitRoomName as string | undefined);
+        (roomData?.livekitRoomName as string | undefined);
       if (livekitRoomName) {
+        // Re-send the overlay too, so this write can't drop one an overlay
+        // sync wrote in between. Lookup failure leaves the overlay as is.
+        const overlay = await getRoomProgramOverlay(roomData).catch(() => undefined);
         try {
-          await broadcastProgramStateWithRetry(livekitRoomName, merged);
+          await broadcastProgramStateWithRetry(livekitRoomName, merged, overlay);
         } catch (err) {
           // Log but don't fail the request — Firestore is already updated
           // and the compositor's poll fallback will pick it up.

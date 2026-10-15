@@ -4,6 +4,7 @@ import {
   DEFAULT_KIT_VIDEO,
   buildProgramOverlay,
   mergeOverlayIntoMetadata,
+  mergeRoomMetadata,
   normalizeKitVideo,
   parseKitVideoInput,
 } from "./programOverlayPure";
@@ -99,4 +100,21 @@ test("roomBranding defaults to the plan's hlsCustomization when the plan doesn't
   // Legacy (v1) docs: same inheritance.
   assert.equal(normalizePlanDoc("legacy", { features: { hlsCustomization: true } }).features.roomBranding, true);
   assert.equal(normalizePlanDoc("legacy", { features: { hlsCustomization: false } }).features.roomBranding, false);
+});
+
+test("mergeRoomMetadata sets only the given keys and keeps the rest", () => {
+  const base = JSON.stringify({ programState: { v: 1 }, programOverlay: { logo: "a" }, other: 1 });
+  assert.deepEqual(JSON.parse(mergeRoomMetadata(base, { programState: { v: 2 } })!), {
+    programState: { v: 2 },
+    programOverlay: { logo: "a" },
+    other: 1,
+  });
+  assert.deepEqual(JSON.parse(mergeRoomMetadata(base, { programState: { v: 3 }, programOverlay: null })!), {
+    programState: { v: 3 },
+    programOverlay: null,
+    other: 1,
+  });
+  assert.deepEqual(JSON.parse(mergeRoomMetadata("", { programOverlay: null })!), { programOverlay: null });
+  assert.equal(mergeRoomMetadata("[1]", { programState: {} }), null);
+  assert.equal(mergeRoomMetadata("not json", { programState: {} }), null);
 });

@@ -13,7 +13,7 @@ import { getLiveKitSdk } from "../lib/livekit";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { checkFeature } from "../lib/entitlements";
 import { kitBrandingForRoom, roomBrandKitId } from "../lib/brandKitsPure";
-import { buildProgramOverlay, mergeOverlayIntoMetadata, type ProgramOverlay } from "../lib/programOverlayPure";
+import { buildProgramOverlay, mergeRoomMetadata, type ProgramOverlay } from "../lib/programOverlayPure";
 import { hasActiveGraphics } from "../lib/roomGraphicsPure";
 import { getBrandKit } from "./brandKits";
 
@@ -53,11 +53,21 @@ async function roomService(): Promise<any | null> {
   return new RoomServiceClient(process.env.LIVEKIT_URL, process.env.LIVEKIT_API_KEY, process.env.LIVEKIT_API_SECRET);
 }
 
-/** Writes the overlay into one active LiveKit room's metadata. Returns false when the room isn't active. */
-async function writeOverlay(svc: any, lkRoom: any, overlay: ProgramOverlay | null): Promise<boolean> {
+/**
+ * Writes the overlay into one active LiveKit room's metadata, re-sending the
+ * room's current programState from Firestore so this read-modify-write can't
+ * revert a layout change that landed in between (see mergeRoomMetadata).
+ */
+async function writeOverlay(svc: any, lkRoom: any, overlay: ProgramOverlay | null, roomId: string): Promise<boolean> {
   const current: string = lkRoom?.metadata || "";
   if (!current && !overlay) return true; // nothing to add or remove
-  const next = mergeOverlayIntoMetadata(current, overlay);
+  let programState: unknown = undefined;
+  try {
+    programState = (await db.collection("rooms").doc(roomId).get()).data()?.programState;
+  } catch {
+    programState = undefined; // leave the metadata's programState as is
+  }
+  const next = mergeRoomMetadata(current, { programOverlay: overlay, programState: programState ?? undefined });
   if (next === null) {
     console.warn("[programOverlay] room metadata is not a JSON object; overlay not written", { room: lkRoom?.name });
     return false;
@@ -89,7 +99,7 @@ export async function syncRoomProgramOverlay(
     const name = livekitRoomNameFor(roomId, room);
     const rooms = await svc.listRooms([name]);
     if (!rooms || rooms.length === 0) return;
-    await writeOverlay(svc, rooms[0], await getRoomProgramOverlay(room));
+    await writeOverlay(svc, rooms[0], await getRoomProgramOverlay(room), roomId);
   } catch (err: any) {
     console.warn("[programOverlay] sync failed", { roomId, error: err?.message || String(err) });
   }
@@ -113,7 +123,7 @@ export async function syncBrandKitRooms(kitId: string, ownerUid: string): Promis
       const r = byName.get(lkRoom.name);
       if (!r) continue;
       try {
-        await writeOverlay(svc, lkRoom, await getRoomProgramOverlay(r.data));
+        await writeOverlay(svc, lkRoom, await getRoomProgramOverlay(r.data), r.id);
       } catch (err: any) {
         console.warn("[programOverlay] kit room sync failed", { roomId: r.id, error: err?.message || String(err) });
       }
