@@ -6,6 +6,8 @@ import { stripe } from "../lib/stripe";
 import { getSubscriptionPeriodEnd, getSubscriptionPeriodStart } from "../lib/stripeFields";
 import { firestore as db } from "../firebaseAdmin";
 import { requireAuth } from "../middleware/requireAuth";
+import { isAdmin as isPlatformAdmin } from "../middleware/adminAuth";
+import { testPlanChangeRefusal } from "../lib/testPlanChangePure";
 import { PLAN_IDS, PlanId, isPlanId } from "../types/plan";
 import { getUserAccount } from "../lib/userAccount";
 import { CURRENT_TOS_VERSION, hasAcceptedCurrentTos } from "../lib/tos";
@@ -942,7 +944,10 @@ router.post("/portal", requireAuth, async (req, res) => {
   }
 });
 
-// Test-mode only: allow self-service plan switching without Stripe when billing is disabled.
+// Test-mode only: plan switching without Stripe while billing is disabled.
+// Platform admins only (same check as requireAdmin): it used to be open to
+// every user when billing was off, and the granted plan stuck after billing
+// was turned back on (audit P2).
 router.post("/test/change-plan", requireAuth, async (req, res) => {
   try {
     const uid = (req as any).user?.uid;
@@ -955,26 +960,12 @@ router.post("/test/change-plan", requireAuth, async (req, res) => {
 
     const account = (req as any).account || await getUserAccount(uid);
 
-    // Only allowed when billing is effectively disabled (platform-wide or per-user)
-    if (account.effectiveBillingEnabled !== false) {
-      return res
-        .status(403)
-        .json({ success: false, error: "billing_live" });
-    }
-
-    const isProd = process.env.NODE_ENV === "production";
-    const platformDisabled = account.platformBillingEnabled === false;
-    const userDisabled = account.billingEnabled === false;
-
-    // Safety rails (especially for production):
-    // - If billing is disabled platform-wide, treat it as an intentional test/staging mode and allow self-service.
-    // - If only the user is in test mode while platform billing is enabled, require explicit tester flag in prod.
-    // - Admins are always allowed.
-    const raw = account.rawUser || {};
-    const isTester = !!(raw.tester || raw.isTester);
-    if (isProd && !account.isAdmin && !platformDisabled && userDisabled && !isTester) {
-      return res.status(403).json({ success: false, error: "test_mode_disabled" });
-    }
+    // Platform admins only, and only while billing is effectively disabled.
+    const refusal = testPlanChangeRefusal({
+      isPlatformAdmin: await isPlatformAdmin(uid),
+      effectiveBillingEnabled: account.effectiveBillingEnabled,
+    });
+    if (refusal) return res.status(refusal.status).json({ success: false, error: refusal.error });
 
     const planIdCandidate = newPlanId as PlanId;
     if (!isPlanId(planIdCandidate)) {

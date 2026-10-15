@@ -1355,7 +1355,11 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
         "Stripe checkout is disabled for your account because billing is turned OFF for this user. An admin must enable billing for your user, then retry."
       );
     } else {
-      setError("Billing is disabled in Test Mode. Use 'Switch Plan (Test Mode)' below instead.");
+      setError(
+        isAdmin
+          ? "Billing is disabled in Test Mode. Use 'Switch Plan (Test Mode)' below instead."
+          : "Plan changes are paused while billing is off. Please try again later."
+      );
     }
     setActionLoading(null);
     return;
@@ -1871,8 +1875,9 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 : "Test Mode — Billing Disabled For This Account"}
             </div>
             <div>
-              Stripe checkout and the billing portal are disabled; plan changes here simulate purchases and apply limits
-              immediately.
+              {isAdmin
+                ? "Stripe checkout and the billing portal are disabled; plan changes here simulate purchases and apply limits immediately (admins only)."
+                : "Stripe checkout and the billing portal are disabled, so plan changes are paused for now."}
             </div>
             {testModeSummary && (
               <div style={{ marginTop: 6, color: "#e5e7eb" }}>{testModeSummary}</div>
@@ -2929,6 +2934,9 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                         {isTestMode ? (
                           isCurrent ? (
                             <span style={S.currentLabel}>✅ Current Plan (Test Mode)</span>
+                          ) : !isAdmin ? (
+                            // Test-mode plan switching is platform-admin only (server enforces it).
+                            <span style={{ ...S.currentLabel, opacity: 0.7 }}>Plan changes are paused while billing is off</span>
                           ) : (
                             <button
                               onClick={() => openTestPlanModal(planId)}
