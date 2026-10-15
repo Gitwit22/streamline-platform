@@ -240,7 +240,7 @@ const V2_LIMIT_FIELDS: Array<{ key: string; label: string; unit?: string; scale?
 const V2_FEATURE_FIELDS: Array<{ key: string; label: string }> = [
   { key: "multistream", label: "Stream destinations (multistream)" },
   { key: "recording", label: "Recording" },
-  { key: "dualRecording", label: "Dual recording" },
+  { key: "dualRecording", label: "Dual recording (hidden from users; not implemented)" },
   { key: "hls", label: "HLS broadcast" },
   { key: "hlsCustomization", label: "HLS branded viewer page" },
   { key: "roomBranding", label: "On-video branding (logo/background on every output)" },
@@ -308,7 +308,7 @@ const FEATURE_META: Record<
   low_latency: { category: "Streaming", label: "Low Latency", description: "Prefer lower-latency LiveKit profiles." },
 
   recording: { category: "Recording", label: "Recording", description: "Allow session recording." },
-  dual_recording: { category: "Recording", label: "Dual Recording", description: "Cloud + local capture." },
+  dual_recording: { category: "Recording", label: "Dual Recording", description: "Not implemented: hidden from users, records a single cloud file." },
   cloud_recording: { category: "Recording", label: "Cloud Recording" },
   vod_downloads: { category: "Recording", label: "VOD Downloads", description: "Enable video downloads." },
 

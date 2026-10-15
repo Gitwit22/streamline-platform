@@ -2889,9 +2889,6 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                         {platformRecordingEnabled !== false && Boolean((plan as any).features?.recording) && (
                           <FeatureRow label="Recording" value={true} />
                         )}
-                        {Boolean((plan as any).features?.dualRecording) && (
-                          <FeatureRow label="Dual Recording" value={true} />
-                        )}
                         {platformTranscodeEnabled !== false && Boolean((plan as any).features?.multistream ?? (plan as any).multistreamEnabled) && (
                           <FeatureRow label="Multistream" value={true} />
                         )}
@@ -3231,99 +3228,15 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                     </select>
                   </label>
 
-                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-                    <label style={{ display: "grid", gap: 6, fontSize: 13, color: "#cbd5e1" }}>
-                      <span style={{ fontWeight: 600, color: "#e2e8f0" }}>Max tiles</span>
-                      <input
-                        type="number"
-                        min={1}
-                        max={64}
-                        disabled={!(mediaPrefs.defaultRoomLayout?.mode === "grid" || mediaPrefs.defaultRoomLayout?.mode === "carousel")}
-                        value={typeof mediaPrefs.defaultRoomLayout?.maxTiles === "number" ? String(mediaPrefs.defaultRoomLayout.maxTiles) : ""}
-                        onChange={(e) => {
-                          const raw = e.target.value;
-                          const next = raw === "" ? undefined : Number(raw);
-                          setMediaPrefs((prev) => ({
-                            ...prev,
-                            defaultRoomLayout: {
-                              ...(prev.defaultRoomLayout || ({ mode: "speaker" } as RoomLayout)),
-                              maxTiles: Number.isFinite(next as any) ? (next as number) : undefined,
-                            },
-                          }));
-                        }}
-                        placeholder="Auto"
-                        style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: "#0f172a", color: "#e2e8f0", opacity: (mediaPrefs.defaultRoomLayout?.mode === "grid" || mediaPrefs.defaultRoomLayout?.mode === "carousel") ? 1 : 0.55 }}
-                      />
-                    </label>
-
-                    <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 13, color: "#cbd5e1", paddingTop: 26 }}>
-                      <input
-                        type="checkbox"
-                        checked={mediaPrefs.defaultRoomLayout?.followSpeaker === true}
-                        onChange={(e) => {
-                          setMediaPrefs((prev) => ({
-                            ...prev,
-                            defaultRoomLayout: {
-                              ...(prev.defaultRoomLayout || ({ mode: "speaker" } as RoomLayout)),
-                              followSpeaker: e.target.checked,
-                            },
-                          }));
-                        }}
-                      />
-                      <span>Follow active speaker</span>
-                    </label>
-                  </div>
-
-                  <label style={{ display: "grid", gap: 6, fontSize: 13, color: "#cbd5e1" }}>
-                    <span style={{ fontWeight: 600, color: "#e2e8f0" }}>Pinned participant (optional)</span>
-                    <input
-                      type="text"
-                      value={mediaPrefs.defaultRoomLayout?.pinnedIdentity || ""}
-                      onChange={(e) => {
-                        const v = e.target.value;
-                        setMediaPrefs((prev) => ({
-                          ...prev,
-                          defaultRoomLayout: {
-                            ...(prev.defaultRoomLayout || ({ mode: "speaker" } as RoomLayout)),
-                            pinnedIdentity: v.trim() ? v : null,
-                          },
-                        }));
-                      }}
-                      placeholder="Participant identity (optional)"
-                      style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: "#0f172a", color: "#e2e8f0" }}
-                    />
-                    <div style={{ marginTop: 6, fontSize: 12, color: "#94a3b8" }}>
-                      Keeps a specific participant visible by default.
-                    </div>
-                  </label>
+                  {/* Max tiles / Follow active speaker / Pinned participant removed:
+                      saved but never applied to rooms or outputs (audit P2). The
+                      defaultRoomLayout fields stay in the schema and are kept on save. */}
                 </div>
               </div>
 
-              {/* SECTION C — Recording Behavior (storage & reliability) */}
-              <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, background: "rgba(255,255,255,0.02)" }}>
-                <div style={{ fontWeight: 700, marginBottom: 6 }}>Recording Storage</div>
-                <select
-                  value={mediaPrefs.defaultRecordingMode}
-                  onChange={(e) => setMediaPrefs((prev) => ({ ...prev, defaultRecordingMode: e.target.value as "cloud" | "dual" }))}
-                  style={{ width: "100%", padding: "10px 12px", borderRadius: 8, border: "1px solid rgba(255,255,255,0.12)", background: entitlements.dualRecording ? "#0f172a" : "rgba(15,23,42,0.6)", color: "#e2e8f0" }}
-                >
-                  <option value="cloud">Standard Recording (Cloud) — Recommended</option>
-                  <option value="dual" disabled={!entitlements.dualRecording}>Redundant Recording (Cloud + Backup)</option>
-                </select>
-                <div style={{ marginTop: 8, fontSize: 12, color: "#94a3b8", display: "grid", gap: 6 }}>
-                  <div>
-                    <strong style={{ color: "#e2e8f0" }}>Standard Recording (Cloud):</strong> Saves a single finalized recording to the cloud. Uses less storage and is suitable for most streams.
-                  </div>
-                  <div>
-                    <strong style={{ color: "#e2e8f0" }}>Redundant Recording (Cloud + Backup):</strong> Saves a cloud recording and an additional backup for recovery or editing. Uses more storage.
-                  </div>
-                </div>
-                {!entitlements.dualRecording && (
-                  <div style={{ marginTop: 6, fontSize: 12, color: "#fbbf24" }}>
-                    Dual recording not included on your plan.
-                  </div>
-                )}
-              </div>
+              {/* SECTION C (Recording Storage: Standard vs "Redundant") removed: the
+                  redundant mode produced one file like standard (audit P2).
+                  mediaPrefs.defaultRecordingMode is kept and saved unchanged. */}
 
               {/* SECTION D — Defaults Behavior (implicit) */}
               <div style={{ border: "1px solid rgba(255,255,255,0.08)", borderRadius: 10, padding: 12, background: "rgba(255,255,255,0.02)" }}>
@@ -3418,11 +3331,6 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
                 "Recording",
                 entitlements.recording ? "Enabled" : "Disabled",
                 entitlements.recording
-              )}
-              {renderEntitlementPill(
-                "Dual Recording",
-                entitlements.dualRecording ? "Cloud + Local" : "Cloud only",
-                entitlements.dualRecording
               )}
               {renderEntitlementPill(
                 "Multistream",

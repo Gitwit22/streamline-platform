@@ -3668,8 +3668,10 @@ function RoomPage() {
           setAuthStatus("authed");
           const me = await meRes.json();
           const prefs = me?.mediaPrefs || {};
+          // "dual" is hidden (it produced a single cloud file); a stored
+          // "dual" default records as cloud. The stored value is left as is.
           if (prefs.defaultRecordingMode === "cloud" || prefs.defaultRecordingMode === "dual") {
-            setDefaultRecordingModePref(prefs.defaultRecordingMode);
+            setDefaultRecordingModePref("cloud");
           }
           // Preset defaults come from the ROOM OWNER (preset-defaults effect),
           // not the caller's own mediaPrefs.
@@ -4955,7 +4957,7 @@ function RoomPage() {
 
   const guestCapLabel = typeof maxGuestsAllowed === "number" && maxGuestsAllowed > 0 ? `${maxGuestsAllowed}` : "—";
 
-  const entitlementSummary = `Rec:${planRecordingEnabled ? "on" : "off"} • Dual:${dualRecordingAllowed ? "on" : "off"} • RTMP:${rtmpCap === 0 ? "off" : rtmpCap === 1 ? "1" : `up to ${rtmpCap}`} • HLS:${planHlsEnabled ? "on" : "off"} • HLS Setup:${planHlsCustomizationEnabled ? "on" : "off"} • Guests:${guestCapLabel}`;
+  const entitlementSummary = `Rec:${planRecordingEnabled ? "on" : "off"} • RTMP:${rtmpCap === 0 ? "off" : rtmpCap === 1 ? "1" : `up to ${rtmpCap}`} • HLS:${planHlsEnabled ? "on" : "off"} • HLS Setup:${planHlsCustomizationEnabled ? "on" : "off"} • Guests:${guestCapLabel}`;
   const recordingEnabled =
     planRecordingEnabled &&
     platformRecordingEnabled &&

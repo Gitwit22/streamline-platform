@@ -659,7 +659,6 @@ export default function StreamSetupModalV2({
     recordingEnabled
       ? { label: "Recording", value: "On", ok: true }
       : null,
-    { label: "Dual", value: dualRecordingAllowed ? "On" : "Off", ok: dualRecordingAllowed },
     // RTMP badge reflects the numeric destination cap. 0 = off,
     // 1 = single destination, >1 = multistream up to N.
     {
@@ -1325,52 +1324,8 @@ export default function StreamSetupModalV2({
                 🎬 Recording Control
               </div>
 
-              {/* Mode Selector */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem', marginBottom: '0.75rem' }}>
-                <span style={{ fontSize: '0.875rem', fontWeight: 600 }}>Mode:</span>
-                <div style={{ display: 'flex', gap: '0.5rem' }}>
-                  <button
-                    onClick={() => setRecordingMode('cloud')}
-                    disabled={recordingIsActive}
-                    style={{
-                      padding: '0.4rem 0.75rem',
-                      borderRadius: '0.35rem',
-                      border: recordingMode === 'cloud' ? '1px solid #ef4444' : '1px solid rgba(255,255,255,0.15)',
-                      background: recordingMode === 'cloud' ? 'rgba(239, 68, 68, 0.12)' : '#18181b',
-                      color: '#ffffff',
-                      fontWeight: 600,
-                      fontSize: '0.8rem',
-                      cursor: recordingIsActive ? 'not-allowed' : 'pointer',
-                      opacity: recordingIsActive ? 0.5 : 1,
-                    }}
-                  >
-                    Cloud
-                  </button>
-                  <button
-                    onClick={() => dualRecordingAllowed && setRecordingMode('dual')}
-                    disabled={recordingIsActive || !dualRecordingAllowed}
-                    title={dualRecordingAllowed ? 'Record cloud + local copy' : 'Dual recording not included in this plan'}
-                    style={{
-                      padding: '0.4rem 0.75rem',
-                      borderRadius: '0.35rem',
-                      border: recordingMode === 'dual' ? '1px solid #ef4444' : '1px solid rgba(255,255,255,0.15)',
-                      background: recordingMode === 'dual' ? 'rgba(239, 68, 68, 0.12)' : '#18181b',
-                      color: '#ffffff',
-                      fontWeight: 600,
-                      fontSize: '0.8rem',
-                      cursor: (recordingIsActive || !dualRecordingAllowed) ? 'not-allowed' : 'pointer',
-                      opacity: !dualRecordingAllowed ? 0.4 : (recordingIsActive ? 0.6 : 1),
-                    }}
-                  >
-                    Dual
-                  </button>
-                </div>
-                {!dualRecordingAllowed && (
-                  <div style={{ fontSize: '0.75rem', color: '#fca5a5' }}>
-                    Dual recording is disabled for this plan.
-                  </div>
-                )}
-              </div>
+              {/* Mode selector removed: "Dual" produced the same single cloud file
+                  as "Cloud" (audit P2). recordingMode stays for API compatibility. */}
 
               {/* Status */}
               {recordingStatus === "error" && (
