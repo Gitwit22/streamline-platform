@@ -45,8 +45,14 @@ import {
 
 const router = Router();
 
-const CLIENT_URL =
-  (process.env.CLIENT_URL || "http://localhost:5173").replace(/\/+$/, "");
+// Where Stripe sends the viewer back after paying. Production must set
+// CLIENT_URL: falling back to localhost there sent paying viewers to a dead
+// page (audit P2). The localhost default is kept for local development only.
+function clientUrl(): string | null {
+  const v = String(process.env.CLIENT_URL || "").trim();
+  if (v) return v.replace(/\/+$/, "");
+  return process.env.NODE_ENV === "production" ? null : "http://localhost:5173";
+}
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -321,6 +327,12 @@ router.post("/checkout", async (req: Request, res: Response) => {
     // Return to the page the viewer bought from (channel or PPV page).
     const returnPath = safeReturnPath(req.body?.returnPath) || `/ppv/${encodeURIComponent(event.id)}`;
     const sep = returnPath.includes("?") ? "&" : "?";
+
+    const CLIENT_URL = clientUrl();
+    if (!CLIENT_URL) {
+      console.error("[monetization] checkout refused: CLIENT_URL is not set");
+      return res.status(500).json({ error: "server_misconfigured" });
+    }
 
     const session = await stripe.checkout.sessions.create({
       mode: "payment",

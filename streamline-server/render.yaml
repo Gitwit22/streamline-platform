@@ -29,6 +29,29 @@ projects:
         sync: false
       - key: R2_ACCOUNT_ACCESS_KEY_ID
         sync: false
+
+      # R2 names the code actually reads (lib/storageClient.ts). The
+      # R2_BUCKET_NAME / R2_*_ACCESS_KEY_ID keys above are not read by the code;
+      # they're kept so a blueprint sync never touches existing values.
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+
+      # Billing: frontend URL for Stripe/PPV redirects + plan price IDs
+      # (checkout returns 500 without the price IDs).
+      - key: CLIENT_URL
+        sync: false
+      - key: STRIPE_PRICE_STARTER
+        sync: false
+      - key: STRIPE_PRICE_BASIC
+        sync: false
+      - key: STRIPE_PRICE_PRO
+        sync: false
       - key: VITE_API_BASE
         sync: false
       - key: PORT

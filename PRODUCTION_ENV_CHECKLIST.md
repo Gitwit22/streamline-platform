@@ -138,6 +138,18 @@ NODE_ENV=production
 **How to verify:**
 - `CLIENT_URL` should match your actual frontend domain
 - Used for CORS and redirect URLs
+- Required in production: pay-per-view checkout refuses to start without it
+  (it used to send paying viewers back to `localhost`).
+
+### 7b. Stripe plan prices
+
+```bash
+STRIPE_PRICE_STARTER=price_...
+STRIPE_PRICE_BASIC=price_...
+STRIPE_PRICE_PRO=price_...
+```
+
+Without these, plan checkout returns 500.
 
 ---
 
