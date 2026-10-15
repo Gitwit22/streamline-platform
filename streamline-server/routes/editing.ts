@@ -53,6 +53,7 @@ import { inferMediaType, publicMediaAsset, uploadToMediaAsset } from "../lib/med
 import { probeMedia } from "../lib/mediaProbe";
 import { deleteSavedVideo } from "../lib/savedVideos";
 import { deleteExportOutput, saveExportToLibrary } from "../lib/exportLibrary";
+import { claimAndDeleteDoc } from "../lib/claimDelete";
 
 const router = Router();
 
@@ -422,12 +423,16 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
       return res.status(r.status).json({ ...r.body, message: "Asset deleted" });
     }
 
-    const uploadData = uploadSnap.data() as any;
-
-    // Verify ownership
-    if (uploadData?.userId !== userId) {
+    // Delete the doc once, atomically: only the request that deletes it
+    // releases the bytes (concurrent deletes used to release twice).
+    const claim = await claimAndDeleteDoc(db.collection("editing_assets").doc(id), (d) => d?.userId === userId);
+    if (claim.status === "forbidden") {
       return res.status(403).json({ error: PERMISSION_ERRORS.INSUFFICIENT_PERMISSIONS });
     }
+    if (claim.status === "not_found") {
+      return res.status(404).json({ error: "Asset not found" });
+    }
+    const uploadData = claim.data as any;
 
     // Capture file size before deletion
     const fileSize = typeof uploadData?.fileSize === "number" ? uploadData.fileSize : 0;
@@ -456,7 +461,6 @@ router.delete("/assets/:id", async (req: Request, res: Response) => {
       }
     }
 
-    await db.collection("editing_assets").doc(id).delete();
     return res.json({ ok: true, message: "Asset deleted" });
   } catch (err: any) {
     console.error("delete asset error:", err);

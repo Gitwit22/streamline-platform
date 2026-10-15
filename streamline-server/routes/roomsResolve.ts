@@ -57,7 +57,9 @@ router.get("/resolve", async (req, res) => {
       fallbackRoomName ||
       roomId;
 
-    const hls = (data as any).hls || {};
+    // Status only: the full hls object includes the playlist URL / prefix of
+    // protected (paywalled) runs, which any room-token holder could read.
+    const hlsStatus = typeof (data as any).hls?.status === "string" ? (data as any).hls.status : "idle";
 
     return res.json({
       roomId,
@@ -65,7 +67,7 @@ router.get("/resolve", async (req, res) => {
       tokenType,
       role: claims?.role || null,
       permissions: claims?.permissions || {},
-      hls,
+      hls: { status: hlsStatus },
     });
   } catch (err) {
     console.error("/api/rooms/resolve error", err);

@@ -9,6 +9,7 @@ import { deleteRecordingStorage } from "../recordingDeletion";
 import { releaseStorageUsage } from "../../usageHelper";
 import { releaseRecordingStorageOnce } from "../recordingUsage";
 import { defineJob } from "./framework";
+import { purgeUserOwnedData } from "./accountPurgeUserData";
 
 async function deleteCollection(ref: FirebaseFirestore.CollectionReference, limit: number = 200) {
   const snap = await ref.limit(limit).get();
@@ -159,8 +160,22 @@ export async function purgeDeletedAccounts(now: Date): Promise<{ purgedCount: nu
         }
       } catch {}
 
-      // Finally: delete the primary user doc.
-      await doc.ref.delete();
+      // Everything else the account owns (uploads, projects, rooms + chat,
+      // channels, kits, audio deck, collaborators, invites, Auth user).
+      const extra = await purgeUserOwnedData(uid);
+      if (!extra.complete) {
+        // Keep the user doc (deleteAfterMs) so the next run retries the rest.
+        console.warn("[maintenance/purge-deleted-accounts] incomplete; will retry", {
+          uid,
+          failures: extra.failures,
+          counts: extra.counts,
+        });
+        continue;
+      }
+
+      // Finally: the user doc with ALL its subcollections (incl.
+      // destinations, which hold encrypted third-party stream keys).
+      await firestore.recursiveDelete(doc.ref);
       purgedCount += 1;
     } catch (e: any) {
       console.warn("[maintenance/purge-deleted-accounts] failed for", uid, e?.message || e);
@@ -174,7 +189,7 @@ export const accountPurgeJob = defineJob({
   name: "account-purge",
   title: "Account Purge",
   description:
-    "Hard-deletes closed accounts past deleteAfterMs: recordings + saved videos (storage released), subcollections, account doc (50 per run).",
+    "Hard-deletes closed accounts past deleteAfterMs: recordings, saved videos, uploads, projects, rooms, channels, kits, collaborators, invites, the Auth user and the user doc with all subcollections (50 per run; retries until complete).",
   intervalMs: 60 * 60_000,
   highlight: "purged",
   async run(ctx) {

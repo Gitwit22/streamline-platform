@@ -7,6 +7,7 @@
 import { firestore as db } from "../firebaseAdmin";
 import { deleteFile } from "./storageClient";
 import { releaseStorageUsage } from "../usageHelper";
+import { claimAndDeleteDoc } from "./claimDelete";
 
 export async function deleteSavedVideo(
   uid: string,
@@ -14,10 +15,11 @@ export async function deleteSavedVideo(
   caller: string,
 ): Promise<{ status: number; body: Record<string, any> }> {
   const ref = db.collection("saved_videos").doc(id);
-  const snap = await ref.get();
-  if (!snap.exists) return { status: 404, body: { error: "Saved video not found" } };
-  const data = snap.data() as any;
-  if (data?.userId !== uid) return { status: 403, body: { error: "forbidden" } };
+  // Only the request that deletes the row releases its bytes.
+  const claim = await claimAndDeleteDoc(ref, (d) => d?.userId === uid);
+  if (claim.status === "not_found") return { status: 404, body: { error: "Saved video not found" } };
+  if (claim.status === "forbidden") return { status: 403, body: { error: "forbidden" } };
+  const data = claim.data;
 
   const sizeBytes = typeof data.sizeBytes === "number" ? data.sizeBytes : 0;
   const storagePath = typeof data.storagePath === "string" ? data.storagePath : null;
@@ -35,6 +37,5 @@ export async function deleteSavedVideo(
       }
     }
   }
-  await ref.delete();
   return { status: 200, body: { ok: true } };
 }

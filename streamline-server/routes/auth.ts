@@ -111,6 +111,16 @@ function cookieOptions() {
   };
 }
 
+/**
+ * Options for clearing the auth cookie. They must match how it was set
+ * (Secure + SameSite=None in hosted envs): a clear without them is ignored by
+ * browsers for the cross-site cookie, so logout left the session alive.
+ */
+export function clearCookieOptions() {
+  const { maxAge: _maxAge, ...rest } = cookieOptions();
+  return rest;
+}
+
 function mustGetEnv(name: string) {
   const v = process.env[name];
   if (!v) throw new Error(`Missing env var: ${name}`);
@@ -574,7 +584,7 @@ router.post("/signup", signupRateLimit, async (req, res) => {
  * Clears auth cookie.
  */
 router.post("/logout", (_req, res) => {
-  res.clearCookie("token", { path: "/" });
+  res.clearCookie("token", clearCookieOptions());
   return res.json({ ok: true });
 });
 
