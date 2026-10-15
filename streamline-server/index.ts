@@ -33,6 +33,7 @@ import telemetryRoutes from "./routes/telemetry";
 import { entitlementDenialTelemetry } from "./lib/telemetry";
 import savedEmbedsRoutes from "./routes/savedEmbeds";
 import brandKitsRoutes, { roomBrandKitRouter } from "./routes/brandKits";
+import roomsGraphicsRoutes from "./routes/roomsGraphics";
 import editingRoutes from "./routes/editing";
 import projectsRoutes from "./routes/projects";
 import myContentRoutes from "./routes/myContent";
@@ -350,6 +351,8 @@ app.use("/api/rooms", roomsRecordingsRoutes);
 app.use("/api/rooms", roomsHlsConfigRoutes);
 // Room brand kit assignment (owner only): PUT /api/rooms/:roomId/brand-kit
 app.use("/api/rooms", roomBrandKitRouter);
+// Live lower thirds + banners (host / cohost with canLayout)
+app.use("/api/rooms", roomsGraphicsRoutes);
 // Channel viewer access mode (public/registered/subscriber/pay_per_view/private)
 app.use("/api/rooms", roomsViewerAccessRoutes);
 // Room-level selection of which Saved Embed to use for HLS control

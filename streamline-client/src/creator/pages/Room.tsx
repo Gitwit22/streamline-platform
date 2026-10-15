@@ -64,6 +64,7 @@ import StreamSetupModalV2 from "../components/StreamSetupModal";
 import { ErrorBoundary } from "../../components/ErrorBoundary";
 import { RoleChangeToast } from "../components/RoleChangeToast";
 import ProgramStage, { ProgramStateProvider, useProgramState } from "../components/ProgramStage";
+import GraphicsPanel from "../components/GraphicsPanel";
 import AudioMixerModal from "../components/AudioMixerModal";
 import ViewerStatsChip from "../components/ViewerStatsChip";
 import MixerBridge from "../components/MixerBridge";
@@ -1269,6 +1270,8 @@ type LiveKitShellProps = {
   presenceMode: "normal" | "invisible";
   showLayoutPicker: boolean;
   onToggleLayoutPicker: () => void;
+  showGraphicsPanel: boolean;
+  onToggleGraphicsPanel: () => void;
   /** Subscribe-only participant (viewer / moved to audience). */
   isAudience?: boolean;
   /** Host controls currently forbid mic (canPublishAudio=false, forcedMute, mute lock). */
@@ -1315,6 +1318,8 @@ function LiveKitShell({
   presenceMode,
   showLayoutPicker,
   onToggleLayoutPicker,
+  showGraphicsPanel,
+  onToggleGraphicsPanel,
   isAudience = false,
   controlsAudioBlocked = false,
   controlsVideoBlocked = false,
@@ -1534,6 +1539,14 @@ function LiveKitShell({
         {(isHost || canLayout) && roomId && roomAccessToken && (
           <LayoutPickerPanel open={showLayoutPicker} onClose={onToggleLayoutPicker} />
         )}
+        {(isHost || canLayout) && roomId && roomAccessToken && (
+          <GraphicsPanel
+            open={showGraphicsPanel}
+            onClose={onToggleGraphicsPanel}
+            roomId={roomId}
+            roomAccessToken={roomAccessToken}
+          />
+        )}
         {canSeeJoinPage && (
           <div
             data-testid="join-page-pill"
@@ -1720,6 +1733,7 @@ function RoomPage() {
   const [showMixer, setShowMixer] = useState(false);
   const [showScreenShareRouter, setShowScreenShareRouter] = useState(false);
   const [showLayoutPicker, setShowLayoutPicker] = useState(false);
+  const [showGraphicsPanel, setShowGraphicsPanel] = useState(false);
   const [screenShareMode, setScreenShareModeRaw] = useState<ScreenShareRouteMode>("off");
   // Bumped on user changes only: the stage maps them onto programState.screenShareMode.
   const [screenShareRouteNonce, setScreenShareRouteNonce] = useState(0);
@@ -5242,7 +5256,10 @@ function RoomPage() {
 
             {canLayoutUi && (
               <button
-                onClick={() => setShowLayoutPicker(v => !v)}
+                onClick={() => {
+                  setShowGraphicsPanel(false);
+                  setShowLayoutPicker(v => !v);
+                }}
                 data-tour="layout-controls"
                 style={{
                   fontSize: '0.75rem',
@@ -5262,6 +5279,34 @@ function RoomPage() {
                 title="Broadcast layout — controls what viewers see on YouTube / Twitch / Facebook"
               >
                 🎬 Layout
+              </button>
+            )}
+
+            {canLayoutUi && (
+              <button
+                onClick={() => {
+                  setShowLayoutPicker(false);
+                  setShowGraphicsPanel(v => !v);
+                }}
+                data-testid="graphics-toggle"
+                style={{
+                  fontSize: '0.75rem',
+                  padding: '0.5rem 0.75rem',
+                  border: showGraphicsPanel
+                    ? '1px solid rgba(236, 72, 153, 0.7)'
+                    : '1px solid rgba(236, 72, 153, 0.35)',
+                  borderRadius: '0.375rem',
+                  background: showGraphicsPanel
+                    ? 'rgba(236, 72, 153, 0.18)'
+                    : 'rgba(236, 72, 153, 0.06)',
+                  color: '#f472b6',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease',
+                  fontWeight: '500'
+                }}
+                title="Lower thirds and banners — shown on every output"
+              >
+                🏷️ Graphics
               </button>
             )}
 
@@ -5367,6 +5412,8 @@ function RoomPage() {
           presenceMode={presenceMode}
           showLayoutPicker={showLayoutPicker}
           onToggleLayoutPicker={() => setShowLayoutPicker(v => !v)}
+          showGraphicsPanel={showGraphicsPanel}
+          onToggleGraphicsPanel={() => setShowGraphicsPanel(v => !v)}
           isAudience={isAudience}
           controlsAudioBlocked={controlsAudioBlocked}
           controlsVideoBlocked={controlsVideoBlocked}

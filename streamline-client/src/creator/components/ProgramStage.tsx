@@ -30,7 +30,7 @@ import {
   programOverlayFromRoomMetadata,
   type ProgramOverlay,
 } from "../../lib/programOverlay";
-import { OverlayBackground, OverlayLogo } from "./ProgramOverlayLayer";
+import { OverlayBackground, OverlayGraphics, OverlayLogo } from "./ProgramOverlayLayer";
 import {
   isEligibleParticipant,
   portraitFor,
@@ -468,6 +468,7 @@ export default function ProgramStage() {
           <OverlayBackground overlay={ctx?.overlay ?? null} />
           <StageCanvas resolution={resolution} />
           {resolution.slots.length === 0 && <div className="sl-stage-empty">Waiting for participants…</div>}
+          <OverlayGraphics overlay={ctx?.overlay ?? null} shortSidePx={Math.min(box.width, box.height)} />
           <OverlayLogo overlay={ctx?.overlay ?? null} shortSidePx={Math.min(box.width, box.height)} />
         </div>
         {toggle}

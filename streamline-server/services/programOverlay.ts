@@ -14,6 +14,7 @@ import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { checkFeature } from "../lib/entitlements";
 import { kitBrandingForRoom, roomBrandKitId } from "../lib/brandKitsPure";
 import { buildProgramOverlay, mergeOverlayIntoMetadata, type ProgramOverlay } from "../lib/programOverlayPure";
+import { hasActiveGraphics } from "../lib/roomGraphicsPure";
 import { getBrandKit } from "./brandKits";
 
 /** LiveKit room name for a room doc (same rule as token issuance). */
@@ -21,15 +22,26 @@ export function livekitRoomNameFor(roomId: string, room: any): string {
   return String(room?.livekitRoomName || roomId).trim();
 }
 
-/** The overlay the room's kit draws, or null (no kit, other owner's kit, plan without roomBranding). */
+/** True when the room could draw something (a kit, or a visible lower third/banner). */
+function roomMayDrawOverlay(room: any): boolean {
+  return !!roomBrandKitId(room) || hasActiveGraphics(room?.graphics);
+}
+
+/**
+ * What the room's outputs draw: its kit (logo, background, accent) and its
+ * visible lower third/banner. Null when there's nothing to draw or the
+ * owner's plan lacks roomBranding. Another owner's kit is ignored.
+ */
 export async function getRoomProgramOverlay(room: any): Promise<ProgramOverlay | null> {
+  if (!room || !roomMayDrawOverlay(room)) return null;
   const kitId = roomBrandKitId(room);
-  if (!kitId) return null;
-  const kit = await getBrandKit(kitId);
-  if (!kit || !kitBrandingForRoom(kit, room)) return null;
-  const ent = await getEffectiveEntitlements(String(room.ownerId));
+  const rawKit = kitId ? await getBrandKit(kitId) : null;
+  const kit = rawKit && kitBrandingForRoom(rawKit, room) ? rawKit : null;
+  const overlay = buildProgramOverlay(kit, room.graphics);
+  if (!overlay) return null;
+  const ent = await getEffectiveEntitlements(String(room.ownerId || ""));
   if (!checkFeature(ent, "roomBranding").allowed) return null;
-  return buildProgramOverlay(kit);
+  return overlay;
 }
 
 async function roomService(): Promise<any | null> {
@@ -59,9 +71,9 @@ async function writeOverlay(svc: any, lkRoom: any, overlay: ProgramOverlay | nul
  * Pushes the room's current overlay into its LiveKit room (no-op when the
  * LiveKit room isn't running). Never throws.
  *
- * Rooms without a kit skip all LiveKit calls (nothing to draw), unless
- * `clearWhenNoKit` is set: the owner just removed the kit, so a running
- * room's overlay must be cleared.
+ * Rooms with nothing to draw (no kit, no visible graphics) skip all
+ * LiveKit calls, unless `clearWhenNoKit` is set: the kit or graphics were
+ * just removed, so a running room's overlay must be cleared.
  */
 export async function syncRoomProgramOverlay(
   roomId: string,
@@ -71,7 +83,7 @@ export async function syncRoomProgramOverlay(
   try {
     const room = roomData ?? (await db.collection("rooms").doc(roomId).get()).data();
     if (!room) return;
-    if (!roomBrandKitId(room) && !opts.clearWhenNoKit) return;
+    if (!roomMayDrawOverlay(room) && !opts.clearWhenNoKit) return;
     const svc = await roomService();
     if (!svc) return;
     const name = livekitRoomNameFor(roomId, room);

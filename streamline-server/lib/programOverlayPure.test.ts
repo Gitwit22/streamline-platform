@@ -44,11 +44,15 @@ test("buildProgramOverlay draws only what the kit turns on", () => {
     v: 1,
     logo: { url: "https://x.example/l.png", position: "top-left", size: 12, opacity: 0.9 },
     background: null,
+    lowerThird: null,
+    banner: null,
   });
   assert.deepEqual(buildProgramOverlay({ logoUrl: "", video: { backgroundColor: "#000000" } }), {
     v: 1,
     logo: null,
     background: { color: "#000000", imageUrl: "" },
+    lowerThird: null,
+    banner: null,
   });
 });
 

@@ -79,10 +79,41 @@
     pointer-events: none;
   }
   #wm.on { display: block; }
+  /* Live graphics: banner strip along the bottom, lower third above it. */
+  #banner {
+    position: absolute; left: 0; right: 0; bottom: 0; z-index: 9000; display: none;
+    height: calc(var(--label-size) * 2.4); overflow: hidden;
+    background: rgba(0, 0, 0, 0.78); border-top: calc(var(--label-size) * 0.18) solid var(--accent, #dc2626);
+    color: #fff; font-weight: 600; font-size: calc(var(--label-size) * 1.05);
+    align-items: center; white-space: nowrap;
+  }
+  #banner.on { display: flex; }
+  #banner .txt { padding: 0 calc(var(--label-size) * 0.9); overflow: hidden; text-overflow: ellipsis; }
+  #banner.scroll .txt {
+    overflow: visible; text-overflow: clip; padding-left: 100%;
+    animation: sl-marquee var(--marquee-sec, 15s) linear infinite;
+  }
+  @keyframes sl-marquee { from { transform: translateX(0); } to { transform: translateX(-100%); } }
+  #lower-third {
+    position: absolute; left: calc(var(--label-size) * 1.2); z-index: 9500; display: none;
+    max-width: 60%; padding: calc(var(--label-size) * 0.45) calc(var(--label-size) * 0.9);
+    background: rgba(0, 0, 0, 0.78); border-left: calc(var(--label-size) * 0.35) solid var(--accent, #dc2626);
+    border-radius: calc(var(--label-size) * 0.2); color: #fff;
+  }
+  #lower-third.on { display: block; }
+  #lower-third .name {
+    font-weight: 800; font-size: calc(var(--label-size) * 1.45); line-height: 1.2;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #lower-third .title {
+    font-weight: 500; font-size: calc(var(--label-size) * 1.0); color: #e5e5e5; line-height: 1.25;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  #lower-third .title:empty { display: none; }
 </style>
 </head>
 <body>
-  <div id="stage"><img id="bg-image" alt="" /><div id="placeholder">STREAMLINE</div><img id="wm" alt="" /></div>
+  <div id="stage"><img id="bg-image" alt="" /><div id="placeholder">STREAMLINE</div><img id="wm" alt="" /><div id="lower-third"><div class="name"></div><div class="title"></div></div><div id="banner"><span class="txt"></span></div></div>
   <div id="audio-bin"></div>
 
   <script type="module">
@@ -110,6 +141,8 @@
     const audioBin = document.getElementById("audio-bin");
     const bgImage = document.getElementById("bg-image");
     const wm = document.getElementById("wm");
+    const lowerThirdEl = document.getElementById("lower-third");
+    const bannerEl = document.getElementById("banner");
 
     function orientation() {
       if (aspectParam === "portrait" || aspectParam === "landscape") return aspectParam;
@@ -195,8 +228,50 @@
         return o && o.v === 1 ? o : null;
       } catch { return null; }
     }
+    function setText(el, text) {
+      const v = typeof text === "string" ? text : "";
+      if (el.textContent !== v) el.textContent = v;
+    }
+    function accentOf(item) {
+      return item && HEX.test(item.accent || "") ? item.accent : "#dc2626";
+    }
+    // Lower third + banner. Returns the banner height (px) so bottom-anchored
+    // elements sit above it. A bottom-left logo pushes the lower third right.
+    function renderGraphics(o) {
+      const banner = o && o.banner && typeof o.banner.text === "string" && o.banner.text ? o.banner : null;
+      const lt = o && o.lowerThird && typeof o.lowerThird.name === "string" && o.lowerThird.name ? o.lowerThird : null;
+      const label = parseFloat(getComputedStyle(stage).getPropertyValue("--label-size")) || 16;
+      let bannerPx = 0;
+      if (banner) {
+        setText(bannerEl.firstElementChild, banner.text.slice(0, 200));
+        bannerEl.style.setProperty("--accent", accentOf(banner));
+        bannerEl.classList.toggle("scroll", banner.scroll === true);
+        // Same reading speed whatever the length: ~6 characters per second, 8s minimum.
+        bannerEl.style.setProperty("--marquee-sec", Math.max(8, Math.round(banner.text.length / 6) + 8) + "s");
+        bannerEl.classList.add("on");
+        bannerPx = label * 2.4;
+      } else {
+        bannerEl.classList.remove("on", "scroll");
+      }
+      if (lt) {
+        setText(lowerThirdEl.querySelector(".name"), lt.name.slice(0, 60));
+        setText(lowerThirdEl.querySelector(".title"), typeof lt.title === "string" ? lt.title.slice(0, 80) : "");
+        lowerThirdEl.style.setProperty("--accent", accentOf(lt));
+        lowerThirdEl.style.bottom = Math.round(bannerPx + label * 1.2) + "px";
+        const logo = o && o.logo && safeUrl(o.logo.url) && o.logo.position === "bottom-left" ? o.logo : null;
+        lowerThirdEl.style.left = logo
+          ? `calc(${clamp(logo.size, 4, 30, 12)}% + ${Math.round(label * 2.4)}px)`
+          : "";
+        lowerThirdEl.classList.add("on");
+      } else {
+        lowerThirdEl.classList.remove("on");
+      }
+      return bannerPx;
+    }
+
     function renderOverlay() {
       const o = programOverlay();
+      const bannerPx = renderGraphics(o);
       const bg = o && o.background;
       stage.style.background = bg && HEX.test(bg.color || "") ? bg.color : "";
       const bgUrl = bg ? safeUrl(bg.imageUrl) : "";
@@ -221,7 +296,7 @@
       wm.style.width = clamp(logo.size, 4, 30, 12) + "%";
       wm.style.opacity = String(clamp(logo.opacity, 0.1, 1, 0.9));
       wm.style.top = pos.startsWith("top") ? margin : "";
-      wm.style.bottom = pos.startsWith("bottom") ? margin : "";
+      wm.style.bottom = pos.startsWith("bottom") ? `calc(${margin} + ${Math.round(bannerPx)}px)` : "";
       wm.style.left = pos.endsWith("left") ? margin : "";
       wm.style.right = pos.endsWith("right") ? margin : "";
       wm.classList.add("on");

@@ -10,6 +10,7 @@
  * render it. Plan gate: entitlements.features.roomBranding.
  */
 import { isValidLogoUrl } from "./hlsBrandingPure";
+import { activeGraphics, normalizeRoomGraphics } from "./roomGraphicsPure";
 
 export const LOGO_POSITIONS = ["top-left", "top-right", "bottom-left", "bottom-right"] as const;
 export type LogoPosition = (typeof LOGO_POSITIONS)[number];
@@ -27,7 +28,11 @@ export type KitVideoSettings = {
   backgroundColor: string;
   /** http(s) image URL or "". */
   backgroundImageUrl: string;
+  /** "#rrggbb": lower third / banner accent. */
+  accentColor: string;
 };
+
+export const DEFAULT_ACCENT_COLOR = "#dc2626";
 
 export const DEFAULT_KIT_VIDEO: KitVideoSettings = {
   showLogo: false,
@@ -36,6 +41,7 @@ export const DEFAULT_KIT_VIDEO: KitVideoSettings = {
   logoOpacity: LOGO_OPACITY_RANGE.default,
   backgroundColor: "",
   backgroundImageUrl: "",
+  accentColor: DEFAULT_ACCENT_COLOR,
 };
 
 /** Overlay payload in LiveKit room metadata (`programOverlay`). */
@@ -43,6 +49,9 @@ export type ProgramOverlay = {
   v: 1;
   logo: { url: string; position: LogoPosition; size: number; opacity: number } | null;
   background: { color: string; imageUrl: string } | null;
+  /** Live room graphics (lib/roomGraphicsPure.ts); accent from the kit. */
+  lowerThird: { name: string; title: string; accent: string } | null;
+  banner: { text: string; scroll: boolean; accent: string } | null;
 };
 
 const HEX_COLOR = /^#[0-9a-f]{6}$/i;
@@ -97,6 +106,12 @@ export function parseKitVideoInput(input: unknown): KitVideoParse {
     if (!isValidLogoUrl(u)) return fail("backgroundImageUrl", "backgroundImageUrl must be an http(s) URL");
     out.backgroundImageUrl = u;
   }
+  if (v.accentColor !== undefined) {
+    if (typeof v.accentColor !== "string" || !HEX_COLOR.test(v.accentColor.trim())) {
+      return fail("accentColor", "accentColor must be #rrggbb");
+    }
+    out.accentColor = v.accentColor.trim().toLowerCase();
+  }
   return { ok: true, value: out };
 }
 
@@ -116,23 +131,31 @@ export function kitVideoEquals(a: KitVideoSettings, b: KitVideoSettings): boolea
 }
 
 /**
- * What the compositor draws for a kit, or null when the kit draws nothing.
+ * What the compositor draws: the kit's logo watermark and background, plus
+ * the room's visible lower third and banner (styled with the kit's accent,
+ * or the default accent without a kit). Null when nothing is drawn.
  * The watermark uses the kit's logo (the same image as the viewer page).
  */
-export function buildProgramOverlay(kit: { logoUrl?: unknown; video?: unknown } | null): ProgramOverlay | null {
-  if (!kit) return null;
-  const video = normalizeKitVideo(kit.video);
-  const logoUrl = typeof kit.logoUrl === "string" ? kit.logoUrl.trim() : "";
+export function buildProgramOverlay(
+  kit: { logoUrl?: unknown; video?: unknown } | null,
+  roomGraphics?: unknown
+): ProgramOverlay | null {
+  const video = normalizeKitVideo(kit ? kit.video : undefined);
+  const logoUrl = kit && typeof kit.logoUrl === "string" ? kit.logoUrl.trim() : "";
   const logo =
-    video.showLogo && logoUrl && isValidLogoUrl(logoUrl)
+    kit && video.showLogo && logoUrl && isValidLogoUrl(logoUrl)
       ? { url: logoUrl, position: video.logoPosition, size: video.logoSize, opacity: video.logoOpacity }
       : null;
   const background =
-    video.backgroundColor || video.backgroundImageUrl
+    kit && (video.backgroundColor || video.backgroundImageUrl)
       ? { color: video.backgroundColor, imageUrl: video.backgroundImageUrl }
       : null;
-  if (!logo && !background) return null;
-  return { v: 1, logo, background };
+  const shown = activeGraphics(normalizeRoomGraphics(roomGraphics));
+  const accent = video.accentColor;
+  const lowerThird = shown.lowerThird ? { name: shown.lowerThird.name, title: shown.lowerThird.title, accent } : null;
+  const banner = shown.banner ? { text: shown.banner.text, scroll: shown.banner.scroll, accent } : null;
+  if (!logo && !background && !lowerThird && !banner) return null;
+  return { v: 1, logo, background, lowerThird, banner };
 }
 
 /**

@@ -10,6 +10,7 @@ import { API_BASE } from "./apiBase";
 import { apiFetchAuth } from "./api";
 import { brandingFromConfig, type HlsBranding } from "./hlsBranding";
 import {
+  DEFAULT_ACCENT_COLOR,
   DEFAULT_KIT_VIDEO,
   LOGO_OPACITY_RANGE,
   LOGO_POSITIONS,
@@ -66,6 +67,8 @@ function toVideo(raw: unknown): KitVideoSettings {
     logoOpacity: num(v.logoOpacity, LOGO_OPACITY_RANGE),
     backgroundColor: typeof v.backgroundColor === "string" ? v.backgroundColor : "",
     backgroundImageUrl: typeof v.backgroundImageUrl === "string" ? v.backgroundImageUrl : "",
+    accentColor:
+      typeof v.accentColor === "string" && /^#[0-9a-f]{6}$/i.test(v.accentColor) ? v.accentColor : DEFAULT_ACCENT_COLOR,
   };
 }
 

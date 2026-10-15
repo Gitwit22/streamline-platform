@@ -5,11 +5,12 @@ import {
   LOGO_SIZE_RANGE,
   overlayFromKit,
   validateKitVideo,
+  DEFAULT_ACCENT_COLOR,
   type KitVideoSettings,
   type LogoPosition,
 } from "../../lib/programOverlay";
 import { validateLogoUrl } from "../../lib/hlsBranding";
-import { OverlayBackground, OverlayLogo } from "./ProgramOverlayLayer";
+import { OverlayBackground, OverlayGraphics, OverlayLogo } from "./ProgramOverlayLayer";
 
 const POSITION_LABEL: Record<LogoPosition, string> = {
   "top-left": "Top left",
@@ -138,6 +139,21 @@ export function KitVideoFields({
         </label>
       </div>
 
+      <div style={fieldLabel}>
+        <span style={labelText}>Accent color (lower thirds and banners)</span>
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <input
+            type="color"
+            aria-label="Accent color"
+            value={HEX.test(video.accentColor) ? video.accentColor : DEFAULT_ACCENT_COLOR}
+            disabled={disabled}
+            onChange={(e) => set("accentColor", e.target.value.toLowerCase())}
+            style={{ width: 44, height: 34, padding: 0, border: "none", background: "transparent" }}
+          />
+          <span style={{ fontSize: 12, color: "#9ca3af" }}>{video.accentColor}</span>
+        </div>
+      </div>
+
       <div>
         <div style={{ ...labelText, marginBottom: 6 }}>Video preview</div>
         <ProgramOverlayPreview logoUrl={logoUrl} video={video} />
@@ -148,7 +164,7 @@ export function KitVideoFields({
 
 /** 16:9 mock of the program output: background, one centered tile, the logo. */
 export function ProgramOverlayPreview({ logoUrl, video }: { logoUrl: string; video: KitVideoSettings }) {
-  const overlay = overlayFromKit(logoUrl, video);
+  const overlay = overlayFromKit(logoUrl, video, true);
   // Logo margin approximates the compositor's 3% of the short side at the preview's max size.
   return (
     <div
@@ -183,6 +199,7 @@ export function ProgramOverlayPreview({ logoUrl, video }: { logoUrl: string; vid
       >
         Camera
       </div>
+      <OverlayGraphics overlay={overlay} shortSidePx={236} />
       <OverlayLogo overlay={overlay} shortSidePx={236} />
     </div>
   );

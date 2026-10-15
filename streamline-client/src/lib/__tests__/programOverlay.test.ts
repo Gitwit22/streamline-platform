@@ -15,7 +15,10 @@ describe("programOverlay", () => {
     const r = programOverlayFromRoomMetadata(
       JSON.stringify({ programOverlay: { v: 1, logo: null, background: { color: "#112233", imageUrl: "" } } })
     );
-    expect(r).toEqual({ known: true, overlay: { v: 1, logo: null, background: { color: "#112233", imageUrl: "" } } });
+    expect(r).toEqual({
+      known: true,
+      overlay: { v: 1, logo: null, background: { color: "#112233", imageUrl: "" }, lowerThird: null, banner: null },
+    });
   });
 
   it("drops unsafe values", () => {
@@ -34,5 +37,15 @@ describe("programOverlay", () => {
     expect(overlayFromKit("https://x.example/l.png", DEFAULT_KIT_VIDEO)).toBeNull();
     expect(overlayFromKit("https://x.example/l.png", { ...DEFAULT_KIT_VIDEO, showLogo: true })?.logo?.position).toBe("top-right");
     expect(overlayFromKit("", { ...DEFAULT_KIT_VIDEO, showLogo: true })).toBeNull();
+  });
+
+  it("keeps lower third and banner text as plain, length-capped strings with a safe accent", () => {
+    const o = normalizeProgramOverlay({
+      v: 1,
+      lowerThird: { name: "x".repeat(100), title: 5, accent: "red" },
+      banner: { text: "Hello", scroll: "yes", accent: "#00aa55" },
+    });
+    expect(o?.lowerThird).toEqual({ name: "x".repeat(60), title: "", accent: "#dc2626" });
+    expect(o?.banner).toEqual({ text: "Hello", scroll: false, accent: "#00aa55" });
   });
 });
