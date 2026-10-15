@@ -210,7 +210,7 @@ router.patch("/:id", requireAuth, async (req: any, res) => {
   }
 });
 
-// ── DELETE /:id — archive project (owner cleanup, never plan-gated) ─────────
+// ── DELETE /:id — delete project + its uploads (owner cleanup, never plan-gated) ─
 router.delete("/:id", requireAuth, async (req: any, res) => {
   try {
     const uid = getAuthUserId(req);
@@ -221,7 +221,14 @@ router.delete("/:id", requireAuth, async (req: any, res) => {
       return res.status(404).json({ error: "Project not found" });
     }
 
-    await deleteProject(project.id);
+    const result = await deleteProject(project.id);
+    if (!result.complete) {
+      // Nothing is lost: the project and its remaining files are kept.
+      return res.status(500).json({
+        error: "project_delete_incomplete",
+        message: "Some files in this project couldn't be deleted. Please try again.",
+      });
+    }
     return res.json({ ok: true });
   } catch (err: any) {
     console.error("[projects] delete error:", err?.message || err);

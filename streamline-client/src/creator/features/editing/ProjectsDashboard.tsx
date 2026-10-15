@@ -64,7 +64,11 @@ export default function ProjectsDashboard() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!window.confirm("Delete this project and all its recordings?")) return;
+    if (
+      !window.confirm(
+        "Delete this project and the files uploaded to it? This can't be undone. Recordings stay in your library."
+      )
+    ) return;
     try {
       await deleteProject(id);
       setProjects((prev) => prev.filter((p) => p.id !== id));
@@ -75,6 +79,8 @@ export default function ProjectsDashboard() {
       });
     } catch (err) {
       console.error("Failed to delete project:", err);
+      const serverMessage = (err as { body?: { message?: unknown } } | null)?.body?.message;
+      alert(typeof serverMessage === "string" && serverMessage ? serverMessage : "Couldn't delete this project. Please try again.");
     }
   };
 

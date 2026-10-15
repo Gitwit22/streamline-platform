@@ -167,12 +167,35 @@ export async function updateProject(
   });
 }
 
-export async function deleteProject(projectId: string): Promise<void> {
-  // Soft-delete: archive, don't destroy
-  await projectsColl().doc(projectId).update({
-    status: "archived",
-    updatedAt: FieldValue.serverTimestamp(),
-  });
+const PROJECT_DELETE_ASSET_LIMIT = 500;
+
+/**
+ * Deletes a project for real (audit P2: it used to only archive, so its
+ * uploads kept their storage quota and became unreachable).
+ *
+ * Each asset goes through deleteProjectAsset (R2 object first, quota
+ * released exactly once). Recording-backed assets are references: the
+ * recording itself stays in the library. The project doc is removed only
+ * when every asset is gone; otherwise it stays as it was and `complete` is
+ * false, so the user can simply retry.
+ */
+export async function deleteProject(projectId: string): Promise<{ complete: boolean; failedAssets: number }> {
+  const ref = projectsColl().doc(projectId);
+  const snap = await assetsColl().where("projectId", "==", projectId).limit(PROJECT_DELETE_ASSET_LIMIT).get();
+  let failedAssets = 0;
+  for (const d of snap.docs) {
+    try {
+      await deleteProjectAsset(d.id, projectId);
+    } catch (err: any) {
+      failedAssets += 1;
+      console.warn("[projectManager.deleteProject] asset delete failed", { projectId, assetId: d.id, error: err?.message || err });
+    }
+  }
+  if (failedAssets > 0 || snap.size >= PROJECT_DELETE_ASSET_LIMIT) {
+    return { complete: false, failedAssets };
+  }
+  await firestore.recursiveDelete(ref);
+  return { complete: true, failedAssets: 0 };
 }
 
 // ── ProjectAsset CRUD ────────────────────────────────────────────────────────
