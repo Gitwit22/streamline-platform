@@ -29,6 +29,7 @@ import { getUserAccount } from "../lib/userAccount";
 import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { buildNewUserDoc } from "../lib/newUserDefaults";
+import { emailClaimBlocks, emailClaimId } from "../lib/emailClaimPure";
 
 console.log("✅ auth router loaded");
 
@@ -564,7 +565,24 @@ router.post("/signup", signupRateLimit, async (req, res) => {
       tosUserAgent: req.get("user-agent") || undefined,
     });
 
-    await userRef.set(userData);
+    // Claim the email and create the user atomically, so a concurrent signup
+    // with the same email can't also pass the lookup above.
+    const claimRef = db.collection("emailClaims").doc(emailClaimId(emailNorm));
+    const claimed = await db.runTransaction(async (tx) => {
+      const claimSnap = await tx.get(claimRef);
+      const claim = claimSnap.exists ? ((claimSnap.data() || {}) as any) : null;
+      if (claim && typeof claim.uid === "string" && claim.uid) {
+        const claimedUserSnap = await tx.get(db.collection("users").doc(claim.uid));
+        const claimedUser = claimedUserSnap.exists ? ((claimedUserSnap.data() || {}) as any) : null;
+        if (emailClaimBlocks(claim, claimedUser)) return false;
+      }
+      tx.set(claimRef, { uid, createdAtMs: now });
+      tx.set(userRef, userData);
+      return true;
+    });
+    if (!claimed) {
+      return res.status(409).json({ error: "Email already in use" });
+    }
 
     const token = signLegacySessionToken(uid);
 
