@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { isRoomOwnerDeleted } from "../lib/roomOwnerStatus";
 import admin from "firebase-admin";
 import crypto from "crypto";
 import jwt from "jsonwebtoken";
@@ -627,6 +628,15 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
     const allowGuestsPolicy = typeof room.allowGuests === "boolean" ? !!room.allowGuests : null;
     const ownerId = typeof room.ownerId === "string" && room.ownerId.trim() ? room.ownerId.trim() : null;
 
+    // A deleted owner's rooms stop admitting people (it reads as removed).
+    if (await isRoomOwnerDeleted(ownerId)) {
+      logPayload.event = "join_now_fail";
+      logPayload.reason = "owner_deleted";
+      logPayload.latencyMs = Date.now() - startTime;
+      console.log("[join-now]", logPayload);
+      return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
+    }
+
     // Optional per-room guest policy. Applies to anonymous guests only:
     // logged-in invitees join with their account.
     if (allowGuestsPolicy === false && !authedUser) {
@@ -934,6 +944,8 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
 
     const room = (snap.data() as any) || {};
     const ownerId = typeof room.ownerId === "string" ? room.ownerId.trim() : "";
+    // A deleted owner's rooms stop admitting people (it reads as removed).
+    if (await isRoomOwnerDeleted(ownerId)) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
     const livekitRoomName = String(room.livekitRoomName || roomId).trim();
     const roomStatus = room.status === "live" ? "live" : "idle";
     const actingContext = user ? await resolveOwnerActingContext(req) : null;
@@ -1551,6 +1563,7 @@ router.post("/rooms/:roomId/join-guest", async (req: any, res) => {
     const roomName = String(room.roomName || room.name || livekitRoomName || roomId);
     const roomStatus = room.status === "live" ? "live" : "idle";
     const ownerId = typeof room.ownerId === "string" && room.ownerId.trim() ? room.ownerId.trim() : null;
+    if (await isRoomOwnerDeleted(ownerId)) return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
 
     // Policy: room access. invite_only rooms refuse direct (no-invite) joins;
     // link/public rooms admit the visitor as a subscribe-only audience
