@@ -36,7 +36,9 @@ test("parseBrandKitInput: reuses the viewer branding limits and logo URL rule", 
 
 test("parseBrandKitInput: update only returns provided fields", () => {
   const r = parseBrandKitInput({ theme: "light" }, { partial: true });
-  assert.deepEqual(r, { ok: true, value: { theme: "light" } });
+  assert.deepEqual(r, { ok: true, value: { theme: "light" }, video: {} });
+  assert.deepEqual(parseBrandKitInput({ video: { showLogo: true } }, { partial: true }).video, { showLogo: true });
+  assert.equal(parseBrandKitInput({ video: { logoSize: 99 } }, { partial: true }).field, "video.logoSize");
   assert.equal(parseBrandKitInput({ name: "" }, { partial: true }).field, "name");
 });
 

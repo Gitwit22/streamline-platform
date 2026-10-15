@@ -45,6 +45,7 @@ import { countRecordingMinutes, recordingBillingUid, releaseRecordingStorageOnce
 import { requireAdmin } from "../middleware/adminAuth";
 import { DOWNLOAD_LINK_TTL_SECONDS, evaluateDownloadRules, shouldClaimStorageCount } from "../lib/mediaPure";
 import { compositorUrl, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
+import { syncRoomProgramOverlay } from "../services/programOverlay";
 import { copyViewerStatsToRecording } from "../lib/viewerStats";
 import { getPlatformFlags } from "../lib/entitlements";
 
@@ -1033,6 +1034,9 @@ router.post(
           customBaseUrl: customBaseUrl || undefined,
         });
       }
+
+      // On-video branding: room metadata may not carry the overlay yet.
+      await syncRoomProgramOverlay(roomId);
 
       const egressResp = await egressClient.startRoomCompositeEgress(livekitRoomName, fileOutput, {
         ...compositeOpts,

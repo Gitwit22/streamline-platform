@@ -30,6 +30,9 @@ export const FEATURE_KEYS = [
   "advancedScreenShare",
   "overages",
   "watermark",
+  // On-video branding drawn by the program compositor (logo, background).
+  // Missing on a stored plan = same as hlsCustomization (see normalizePlanV2).
+  "roomBranding",
 ] as const;
 
 export type FeatureKey = (typeof FEATURE_KEYS)[number];

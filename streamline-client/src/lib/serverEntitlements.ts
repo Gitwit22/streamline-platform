@@ -67,8 +67,9 @@ export type ServerEntitlements = {
   planId: string;
   planName: string;
   // Newer feature keys are optional: servers older than this client don't send them.
-  features: Record<ServerFeatureKey, boolean> & { audioMixer?: boolean; advancedScreenShare?: boolean };
-  planFeatures: Record<ServerFeatureKey, boolean> & { audioMixer?: boolean; advancedScreenShare?: boolean };
+  // roomBranding (on-video branding) is optional: servers before it was added don't send it.
+  features: Record<ServerFeatureKey, boolean> & { audioMixer?: boolean; advancedScreenShare?: boolean; roomBranding?: boolean };
+  planFeatures: Record<ServerFeatureKey, boolean> & { audioMixer?: boolean; advancedScreenShare?: boolean; roomBranding?: boolean };
   limits: Record<ServerLimitKey, Limit> & { maxPresetId: string };
   source: {
     basePlan: string;

@@ -18,7 +18,9 @@
                       while the host is reconnecting.
 
   Layout comes from room metadata `programState` (v2, see
-  streamline-server/lib/programPresets.ts).  Resolution logic is imported from
+  streamline-server/lib/programPresets.ts).  On-video branding (corner logo,
+  background color/image) comes from room metadata `programOverlay` (see
+  streamline-server/lib/programOverlayPure.ts).  Resolution logic is imported from
   ./program-layout.mjs, which is generated from that same TypeScript file so
   the egress output and the in-room stage resolve identically.
 -->
@@ -66,10 +68,21 @@
   }
   #placeholder.hidden { display: none; }
   #audio-bin { position: absolute; width: 0; height: 0; overflow: hidden; }
+  /* Branding: background sits under the slots (z 0), the logo above them. */
+  #bg-image {
+    position: absolute; inset: 0; width: 100%; height: 100%;
+    object-fit: cover; z-index: 0; display: none;
+  }
+  #bg-image.on { display: block; }
+  #wm {
+    position: absolute; z-index: 10000; display: none; height: auto;
+    pointer-events: none;
+  }
+  #wm.on { display: block; }
 </style>
 </head>
 <body>
-  <div id="stage"><div id="placeholder">STREAMLINE</div></div>
+  <div id="stage"><img id="bg-image" alt="" /><div id="placeholder">STREAMLINE</div><img id="wm" alt="" /></div>
   <div id="audio-bin"></div>
 
   <script type="module">
@@ -95,6 +108,8 @@
     const stage = document.getElementById("stage");
     const placeholder = document.getElementById("placeholder");
     const audioBin = document.getElementById("audio-bin");
+    const bgImage = document.getElementById("bg-image");
+    const wm = document.getElementById("wm");
 
     function orientation() {
       if (aspectParam === "portrait" || aspectParam === "landscape") return aspectParam;
@@ -155,6 +170,61 @@
         camera: cam ? { publishedAt: seen(cam) } : null,
         screen: scr ? { publishedAt: seen(scr) } : null,
       };
+    }
+
+    // ---- On-video branding (room metadata `programOverlay`) ----
+    // Values are validated server-side; re-checked here because they end up
+    // in src/style attributes.
+    const HEX = /^#[0-9a-f]{6}$/i;
+    const POSITIONS = ["top-left", "top-right", "bottom-left", "bottom-right"];
+    function safeUrl(u) {
+      if (typeof u !== "string" || !u) return "";
+      try {
+        const p = new URL(u);
+        return p.protocol === "https:" || p.protocol === "http:" ? p.href : "";
+      } catch { return ""; }
+    }
+    function clamp(n, lo, hi, dflt) {
+      const v = Number(n);
+      return Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : dflt;
+    }
+    function programOverlay() {
+      try {
+        const meta = room.metadata ? JSON.parse(room.metadata) : null;
+        const o = meta && meta.programOverlay;
+        return o && o.v === 1 ? o : null;
+      } catch { return null; }
+    }
+    function renderOverlay() {
+      const o = programOverlay();
+      const bg = o && o.background;
+      stage.style.background = bg && HEX.test(bg.color || "") ? bg.color : "";
+      const bgUrl = bg ? safeUrl(bg.imageUrl) : "";
+      if (bgUrl) {
+        if (bgImage.getAttribute("src") !== bgUrl) bgImage.setAttribute("src", bgUrl);
+        bgImage.classList.add("on");
+      } else {
+        bgImage.classList.remove("on");
+        bgImage.removeAttribute("src");
+      }
+
+      const logo = o && o.logo;
+      const logoUrl = logo ? safeUrl(logo.url) : "";
+      if (!logoUrl) {
+        wm.classList.remove("on");
+        wm.removeAttribute("src");
+        return;
+      }
+      if (wm.getAttribute("src") !== logoUrl) wm.setAttribute("src", logoUrl);
+      const pos = POSITIONS.includes(logo.position) ? logo.position : "top-right";
+      const margin = Math.round(Math.min(stage.clientWidth, stage.clientHeight) * 0.03) + "px";
+      wm.style.width = clamp(logo.size, 4, 30, 12) + "%";
+      wm.style.opacity = String(clamp(logo.opacity, 0.1, 1, 0.9));
+      wm.style.top = pos.startsWith("top") ? margin : "";
+      wm.style.bottom = pos.startsWith("bottom") ? margin : "";
+      wm.style.left = pos.endsWith("left") ? margin : "";
+      wm.style.right = pos.endsWith("right") ? margin : "";
+      wm.classList.add("on");
     }
 
     // Legacy (v1) metadata → v2 layout so old rooms still render sensibly.
@@ -249,6 +319,7 @@
         slotEls.delete(key);
       }
       placeholder.classList.toggle("hidden", resolved.slots.some((r) => !!r.identity));
+      renderOverlay();
 
       syncAudio();
       checkIdle(resolved);

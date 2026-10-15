@@ -12,6 +12,13 @@
  * Rooms without a kit keep the legacy per-room hlsConfig branding unchanged.
  */
 import { publicBranding, validateBrandingInput } from "./hlsBrandingPure";
+import {
+  DEFAULT_KIT_VIDEO,
+  kitVideoEquals,
+  normalizeKitVideo,
+  parseKitVideoInput,
+  type KitVideoSettings,
+} from "./programOverlayPure";
 
 export const BRAND_KIT_LIMITS = {
   name: 60,
@@ -36,6 +43,8 @@ export type PublicKitBranding = NonNullable<ReturnType<typeof publicBranding>>;
 export type BrandKitParse = {
   ok: boolean;
   value?: Partial<BrandKitFields>;
+  /** Provided `video` fields only; merge onto the stored/default settings. */
+  video?: Partial<KitVideoSettings>;
   field?: string;
   details?: string;
 };
@@ -81,9 +90,13 @@ export function parseBrandKitInput(body: any, opts: { partial: boolean }): Brand
     out.theme = body.theme;
   }
 
+  const video = parseKitVideoInput(body.video);
+  if (!video.ok) return { ok: false, field: video.field, details: video.details };
+
   if (!opts.partial) {
     return {
       ok: true,
+      video: video.value,
       value: {
         name: out.name,
         title: out.title ?? "",
@@ -94,7 +107,32 @@ export function parseBrandKitInput(body: any, opts: { partial: boolean }): Brand
       },
     };
   }
-  return { ok: true, value: out };
+  return { ok: true, value: out, video: video.value };
+}
+
+const VIEWER_FIELDS = ["title", "subtitle", "offlineMessage", "theme"] as const;
+
+/**
+ * Plan features a kit write needs. Viewer-page fields need hlsCustomization;
+ * on-video settings need roomBranding. The logo is shared by both, so it
+ * needs either one (like a rename): what it's drawn on is still gated where
+ * it's drawn (the compositor overlay requires the owner's roomBranding).
+ * `any` = no specific feature, but at least one of the two.
+ */
+export function requiredKitFeatures(
+  existing: { [k: string]: unknown; video?: unknown } | null,
+  next: Partial<BrandKitFields>,
+  nextVideo: KitVideoSettings
+): { features: Array<"hlsCustomization" | "roomBranding">; any: boolean } {
+  const prev = existing || {};
+  const prevVideo = normalizeKitVideo(existing ? existing.video : DEFAULT_KIT_VIDEO);
+  const s = (v: unknown) => (typeof v === "string" ? v : "");
+  const changed = (k: (typeof VIEWER_FIELDS)[number]) =>
+    next[k] !== undefined && s(next[k]) !== (k === "theme" ? s(prev[k]) || "dark" : s(prev[k]));
+  const features: Array<"hlsCustomization" | "roomBranding"> = [];
+  if (VIEWER_FIELDS.some(changed)) features.push("hlsCustomization");
+  if (!kitVideoEquals(prevVideo, nextVideo)) features.push("roomBranding");
+  return { features, any: features.length === 0 };
 }
 
 /** Kit document as returned to its owner (no ownerId echo needed, but harmless). */
@@ -108,6 +146,7 @@ export function serializeBrandKit(id: string, data: any) {
     logoUrl: s(data?.logoUrl),
     offlineMessage: s(data?.offlineMessage),
     theme: (data?.theme === "light" ? "light" : "dark") as BrandKitTheme,
+    video: normalizeKitVideo(data?.video),
     updatedAt: toIso(data?.updatedAt),
   };
 }

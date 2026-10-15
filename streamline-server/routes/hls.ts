@@ -26,6 +26,7 @@ import { resolveRoomViewerAccess } from "../lib/viewerAccessStore";
 import { hlsProxyAll, hlsRunPrefix } from "../lib/hlsPlayback";
 import { onHlsIdle, onHlsLive } from "../lib/viewerStats";
 import { recordTelemetry } from "../lib/telemetry";
+import { syncRoomProgramOverlay } from "../services/programOverlay";
 
 const router = Router();
 
@@ -197,6 +198,9 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
 
     let egressId: string | null = null;
     try {
+      // On-video branding: room metadata may not carry the overlay yet.
+      await syncRoomProgramOverlay(roomId);
+
       // 2) Start egress
       ({ egressId } = await startHlsEgress({
         roomName: livekitRoomName,

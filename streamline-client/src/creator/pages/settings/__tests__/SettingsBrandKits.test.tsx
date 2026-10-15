@@ -106,4 +106,34 @@ describe("SettingsBrandKits", () => {
     await waitFor(() => expect(screen.queryByTestId("brand-kit-row")).toBeNull());
     confirmSpy.mockRestore();
   });
+
+  it("locks the on-video section when the plan lacks roomBranding", async () => {
+    route({
+      "GET /api/brand-kits": () =>
+        res(200, { kits: [KIT], defaultKitId: null, canEdit: true, canEditViewer: true, canEditVideo: false, blockedReason: null, videoBlockedReason: "plan" }),
+    });
+    render(<SettingsBrandKits />);
+    fireEvent.click(await screen.findByText("Edit"));
+    expect((await screen.findByTestId("kit-video-locked")).textContent).toContain("not included in your plan");
+    expect((screen.getByLabelText("Show the kit logo on the video") as HTMLInputElement).disabled).toBe(true);
+  });
+
+  it("saves on-video settings with the kit", async () => {
+    let put: Record<string, unknown> | null = null;
+    route({
+      "GET /api/brand-kits": () =>
+        res(200, { kits: [{ ...KIT, logoUrl: "https://x.example/l.png" }], defaultKitId: null, canEdit: true, canEditViewer: true, canEditVideo: true, blockedReason: null, videoBlockedReason: null }),
+      "PUT /api/brand-kits/k1": (init) => {
+        put = JSON.parse(String(init?.body));
+        return res(200, { kit: { ...KIT, logoUrl: "https://x.example/l.png", video: (put as { video: unknown }).video } });
+      },
+    });
+    render(<SettingsBrandKits />);
+    fireEvent.click(await screen.findByText("Edit"));
+    fireEvent.click(screen.getByLabelText("Show the kit logo on the video"));
+    expect(await screen.findByTestId("overlay-logo")).toBeTruthy();
+    fireEvent.click(screen.getByText("Save kit"));
+    await screen.findByText(/Live outputs update now/);
+    expect(put).toMatchObject({ video: { showLogo: true, logoPosition: "top-right", logoSize: 12 } });
+  });
 });

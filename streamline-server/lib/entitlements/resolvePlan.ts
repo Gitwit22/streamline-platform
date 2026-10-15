@@ -181,6 +181,8 @@ export function combineFeatures(plan: EntitlementFeatures, flags: PlatformFlags)
     advancedScreenShare: plan.advancedScreenShare && flags.advancedScreenShareEnabled,
     overages: plan.overages,
     watermark: plan.watermark,
+    // Plan only: on-video branding works for every output, so no HLS switch.
+    roomBranding: plan.roomBranding,
   };
 }
 

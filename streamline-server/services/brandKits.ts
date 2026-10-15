@@ -7,6 +7,8 @@
  */
 import { firestore as db } from "../firebaseAdmin";
 import { kitBrandingForRoom, roomBrandKitId, type PublicKitBranding } from "../lib/brandKitsPure";
+import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
+import { checkFeature, type FeatureCheck } from "../lib/entitlements";
 
 export const BRAND_KITS_COLLECTION = "brandKits";
 
@@ -47,4 +49,21 @@ export async function getRoomKitBranding(room: any): Promise<PublicKitBranding |
     console.warn("[brandKits] kit lookup failed", { kitId, error: e?.message || e });
     return null;
   }
+}
+
+export type BrandKitAccess = {
+  /** Viewer-page fields (title, subtitle, logo, offline message, theme). */
+  viewer: FeatureCheck;
+  /** On-video branding (kit.video, and the logo when it's drawn on video). */
+  video: FeatureCheck;
+  /** Either one: enough to create, rename, pick a default or assign kits. */
+  any: boolean;
+};
+
+/** The account's kit permissions (plan features AND platform switches). */
+export async function getBrandKitAccess(uid: string): Promise<BrandKitAccess> {
+  const ent = await getEffectiveEntitlements(uid);
+  const viewer = checkFeature(ent, "hlsCustomization");
+  const video = checkFeature(ent, "roomBranding");
+  return { viewer, video, any: viewer.allowed || video.allowed };
 }

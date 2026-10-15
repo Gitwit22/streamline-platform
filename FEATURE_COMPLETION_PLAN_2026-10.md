@@ -171,7 +171,8 @@ The owner chose these on 2026-10-05. **Don't start them until the owner says so.
 - Kit picker on the create-room form (default pre-selected); `rooms/{id}.brandKitId`. Channels pick a kit in Settings → HLS → Channel branding.
 - Viewer page order: kit of the live room → kit of the channel's home room → the home room's own hlsConfig branding (unchanged for rooms without a kit). This fixes "other rooms show the home room's branding" for rooms with a kit.
 - Fixed: a co-host with `canLayout` can no longer change branding (owner or platform admin only).
-- Next: branding on the video (compositor), lower thirds and banners, rename + join page branding, the remaining audit bugs below.
+- Step 2 done: branding on the video. A kit's "On video" settings (kit logo as a corner watermark with position/size/opacity, background color or image) are drawn by the program compositor on every output and mirrored on the in-room stage. Sent as LiveKit room metadata `programOverlay`, pushed when an output starts, when a room's kit changes, and when a kit is edited or deleted. New plan feature `roomBranding` (admin plan editor); plans that don't set it keep their HLS customization value.
+- Next: lower thirds and banners, rename + join page branding, the remaining audit bugs below.
 
 **Today:**
 - Channel branding (title, subtitle, logo, offline message, theme) appears only on the `/live/...` viewer page.

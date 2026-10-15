@@ -14,9 +14,7 @@ import {
   type RoomAccessMode,
 } from "../lib/roomAccessPolicy";
 import { pickCreateBrandKit } from "../lib/brandKitsPure";
-import { getDefaultBrandKitId, getOwnedBrandKit } from "../services/brandKits";
-import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
-import { checkFeature } from "../lib/entitlements";
+import { getBrandKitAccess, getDefaultBrandKitId, getOwnedBrandKit } from "../services/brandKits";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 
 const router = Router();
@@ -81,13 +79,14 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
     const explicit = kitPick.source === "explicit";
     try {
       const kit = await getOwnedBrandKit(kitPick.kitId, ownerUid);
-      const check = kit ? checkFeature(await getEffectiveEntitlements(ownerUid), "hlsCustomization") : null;
+      // Either kit feature (viewer page or on-video branding) lets a room use a kit.
+      const access = kit ? await getBrandKitAccess(ownerUid) : null;
       if (!kit) {
         if (explicit) return res.status(400).json({ error: "invalid_brand_kit" });
-      } else if (!check!.allowed) {
+      } else if (!access!.any) {
         if (explicit) {
           return res.status(403).json({
-            error: check!.code === LIMIT_ERRORS.FEATURE_DISABLED ? LIMIT_ERRORS.FEATURE_DISABLED : "brand_kits_not_in_plan",
+            error: access!.viewer.code === LIMIT_ERRORS.FEATURE_DISABLED ? LIMIT_ERRORS.FEATURE_DISABLED : "brand_kits_not_in_plan",
           });
         }
       } else {

@@ -26,6 +26,12 @@ import {
 import { RoomEvent, Track, type Participant } from "livekit-client";
 import { apiGetProgramState, apiUpdateProgramState } from "../../lib/api";
 import {
+  normalizeProgramOverlay,
+  programOverlayFromRoomMetadata,
+  type ProgramOverlay,
+} from "../../lib/programOverlay";
+import { OverlayBackground, OverlayLogo } from "./ProgramOverlayLayer";
+import {
   isEligibleParticipant,
   portraitFor,
   suggestPreset,
@@ -152,6 +158,8 @@ type ProgramStateContextValue = {
   apply: (change: { landscapeId?: string; portraitId?: string; screenShareMode?: ScreenShareMode }) => Promise<void>;
   /** True when the portrait preset was chosen explicitly (not portraitFor). */
   portraitExplicit: boolean;
+  /** On-video branding the outputs draw (room metadata, else the initial GET). */
+  overlay: ProgramOverlay | null;
 };
 
 const ProgramStateContext = createContext<ProgramStateContextValue | null>(null);
@@ -188,6 +196,10 @@ export function ProgramStateProvider({
   const [error, setError] = useState<string | null>(null);
   const pendingRef = useRef(0);
   const gotMetadataRef = useRef(false);
+  const [fetchedOverlay, setFetchedOverlay] = useState<ProgramOverlay | null>(null);
+  // Metadata wins once the server has written the key (null = branding removed).
+  const metaOverlay = useMemo(() => programOverlayFromRoomMetadata(metadata), [metadata]);
+  const overlay = metaOverlay.known ? metaOverlay.overlay : fetchedOverlay;
 
   // Room metadata is the live source of truth for everyone.
   useEffect(() => {
@@ -211,6 +223,7 @@ export function ProgramStateProvider({
         const data = await apiGetProgramState(roomId, roomAccessToken);
         const s = normalizeProgramState(data?.programState ?? null);
         if (!cancelled && s && !gotMetadataRef.current) setServer((prev) => prev ?? s);
+        if (!cancelled) setFetchedOverlay(normalizeProgramOverlay(data?.programOverlay ?? null));
       } catch {
         // keep whatever metadata provides
       } finally {
@@ -293,8 +306,8 @@ export function ProgramStateProvider({
   }, [screenShareRouteNonce, screenShareRouteMode, canLayout, apply]);
 
   const value = useMemo<ProgramStateContextValue>(
-    () => ({ state, loaded, saving, error, canLayout, participants, apply, portraitExplicit }),
-    [state, loaded, saving, error, canLayout, participants, apply, portraitExplicit],
+    () => ({ state, loaded, saving, error, canLayout, participants, apply, portraitExplicit, overlay }),
+    [state, loaded, saving, error, canLayout, participants, apply, portraitExplicit, overlay],
   );
 
   return <ProgramStateContext.Provider value={value}>{children}</ProgramStateContext.Provider>;
@@ -452,8 +465,10 @@ export default function ProgramStage() {
           data-fallback-grid={resolution.fallbackGrid ? "true" : "false"}
           style={{ left: box.left, top: box.top, width: box.width, height: box.height }}
         >
+          <OverlayBackground overlay={ctx?.overlay ?? null} />
           <StageCanvas resolution={resolution} />
           {resolution.slots.length === 0 && <div className="sl-stage-empty">Waiting for participants…</div>}
+          <OverlayLogo overlay={ctx?.overlay ?? null} shortSidePx={Math.min(box.width, box.height)} />
         </div>
         {toggle}
       </div>

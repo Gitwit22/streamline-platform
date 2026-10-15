@@ -1,5 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { BrandingFields, HlsViewerPreview, TextField } from "../../components/HlsBrandingEditor";
+import { KitVideoFields } from "../../components/KitVideoFields";
+import { DEFAULT_KIT_VIDEO, validateKitVideo, type KitVideoSettings } from "../../../lib/programOverlay";
 import { EMPTY_BRANDING, validateBranding, type HlsBranding } from "../../../lib/hlsBranding";
 import {
   BRAND_KIT_NAME_MAX,
@@ -15,11 +17,17 @@ import {
 
 type Draft = BrandKitInput;
 
-const EMPTY_DRAFT: Draft = { ...EMPTY_BRANDING, name: "" };
+const EMPTY_DRAFT: Draft = { ...EMPTY_BRANDING, name: "", video: DEFAULT_KIT_VIDEO };
 
 function draftFromKit(kit: BrandKit): Draft {
-  const { title, subtitle, logoUrl, offlineMessage, theme, name } = kit;
-  return { title, subtitle, logoUrl, offlineMessage, theme, name };
+  const { title, subtitle, logoUrl, offlineMessage, theme, name, video } = kit;
+  return { title, subtitle, logoUrl, offlineMessage, theme, name, video: { ...video } };
+}
+
+function videoEquals(a: KitVideoSettings, b: KitVideoSettings): boolean {
+  return (Object.keys(DEFAULT_KIT_VIDEO) as Array<keyof KitVideoSettings>).every((k) =>
+    k === "backgroundImageUrl" ? a[k].trim() === b[k].trim() : a[k] === b[k]
+  );
 }
 
 function errorMessage(e: unknown, fallback: string): string {
@@ -33,14 +41,16 @@ function draftEquals(a: Draft, b: Draft): boolean {
     a.subtitle === b.subtitle &&
     a.logoUrl.trim() === b.logoUrl.trim() &&
     a.offlineMessage === b.offlineMessage &&
-    a.theme === b.theme
+    a.theme === b.theme &&
+    videoEquals(a.video, b.video)
   );
 }
 
 /**
  * Settings -> Branding: create and edit reusable brand kits and pick the
  * default kit that new rooms start with. A room's kit decides what its HLS
- * viewer page shows (title, subtitle, logo, theme, offline message).
+ * viewer page shows (title, subtitle, logo, theme, offline message) and what
+ * the compositor draws on every output (logo watermark, background).
  */
 export default function SettingsBrandKits({ onUpgrade }: { onUpgrade?: () => void }) {
   const [list, setList] = useState<BrandKitList | null>(null);
@@ -86,12 +96,17 @@ export default function SettingsBrandKits({ onUpgrade }: { onUpgrade?: () => voi
 
   const kits = list?.kits || [];
   const canEdit = list?.canEdit === true;
+  const canEditViewer = list?.canEditViewer === true;
+  const canEditVideo = list?.canEditVideo === true;
   const editingKit = editing && editing !== "new" ? kits.find((k) => k.id === editing) || null : null;
   const baseline = editingKit ? draftFromKit(editingKit) : EMPTY_DRAFT;
   const dirty = editing !== null && !draftEquals(draft, baseline);
 
   const errors = useMemo(() => {
-    const e: Partial<Record<keyof Draft, string>> = validateBranding(draft);
+    const e: Partial<Record<keyof Draft | "backgroundColor" | "backgroundImageUrl", string>> = {
+      ...validateBranding(draft),
+      ...validateKitVideo(draft.video),
+    };
     if (!draft.name.trim()) e.name = "Give the kit a name.";
     else if (draft.name.trim().length > BRAND_KIT_NAME_MAX) e.name = `Name must be ${BRAND_KIT_NAME_MAX} characters or less.`;
     return e;
@@ -140,12 +155,9 @@ export default function SettingsBrandKits({ onUpgrade }: { onUpgrade?: () => voi
     try {
       if (editing === "new") {
         const { kit, defaultKitId } = await createBrandKit(draft, makeDefault);
-        setList((prev) => ({
-          canEdit: prev?.canEdit ?? true,
-          blockedReason: prev?.blockedReason ?? null,
-          defaultKitId,
-          kits: [...(prev?.kits || []), kit].sort((a, b) => a.name.localeCompare(b.name)),
-        }));
+        setList((prev) =>
+          prev ? { ...prev, defaultKitId, kits: [...prev.kits, kit].sort((a, b) => a.name.localeCompare(b.name)) } : prev
+        );
         setEditing(kit.id);
         setDraft(draftFromKit(kit));
         setMessage("Kit created.");
@@ -155,7 +167,7 @@ export default function SettingsBrandKits({ onUpgrade }: { onUpgrade?: () => voi
           prev ? { ...prev, kits: prev.kits.map((k) => (k.id === kit.id ? kit : k)).sort((a, b) => a.name.localeCompare(b.name)) } : prev
         );
         setDraft(draftFromKit(kit));
-        setMessage("Saved — rooms using this kit show it to viewers on their next load.");
+        setMessage("Saved. Live outputs update now; viewer pages update on their next load.");
       }
     } catch (e) {
       setError(errorMessage(e, "Failed to save the kit."));
@@ -223,9 +235,9 @@ export default function SettingsBrandKits({ onUpgrade }: { onUpgrade?: () => voi
   return (
     <div style={{ display: "grid", gap: 14 }} data-testid="brand-kits">
       <p style={{ color: "#94a3b8", margin: 0, fontSize: 13, lineHeight: 1.5 }}>
-        A brand kit is a reusable look for your viewer page: title, subtitle, logo, theme and offline message. New rooms
-        start with your default kit, and you can pick a different kit (or none) when you create a room. Editing a kit
-        updates every room that uses it.
+        A brand kit is a reusable look for your rooms: the viewer page (title, subtitle, logo, theme, offline message)
+        and what's drawn on the video itself (logo watermark, background). New rooms start with your default kit, and
+        you can pick a different kit (or none) when you create a room. Editing a kit updates every room that uses it.
       </p>
 
       {!canEdit && (
@@ -307,25 +319,58 @@ export default function SettingsBrandKits({ onUpgrade }: { onUpgrade?: () => voi
               setDraft((prev) => ({ ...prev, name: v }));
             }}
           />
+          <div style={sectionTitle}>Viewer page</div>
+          {!canEditViewer && (
+            <div style={{ fontSize: 12, color: "#fcd34d" }}>
+              Viewer page branding isn't available on your plan right now, so these fields are locked (the logo is still
+              editable for the video).
+            </div>
+          )}
           <BrandingFields
             draft={draft}
             errors={errors}
-            disabled={!canEdit || busy}
+            disabled={!canEditViewer || busy}
+            logoDisabled={!canEdit || busy}
             logoBroken={logoBroken}
             titlePlaceholder="Your channel name"
             subtitlePlaceholder="Live Viewer"
             onChange={setField}
           />
+          <div style={{ fontSize: 12, color: "#9ca3af", fontWeight: 800, marginBottom: 0 }}>Viewer page preview</div>
+          <HlsViewerPreview branding={draft} embedName={draft.name} onLogoError={() => setLogoBroken(true)} />
+
+          <div style={{ ...sectionTitle, marginTop: 8 }}>On video</div>
+          <div style={{ fontSize: 12, color: "#9ca3af", marginTop: -6 }}>
+            Drawn on every output — stream destinations, the HLS stream and recordings.
+          </div>
+          {!canEditVideo && (
+            <div style={noticeStyle} data-testid="kit-video-locked">
+              {list?.videoBlockedReason === "platform"
+                ? "On-video branding is temporarily disabled."
+                : "On-video branding is not included in your plan."}
+              {list?.videoBlockedReason !== "platform" && onUpgrade && (
+                <button type="button" onClick={onUpgrade} style={{ ...btnSmall, marginLeft: 10 }}>
+                  Upgrade
+                </button>
+              )}
+            </div>
+          )}
+          <KitVideoFields
+            video={draft.video}
+            logoUrl={draft.logoUrl}
+            disabled={!canEditVideo || busy}
+            onChange={(video) => {
+              setMessage(null);
+              setDraft((prev) => ({ ...prev, video }));
+            }}
+          />
+
           {editing === "new" && (
             <label style={{ display: "flex", gap: 8, alignItems: "center", fontSize: 13, color: "#e5e7eb" }}>
               <input type="checkbox" checked={makeDefault} disabled={busy} onChange={(e) => setMakeDefault(e.target.checked)} />
               Use as the default for new rooms
             </label>
           )}
-          <div>
-            <div style={{ fontSize: 12, color: "#9ca3af", fontWeight: 800, marginBottom: 6 }}>Preview</div>
-            <HlsViewerPreview branding={draft} embedName={draft.name} onLogoError={() => setLogoBroken(true)} />
-          </div>
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
             <button type="button" style={btnSecondary} disabled={busy} onClick={close}>
               {dirty ? "Cancel" : "Close"}
@@ -347,6 +392,7 @@ export default function SettingsBrandKits({ onUpgrade }: { onUpgrade?: () => voi
   );
 }
 
+const sectionTitle: CSSProperties = { fontWeight: 800, color: "#e5e7eb", fontSize: 13, marginTop: 4 };
 const ellipsis: CSSProperties = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
 const panelStyle: CSSProperties = {
   display: "grid",

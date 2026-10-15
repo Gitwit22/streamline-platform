@@ -26,6 +26,7 @@ import { FieldValue } from "firebase-admin/firestore";
 import { recordTelemetry } from "../lib/telemetry";
 import { decideMultistreamStart, maskSecretTail, redactRtmpUrl } from "../lib/mediaPure";
 import { compositorUrl, instagramAspectFor, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
+import { syncRoomProgramOverlay } from "../services/programOverlay";
 import { summarizeEgressOutput, type MultistreamOutputKind } from "../lib/multistreamStatusPure";
 
 // livekit-server-sdk is ESM; use dynamic import so CommonJS builds work on Render
@@ -468,6 +469,9 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       // Import LiveKit egress client and types using dynamic helper
       const { StreamOutput, StreamProtocol } = await getLiveKitSdk();
       const egressClient = await getEgressClient();
+
+      // On-video branding: room metadata may not carry the overlay yet.
+      await syncRoomProgramOverlay(roomId, roomDoc);
 
       // Start separate egress jobs so Instagram can have a different encoder shape.
       const egressIds: { normal?: string; instagram?: string } = {};

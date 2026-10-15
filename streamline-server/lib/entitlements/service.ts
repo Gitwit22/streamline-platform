@@ -61,6 +61,7 @@ const FEATURE_LABELS: Record<FeatureKey, string> = {
   advancedScreenShare: "Advanced screen share",
   overages: "Overages",
   watermark: "Watermark",
+  roomBranding: "On-video branding",
 };
 
 /** Pure feature check against already-resolved entitlements. */

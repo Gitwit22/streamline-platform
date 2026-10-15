@@ -43,6 +43,7 @@ function features(on: Partial<EntitlementFeatures>): EntitlementFeatures {
     advancedScreenShare: true,
     overages: false,
     watermark: false,
+    roomBranding: false,
     ...on,
   };
 }
@@ -53,6 +54,7 @@ const ALL_FEATURES_ON = features({
   dualRecording: true,
   hls: true,
   hlsCustomization: true,
+  roomBranding: true,
   editing: true,
   projects: true,
   contentLibrary: true,

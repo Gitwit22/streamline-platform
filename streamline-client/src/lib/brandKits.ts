@@ -9,12 +9,22 @@
 import { API_BASE } from "./apiBase";
 import { apiFetchAuth } from "./api";
 import { brandingFromConfig, type HlsBranding } from "./hlsBranding";
+import {
+  DEFAULT_KIT_VIDEO,
+  LOGO_OPACITY_RANGE,
+  LOGO_POSITIONS,
+  LOGO_SIZE_RANGE,
+  type KitVideoSettings,
+  type LogoPosition,
+} from "./programOverlay";
 
 export const BRAND_KIT_NAME_MAX = 60;
 
 export type BrandKit = HlsBranding & {
   id: string;
   name: string;
+  /** On-video branding drawn by the program compositor on every output. */
+  video: KitVideoSettings;
   updatedAt: string | null;
 };
 
@@ -24,6 +34,11 @@ export type BrandKitList = {
   /** Plan includes viewer branding (hlsCustomization) and the platform switch is on. */
   canEdit: boolean;
   blockedReason: "plan" | "platform" | null;
+  /** Viewer-page fields (plan: HLS customization). */
+  canEditViewer: boolean;
+  /** On-video settings (plan: roomBranding). */
+  canEditVideo: boolean;
+  videoBlockedReason: "plan" | "platform" | null;
 };
 
 export class BrandKitError extends Error {
@@ -34,13 +49,32 @@ export class BrandKitError extends Error {
   }
 }
 
-type RawKit = Partial<Record<"id" | "name" | "title" | "subtitle" | "logoUrl" | "offlineMessage" | "theme" | "updatedAt", unknown>>;
+type RawKit = Partial<
+  Record<"id" | "name" | "title" | "subtitle" | "logoUrl" | "offlineMessage" | "theme" | "updatedAt" | "video", unknown>
+>;
+
+function toVideo(raw: unknown): KitVideoSettings {
+  const v = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const num = (x: unknown, r: { min: number; max: number; default: number }) =>
+    typeof x === "number" && Number.isFinite(x) && x >= r.min && x <= r.max ? x : r.default;
+  return {
+    showLogo: v.showLogo === true,
+    logoPosition: (LOGO_POSITIONS as readonly unknown[]).includes(v.logoPosition)
+      ? (v.logoPosition as LogoPosition)
+      : DEFAULT_KIT_VIDEO.logoPosition,
+    logoSize: num(v.logoSize, LOGO_SIZE_RANGE),
+    logoOpacity: num(v.logoOpacity, LOGO_OPACITY_RANGE),
+    backgroundColor: typeof v.backgroundColor === "string" ? v.backgroundColor : "",
+    backgroundImageUrl: typeof v.backgroundImageUrl === "string" ? v.backgroundImageUrl : "",
+  };
+}
 
 function toKit(raw: RawKit | null | undefined): BrandKit {
   return {
     ...brandingFromConfig(raw as Parameters<typeof brandingFromConfig>[0]),
     id: String(raw?.id || ""),
     name: String(raw?.name || "Untitled kit"),
+    video: toVideo(raw?.video),
     updatedAt: typeof raw?.updatedAt === "string" ? raw.updatedAt : null,
   };
 }
@@ -53,6 +87,8 @@ export function brandKitErrorMessage(code: string, details?: string): string {
       return "Brand kits are not included in your plan.";
     case "feature_disabled":
       return "Branding is temporarily disabled.";
+    case "room_branding_not_in_plan":
+      return "On-video branding is not included in your plan.";
     case "brand_kit_limit_reached":
       return "You've reached the maximum number of brand kits.";
     case "brand_kit_not_found":
@@ -84,17 +120,25 @@ function jsonInit(method: string, body: unknown): RequestInit {
 }
 
 /** quiet: don't trigger the global sign-out/redirect on 401 (pages that also serve signed-out users). */
+function reasonOf(v: unknown): "plan" | "platform" | null {
+  return v === "platform" ? "platform" : v === "plan" ? "plan" : null;
+}
+
 export async function listBrandKits(opts: { quiet?: boolean } = {}): Promise<BrandKitList> {
   const p = await call("/api/brand-kits", { cache: "no-store" }, opts);
   return {
     kits: Array.isArray(p?.kits) ? p.kits.map(toKit) : [],
     defaultKitId: typeof p?.defaultKitId === "string" ? p.defaultKitId : null,
     canEdit: p?.canEdit === true,
-    blockedReason: p?.blockedReason === "platform" ? "platform" : p?.blockedReason === "plan" ? "plan" : null,
+    blockedReason: reasonOf(p?.blockedReason),
+    // Older servers (before on-video branding) only send canEdit.
+    canEditViewer: typeof p?.canEditViewer === "boolean" ? p.canEditViewer : p?.canEdit === true,
+    canEditVideo: p?.canEditVideo === true,
+    videoBlockedReason: reasonOf(p?.videoBlockedReason) ?? (p?.canEditVideo === true ? null : "plan"),
   };
 }
 
-export type BrandKitInput = HlsBranding & { name: string };
+export type BrandKitInput = HlsBranding & { name: string; video: KitVideoSettings };
 
 function inputBody(input: BrandKitInput) {
   return {
@@ -104,6 +148,7 @@ function inputBody(input: BrandKitInput) {
     logoUrl: input.logoUrl.trim(),
     offlineMessage: input.offlineMessage.trim(),
     theme: input.theme,
+    video: { ...input.video, backgroundImageUrl: input.video.backgroundImageUrl.trim() },
   };
 }
 

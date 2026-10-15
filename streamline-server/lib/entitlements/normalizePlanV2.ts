@@ -170,6 +170,7 @@ export function readLegacyFeatures(id: string, data: any): EntitlementFeatures {
   out.overages = overages !== undefined ? toBool(overages) : LEGACY_OVERAGES_DEFAULT_ON.has(idLower);
 
   out.watermark = toBool(firstDefined(f.watermarkRecordings, f.watermark));
+  out.roomBranding = readRoomBranding(f, out.hlsCustomization);
   return out;
 }
 
@@ -254,7 +255,17 @@ function readV2Features(data: any): EntitlementFeatures {
   const f = (data.features || {}) as any;
   const out = emptyFeatures();
   for (const k of FEATURE_KEYS) out[k] = toBool(f[k] === undefined && DEFAULT_ON_WHEN_MISSING.has(k) ? true : f[k]);
+  out.roomBranding = readRoomBranding(f, out.hlsCustomization);
   return out;
+}
+
+/**
+ * roomBranding was added after plans were stored: a plan without the key
+ * keeps exactly the branding access it already had (its hlsCustomization),
+ * so deploying it changes no plan. Admins can set it separately afterwards.
+ */
+function readRoomBranding(f: any, hlsCustomization: boolean): boolean {
+  return f.roomBranding === undefined || f.roomBranding === null ? hlsCustomization : toBool(f.roomBranding);
 }
 
 function readV2Limits(data: any): Record<LimitKey, Limit> {

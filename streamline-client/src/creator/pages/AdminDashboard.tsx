@@ -243,6 +243,7 @@ const V2_FEATURE_FIELDS: Array<{ key: string; label: string }> = [
   { key: "dualRecording", label: "Dual recording" },
   { key: "hls", label: "HLS broadcast" },
   { key: "hlsCustomization", label: "HLS branded viewer page" },
+  { key: "roomBranding", label: "On-video branding (logo/background on every output)" },
   { key: "editing", label: "Editor" },
   { key: "projects", label: "Projects" },
   { key: "contentLibrary", label: "Content library" },

@@ -285,10 +285,13 @@ export function BrandingFields({
   titlePlaceholder,
   subtitlePlaceholder,
   onChange,
+  logoDisabled = disabled,
 }: {
   draft: HlsBranding;
   errors: Partial<Record<keyof HlsBranding, string>>;
   disabled: boolean;
+  /** The logo is also used on the video (brand kits), so it can be editable on its own. */
+  logoDisabled?: boolean;
   logoBroken: boolean;
   titlePlaceholder: string;
   subtitlePlaceholder: string;
@@ -319,7 +322,7 @@ export function BrandingFields({
         placeholder="https://example.com/logo.png"
         value={draft.logoUrl}
         max={HLS_BRANDING_LIMITS.logoUrl}
-        disabled={disabled}
+        disabled={logoDisabled}
         error={errors.logoUrl || (logoBroken && draft.logoUrl.trim() ? "Couldn't load this image — check the URL." : undefined)}
         hint="Square PNG/SVG works best. Leave empty for the StreamLine logo."
         onChange={(v) => onChange("logoUrl", v)}

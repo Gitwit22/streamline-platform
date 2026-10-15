@@ -14,6 +14,7 @@ import {
   type ProgramStateV2,
 } from "../lib/programState";
 import { getLiveKitSdk } from "../lib/livekit";
+import { getRoomProgramOverlay } from "../services/programOverlay";
 
 const router = Router();
 
@@ -117,7 +118,14 @@ router.get(
         ? upgradeProgramState(data.programState, roomHostIdentity(data))
         : null;
 
-      return res.json({ ok: true, roomId, programState });
+      // On-video branding (also pushed into room metadata when outputs start
+      // or the kit changes); here so the stage shows it before going live.
+      const programOverlay = await getRoomProgramOverlay(data).catch((err) => {
+        console.warn("[programState] overlay lookup failed", { roomId, error: err?.message || String(err) });
+        return null;
+      });
+
+      return res.json({ ok: true, roomId, programState, programOverlay });
     } catch (err) {
       console.error("[programState] GET error", err);
       return res.status(500).json({ error: "internal_error" });

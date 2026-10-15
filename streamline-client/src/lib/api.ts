@@ -385,6 +385,8 @@ export async function apiGetProgramState(roomId: string, roomAccessToken: string
     ok: true;
     roomId: string;
     programState: ProgramStateV2 | ProgramState | null;
+    /** On-video branding (lib/programOverlay.ts); absent on older servers. */
+    programOverlay?: unknown;
   }>;
 }
 
