@@ -212,6 +212,15 @@ async function handleResponse<T>(response: Response): Promise<T> {
 // ============================================================================
 
 export const assetsApi = {
+  /**
+   * Same as list() but throws on any failure, so a page can show an error
+   * instead of an empty library ("your recordings are gone").
+   */
+  async listStrict(): Promise<MediaAsset[]> {
+    const response = await apiFetchAuth(`${API_BASE}/api/editing/assets`, {}, { allowNonOk: true });
+    return handleResponse<MediaAsset[]>(response);
+  },
+
   /** Unified content library: recordings + uploads + saved/exported videos. */
   async list(): Promise<MediaAsset[]> {
     try {
@@ -420,6 +429,7 @@ export const exportApi = {
 export const editingApi = {
   // Media assets (content library)
   getMediaAssets: () => assetsApi.list(),
+  getMediaAssetsStrict: () => assetsApi.listStrict(),
   getAsset: (id: string) => assetsApi.getById(id),
   uploadAsset: (file: File, onProgress?: (p: number) => void) => assetsApi.upload(file, onProgress),
   deleteAsset: (id: string) => assetsApi.delete(id),

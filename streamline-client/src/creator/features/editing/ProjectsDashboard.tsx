@@ -15,6 +15,7 @@ export default function ProjectsDashboard() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectAssets, setProjectAssets] = useState<Record<string, ProjectAsset[]>>({});
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [projectName, setProjectName] = useState("");
 
@@ -38,8 +39,10 @@ export default function ProjectsDashboard() {
         }),
       );
       setProjectAssets(assetMap);
+      setLoadError(false);
     } catch (err) {
       console.error("Failed to load projects:", err);
+      setLoadError(true);
     } finally {
       setLoading(false);
     }
@@ -152,6 +155,17 @@ export default function ProjectsDashboard() {
             }} />
             <p style={{ marginTop: '1rem' }}>Loading projects...</p>
             <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+          </div>
+        ) : loadError ? (
+          <div role="alert" style={{ textAlign: 'center', padding: '3rem', color: '#fca5a5' }}>
+            <p style={{ marginBottom: '1rem' }}>We couldn't load your projects. Nothing has been deleted.</p>
+            <button
+              type="button"
+              onClick={() => void loadProjects()}
+              style={{ padding: '0.5rem 1rem', borderRadius: '0.5rem', background: '#dc2626', color: '#fff', border: 'none', cursor: 'pointer' }}
+            >
+              Try again
+            </button>
           </div>
         ) : projects.length === 0 ? (
           <div style={{

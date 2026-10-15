@@ -32,14 +32,17 @@ import { DEFAULT_MEDIA_PRESET_ID, mediaPresetLabel, toPresetOptions, type Preset
 
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
 
-async function apiFetchWithCookieFallback(path: string, init: RequestInit = {}) {
+// `allowNonOk`: return non-2xx responses instead of throwing "HTTP 409", so
+// callers that check `res.ok` can show the server's reason. Only pass it where
+// the caller handles !res.ok itself.
+async function apiFetchWithCookieFallback(path: string, init: RequestInit = {}, opts?: { allowNonOk?: boolean }) {
   try {
-    return await apiFetchAuth(path, init);
+    return await apiFetchAuth(path, init, opts);
   } catch (err: any) {
     // In cookie-auth setups (Admin flow), we may not have a localStorage JWT.
     // Fall back to cookie-based auth so test-mode plan switching works.
     if (err instanceof ApiUnauthorizedError) {
-      return await apiFetch(path, init);
+      return await apiFetch(path, init, opts);
     }
     throw err;
   }
@@ -282,6 +285,8 @@ export default function SettingsBilling() {
   const [plans, setPlans] = useState<any[]>([]);
   const [entitlements, setEntitlements] = useState<typeof DEFAULT_ENTITLEMENTS>(DEFAULT_ENTITLEMENTS);
   const [usage, setUsage] = useState<UsageSummaryModel | null>(null);
+  // Usage fetch failed: say so instead of rendering "0 used / unlimited".
+  const [usageError, setUsageError] = useState(false);
 
   const [platformHlsEnabled, setPlatformHlsEnabled] = useState<boolean>(true);
   const [platformTranscodeEnabled, setPlatformTranscodeEnabled] = useState<boolean>(true);
@@ -395,12 +400,14 @@ export default function SettingsBilling() {
     // Also accepts ?openTab=<tab> (e.g. links in emails / other pages).
     let queryTab: string | null = null;
     try {
-      queryTab = new URLSearchParams(location.search || "").get("openTab");
+      // ?tab= is what in-app links use (e.g. Join -> destinations).
+      const qs = new URLSearchParams(location.search || "");
+      queryTab = qs.get("openTab") ?? qs.get("tab");
     } catch {
       queryTab = null;
     }
     const openTab = (location.state as any)?.openTab ?? queryTab;
-    const validTabs: Array<typeof activeTab> = ["plan", "usage", "destinations", "hls", "defaults", "roles", "collaborators", "close"];
+    const validTabs: Array<typeof activeTab> = ["plan", "usage", "destinations", "hls", "branding", "defaults", "roles", "collaborators", "close"];
     if (typeof openTab === "string" && validTabs.includes(openTab as any)) {
       setActiveTab(openTab as any);
     }
@@ -434,7 +441,7 @@ export default function SettingsBilling() {
       setCollaboratorsLoading(true);
       setCollaboratorsError(null);
       try {
-        const res = await apiFetchWithCookieFallback("/api/collaborators/me", { method: "GET" });
+        const res = await apiFetchWithCookieFallback("/api/collaborators/me", { method: "GET" }, { allowNonOk: true });
         const payload = await res.json().catch(() => null);
         if (!res.ok) {
           throw new Error(payload?.error || "Failed to load collaborators");
@@ -470,13 +477,13 @@ export default function SettingsBilling() {
         method,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body || {}),
-      });
+      }, { allowNonOk: true });
       const actionPayload = await actionRes.json().catch(() => null);
       if (!actionRes.ok) {
         throw new Error(actionPayload?.error || "Collaborator action failed");
       }
 
-      const refreshed = await apiFetchWithCookieFallback("/api/collaborators/me", { method: "GET" });
+      const refreshed = await apiFetchWithCookieFallback("/api/collaborators/me", { method: "GET" }, { allowNonOk: true });
       const payload = await refreshed.json().catch(() => null);
       if (!refreshed.ok) {
         throw new Error(payload?.error || "Failed to refresh collaborators");
@@ -671,7 +678,7 @@ export default function SettingsBilling() {
   const handleRefreshStatus = async () => {
     try {
       // Try to reconcile Stripe -> Firestore (self-heals when webhooks lag/miss)
-      const res = await apiFetchWithCookieFallback("/api/billing/refresh", { method: "POST" });
+      const res = await apiFetchWithCookieFallback("/api/billing/refresh", { method: "POST" }, { allowNonOk: true });
       const { json } = await safeReadJson(res);
       const changed = Boolean((json as any)?.changed);
       if (res.ok) {
@@ -750,7 +757,7 @@ export default function SettingsBilling() {
 
   const loadBillingStatus = async () => {
     try {
-      const res = await apiFetchWithCookieFallback("/api/billing/status", { method: "GET" });
+      const res = await apiFetchWithCookieFallback("/api/billing/status", { method: "GET" }, { allowNonOk: true });
       const { json } = await safeReadJson(res);
       if (!res.ok) return;
       if ((json as any)?.success) {
@@ -931,9 +938,11 @@ export default function SettingsBilling() {
       const res = await apiFetchAuth("/api/usage/me");
       const data = await res.json();
       setUsage(parseUsageSummary(data));
+      setUsageError(false);
     } catch (err) {
       console.warn("loadUsage failed", err);
-      setUsage(parseUsageSummary({}));
+      // Keep the last good numbers if there are any; never show fake zeros.
+      setUsageError(true);
     }
   };
 
@@ -1150,7 +1159,7 @@ export default function SettingsBilling() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: nextEnabled }),
-      });
+      }, { allowNonOk: true });
 
       const { json, text } = await safeReadJson(res);
 
@@ -1501,7 +1510,7 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
       const res = await apiFetchWithCookieFallback("/api/account/close", {
         method: "POST",
         body: JSON.stringify({ mode: "cancel_only" }),
-      });
+      }, { allowNonOk: true });
       const data = await res.json();
       if (!res.ok || data?.error) {
         throw Object.assign(new Error(data?.error || "Cancel failed"), { status: res.status, body: data });
@@ -1527,7 +1536,7 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
     try {
       const res = await apiFetchWithCookieFallback("/api/billing/cancel-plan-change", {
         method: "POST",
-      });
+      }, { allowNonOk: true });
       const data = await res.json();
       if (!res.ok || data?.error) {
         throw Object.assign(new Error(data?.error || "Failed to cancel plan change"), { status: res.status, body: data });
@@ -1559,7 +1568,7 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
       const res = await apiFetchWithCookieFallback("/api/account/close", {
         method: "POST",
         body: JSON.stringify({ mode: "delete" }),
-      });
+      }, { allowNonOk: true });
       const data = await res.json();
       if (!res.ok || data?.error) {
         throw Object.assign(new Error(data?.error || "Delete failed"), { status: res.status, body: data });
@@ -1591,7 +1600,7 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
       
       const res = await apiFetchWithCookieFallback("/api/billing/portal", {
         method: "POST",
-      });
+      }, { allowNonOk: true });
       const { json: data } = await safeReadJson(res);
 
       if (!res.ok) {
@@ -1629,7 +1638,7 @@ const startCheckout = async (plan: CheckoutPlanVariant) => {
       try {
         const res = await apiFetchWithCookieFallback("/api/account/accept-tos", {
           method: "POST",
-        });
+        }, { allowNonOk: true });
         const data = await res.json();
         if (!res.ok || data.error) {
           throw new Error(data.error || "Failed to record Terms acceptance.");
@@ -3356,6 +3365,18 @@ const daysLeft = getDaysUntil(user?.billing?.currentPeriodEnd);
         {/* ================================================================ */}
         {/* SECTION 5: USAGE THIS MONTH */}
         {/* ================================================================ */}
+        {activeTab === "usage" && !usage && usageError && (
+          <div style={S.card} role="alert">
+            <h2 style={S.cardTitle}>📊 Usage This Month</h2>
+            <p style={{ color: "#fca5a5", margin: "8px 0 12px" }}>
+              We couldn't load your usage right now. Your plan limits still apply.
+            </p>
+            <button type="button" style={S.secondaryBtn} onClick={() => void loadUsage()}>
+              Try again
+            </button>
+          </div>
+        )}
+
         {activeTab === "usage" && usage && (
           <div style={{ ...S.card, opacity: isBlocked ? 0.6 : 1 }}>
             <div style={S.cardHeader}>

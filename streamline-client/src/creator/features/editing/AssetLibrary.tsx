@@ -17,6 +17,7 @@ export default function AssetLibrary() {
   const [assets, setAssets] = useState<MediaAsset[]>([]);
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [filter, setFilter] = useState<'all' | 'stream' | 'upload' | 'recordings'>('all');
   const [search, setSearch] = useState("");
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -24,15 +25,24 @@ export default function AssetLibrary() {
   const [playingVideo, setPlayingVideo] = useState<{ url: string; title: string } | null>(null);
 
   // One MediaAsset listing (recordings + uploads + saved/exported videos).
+  // A failed load shows an error with Retry, never an empty library, and
+  // always ends the spinner (a thrown 401 used to leave it spinning forever).
   const loadData = async () => {
-    const all = canAssets || canMyContentRecordings ? await editingApi.getMediaAssets() : [];
-    setAssets(canAssets ? all : []);
-    setRecordings(
-      canMyContentRecordings
-        ? all.filter((a) => a.type === 'recording' && a.status === 'ready').map(mediaAssetToRecording)
-        : [],
-    );
-    setLoading(false);
+    try {
+      const all = canAssets || canMyContentRecordings ? await editingApi.getMediaAssetsStrict() : [];
+      setAssets(canAssets ? all : []);
+      setRecordings(
+        canMyContentRecordings
+          ? all.filter((a) => a.type === 'recording' && a.status === 'ready').map(mediaAssetToRecording)
+          : [],
+      );
+      setLoadError(false);
+    } catch (err) {
+      console.error('Failed to load content library:', err);
+      setLoadError(true);
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleCreateProject = async () => {
@@ -539,6 +549,17 @@ export default function AssetLibrary() {
                     to { transform: rotate(360deg); }
                   }
                 `}</style>
+              </div>
+            ) : loadError ? (
+              <div role="alert" style={{ textAlign: 'center', padding: '3rem', color: '#fca5a5' }}>
+                <p style={{ marginBottom: '1rem' }}>We couldn't load your content. Nothing has been deleted.</p>
+                <button
+                  type="button"
+                  onClick={() => { setLoading(true); void loadData(); }}
+                  style={{ padding: '0.5rem 1rem', borderRadius: '0.5rem', background: '#dc2626', color: '#fff', border: 'none', cursor: 'pointer' }}
+                >
+                  Try again
+                </button>
               </div>
             ) : filtered.length === 0 ? (
               <div style={{
