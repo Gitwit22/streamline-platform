@@ -4,6 +4,7 @@ import {
   inferMediaType,
   mergeMediaAssets,
   recordingAccessibleBy,
+  libraryUploadRejection,
   projectAssetToMediaAsset,
   publicMediaAsset,
   recordingToMediaAsset,
@@ -82,5 +83,20 @@ describe("recordingAccessibleBy", () => {
     assert.equal(recordingAccessibleBy({ userId: "u1" }, "u1"), true);
     assert.equal(recordingAccessibleBy({ userId: "u1" }, ""), false);
     assert.equal(recordingAccessibleBy(null, "u1"), false);
+  });
+});
+
+describe("libraryUploadRejection", () => {
+  it("accepts media and raster images", () => {
+    for (const [m, f] of [["video/mp4", "a.mp4"], ["audio/mpeg", "a.mp3"], ["image/png", "a.png"], ["image/jpeg", "a.jpg"], ["application/octet-stream", "a.mov"], ["", "a.webm"]]) {
+      assert.equal(libraryUploadRejection(m, f), null, `${m} ${f}`);
+    }
+  });
+  it("refuses SVG and HTML-like files however they're labelled", () => {
+    assert.ok(libraryUploadRejection("image/svg+xml", "logo.svg"));
+    assert.ok(libraryUploadRejection("application/octet-stream", "logo.svg"));
+    assert.ok(libraryUploadRejection("video/mp4", "x.html"));
+    assert.ok(libraryUploadRejection("image/svg+xml", "logo.png"));
+    assert.ok(libraryUploadRejection("text/html", "a.mp4"));
   });
 });

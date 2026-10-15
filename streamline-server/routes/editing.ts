@@ -49,7 +49,7 @@ import { monthKeyUTC } from "../lib/streamingMeterPure";
 import { countUserProjects, loadEditorProject } from "../lib/projectStore";
 import { buildExportTimeline, type ResolvedClipSource } from "../lib/editorTimeline";
 import { listMediaAssets, resolveMediaAsset, resolveMediaAssets, withPlayableUrl } from "../lib/mediaAssets";
-import { inferMediaType, publicMediaAsset, recordingAccessibleBy, uploadToMediaAsset } from "../lib/mediaAssetsPure";
+import { inferMediaType, libraryUploadRejection, publicMediaAsset, recordingAccessibleBy, uploadToMediaAsset } from "../lib/mediaAssetsPure";
 import { probeMedia } from "../lib/mediaProbe";
 import { deleteSavedVideo } from "../lib/savedVideos";
 import { deleteExportOutput, saveExportToLibrary } from "../lib/exportLibrary";
@@ -232,9 +232,9 @@ router.post(
       }
 
       const mediaType = inferMediaType(file.mimetype, file.originalname);
-      const mime = String(file.mimetype || "").toLowerCase();
-      if (mime && !/^(video|audio|image)\//.test(mime) && mime !== "application/octet-stream") {
-        return res.status(400).json({ error: "Only video, audio and image files are accepted" });
+      const rejection = libraryUploadRejection(file.mimetype, file.originalname);
+      if (rejection) {
+        return res.status(400).json({ error: rejection });
       }
 
       const title = req.body.title || file.originalname.replace(/\.[^/.]+$/, "");

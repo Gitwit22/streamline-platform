@@ -15,14 +15,47 @@ export const HLS_BRANDING_LIMITS = {
 // (Flat shape: the server compiles without strictNullChecks, so union narrowing on `ok` is unavailable.)
 export type BrandingValidation = { ok: boolean; field?: string; details?: string };
 
-/** Logo URLs must be absolute http(s) (rendered as <img src>; no data:/javascript:). */
+/**
+ * Hosts a branding image may not point at: loopback, private, link-local
+ * (cloud metadata) and internal names. The egress browser fetches these
+ * URLs server-side, so they'd be a blind SSRF on self-hosted egress (audit P3).
+ */
+export function isPrivateImageHost(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (!h) return true;
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) return true;
+  if (!h.includes(".") && !h.includes(":")) return true; // single-label intranet name
+  const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return (
+      a === 0 || a === 10 || a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) ||
+      (a === 100 && b >= 64 && b <= 127) ||
+      a >= 224
+    );
+  }
+  if (h.includes(":")) {
+    // IPv6 literal: loopback, unspecified, unique-local, link-local, v4-mapped.
+    return h === "::1" || h === "::" || /^f[cd]/.test(h) || /^fe[89ab]/.test(h) || h.startsWith("::ffff:");
+  }
+  return false;
+}
+
+/**
+ * Logo / background URLs must be absolute http(s) (rendered as <img src>; no
+ * data:/javascript:) on a public host. http stays accepted so existing
+ * branding keeps working.
+ */
 export function isValidLogoUrl(raw: string): boolean {
   const v = raw.trim();
   if (!v) return true; // empty = default logo
   if (v.length > HLS_BRANDING_LIMITS.logoUrl) return false;
   try {
     const u = new URL(v);
-    return (u.protocol === "https:" || u.protocol === "http:") && !!u.hostname;
+    return (u.protocol === "https:" || u.protocol === "http:") && !!u.hostname && !isPrivateImageHost(u.hostname);
   } catch {
     return false;
   }
@@ -45,7 +78,7 @@ export function validateBrandingInput(body: {
     }
   }
   if (typeof body.logoUrl === "string" && !isValidLogoUrl(body.logoUrl)) {
-    return { ok: false, field: "logoUrl", details: "logoUrl must be an http(s) URL" };
+    return { ok: false, field: "logoUrl", details: "logoUrl must be an http(s) URL on a public host" };
   }
   return { ok: true };
 }

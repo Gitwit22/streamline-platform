@@ -55,3 +55,27 @@ test("normalizeStoredHlsConfig hides only the seeded placeholder", () => {
   assert.equal(validateHlsConfigBranding({ logoUrl: "javascript:alert(1)" }).ok, false);
   assert.equal(validateHlsConfigBranding({ title: "Show", logoUrl: "https://a.example/l.png" }).ok, true);
 });
+
+test("isValidLogoUrl refuses private / internal hosts (SSRF from the egress browser)", () => {
+  for (const u of [
+    "http://localhost/a.png",
+    "http://127.0.0.1/a.png",
+    "http://0x7f000001/a.png",
+    "http://2130706433/a.png",
+    "http://10.0.0.5/a.png",
+    "http://172.20.1.1/a.png",
+    "http://192.168.1.1/a.png",
+    "http://169.254.169.254/latest/meta-data",
+    "http://[::1]/a.png",
+    "http://[fd00::1]/a.png",
+    "http://[::ffff:127.0.0.1]/a.png",
+    "http://metadata.google.internal/a.png",
+    "http://intranet/a.png",
+    "https://printer.local/a.png",
+  ]) {
+    assert.equal(isValidLogoUrl(u), false, u);
+  }
+  assert.equal(isValidLogoUrl("https://172.15.0.1/a.png"), true);
+  assert.equal(isValidLogoUrl("https://8.8.8.8/a.png"), true);
+  assert.equal(isValidLogoUrl("http://cdn.example.com/a.png"), true);
+});

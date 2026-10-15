@@ -212,3 +212,23 @@ export function recordingAccessibleBy(d: { userId?: unknown; ownerUid?: unknown 
   if (!d || !uid) return false;
   return d.userId === uid || d.ownerUid === uid;
 }
+
+const ALLOWED_IMAGE_MIME = new Set(["image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/bmp"]);
+const BLOCKED_UPLOAD_EXT = new Set(["svg", "svgz", "html", "htm", "xhtml", "xml", "js", "mjs"]);
+
+/**
+ * Why a library upload is refused, or null when it's accepted. Images are an
+ * allowlist: SVG (and HTML-like files) can carry script and are served from
+ * the public storage URL with the uploaded content type (audit P3).
+ */
+export function libraryUploadRejection(mime: unknown, filename: unknown): string | null {
+  const m = typeof mime === "string" ? mime.trim().toLowerCase() : "";
+  const ext = typeof filename === "string" ? filename.split("?")[0].split(".").pop()?.toLowerCase() || "" : "";
+  if (BLOCKED_UPLOAD_EXT.has(ext)) return "This file type isn't supported. Upload a video, audio file, or PNG/JPEG/GIF/WebP image.";
+  if (!m || m === "application/octet-stream") return null;
+  if (m.startsWith("image/")) {
+    return ALLOWED_IMAGE_MIME.has(m) ? null : "Images must be PNG, JPEG, GIF, WebP or BMP.";
+  }
+  if (m.startsWith("video/") || m.startsWith("audio/")) return null;
+  return "Only video, audio and image files are accepted";
+}
