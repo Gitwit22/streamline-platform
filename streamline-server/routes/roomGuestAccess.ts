@@ -41,6 +41,8 @@ import {
   resolveRoomAccessMode,
 } from "../lib/roomAccessPolicy";
 import { applyOwnerPresetToControls, loadOwnerRolePreset } from "../lib/permissions/rolePresetStore";
+import { roomDisplayName } from "../lib/roomDisplayPure";
+import { getRoomKitBranding } from "../services/brandKits";
 
 /**
  * Invite JWT from x-invite-token, body.inviteToken or query inviteToken/t.
@@ -1366,6 +1368,12 @@ function deriveDebugReason(roomStatus: string, room: Record<string, any> | null,
   return extra || undefined;
 }
 
+/** Channel title + logo from the room's brand kit for the public join pages (null without a kit). */
+async function joinPageBranding(room: any): Promise<{ title: string; logoUrl: string } | null> {
+  const kit = await getRoomKitBranding(room);
+  return kit && (kit.title || kit.logoUrl) ? { title: kit.title, logoUrl: kit.logoUrl } : null;
+}
+
 /**
  * GET /api/rooms/:roomId/info
  * Auth: NONE — fully public
@@ -1396,7 +1404,7 @@ router.get("/rooms/:roomId/info", async (req: any, res) => {
     const allowGuests = anonymousGuestsAllowed(room) && roomAccessMode !== "invite_only";
     const guestJoinAllowed = directJoinAllowed(roomAccessMode, room, roomStatus === "live");
     const roomName = String(room.roomName || room.name || roomId);
-    const hostName = await resolveHostName(room.ownerId);
+    const [hostName, branding] = await Promise.all([resolveHostName(room.ownerId), joinPageBranding(room)]);
     const roomType = room.roomType === "hls" || room.hlsConfig?.enabled === true ? "hls" : "rtc";
     const debugReason = deriveDebugReason(roomStatus, room);
 
@@ -1404,6 +1412,10 @@ router.get("/rooms/:roomId/info", async (req: any, res) => {
     return res.json({
       roomId,
       roomName,
+      // What to show (owner's rename, else the original name); roomName stays the identity name.
+      displayName: roomDisplayName(room, roomId),
+      // The room's brand kit (channel title + logo) for the join page, or null.
+      branding,
       status: roomStatus === "live" ? "live" : "idle", // backward compat
       roomStatus,
       allowGuests,
@@ -1468,12 +1480,14 @@ router.get("/invites/:inviteId/info", async (req: any, res) => {
     }
 
     // Resolve host name from room owner
-    const hostName = await resolveHostName(room?.ownerId);
+    const [hostName, branding] = await Promise.all([resolveHostName(room?.ownerId), room ? joinPageBranding(room) : null]);
 
     return res.json({
       inviteId,
       roomId,
       roomName,
+      displayName: room ? roomDisplayName(room, roomId) : roomName,
+      branding,
       hostName,
       role: invite.role || "guest",
       status: roomStatus === "live" ? "live" : "idle", // backward compat

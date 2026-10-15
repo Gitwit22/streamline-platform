@@ -48,6 +48,7 @@ import {
   joinPagePillText,
   nextMintRetryDelayMs,
   normalizePublicRoomInfo,
+  type JoinPageBranding,
   parseJoinPagePresence,
   presenceDowngradeNotice,
   readShareToken,
@@ -1810,6 +1811,14 @@ function RoomPage() {
   const [presenceNotice, setPresenceNotice] = useState<string | null>(null);
   // Public room info for the guest join gate (GET /api/rooms/:id/info).
   const [publicRoomInfo, setPublicRoomInfo] = useState<PublicRoomInfo | null>(null);
+  // Room header: display name (owner's rename) + brand kit logo/title. Kept
+  // apart from publicRoomInfo (join-gate state) and from roomName, which is
+  // identity data used for invites and tokens.
+  const [headerInfo, setHeaderInfo] = useState<{ displayName: string | null; branding: JoinPageBranding | null } | null>(null);
+  const [renaming, setRenaming] = useState(false);
+  const [renameDraft, setRenameDraft] = useState("");
+  const [renameBusy, setRenameBusy] = useState(false);
+  const [renameError, setRenameError] = useState<string | null>(null);
   const waitStartRef = useRef<number | null>(null);
   const [waitStartedAt, setWaitStartedAt] = useState<number | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
@@ -1984,6 +1993,58 @@ function RoomPage() {
   const [, setAuthStatus] = useState<"unknown" | "authed" | "guest">("unknown");
     const [effectivePermissionsMode, setEffectivePermissionsMode] = useState<"simple" | "advanced">("simple");
   const roomId = firestoreRoomId ?? routeRoomId ?? null;
+
+  // Header name + brand kit (public, cheap). Failure just leaves roomName shown.
+  useEffect(() => {
+    if (!roomId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/info`, {}, { allowNonOk: true });
+        if (!res.ok || cancelled) return;
+        const info = normalizePublicRoomInfo(res.status, await res.json().catch(() => null));
+        if (!cancelled) setHeaderInfo({ displayName: info.displayName, branding: info.branding });
+      } catch {
+        // non-critical
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [roomId]);
+
+  const submitRename = async () => {
+    if (!roomId || renameBusy) return;
+    setRenameBusy(true);
+    setRenameError(null);
+    try {
+      const res = await apiFetchAuth(
+        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/display-name`,
+        {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ displayName: renameDraft.trim() || null }),
+        },
+        { allowNonOk: true }
+      );
+      const payload = await res.json().catch(() => null);
+      if (!res.ok) {
+        const code = String(payload?.error || "");
+        setRenameError(
+          code === "rename_owner_only"
+            ? "Only the room owner can rename it."
+            : payload?.details || "Couldn't rename the room."
+        );
+        return;
+      }
+      setHeaderInfo((prev) => ({ displayName: payload?.displayName ?? null, branding: prev?.branding ?? null }));
+      setRenaming(false);
+    } catch {
+      setRenameError("Couldn't rename the room.");
+    } finally {
+      setRenameBusy(false);
+    }
+  };
 
   // ---------------------------------------------------------------------------
   // Token refresh on role change (controls SSE `refresh_token` hint).
@@ -4570,7 +4631,7 @@ function RoomPage() {
 
   // ==================== RENDER ====================
 
-  const gateRoomName = publicRoomInfo?.roomName || roomName || routeRoomId || "this room";
+  const gateRoomName = publicRoomInfo?.displayName || publicRoomInfo?.roomName || roomName || routeRoomId || "this room";
   const gateStatus = publicRoomInfo?.status ?? "unknown";
   const gateIsLive = gateStatus === "live";
   const goHomeFromGate = () => nav("/");
@@ -4612,7 +4673,7 @@ function RoomPage() {
   // No access (403 not_allowed): re-auth can't fix it.
   if (accessDenied) {
     return (
-      <JoinGateLayout roomName={gateRoomName} hostName={publicRoomInfo?.hostName}>
+      <JoinGateLayout roomName={gateRoomName} hostName={publicRoomInfo?.hostName} branding={publicRoomInfo?.branding}>
         <RoomUnavailableCard
           testId="room-access-denied"
           title="You don't have access to this room"
@@ -4647,7 +4708,7 @@ function RoomPage() {
   if (!displayName) {
     const showWaiting = !isHost && !gateUnavailable && gateStatus === "idle";
     return (
-      <JoinGateLayout roomName={gateRoomName} hostName={publicRoomInfo?.hostName} isLive={gateIsLive}>
+      <JoinGateLayout roomName={gateRoomName} hostName={publicRoomInfo?.hostName} branding={publicRoomInfo?.branding} isLive={gateIsLive}>
         {gateUnavailable}
         {showWaiting && (
           <WaitingForHostCard
@@ -4772,7 +4833,7 @@ function RoomPage() {
   // the host (409 room_not_live) — re-requests /token automatically.
   if (!isHost && !token && (gateUnavailable || roomGateStatus === "idle")) {
     return (
-      <JoinGateLayout roomName={gateRoomName} hostName={publicRoomInfo?.hostName} isLive={gateIsLive}>
+      <JoinGateLayout roomName={gateRoomName} hostName={publicRoomInfo?.hostName} branding={publicRoomInfo?.branding} isLive={gateIsLive}>
         {gateUnavailable || (
           <WaitingForHostCard
             elapsedMs={waitedMs}
@@ -5077,7 +5138,67 @@ function RoomPage() {
             {recordingStatus === "stopping" ? "⏳ Exiting..." : "Exit Room"}
           </button>
 
-          <span className="text-sm opacity-80">{roomName}</span>
+          {headerInfo?.branding?.logoUrl && (
+            <img
+              src={headerInfo.branding.logoUrl}
+              alt=""
+              data-testid="room-header-logo"
+              style={{ height: 24, width: "auto", maxWidth: 96, objectFit: "contain" }}
+            />
+          )}
+          {renaming ? (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                void submitRename();
+              }}
+              style={{ display: "flex", alignItems: "center", gap: 6 }}
+            >
+              <input
+                autoFocus
+                aria-label="Room name"
+                value={renameDraft}
+                maxLength={80}
+                onChange={(e) => setRenameDraft(e.target.value)}
+                placeholder={roomName || "Room name"}
+                className="text-sm"
+                style={{ background: "#111", border: "1px solid #444", borderRadius: 6, padding: "4px 8px", color: "#fff", width: 200 }}
+              />
+              <button type="submit" disabled={renameBusy} className="text-xs px-2 py-1 rounded bg-white text-black font-semibold">
+                {renameBusy ? "Saving…" : "Save"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setRenaming(false);
+                  setRenameError(null);
+                }}
+                className="text-xs px-2 py-1 rounded border border-gray-600"
+              >
+                Cancel
+              </button>
+              {renameError && <span className="text-xs text-red-400">{renameError}</span>}
+            </form>
+          ) : (
+            <span className="text-sm opacity-80" data-testid="room-header-name">
+              {headerInfo?.displayName || roomName}
+              {isHost && roomId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRenameDraft(headerInfo?.displayName || roomName || "");
+                    setRenameError(null);
+                    setRenaming(true);
+                  }}
+                  title="Rename room (only changes the name people see)"
+                  aria-label="Rename room"
+                  style={{ marginLeft: 6, background: "none", border: "none", color: "#9ca3af", cursor: "pointer" }}
+                >
+                  ✎
+                </button>
+              )}
+            </span>
+          )}
 
           {actingContextBanner.isDelegated && actingContextBanner.ownerLabel && (
             <div

@@ -1,5 +1,5 @@
 import React from "react";
-import { formatElapsed } from "../../lib/roomJoin";
+import { formatElapsed, type JoinPageBranding } from "../../lib/roomJoin";
 
 // Pre-join screens for the routed room page: the shared dark/red layout of
 // the name gate, plus status cards (waiting for host, ended, not found, no
@@ -38,11 +38,14 @@ export function JoinGateLayout({
   roomName,
   hostName,
   isLive,
+  branding,
   children,
 }: {
   roomName: string;
   hostName?: string | null;
   isLive?: boolean;
+  /** The room's brand kit (channel title + logo), when it has one. */
+  branding?: JoinPageBranding | null;
   children: React.ReactNode;
 }) {
   return (
@@ -98,6 +101,22 @@ export function JoinGateLayout({
       `}</style>
 
       <div style={{ textAlign: "center", position: "relative", zIndex: 1 }} data-testid="join-gate-header">
+        {branding?.logoUrl && (
+          <img
+            src={branding.logoUrl}
+            alt=""
+            data-testid="join-gate-logo"
+            style={{ height: 56, width: "auto", maxWidth: 220, objectFit: "contain", margin: "0 auto 0.5rem", display: "block" }}
+          />
+        )}
+        {branding?.title && (
+          <div
+            data-testid="join-gate-channel"
+            style={{ fontSize: "0.8rem", fontWeight: 700, letterSpacing: "0.04em", color: "rgba(255,255,255,0.6)", marginBottom: "0.25rem" }}
+          >
+            {branding.title}
+          </div>
+        )}
         <h2 style={{ fontSize: "1.25rem", fontWeight: 600, color: "rgba(255, 255, 255, 0.9)", marginBottom: "0.25rem" }}>
           {roomName}
         </h2>

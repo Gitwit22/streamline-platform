@@ -67,8 +67,14 @@ export function hasRoomPermission(
 
 export type PublicRoomStatus = "live" | "idle" | "ended" | "not_found" | "unknown";
 
+/** Channel title + logo from the room's brand kit (join page), when it has one. */
+export type JoinPageBranding = { title: string | null; logoUrl: string | null };
+
 export type PublicRoomInfo = {
   roomName: string | null;
+  /** Name to show (owner's rename, else the original); null on older servers. */
+  displayName: string | null;
+  branding: JoinPageBranding | null;
   hostName: string | null;
   status: PublicRoomStatus;
   allowGuests: boolean;
@@ -78,7 +84,15 @@ export type PublicRoomInfo = {
 /** Normalize GET /api/rooms/:id/info (roomStatus on new servers, status on old). */
 export function normalizePublicRoomInfo(httpStatus: number, data: any): PublicRoomInfo {
   if (httpStatus === 404) {
-    return { roomName: null, hostName: null, status: "not_found", allowGuests: false, guestJoinAllowed: false };
+    return {
+      roomName: null,
+      displayName: null,
+      branding: null,
+      hostName: null,
+      status: "not_found",
+      allowGuests: false,
+      guestJoinAllowed: false,
+    };
   }
   const raw = String(data?.roomStatus || data?.status || "").trim().toLowerCase();
   const status: PublicRoomStatus =
@@ -86,11 +100,30 @@ export function normalizePublicRoomInfo(httpStatus: number, data: any): PublicRo
   const str = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
   return {
     roomName: str(data?.roomName),
+    displayName: str(data?.displayName),
+    branding: normalizeJoinPageBranding(data?.branding),
     hostName: str(data?.hostName),
     status,
     allowGuests: data?.allowGuests !== false,
     guestJoinAllowed: typeof data?.guestJoinAllowed === "boolean" ? data.guestJoinAllowed : null,
   };
+}
+
+/** Validated join-page branding (http(s) logo only), or null when empty. */
+export function normalizeJoinPageBranding(raw: unknown): JoinPageBranding | null {
+  if (!raw || typeof raw !== "object") return null;
+  const b = raw as { title?: unknown; logoUrl?: unknown };
+  const title = typeof b.title === "string" && b.title.trim() ? b.title.trim().slice(0, 80) : null;
+  let logoUrl: string | null = null;
+  if (typeof b.logoUrl === "string" && b.logoUrl.trim()) {
+    try {
+      const u = new URL(b.logoUrl.trim());
+      if (u.protocol === "https:" || u.protocol === "http:") logoUrl = u.href;
+    } catch {
+      logoUrl = null;
+    }
+  }
+  return title || logoUrl ? { title, logoUrl } : null;
 }
 
 /** Backoff for re-requesting /token while the room is not live yet. */

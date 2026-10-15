@@ -18,6 +18,8 @@ interface InviteInfo {
   inviteId: string;
   roomId: string;
   roomName: string;
+  /** Name to show (owner's rename); older servers omit it. */
+  displayName?: string;
   hostName: string;
   role: string;
   status: string;           // backward compat ("live" | "idle")
@@ -287,13 +289,13 @@ export default function InviteRedeem() {
           </div>
 
           {/* Room info */}
-          {info?.roomName && (
+          {(info?.displayName || info?.roomName) && (
             <div style={{
               padding: "12px 16px", borderRadius: 10, marginBottom: 16,
               background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
             }}>
               <div style={{ fontSize: 15, fontWeight: 600 }}>
-                {info.roomName}
+                {info.displayName || info.roomName}
               </div>
               {info.hostName && (
                 <div style={{ fontSize: 13, opacity: 0.55, marginTop: 2 }}>
@@ -341,7 +343,7 @@ export default function InviteRedeem() {
             background: "rgba(255,255,255,0.04)", border: "1px solid rgba(255,255,255,0.08)",
           }}>
             <div style={{ fontSize: 15, fontWeight: 600 }}>
-              {info?.roomName || "StreamLine Room"}
+              {info?.displayName || info?.roomName || "StreamLine Room"}
             </div>
             {info?.hostName && (
               <div style={{ fontSize: 13, opacity: 0.55, marginTop: 2 }}>
@@ -386,7 +388,7 @@ export default function InviteRedeem() {
             You're invited to
           </div>
           <div style={{ fontSize: 22, fontWeight: 700, lineHeight: 1.3 }}>
-            {info?.roomName || "a StreamLine room"}
+            {info?.displayName || info?.roomName || "a StreamLine room"}
           </div>
           {info?.hostName && (
             <div style={{ fontSize: 14, opacity: 0.65, marginTop: 4 }}>
