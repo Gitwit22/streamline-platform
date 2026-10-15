@@ -16,7 +16,7 @@
 import { useEffect, useRef } from "react";
 import { useRoomContext } from "@livekit/components-react";
 import { RoomEvent, Track, type RemoteTrackPublication } from "livekit-client";
-import { getMixer } from "./AudioMixerModal";
+import { getMixer } from "../../lib/mixerInstance";
 import { useMixerBroadcast } from "../hooks/useMixerBroadcast";
 
 /**

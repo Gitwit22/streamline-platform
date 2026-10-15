@@ -14,7 +14,7 @@
  */
 
 import { useState, useRef, useCallback } from "react";
-import { getMixer } from "../components/AudioMixerModal";
+import { getMixer } from "../../lib/mixerInstance";
 
 export type LocalRecordingState = "idle" | "recording" | "stopping";
 

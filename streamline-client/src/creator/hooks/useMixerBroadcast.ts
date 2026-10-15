@@ -17,7 +17,7 @@
 import { useEffect } from "react";
 import { useRoomContext } from "@livekit/components-react";
 import { RoomEvent, Track, TrackEvent, type LocalAudioTrack } from "livekit-client";
-import { getMixer } from "../components/AudioMixerModal";
+import { getMixer } from "../../lib/mixerInstance";
 
 export const HOST_RAW_MIC_KEY = "host-raw-mic";
 

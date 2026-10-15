@@ -66,6 +66,7 @@ import { ErrorBoundary } from "../../components/ErrorBoundary";
 import { RoleChangeToast } from "../components/RoleChangeToast";
 import ProgramStage, { ProgramStateProvider, useProgramState } from "../components/ProgramStage";
 import GraphicsPanel from "../components/GraphicsPanel";
+import AudioDeckPanel, { AudioDropOverlay } from "../components/AudioDeckPanel";
 import AudioMixerModal from "../components/AudioMixerModal";
 import ViewerStatsChip from "../components/ViewerStatsChip";
 import MixerBridge from "../components/MixerBridge";
@@ -1732,6 +1733,7 @@ function RoomPage() {
   const [showStreamSetup, setShowStreamSetup] = useState(false);
   const [inviteModalOpen, setInviteModalOpen] = useState(false);
   const [showMixer, setShowMixer] = useState(false);
+  const [showAudioDeck, setShowAudioDeck] = useState(false);
   const [showScreenShareRouter, setShowScreenShareRouter] = useState(false);
   const [showLayoutPicker, setShowLayoutPicker] = useState(false);
   const [showGraphicsPanel, setShowGraphicsPanel] = useState(false);
@@ -5350,6 +5352,35 @@ function RoomPage() {
             </button>
             )}
 
+            {featureAccess.audioMixer.allowed && !isAudience && (
+            <button
+              onClick={() => {
+                setShowLayoutPicker(false);
+                setShowGraphicsPanel(false);
+                setShowAudioDeck(v => !v);
+              }}
+              data-testid="audio-deck-toggle"
+              style={{
+                fontSize: '0.75rem',
+                padding: '0.5rem 0.75rem',
+                border: showAudioDeck
+                  ? '1px solid rgba(16, 185, 129, 0.7)'
+                  : '1px solid rgba(16, 185, 129, 0.35)',
+                borderRadius: '0.375rem',
+                background: showAudioDeck
+                  ? 'rgba(16, 185, 129, 0.18)'
+                  : 'rgba(16, 185, 129, 0.06)',
+                color: '#34d399',
+                cursor: 'pointer',
+                transition: 'all 0.3s ease',
+                fontWeight: '500'
+              }}
+              title="Background music playlist and soundboard (plays through the mixer's Music channel)"
+            >
+              🎵 Audio
+            </button>
+            )}
+
             {isHost && featureAccess.advancedScreenShare.allowed && (
               <button
                 onClick={() => setShowScreenShareRouter(v => !v)}
@@ -5379,6 +5410,7 @@ function RoomPage() {
               <button
                 onClick={() => {
                   setShowGraphicsPanel(false);
+                  setShowAudioDeck(false);
                   setShowLayoutPicker(v => !v);
                 }}
                 data-tour="layout-controls"
@@ -5407,6 +5439,7 @@ function RoomPage() {
               <button
                 onClick={() => {
                   setShowLayoutPicker(false);
+                  setShowAudioDeck(false);
                   setShowGraphicsPanel(v => !v);
                 }}
                 data-testid="graphics-toggle"
@@ -5783,7 +5816,26 @@ function RoomPage() {
         open={showMixer}
         onClose={() => setShowMixer(false)}
         canBroadcast={!isAudience && (isHost || can("canStream"))}
+        onOpenAudioDeck={
+          isAudience
+            ? undefined
+            : () => {
+                setShowMixer(false);
+                setShowAudioDeck(true);
+              }
+        }
       />
+      )}
+
+      {featureAccess.audioMixer.allowed && !isAudience && (
+        <>
+          <AudioDeckPanel
+            open={showAudioDeck}
+            onClose={() => setShowAudioDeck(false)}
+            onOpenMixer={() => setShowMixer(true)}
+          />
+          <AudioDropOverlay onDropped={() => setShowAudioDeck(true)} />
+        </>
       )}
 
       {featureAccess.advancedScreenShare.allowed && (

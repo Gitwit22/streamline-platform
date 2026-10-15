@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
+import { getMixer } from "../../lib/mixerInstance";
 import {
-  AudioMixer,
   ALL_BUS_IDS,
   BUS_LABELS,
   STREAM_LOCKED_BUSES,
@@ -9,6 +9,7 @@ import {
   type DuckingConfig,
 } from "../../lib/audioMixer";
 import { useLocalRecording } from "../hooks/useLocalRecording";
+import { useAudioDeck } from "../hooks/useAudioDeck";
 
 // ---------------------------------------------------------------------------
 // Props
@@ -19,24 +20,17 @@ interface AudioMixerModalProps {
   onClose: () => void;
   /** Host / canStream: may send the mix to the room and every output. */
   canBroadcast?: boolean;
+  /** Opens the audio deck panel (playlist + soundboard); hidden when absent. */
+  onOpenAudioDeck?: () => void;
 }
 
-// ---------------------------------------------------------------------------
-// Singleton mixer instance (lives for the lifetime of the tab)
-// ---------------------------------------------------------------------------
-
-let _mixerInstance: AudioMixer | null = null;
-
-export function getMixer(): AudioMixer {
-  if (!_mixerInstance) _mixerInstance = new AudioMixer();
-  return _mixerInstance;
-}
+// The tab-lifetime mixer lives in lib/mixerInstance.ts.
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export default function AudioMixerModal({ open, onClose, canBroadcast = false }: AudioMixerModalProps) {
+export default function AudioMixerModal({ open, onClose, canBroadcast = false, onOpenAudioDeck }: AudioMixerModalProps) {
   const mixer = getMixer(); // tab-lifetime singleton (stable identity)
   const [state, setState] = useState<MixerState>(() => mixer.getState());
   const [broadcasting, setBroadcasting] = useState(() => mixer.isBroadcasting());
@@ -97,84 +91,6 @@ export default function AudioMixerModal({ open, onClose, canBroadcast = false }:
     },
     [mixer, state],
   );
-
-  // --- Music player state ---
-  const [musicFile, setMusicFile] = useState<File | null>(null);
-  const musicAudioRef = useRef<HTMLAudioElement | null>(null);
-  const musicFileInputRef = useRef<HTMLInputElement>(null);
-  const [musicPlaying, setMusicPlaying] = useState(false);
-
-  const loadMusicFile = useCallback((file: File) => {
-    // Clean up previous
-    if (musicAudioRef.current) {
-      musicAudioRef.current.pause();
-      mixer.disconnectMusicElement();
-      URL.revokeObjectURL(musicAudioRef.current.src);
-      musicAudioRef.current = null;
-    }
-
-    const audio = new Audio();
-    audio.crossOrigin = "anonymous";
-    audio.src = URL.createObjectURL(file);
-    audio.loop = true;
-    musicAudioRef.current = audio;
-    setMusicFile(file);
-    setMusicPlaying(false);
-
-    // Must init context first (user gesture)
-    mixer.init();
-    mixer.connectMusicElement(audio);
-  }, [mixer]);
-
-  const toggleMusicPlay = useCallback(() => {
-    const audio = musicAudioRef.current;
-    if (!audio) return;
-    if (audio.paused) {
-      audio.play().catch(() => { /* autoplay blocked */ });
-      setMusicPlaying(true);
-    } else {
-      audio.pause();
-      setMusicPlaying(false);
-    }
-  }, []);
-
-  const stopMusic = useCallback(() => {
-    const audio = musicAudioRef.current;
-    if (!audio) return;
-    audio.pause();
-    audio.currentTime = 0;
-    setMusicPlaying(false);
-  }, []);
-
-  const removeMusic = useCallback(() => {
-    if (musicAudioRef.current) {
-      musicAudioRef.current.pause();
-      mixer.disconnectMusicElement();
-      URL.revokeObjectURL(musicAudioRef.current.src);
-      musicAudioRef.current = null;
-    }
-    setMusicFile(null);
-    setMusicPlaying(false);
-  }, [mixer]);
-
-  // Sync play state if audio ends (for non-loop scenarios)
-  useEffect(() => {
-    const audio = musicAudioRef.current;
-    if (!audio) return;
-    const onEnded = () => setMusicPlaying(false);
-    audio.addEventListener("ended", onEnded);
-    return () => audio.removeEventListener("ended", onEnded);
-  });
-
-  // Cleanup music on unmount
-  useEffect(() => {
-    return () => {
-      if (musicAudioRef.current) {
-        musicAudioRef.current.pause();
-        URL.revokeObjectURL(musicAudioRef.current.src);
-      }
-    };
-  }, []);
 
   // --- Local recording ---
   const recording = useLocalRecording();
@@ -422,100 +338,8 @@ export default function AudioMixerModal({ open, onClose, canBroadcast = false }:
             />
           </div>
 
-          {/* ---- Music Player ---- */}
-          <div
-            style={{
-              padding: "0.6rem",
-              background: "rgba(15,23,42,0.7)",
-              borderRadius: "0.4rem",
-              border: "1px solid rgba(55,65,81,0.5)",
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.4rem",
-            }}
-          >
-            <div style={{ fontSize: "0.65rem", fontWeight: 600, color: "#a78bfa", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-              🎵 Music
-            </div>
-            <input
-              ref={musicFileInputRef}
-              type="file"
-              accept="audio/mpeg,audio/mp3,audio/wav,audio/ogg,audio/aac,audio/mp4,audio/*"
-              style={{ display: "none" }}
-              onChange={(e) => {
-                const file = e.target.files?.[0];
-                if (file) loadMusicFile(file);
-                e.target.value = "";
-              }}
-            />
-            {!musicFile ? (
-              <button
-                onClick={() => musicFileInputRef.current?.click()}
-                style={{
-                  fontSize: "0.65rem",
-                  padding: "0.4rem 0.6rem",
-                  borderRadius: "0.3rem",
-                  border: "1px solid rgba(139,92,246,0.3)",
-                  background: "rgba(139,92,246,0.1)",
-                  color: "#c4b5fd",
-                  cursor: "pointer",
-                }}
-              >
-                Load audio file…
-              </button>
-            ) : (
-              <div style={{ display: "flex", alignItems: "center", gap: "0.4rem", flexWrap: "wrap" }}>
-                <span style={{ fontSize: "0.6rem", color: "#d1d5db", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {musicFile.name}
-                </span>
-                <button
-                  onClick={toggleMusicPlay}
-                  title={musicPlaying ? "Pause" : "Play"}
-                  style={{
-                    width: 28, height: 22, fontSize: "0.6rem", fontWeight: 700,
-                    borderRadius: "0.25rem", border: "none", cursor: "pointer",
-                    background: musicPlaying ? "#eab308" : "#059669",
-                    color: musicPlaying ? "#000" : "#fff",
-                  }}
-                >
-                  {musicPlaying ? "⏸" : "▶"}
-                </button>
-                <button
-                  onClick={stopMusic}
-                  title="Stop"
-                  style={{
-                    width: 28, height: 22, fontSize: "0.6rem", fontWeight: 700,
-                    borderRadius: "0.25rem", border: "none", cursor: "pointer",
-                    background: "rgba(55,65,81,0.7)", color: "#9ca3af",
-                  }}
-                >
-                  ⏹
-                </button>
-                <button
-                  onClick={() => musicFileInputRef.current?.click()}
-                  title="Replace"
-                  style={{
-                    width: 28, height: 22, fontSize: "0.55rem", fontWeight: 700,
-                    borderRadius: "0.25rem", border: "none", cursor: "pointer",
-                    background: "rgba(55,65,81,0.7)", color: "#9ca3af",
-                  }}
-                >
-                  📂
-                </button>
-                <button
-                  onClick={removeMusic}
-                  title="Remove"
-                  style={{
-                    width: 28, height: 22, fontSize: "0.55rem", fontWeight: 700,
-                    borderRadius: "0.25rem", border: "none", cursor: "pointer",
-                    background: "rgba(220,38,38,0.2)", color: "#f87171",
-                  }}
-                >
-                  ✕
-                </button>
-              </div>
-            )}
-          </div>
+          {/* ---- Music: the audio deck (playlist + soundboard) plays into the Music channel ---- */}
+          <MusicDeckSummary onOpen={onOpenAudioDeck} />
 
           {/* ---- Local Recording ---- */}
           <div
@@ -992,6 +816,61 @@ function DuckingSlider({ label, hint, min, max, step, value, display, onChange }
         }}
         aria-label={`Ducking ${label}`}
       />
+    </div>
+  );
+}
+
+/** Now-playing summary of the audio deck, with a button to open it. */
+function MusicDeckSummary({ onOpen }: { onOpen?: () => void }) {
+  const { deck, state } = useAudioDeck();
+  const current = state.playlist.find((x) => x.id === state.currentId) || null;
+  return (
+    <div
+      data-testid="mixer-music-summary"
+      style={{
+        padding: "0.6rem",
+        background: "rgba(15,23,42,0.7)",
+        borderRadius: "0.4rem",
+        border: "1px solid rgba(55,65,81,0.5)",
+        display: "flex",
+        flexDirection: "column",
+        gap: "0.4rem",
+      }}
+    >
+      <div style={{ fontSize: "0.65rem", fontWeight: 600, color: "#a78bfa", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+        🎵 Music
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
+        <span style={{ fontSize: "0.6rem", color: current ? "#d1d5db" : "#6b7280", flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {current ? current.name : `Playlist: ${state.playlist.length} · Pads: ${state.pads.length}`}
+        </span>
+        {state.playlist.length > 0 && (
+          <button
+            onClick={() => deck.togglePlay()}
+            title={state.playing ? "Pause" : "Play"}
+            style={{
+              width: 28, height: 22, fontSize: "0.6rem", fontWeight: 700,
+              borderRadius: "0.25rem", border: "none", cursor: "pointer",
+              background: state.playing ? "#eab308" : "#059669",
+              color: state.playing ? "#000" : "#fff",
+            }}
+          >
+            {state.playing ? "⏸" : "▶"}
+          </button>
+        )}
+        {onOpen && (
+          <button
+            onClick={onOpen}
+            style={{
+              fontSize: "0.6rem", padding: "0.25rem 0.5rem", borderRadius: "0.25rem",
+              border: "1px solid rgba(139,92,246,0.3)", background: "rgba(139,92,246,0.1)",
+              color: "#c4b5fd", cursor: "pointer",
+            }}
+          >
+            Open playlist & soundboard
+          </button>
+        )}
+      </div>
     </div>
   );
 }

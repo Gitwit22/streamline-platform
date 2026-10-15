@@ -446,6 +446,20 @@ export class AudioMixer {
     this.musicElement = null;
   }
 
+  /**
+   * The AudioContext and the Music bus input, for sources managed outside the
+   * mixer (lib/audioDeck.ts: playlist + soundboard). Both are null until
+   * init(). Anything connected here gets the Music channel's volume, mute,
+   * ducking and output routing (incl. "Send mix to stream").
+   */
+  getAudioContext(): AudioContext | null {
+    return this.ctx;
+  }
+
+  getMusicBusInput(): AudioNode | null {
+    return this.gainNodes.get("musicBus") ?? null;
+  }
+
   /** Returns the currently connected music HTMLAudioElement, if any. */
   getMusicElement(): HTMLAudioElement | null {
     return this.musicElement;

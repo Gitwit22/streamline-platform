@@ -150,6 +150,8 @@ The owner chose these on 2026-10-05. **Don't start them until the owner says so.
 
 ### S1. Audio: soundboard + playlist (through the mixer)
 
+**Status (2026-10-15): done.** 🎵 Audio panel in the room: playlist (queue, previous/next, seek, loop all/one/off) and soundboard pads (one-shots, overlap, stop all), per-item volume, drag and drop onto the panel or anywhere on the room, add from the content library. Engine `lib/audioDeck.ts` (tab lifetime, plays into the mixer's Music bus); files upload to the content library, layout saved at `audioDecks/{uid}` (`/api/audio-deck`). The mixer's old single-file music slot now shows the deck. Verified in Chromium with the real mixer: signal reaches the stream output, Music mute/volume apply, a library URL without CORS reports an error instead of playing silence.
+
 **Today:** the mixer has one music slot.
 - It uses a file picker and always loops, with play, stop and remove.
 - It plays through the Music channel, and viewers hear it when "Send mix to stream" is on.
