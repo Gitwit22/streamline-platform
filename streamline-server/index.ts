@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { checkEnv, publicEnvReport } from "./lib/envCheckPure";
 import express from "express";
 import cors, { type CorsOptions } from "cors";
 import cookieParser from "cookie-parser";
@@ -197,7 +198,7 @@ app.use(
     autoLogging: {
       ignore: (req: any) => {
         const url = req.url || "";
-        return url === "/api/health" || url === "/" || url === "/api";
+        return url === "/api/health" || url === "/api/health/ready" || url === "/" || url === "/api";
       },
     },
   })
@@ -405,11 +406,23 @@ app.use("/api/horizon/skills", requireAdmin, skillsIntegrationRoutes);
 app.use("/api/horizon/support/actions", requireAdmin, supportActionsRoutes);
 app.use("/api/horizon/support/tickets", requireAdmin, supportTicketsRoutes);
 
+// Readiness: 503 when a variable a core feature needs is missing or invalid.
+// Public, so it reports counts and areas only (variable names are in
+// /api/health/config for admins). Point Render's health check here to block
+// deploys that are missing configuration.
+app.get("/api/health/ready", (_req, res) => {
+  const report = checkEnv(process.env);
+  return res.status(report.ok ? 200 : 503).json(publicEnvReport(report));
+});
+
 // Protected config health (helps diagnose env drift across Render services)
 app.get("/api/health/config", requireAdmin, (req, res) => {
   const asBool = (v: any) => (v ? true : false);
+  const report = checkEnv(process.env);
   return res.json({
-    ok: true,
+    ok: report.ok,
+    missingRequired: report.missingRequired,
+    missingRecommended: report.missingRecommended,
     env: String(process.env.NODE_ENV || "development"),
     tokenGrants: "v3-no-sources",
     hasLivekitUrl: asBool(process.env.LIVEKIT_URL),
@@ -982,6 +995,19 @@ const server = app.listen(PORT, () => {
     },
     `Server listening on http://localhost:${PORT}`
   );
+
+  // Configuration check (names only, never values). Logged, not fatal: the
+  // readiness endpoint is what blocks a misconfigured deploy.
+  {
+    const report = checkEnv(process.env);
+    for (const p of report.missingRequired) {
+      logger.error({ area: p.area, variables: p.variables, problem: p.problem, detail: p.detail }, `Config: ${p.impact}`);
+    }
+    for (const p of report.missingRecommended) {
+      logger.warn({ area: p.area, variables: p.variables, problem: p.problem, detail: p.detail }, `Config: ${p.impact}`);
+    }
+    if (report.ok && report.missingRecommended.length === 0) logger.info("Config check passed: all expected variables are set");
+  }
 
   // Egress compositor template origin: without it every output (RTMP, HLS,
   // recordings, Instagram) falls back to LiveKit's built-in layouts and

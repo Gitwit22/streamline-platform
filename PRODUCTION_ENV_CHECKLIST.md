@@ -348,3 +348,19 @@ If something is wrong after launch:
 
 **Last Updated**: February 14, 2026  
 **Review Before Every Deploy**: Yes, every time!
+
+---
+
+## Automated check
+
+After deploying, open `https://<backend>/api/health/ready`:
+
+- `200 {"ok":true,...}`: every required variable is set.
+- `503 {"ok":false,...}`: something required is missing. The response lists the
+  affected areas (e.g. `storage`, `livekit`); the variable names are in the
+  server's startup log and in `/api/health/config` (admin sign-in).
+
+The rules live in `streamline-server/lib/envCheckPure.ts`. Setting Render's
+Health Check Path to `/api/health/ready` makes Render refuse a deploy that is
+missing required configuration (the previous version stays live).
+
