@@ -42,6 +42,8 @@ import {
 import { voiceRoomEvent } from "../lib/horizonEvents";
 import { emitRoomStarted, emitRoomEnded, emitRoomParticipantJoined, emitRoomParticipantLeft } from "../events/emitters/roomEmitter";
 import { emitVoiceStreamStarted, emitVoiceStreamEnded } from "../events/emitters/voiceEmitter";
+import { mayApplyRecordingStatus, recordingOutcomeFromEgress } from "../lib/recordingFinalizePure";
+import { egressStatusName } from "../lib/streamSummaryPure";
 
 const router = express.Router();
 
@@ -1179,21 +1181,25 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
     // =========================================================================
     // READY GATING: Check for errors AND verify file exists in R2
     // =========================================================================
-    const egressStatus = String(egressInfo?.status || "").toUpperCase();
+    // Readable name for logs / livekitStatus ("COMPLETE", not the enum number).
+    const egressStatus = (egressStatusName(egressInfo?.status) || String(egressInfo?.status || "")).toUpperCase();
     const egressError = egressInfo?.error || egressInfo?.errorMessage;
     let finalStatus: string;
     let downloadReady = false;
     let fileSize: number | null = null;
     let errorMessage: string | null = null;
 
+    // The SDK parses the status as an enum number (3 = complete); compare via
+    // recordingOutcomeFromEgress, which accepts numbers and names (audit P1-2).
+    const outcome = recordingOutcomeFromEgress(egressInfo?.status, egressError);
     // Check for egress error first
     if (egressError) {
       finalStatus = "failed";
       errorMessage = `Egress error: ${egressError}`;
       console.error(`[livekit-webhook] Egress error for ${recordingId}:`, egressError);
     }
-    // Check egress status indicates completion
-    else if (egressStatus === "EGRESS_COMPLETE" || egressStatus === "COMPLETE") {
+    // Egress ended in a way that may have produced a file (complete, limit reached, aborted)
+    else if (outcome === "check_file") {
       // READY GATING: R2 HEAD check - ContentLength > 0
       console.log(`[livekit-webhook] Verifying file in R2: ${objectKey}`);
       fileSize = await r2HeadObjectSize(objectKey);
@@ -1209,7 +1215,7 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       }
     }
     // Egress failed
-    else if (egressStatus === "EGRESS_FAILED" || egressStatus === "FAILED") {
+    else if (outcome === "failed") {
       finalStatus = "failed";
       errorMessage = `Egress failed with status: ${egressStatus}`;
       console.error(`[livekit-webhook] Egress failed for ${recordingId}: ${egressStatus}`);
@@ -1256,7 +1262,21 @@ router.post("/livekit", express.raw({ type: "*/*" }), async (req, res) => {
       updates.errorMessage = errorMessage;
     }
 
-    await recordingRef.update(updates);
+    // Never downgrade: the post-stop head-check can mark the recording ready
+    // between our read above and this write (audit P1-2).
+    const applied = await db.runTransaction(async (tx) => {
+      const fresh = await tx.get(recordingRef);
+      if (!fresh.exists) return false;
+      if (!mayApplyRecordingStatus((fresh.data() as any)?.status, finalStatus as "ready" | "failed" | "processing")) {
+        return false;
+      }
+      tx.update(recordingRef, updates);
+      return true;
+    });
+    if (!applied) {
+      console.log(`[livekit-webhook] Recording ${recordingId} already finalized; not overwriting with ${finalStatus}`);
+      return res.status(200).json({ ok: true, alreadyFinalized: true, recordingId });
+    }
 
     if (finalStatus === "ready" || finalStatus === "failed") {
       recordTelemetry(finalStatus === "ready" ? "recording.completed" : "recording.failed", {

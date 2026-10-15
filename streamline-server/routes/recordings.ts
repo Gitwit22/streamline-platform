@@ -43,10 +43,11 @@ import { createSavedVideoFromRecording } from "./myContent";
 import { getCurrentStorageUsage, reserveStorageUsage } from "../usageHelper";
 import { countRecordingMinutes, recordingBillingUid, releaseRecordingStorageOnce } from "../lib/recordingUsage";
 import { requireAdmin } from "../middleware/adminAuth";
-import { DOWNLOAD_LINK_TTL_SECONDS, evaluateDownloadRules, shouldClaimStorageCount } from "../lib/mediaPure";
+import { DOWNLOAD_LINK_TTL_SECONDS, evaluateDownloadRules, shouldClaimStorageCount, toMillis } from "../lib/mediaPure";
 import { compositorUrl, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
 import { syncRoomProgramOverlay } from "../services/programOverlay";
 import { roomDisplayName } from "../lib/roomDisplayPure";
+import { recordingLockBlocks } from "../lib/recordingFinalizePure";
 import { copyViewerStatsToRecording } from "../lib/viewerStats";
 import { getPlatformFlags } from "../lib/entitlements";
 
@@ -694,6 +695,31 @@ router.post(
     const now = new Date();
     const recordingId = firestore.collection("recordings").doc().id;
 
+    // One recording at a time per room (audit P1-4): two producer tabs,
+    // host + cohost, or a reloaded tab would otherwise each start an egress.
+    // Emergency recordings keep their own one-per-user rule below.
+    if (recordingClass !== "emergency") {
+      const lockRef = firestore.collection("recordingLocks").doc(roomId);
+      const blockedBy = await firestore.runTransaction(async (tx) => {
+        const lockSnap = await tx.get(lockRef);
+        const lock = lockSnap.exists ? ((lockSnap.data() || {}) as any) : null;
+        let current: { status?: unknown; updatedAtMs?: number | null } | null = null;
+        if (lock && typeof lock.recordingId === "string" && lock.recordingId) {
+          const recSnap = await tx.get(firestore.collection("recordings").doc(lock.recordingId));
+          if (recSnap.exists) {
+            const r = (recSnap.data() || {}) as any;
+            current = { status: r.status, updatedAtMs: toMillis(r.updatedAt) };
+          }
+        }
+        if (recordingLockBlocks(lock, current, now.getTime())) return String(lock.recordingId);
+        tx.set(lockRef, { recordingId, claimedAtMs: now.getTime(), claimedBy: uid, roomId });
+        return null;
+      });
+      if (blockedBy) {
+        return res.status(409).json({ error: "recording_already_running", recordingId: blockedBy });
+      }
+    }
+
     // Best-effort: attach orgId for reporting.
     let orgId: string | null = null;
     try {
@@ -1315,86 +1341,11 @@ router.post(
     }
 
     // Best-effort post-stop verification in case webhooks are delayed or dropped
+    // (the stuck-recordings job retries later if the file isn't there yet).
     const objectKey = data.objectKey as string | undefined;
     if (objectKey) {
-      setTimeout(async () => {
-        try {
-          const size = await r2HeadObjectSize(objectKey);
-          if (size > 0) {
-            // Flip storageCounted inside a transaction: the egress_ended
-            // webhook may race us, and only the call that performs the flip
-            // may count the bytes.
-            const flip = await firestore.runTransaction(async (tx) => {
-              const freshSnap = await tx.get(recordingRef);
-              if (!freshSnap.exists) return { skip: true, claimed: false };
-              const freshData = (freshSnap.data() || {}) as any;
-              const freshStatus = String(freshData.status || "").toLowerCase();
-              if (freshStatus === "deleted" || freshStatus === "deleting") return { skip: true, claimed: false };
-              const claimed = shouldClaimStorageCount(freshData, size);
-              tx.update(recordingRef, {
-                status: "ready",
-                downloadReady: true,
-                readyAt: freshData.readyAt || new Date(),
-                fileSize: size,
-                updatedAt: new Date(),
-                ...(claimed ? { storageCounted: true } : {}),
-              });
-              return { skip: false, claimed };
-            });
-            if (flip.skip) {
-              console.warn(`[recordings/stop] head-check skipped: recording ${recordingId} missing or deleted`);
-              return;
-            }
-            const alreadyCounted = !flip.claimed;
-            if (flip.claimed) {
-              recordTelemetry("recording.completed", {
-                userId: billingUid || null,
-                roomId: typeof (data as any).roomId === "string" ? (data as any).roomId : null,
-                broadcastId: recordingId,
-                metadata: { via: "stop_head_check", fileSize: size },
-              });
-            }
-            console.log(`[recordings/stop] ✅ File confirmed via head-check: ${objectKey} (${size} bytes)`);
-
-            // Count storage for this recording (only if this call flipped storageCounted)
-            if (!alreadyCounted && billingUid) {
-              try {
-                await reserveStorageUsage(billingUid, size, {
-                  caller: "recordings.stop.headcheck",
-                  recordingId,
-                  objectKey,
-                });
-              } catch (e: any) {
-                console.error("[recordings/stop] storage accounting failed:", {
-                  userId: billingUid, recordingId, size, error: e?.message || e,
-                });
-              }
-            }
-
-            // Auto-create saved_video so recording appears in My Content
-            try {
-              const roomName = typeof data.roomName === "string" ? data.roomName : "";
-              const videoUrl = typeof data.videoUrl === "string" ? data.videoUrl : "";
-              const thumbUrl = typeof data.thumbnailUrl === "string" ? data.thumbnailUrl : null;
-              const durationSec = typeof data.durationSeconds === "number" ? data.durationSeconds : null;
-              await createSavedVideoFromRecording({
-                userId: accountUid,
-                recordingId,
-                title: roomName || data.title || "Untitled Recording",
-                playbackUrl: videoUrl,
-                thumbnailUrl: thumbUrl,
-                durationMs: durationSec ? Math.round(durationSec * 1000) : 0,
-                fileSize: size,
-              });
-            } catch (savedErr: any) {
-              console.warn("[recordings/stop] failed to auto-create saved_video:", savedErr?.message);
-            }
-          } else {
-            console.warn(`[recordings/stop] head-check found no file yet for ${objectKey}`);
-          }
-        } catch (checkErr: any) {
-          console.warn(`[recordings/stop] head-check error for ${objectKey}:`, checkErr?.message);
-        }
+      setTimeout(() => {
+        void finalizeRecordingIfUploaded(recordingId, "stop_head_check");
       }, 4000);
     }
 
@@ -1552,6 +1503,113 @@ export type RecordingDownloadLinkOutcome = {
  * platform feature flag, ownership, strict status === "ready" + downloadReady,
  * retention expiry, paywall, and a 15-minute signed URL.
  */
+/**
+ * Marks a recording ready once its file is in storage: flips status, counts
+ * storage once (transactional storageCounted flip, which the egress_ended
+ * webhook races) and creates its My Content entry. Used 4s after stop and by
+ * the stuck-recordings job. Returns "ready", "not_found" (no file yet) or
+ * "skipped" (missing / deleted / no object key). Never throws.
+ */
+export async function finalizeRecordingIfUploaded(
+  recordingId: string,
+  via: "stop_head_check" | "stuck_sweep"
+): Promise<"ready" | "not_found" | "skipped"> {
+  const recordingRef = firestore.collection("recordings").doc(recordingId);
+  let data: any;
+  try {
+    const snap = await recordingRef.get();
+    if (!snap.exists) return "skipped";
+    data = snap.data() || {};
+  } catch (err: any) {
+    console.warn(`[recordings/finalize] read failed for ${recordingId}:`, err?.message);
+    return "skipped";
+  }
+  const objectKey = typeof data.objectKey === "string" ? data.objectKey : "";
+  if (!objectKey) return "skipped";
+  const accountUid: string = typeof data.userId === "string" ? data.userId.trim() : "";
+  const billingUid = recordingBillingUid(data, accountUid) || accountUid;
+  let result: "ready" | "not_found" | "skipped" = "not_found";
+  try {
+    const size = await r2HeadObjectSize(objectKey);
+    if (size > 0) {
+      // Flip storageCounted inside a transaction: the egress_ended
+      // webhook may race us, and only the call that performs the flip
+      // may count the bytes.
+      const flip = await firestore.runTransaction(async (tx) => {
+        const freshSnap = await tx.get(recordingRef);
+        if (!freshSnap.exists) return { skip: true, claimed: false };
+        const freshData = (freshSnap.data() || {}) as any;
+        const freshStatus = String(freshData.status || "").toLowerCase();
+        if (freshStatus === "deleted" || freshStatus === "deleting") return { skip: true, claimed: false };
+        const claimed = shouldClaimStorageCount(freshData, size);
+        tx.update(recordingRef, {
+          status: "ready",
+          downloadReady: true,
+          readyAt: freshData.readyAt || new Date(),
+          fileSize: size,
+          updatedAt: new Date(),
+          ...(claimed ? { storageCounted: true } : {}),
+        });
+        return { skip: false, claimed };
+      });
+      if (flip.skip) {
+        console.warn(`[recordings/finalize] skipped: recording ${recordingId} missing or deleted`);
+        return "skipped";
+      }
+      result = "ready";
+      const alreadyCounted = !flip.claimed;
+      if (flip.claimed) {
+        recordTelemetry("recording.completed", {
+          userId: billingUid || null,
+          roomId: typeof (data as any).roomId === "string" ? (data as any).roomId : null,
+          broadcastId: recordingId,
+          metadata: { via, fileSize: size },
+        });
+      }
+      console.log(`[recordings/stop] ✅ File confirmed via head-check: ${objectKey} (${size} bytes)`);
+
+      // Count storage for this recording (only if this call flipped storageCounted)
+      if (!alreadyCounted && billingUid) {
+        try {
+          await reserveStorageUsage(billingUid, size, {
+            caller: "recordings.stop.headcheck",
+            recordingId,
+            objectKey,
+          });
+        } catch (e: any) {
+          console.error("[recordings/stop] storage accounting failed:", {
+            userId: billingUid, recordingId, size, error: e?.message || e,
+          });
+        }
+      }
+
+      // Auto-create saved_video so recording appears in My Content
+      try {
+        const roomName = typeof data.roomName === "string" ? data.roomName : "";
+        const videoUrl = typeof data.videoUrl === "string" ? data.videoUrl : "";
+        const thumbUrl = typeof data.thumbnailUrl === "string" ? data.thumbnailUrl : null;
+        const durationSec = typeof data.durationSeconds === "number" ? data.durationSeconds : null;
+        await createSavedVideoFromRecording({
+          userId: accountUid,
+          recordingId,
+          title: roomName || data.title || "Untitled Recording",
+          playbackUrl: videoUrl,
+          thumbnailUrl: thumbUrl,
+          durationMs: durationSec ? Math.round(durationSec * 1000) : 0,
+          fileSize: size,
+        });
+      } catch (savedErr: any) {
+        console.warn("[recordings/stop] failed to auto-create saved_video:", savedErr?.message);
+      }
+    } else {
+      console.warn(`[recordings/stop] head-check found no file yet for ${objectKey}`);
+    }
+  } catch (checkErr: any) {
+    console.warn(`[recordings/stop] head-check error for ${objectKey}:`, checkErr?.message);
+  }
+  return result;
+}
+
 export async function buildRecordingDownloadLink(params: {
   uid: string | null;
   recordingId: string;

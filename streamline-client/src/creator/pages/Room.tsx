@@ -4210,11 +4210,23 @@ function RoomPage() {
         }
         console.log("✅ Recording started!");
       } catch (e) {
-        console.error("❌ Failed to start recording:", e);
-        setRecordingStatus("error");
         const anyErr: any = e as any;
         const body = anyErr?.body;
         const code = String(body?.error || body?.code || "").trim();
+        // A recording is already running in this room (another producer, or
+        // this tab before a reload): take it over so it can be stopped here.
+        const runningId = typeof body?.recordingId === "string" ? body.recordingId : "";
+        if (code === "recording_already_running" && runningId) {
+          recordingRef.current = runningId;
+          setRecordingId(runningId);
+          recordingStartRef.current = Date.now();
+          setRecordingElapsed(0);
+          setRecordingStatus("recording");
+          alert("A recording is already running in this room. It's shown here now, so you can stop it.");
+          return;
+        }
+        console.error("❌ Failed to start recording:", e);
+        setRecordingStatus("error");
         const friendly = code ? getFeatureErrorMessage(code, "recording") : null;
         alert(friendly ? `Failed to start recording: ${friendly}` : `Failed to start recording: ${anyErr?.message || "Unknown error"}`);
       } finally {

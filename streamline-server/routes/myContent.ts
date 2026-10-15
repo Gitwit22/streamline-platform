@@ -137,7 +137,18 @@ export async function createSavedVideoFromRecording(opts: {
     createdAt: now,
   };
 
-  const ref = await db.collection("saved_videos").add(savedVideo);
+  // Deterministic id + create(): the egress webhook and the post-stop
+  // head-check can both get here for the same recording (the query above
+  // isn't transactional), and only one row may be created.
+  const ref = db.collection("saved_videos").doc(`rec_${recordingId}`);
+  try {
+    await ref.create(savedVideo);
+  } catch (err: any) {
+    if (err?.code === 6 || /already exists/i.test(String(err?.message || ""))) {
+      return { id: ref.id, duplicate: true };
+    }
+    throw err;
+  }
   console.log(`[my-content] Auto-created saved_video ${ref.id} for recording ${recordingId}`);
   return { id: ref.id, duplicate: false };
 }

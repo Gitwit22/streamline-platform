@@ -3,6 +3,7 @@
  *
  *   job                     interval   what
  *   recording-enforcement   1 min      stop recordings past autoStopAt (per-clip limit)
+ *   stuck-recordings        10 min     finalize recordings stuck in "processing" (file in storage), fail after 6h
  *   streaming-meter-sweep   2 min      bill / close / cap streaming outputs (STREAMING_METER_SWEEP_MS)
  *   stale-hls               5 min      purge orphaned HLS sessions
  *   media-purge             1 h        emergency expiry, deleteAfterMs, 24h retention
@@ -16,6 +17,7 @@
  */
 export * from "./framework";
 export { recordingEnforcementJob, enforceRecordingLimits } from "./recordingEnforcement";
+export { stuckRecordingsJob, sweepStuckRecordings } from "./stuckRecordings";
 export { streamingMeterJob, streamingMeterIntervalMs } from "./streamingMeterJob";
 export { staleHlsJob, purgeStaleHls } from "./staleHls";
 export {
