@@ -166,6 +166,26 @@ export async function presignGetQuiet(remotePath: string, expiresIn: number): Pr
 }
 
 /**
+ * Presigned GET that forces a download with the given Content-Disposition /
+ * Content-Type (R2 honours the S3 response-* overrides). Used for room-chat
+ * attachments so shared files are never rendered inline from our bucket.
+ */
+export async function presignDownloadWithDisposition(
+  remotePath: string,
+  expiresIn: number,
+  contentDisposition: string,
+  contentType?: string
+): Promise<string> {
+  const command = new GetObjectCommand({
+    Bucket: R2_BUCKET,
+    Key: remotePath,
+    ResponseContentDisposition: contentDisposition,
+    ...(contentType ? { ResponseContentType: contentType } : {}),
+  });
+  return getSignedUrl(s3Client, command, { expiresIn });
+}
+
+/**
  * Small text object (HLS playlists). Returns null when missing.
  */
 export async function getObjectText(remotePath: string): Promise<string | null> {

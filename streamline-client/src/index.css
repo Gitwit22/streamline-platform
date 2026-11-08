@@ -287,6 +287,71 @@ button:focus-visible {
   background: rgba(30, 41, 59, 0.9);
 }
 
+/* Persisted room chat (RoomChat.tsx): toggle under the view toggle and a
+   side panel next to the stage, in both Program and Gallery views. */
+.sl-stage-chat-toggle {
+  position: absolute;
+  top: 44px;
+  left: 10px;
+  z-index: 15;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(15, 23, 42, 0.75);
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.sl-stage-chat-toggle:hover,
+.sl-stage-chat-toggle[aria-pressed="true"] {
+  background: rgba(30, 41, 59, 0.9);
+}
+.sl-stage-chat-badge {
+  min-width: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+.sl-stage-chat {
+  width: 320px;
+  max-width: 85vw;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  box-sizing: border-box;
+  background: #0f172a;
+  border-left: 1px solid rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.9);
+}
+@media (max-width: 640px) {
+  .sl-stage-shell {
+    position: relative;
+  }
+  .sl-stage-chat {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 30;
+  }
+}
+/* Gallery uses LiveKit's prefab VideoConference, which has its own
+   (non-persisted) chat button + panel; the persisted chat replaces it. */
+.sl-gallery-stage .lk-chat-toggle,
+.sl-gallery-stage .lk-chat {
+  display: none !important;
+}
+
 /* ======================================
    SCREEN SHARE PERMISSION & LAYOUT GATING
    ====================================== */

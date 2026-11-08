@@ -28,8 +28,14 @@ export interface UploadedDiskFile {
 
 export const MAX_UPLOAD_BYTES = 500 * 1024 * 1024; // 500 MB
 
-export function createDiskUpload(maxBytes: number = MAX_UPLOAD_BYTES) {
+export function createDiskUpload(
+  maxBytes: number = MAX_UPLOAD_BYTES,
+  opts: { defParamCharset?: string } = {}
+) {
   return multer({
+    // Default (unset) keeps multer's latin1 filename decoding for existing
+    // callers; pass "utf8" to get non-ASCII file names intact.
+    ...(opts.defParamCharset ? { defParamCharset: opts.defParamCharset } : {}),
     storage: multer.diskStorage({
       destination: (_req, _file, cb) => cb(null, os.tmpdir()),
       // Random name: never trust originalname for a filesystem path.

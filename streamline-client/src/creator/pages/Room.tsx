@@ -60,6 +60,7 @@ import {
   type RoomPermissions,
 } from "../../lib/roomJoin";
 import RoleOverlay from "../components/RoleOverlay";
+import { LiveKitRoomChatProvider } from "../components/RoomChat";
 import { JoinGateLayout, RoomUnavailableCard, WaitingForHostCard } from "../components/RoomJoinGate";
 import StreamSetupModalV2 from "../components/StreamSetupModal";
 import { ErrorBoundary } from "../../components/ErrorBoundary";
@@ -1518,6 +1519,14 @@ function LiveKitShell({
         screenShareRouteMode={screenShareMode}
         screenShareRouteNonce={screenShareRouteNonce}
       >
+      {/* One persisted chat for the room (stage panel + dashboard). Viewers
+          (subscribe-only) had no chat before and still don't. */}
+      <LiveKitRoomChatProvider
+        roomId={roomId || ""}
+        roomAccessToken={roomAccessToken || ""}
+        enabled={!isViewer}
+        canUpload={!isViewer}
+      >
       <div ref={mediaRootRef} style={{ width: "100%", height: "100%", position: "relative" }}>
         <LiveKitDebugLogger />
         <VideoElementMonitor />
@@ -1680,6 +1689,7 @@ function LiveKitShell({
           />
         )}
       </div>
+      </LiveKitRoomChatProvider>
       </ProgramStateProvider>
     </LiveKitRoom>
   );

@@ -14,7 +14,8 @@
  * (financial records other people's access depends on) and audit logs.
  */
 import { firestore, auth } from "../../firebaseAdmin";
-import { deleteFile, deletePrefix } from "../storageClient";
+import { deleteFile, deletePrefix, isR2Configured } from "../storageClient";
+import { isKeySafeId, roomAttachmentPrefix } from "../chatAttachmentsPure";
 
 const BATCH = 300;
 const PREFIX_BATCH = 5000;
@@ -78,13 +79,16 @@ export async function purgeUserOwnedData(uid: string): Promise<UserDataPurgeResu
     await step(legacy, () => deleteQueryDocs(firestore.collection(legacy).where("userId", "==", uid)));
   }
 
-  // Rooms (recursive: controls, chat sessions + messages, presence, viewers),
+  // Rooms (recursive: controls, chat sessions + messages, presence, viewers;
+  // chat file attachments in R2 by prefix),
   // their invites and recording locks.
   await step("rooms", () =>
     deleteQueryDocs(firestore.collection("rooms").where("ownerId", "==", uid), async (d) => {
       const invites = await firestore.collection("roomInvites").where("roomId", "==", d.id).limit(BATCH).get();
       for (const inv of invites.docs) await inv.ref.delete();
       await firestore.collection("recordingLocks").doc(d.id).delete();
+      // Files shared in this room's chat (R2). Throws → step fails → retried.
+      if (isR2Configured() && isKeySafeId(d.id)) await deletePrefix(roomAttachmentPrefix(d.id), PREFIX_BATCH);
     })
   );
 

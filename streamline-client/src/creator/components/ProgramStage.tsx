@@ -13,7 +13,6 @@
  */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import {
-  Chat,
   ControlBar,
   LayoutContextProvider,
   ParticipantTile,
@@ -21,8 +20,9 @@ import {
   useRoomContext,
   useRoomInfo,
   type TrackReferenceOrPlaceholder,
-  type WidgetState,
 } from "@livekit/components-react";
+import { StageChatPanel } from "./RoomChat";
+import { useRoomChatContext } from "../hooks/useRoomChat";
 import { RoomEvent, Track, type Participant } from "livekit-client";
 import { apiGetProgramState, apiUpdateProgramState } from "../../lib/api";
 import {
@@ -410,9 +410,18 @@ export default function ProgramStage() {
   const state = ctx?.state ?? null;
   const [view, setView] = useState<"program" | "gallery">(readView);
   const { ref, box } = useFittedBox(16 / 9);
-  // Chat side panel for the program view, wired like LiveKit's VideoConference
-  // (Gallery view): the ControlBar's Chat button toggles widget.showChat.
-  const [widget, setWidget] = useState<WidgetState>({ showChat: false, unreadMessages: 0 });
+  // Persisted room chat (RoomChatProvider in Room.tsx) replaces LiveKit's
+  // data-channel <Chat>, whose messages vanished on reload / view switch and
+  // never reached late joiners. One side panel serves both views; its state
+  // lives in the provider, so toggling the panel or the view keeps history.
+  const chat = useRoomChatContext();
+  const chatAvailable = !!chat?.enabled;
+  const [chatOpen, setChatOpen] = useState(false);
+  const markChatRead = chat?.markRead;
+  const chatMessageCount = chat?.messages.length ?? 0;
+  useEffect(() => {
+    if (chatOpen) markChatRead?.();
+  }, [chatOpen, chatMessageCount, markChatRead]);
 
   const toggleView = () => {
     setView((v) => {
@@ -443,17 +452,42 @@ export default function ProgramStage() {
     </button>
   );
 
+  const unread = chatAvailable && !chatOpen ? chat!.unreadCount : 0;
+  const chatToggle = chatAvailable ? (
+    <button
+      type="button"
+      className="sl-stage-chat-toggle"
+      data-testid="stage-chat-toggle"
+      aria-pressed={chatOpen}
+      onClick={() => setChatOpen((o) => !o)}
+      title={chatOpen ? "Hide chat" : "Show chat"}
+    >
+      Chat
+      {unread > 0 && (
+        <span className="sl-stage-chat-badge" aria-label={`${unread} unread`}>
+          {unread > 99 ? "99+" : unread}
+        </span>
+      )}
+    </button>
+  ) : null;
+  const chatPanel =
+    chatAvailable && chatOpen ? <StageChatPanel chat={chat!} onClose={() => setChatOpen(false)} /> : null;
+
   if (view === "gallery") {
     return (
-      <div className="sl-gallery-stage" style={{ width: "100%", height: "100%", position: "relative" }}>
-        <SafeVideoConference />
-        {toggle}
+      <div className="sl-stage-shell">
+        <div className="sl-gallery-stage" style={{ flex: 1, minWidth: 0, height: "100%", position: "relative" }}>
+          <SafeVideoConference />
+          {toggle}
+          {chatToggle}
+        </div>
+        {chatPanel}
       </div>
     );
   }
 
   return (
-    <LayoutContextProvider onWidgetChange={setWidget}>
+    <LayoutContextProvider>
     <div className="sl-stage-shell">
     <div className="sl-stage-root" data-testid="program-stage">
       <div className="sl-stage-area" ref={ref}>
@@ -472,10 +506,11 @@ export default function ProgramStage() {
           <OverlayLogo overlay={ctx?.overlay ?? null} shortSidePx={Math.min(box.width, box.height)} />
         </div>
         {toggle}
+        {chatToggle}
       </div>
-      <ControlBar controls={{ chat: true }} />
+      <ControlBar controls={{ chat: false }} />
     </div>
-    <Chat style={{ display: widget.showChat ? "grid" : "none" }} />
+    {chatPanel}
     </div>
     <RoomAudioRenderer />
     </LayoutContextProvider>

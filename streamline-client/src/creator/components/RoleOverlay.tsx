@@ -5,6 +5,8 @@ import { useParticipants, useLocalParticipant, useRoomContext } from "@livekit/c
 import { normalizeUiRolePresetId, isParticipantHidden, extractPresenceMetadata, presenceModeLabel } from "../../lib/roles";
 import { apiFetch, apiFetchAuth } from "../../lib/api";
 import { encodeReconnectMediaMessage, reconnectMedia } from "../../lib/mediaRecovery";
+import { ChatComposer, ChatMessageList } from "./RoomChat";
+import { useRoomChat, useRoomChatContext, type RoomChatState } from "../hooks/useRoomChat";
 
 // Normalize API base to avoid trailing slashes that cause "//api/..." URLs
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
@@ -795,66 +797,11 @@ function ParticipantPanel({
   );
 }
 
-/* ── localStorage cache helpers for chat persistence ────────────────── */
-const CHAT_CACHE_PREFIX = "sl_chat_";
-const CHAT_CACHE_MAX_AGE_MS = 12 * 60 * 60 * 1000; // 12 hours — matches server session TTL
-
-type ChatMsg = {
-  id: string;
-  text: string;
-  createdAtMs: number | null;
-  sender?: { name?: string | null; role?: string | null };
-};
-
-function chatCacheKey(roomId: string): string {
-  return `${CHAT_CACHE_PREFIX}${roomId}`;
-}
-
-function readChatCache(roomId: string): { sessionId: string; messages: ChatMsg[] } | null {
-  try {
-    const raw = localStorage.getItem(chatCacheKey(roomId));
-    if (!raw) return null;
-    const parsed = JSON.parse(raw);
-    // Expire stale caches
-    if (
-      typeof parsed?.ts === "number" &&
-      Date.now() - parsed.ts > CHAT_CACHE_MAX_AGE_MS
-    ) {
-      localStorage.removeItem(chatCacheKey(roomId));
-      return null;
-    }
-    if (!parsed?.sessionId || !Array.isArray(parsed?.messages)) return null;
-    return { sessionId: parsed.sessionId, messages: parsed.messages };
-  } catch {
-    return null;
-  }
-}
-
-function writeChatCache(
-  roomId: string,
-  sessionId: string,
-  messages: ChatMsg[],
-): void {
-  try {
-    // Only keep the last 200 messages in cache to keep storage bounded
-    const capped = messages.slice(-200);
-    localStorage.setItem(
-      chatCacheKey(roomId),
-      JSON.stringify({ sessionId, messages: capped, ts: Date.now() }),
-    );
-  } catch {
-    // localStorage full or unavailable — silently ignore
-  }
-}
-
-function clearChatCache(roomId: string): void {
-  try {
-    localStorage.removeItem(chatCacheKey(roomId));
-  } catch {
-    // ignore
-  }
-}
-
+/**
+ * Dashboard chat section. Uses the room-wide chat state from RoomChatProvider
+ * (Room.tsx) so it shows the same persisted messages as the stage chat panel;
+ * falls back to its own instance when rendered outside a provider.
+ */
 function ChatPanel({
   roomId,
   roomAccessToken,
@@ -866,306 +813,47 @@ function ChatPanel({
   displayName?: string;
   allowEndSession: boolean;
 }) {
-  // Hydrate from localStorage cache immediately (before any async fetch)
-  const cached = React.useMemo(() => readChatCache(roomId), [roomId]);
-
-  const [sessionId, setSessionId] = React.useState<string | null>(cached?.sessionId ?? null);
-  const [loading, setLoading] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const [messages, setMessages] = React.useState<ChatMsg[]>(cached?.messages ?? []);
-  const [draft, setDraft] = React.useState("");
-  const bottomRef = React.useRef<HTMLDivElement | null>(null);
-  const eventSourceRef = React.useRef<EventSource | null>(null);
-  const seenIdsRef = React.useRef<Set<string>>(
-    new Set(cached?.messages?.map((m) => m.id) ?? []),
+  const shared = useRoomChatContext();
+  if (shared && shared.enabled) {
+    return <ChatPanelView chat={shared} allowEndSession={allowEndSession} />;
+  }
+  return (
+    <StandaloneChatPanel
+      roomId={roomId}
+      roomAccessToken={roomAccessToken}
+      displayName={displayName}
+      allowEndSession={allowEndSession}
+    />
   );
-  const reconnectTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+}
 
-  // Persist messages to localStorage whenever they change
-  React.useEffect(() => {
-    if (sessionId && messages.length > 0) {
-      writeChatCache(roomId, sessionId, messages);
-    }
-  }, [roomId, sessionId, messages]);
+function StandaloneChatPanel(props: {
+  roomId: string;
+  roomAccessToken: string;
+  displayName?: string;
+  allowEndSession: boolean;
+}) {
+  const chat = useRoomChat({
+    roomId: props.roomId,
+    roomAccessToken: props.roomAccessToken,
+    displayName: props.displayName,
+    canUpload: true,
+  });
+  return <ChatPanelView chat={chat} allowEndSession={props.allowEndSession} />;
+}
 
-  const loadSessionAndHistory = React.useCallback(async () => {
-    if (!roomId || !roomAccessToken) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const sessionRes = await apiFetch(
-        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/session`,
-        {
-          method: "GET",
-          headers: {
-            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
-          },
-        },
-        { allowNonOk: true }
-      );
-      const sessionText = await sessionRes.text();
-      const sessionData = sessionText ? JSON.parse(sessionText) : {};
-      if (!sessionRes.ok) {
-        setError(sessionData?.error || "Failed to load chat session");
-        // Keep cached messages visible on error instead of clearing
-        if (!cached) {
-          setSessionId(null);
-          setMessages([]);
-        }
-        return;
-      }
-      const sid = typeof sessionData?.sessionId === "string" ? sessionData.sessionId : null;
-      setSessionId(sid);
-
-      if (!sid) {
-        setMessages([]);
-        return;
-      }
-
-      const msgRes = await apiFetch(
-        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/messages?sessionId=${encodeURIComponent(sid)}&limit=200`,
-        {
-          method: "GET",
-          headers: {
-            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
-          },
-        },
-        { allowNonOk: true }
-      );
-      const msgText = await msgRes.text();
-      const msgData = msgText ? JSON.parse(msgText) : {};
-      if (!msgRes.ok) {
-        setError(msgData?.error || "Failed to load chat messages");
-        // Keep cached messages visible on error
-        return;
-      }
-
-      const rows = Array.isArray(msgData?.messages) ? msgData.messages : [];
-      const next: ChatMsg[] = rows
-        .map((m: any) => ({
-          id: String(m?.id || ""),
-          text: typeof m?.text === "string" ? m.text : "",
-          createdAtMs: typeof m?.createdAtMs === "number" ? m.createdAtMs : null,
-          sender: m?.sender || undefined,
-        }))
-        .filter((m: any) => !!m.id);
-      setMessages(next);
-      const seen = new Set<string>();
-      next.forEach((m) => seen.add(m.id));
-      seenIdsRef.current = seen;
-    } catch (e: any) {
-      setError(e?.message || "Failed to load chat");
-      // Don't wipe session/messages on network error — keep cached data visible
-      if (!cached && messages.length === 0) {
-        setSessionId(null);
-        setMessages([]);
-      }
-    } finally {
-      setLoading(false);
-    }
-  }, [roomId, roomAccessToken]);
-
-  const connectStream = React.useCallback(
-    (sid: string) => {
-      try {
-        if (eventSourceRef.current) {
-          eventSourceRef.current.close();
-          eventSourceRef.current = null;
-        }
-        if (reconnectTimerRef.current) {
-          clearTimeout(reconnectTimerRef.current);
-          reconnectTimerRef.current = null;
-        }
-
-        // EventSource can't send headers, so we pass the room access token via query param `t`.
-        const url = `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/stream?sessionId=${encodeURIComponent(sid)}&t=${encodeURIComponent(roomAccessToken)}`;
-        const es = new EventSource(url);
-        eventSourceRef.current = es;
-
-        es.addEventListener("message", (ev: any) => {
-          try {
-            const payload = JSON.parse(ev?.data || "{}");
-            const id = typeof payload?.id === "string" ? payload.id : "";
-            if (!id) return;
-            if (seenIdsRef.current.has(id)) return;
-            seenIdsRef.current.add(id);
-
-            const nextMsg: ChatMsg = {
-              id,
-              text: typeof payload?.text === "string" ? payload.text : "",
-              createdAtMs: typeof payload?.createdAtMs === "number" ? payload.createdAtMs : null,
-              sender: payload?.sender || undefined,
-            };
-
-            setMessages((prev) => prev.concat([nextMsg]));
-          } catch {
-            // ignore
-          }
-        });
-
-        // Auto-reconnect on SSE error/close with exponential backoff
-        es.addEventListener("error", () => {
-          try {
-            es.close();
-          } catch {
-            // ignore
-          }
-          eventSourceRef.current = null;
-          // Reconnect after 3 seconds
-          reconnectTimerRef.current = setTimeout(() => {
-            connectStream(sid);
-          }, 3_000);
-        });
-      } catch {
-        // ignore
-      }
-    },
-    [roomId, roomAccessToken]
-  );
-
-  const sendMessage = React.useCallback(async () => {
-    const text = draft.trim();
-    if (!text) return;
-    setDraft("");
-    setError(null);
-    try {
-      const res = await apiFetch(
-        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/messages`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
-          },
-          body: JSON.stringify({ text, displayName: displayName || undefined }),
-        },
-        { allowNonOk: true }
-      );
-      const raw = await res.text();
-      const data = raw ? JSON.parse(raw) : {};
-      if (!res.ok) {
-        setError(data?.error || "Failed to send message");
-        return;
-      }
-      const sid = typeof data?.sessionId === "string" ? data.sessionId : null;
-      if (sid && sid !== sessionId) {
-        setSessionId(sid);
-      }
-    } catch (e: any) {
-      setError(e?.message || "Failed to send message");
-    }
-  }, [draft, roomId, roomAccessToken, displayName, sessionId]);
-
-  const endSession = React.useCallback(async () => {
-    if (!allowEndSession) return;
-    setError(null);
-    try {
-      const res = await apiFetchAuth(
-        `${API_BASE}/api/rooms/${encodeURIComponent(roomId)}/chat/session/end`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            ...(roomAccessToken ? { "x-room-access-token": roomAccessToken } : {}),
-          },
-          body: JSON.stringify({}),
-        },
-        { allowNonOk: true }
-      );
-
-      // Only clear local state if server successfully ended the session
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        const errorMsg = `Couldn't end chat session. ${res.status} ${text}`;
-        setError(errorMsg);
-        console.error("[RoleOverlay] endSession failed:", errorMsg);
-        return;
-      }
-
-      setSessionId(null);
-      setMessages([]);
-      clearChatCache(roomId);
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
-    } catch (e: any) {
-      const errorMsg = e?.message || "Failed to end session";
-      setError(errorMsg);
-      console.error("[RoleOverlay] endSession error:", e);
-    }
-  }, [allowEndSession, roomId, roomAccessToken]);
-
-  // Load session + history on mount / token change
-  React.useEffect(() => {
-    void loadSessionAndHistory();
-    return () => {
-      try {
-        if (reconnectTimerRef.current) {
-          clearTimeout(reconnectTimerRef.current);
-          reconnectTimerRef.current = null;
-        }
-        if (eventSourceRef.current) {
-          eventSourceRef.current.close();
-          eventSourceRef.current = null;
-        }
-      } catch {
-        // ignore
-      }
-    };
-  }, [loadSessionAndHistory]);
-
-  // Connect SSE stream when session is active
-  React.useEffect(() => {
-    if (!sessionId) return;
-    connectStream(sessionId);
-    return () => {
-      try {
-        if (reconnectTimerRef.current) {
-          clearTimeout(reconnectTimerRef.current);
-          reconnectTimerRef.current = null;
-        }
-        if (eventSourceRef.current) {
-          eventSourceRef.current.close();
-          eventSourceRef.current = null;
-        }
-      } catch {
-        // ignore
-      }
-    };
-  }, [sessionId, connectStream]);
-
-  // Reconnect SSE + refresh messages when tab becomes visible again
-  React.useEffect(() => {
-    const handleVisibility = () => {
-      if (document.visibilityState === "visible" && sessionId) {
-        // Refresh from server to pick up any messages missed while hidden
-        void loadSessionAndHistory();
-      }
-    };
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, [sessionId, loadSessionAndHistory]);
-
-  React.useEffect(() => {
-    try {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-    } catch {
-      // ignore
-    }
-  }, [messages.length]);
-
+function ChatPanelView({ chat, allowEndSession }: { chat: RoomChatState; allowEndSession: boolean }) {
   return (
     <Section title="Chat">
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
           <div style={{ fontSize: 12, color: "rgba(255,255,255,0.75)" }}>
-            {loading ? "Loading…" : sessionId ? "Session chat" : "Chat not started"}
+            {chat.loading ? "Loading…" : chat.sessionId ? "Session chat" : "Chat not started"}
           </div>
           <div style={{ display: "flex", gap: 8 }}>
             <button
               type="button"
-              onClick={() => void loadSessionAndHistory()}
+              onClick={() => void chat.refresh()}
               style={{
                 padding: "6px 10px",
                 borderRadius: 10,
@@ -1182,7 +870,7 @@ function ChatPanel({
             {allowEndSession && (
               <button
                 type="button"
-                onClick={() => void endSession()}
+                onClick={() => void chat.endSession()}
                 style={{
                   padding: "6px 10px",
                   borderRadius: 10,
@@ -1200,77 +888,10 @@ function ChatPanel({
           </div>
         </div>
 
-        {error && <div style={{ fontSize: 12, color: "rgba(248,113,113,0.95)" }}>{String(error)}</div>}
+        {chat.error && <div style={{ fontSize: 12, color: "rgba(248,113,113,0.95)" }}>{String(chat.error)}</div>}
 
-        <div
-          style={{
-            border: "1px solid rgba(255,255,255,0.10)",
-            background: "rgba(15,23,42,0.35)",
-            borderRadius: 12,
-            padding: 10,
-            maxHeight: 180,
-            overflowY: "auto",
-            display: "flex",
-            flexDirection: "column",
-            gap: 8,
-          }}
-        >
-          {messages.length === 0 ? (
-            <div style={{ fontSize: 12, opacity: 0.7 }}>No messages yet.</div>
-          ) : (
-            messages.map((m) => (
-              <div key={m.id} style={{ fontSize: 12, lineHeight: 1.35 }}>
-                <span style={{ color: "rgba(255,255,255,0.75)", fontWeight: 700 }}>
-                  {(m.sender?.name || m.sender?.role || "Someone") + ": "}
-                </span>
-                <span style={{ color: "rgba(255,255,255,0.92)" }}>{m.text}</span>
-              </div>
-            ))
-          )}
-          <div ref={bottomRef} />
-        </div>
-
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void sendMessage();
-              }
-            }}
-            placeholder={sessionId ? "Type a message…" : "Chat will start when you send"}
-            style={{
-              flex: 1,
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid rgba(255,255,255,0.14)",
-              background: "rgba(255,255,255,0.06)",
-              color: "rgba(255,255,255,0.9)",
-              outline: "none",
-              fontSize: 13,
-            }}
-          />
-          <button
-            type="button"
-            onClick={() => void sendMessage()}
-            disabled={!draft.trim()}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 12,
-              border: "1px solid rgba(59,130,246,0.20)",
-              background: !draft.trim() ? "rgba(59,130,246,0.08)" : "rgba(59,130,246,0.18)",
-              color: "rgba(255,255,255,0.95)",
-              fontSize: 13,
-              fontWeight: 900,
-              cursor: !draft.trim() ? "not-allowed" : "pointer",
-              opacity: !draft.trim() ? 0.6 : 1,
-            }}
-          >
-            Send
-          </button>
-        </div>
+        <ChatMessageList chat={chat} maxHeight={180} />
+        <ChatComposer chat={chat} />
       </div>
     </Section>
   );

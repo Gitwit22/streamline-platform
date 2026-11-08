@@ -6,6 +6,23 @@ import { sanitizeDisplayName } from "../lib/sanitizeDisplayName";
 import { getRoomAccess, requireRoomAccessToken } from "../middleware/roomAccessToken";
 import { chatMessageEvent, chatSessionStartEvent, chatSessionEndEvent } from "../lib/horizonEvents";
 import { emitChatMessageCreated } from "../events/emitters/chatEmitter";
+import { createDiskUpload, cleanupUploadedFile, type UploadedDiskFile } from "../lib/diskUpload";
+import {
+  deleteFile,
+  isR2Configured,
+  presignDownloadWithDisposition,
+  uploadFileFromPath,
+} from "../lib/storageClient";
+import { rateLimit, SlidingWindowLimiter } from "../lib/rateLimit";
+import {
+  CHAT_ATTACHMENT_MAX_BYTES,
+  CHAT_ATTACHMENT_URL_TTL_SECONDS,
+  attachmentContentDisposition,
+  buildAttachmentKey,
+  publicAttachment,
+  resolveAttachmentContentType,
+  sanitizeAttachmentName,
+} from "../lib/chatAttachmentsPure";
 
 const router = Router();
 
@@ -42,6 +59,24 @@ function sanitizeMessageText(input: any): string {
   // Collapse extreme whitespace spam but preserve intent.
   const collapsed = trimmed.replace(/\s{3,}/g, "  ");
   return collapsed.slice(0, MAX_MESSAGE_LEN);
+}
+
+/** Wire shape of a chat message (list + SSE). Storage keys are never exposed. */
+function serializeMessage(id: string, raw: any) {
+  const data = raw || {};
+  const attachment = publicAttachment(data.attachment);
+  return {
+    id,
+    text: typeof data.text === "string" ? data.text : "",
+    createdAtMs: timestampToMillis(data.createdAt),
+    sender: {
+      identity: typeof data.senderIdentity === "string" ? data.senderIdentity : null,
+      uid: typeof data.senderUid === "string" ? data.senderUid : null,
+      role: typeof data.senderRole === "string" ? data.senderRole : null,
+      name: typeof data.senderName === "string" ? data.senderName : null,
+    },
+    ...(attachment ? { attachment } : {}),
+  };
 }
 
 async function ensureRoomExists(roomId: string) {
@@ -272,20 +307,7 @@ router.get("/:roomId/chat/messages", requireRoomAccessToken as any, async (req: 
     const messages = messagesSnap.docs
       .slice()
       .reverse()
-      .map((d) => {
-      const data = (d.data() as any) || {};
-      return {
-        id: d.id,
-        text: typeof data.text === "string" ? data.text : "",
-        createdAtMs: timestampToMillis(data.createdAt),
-        sender: {
-          identity: typeof data.senderIdentity === "string" ? data.senderIdentity : null,
-          uid: typeof data.senderUid === "string" ? data.senderUid : null,
-          role: typeof data.senderRole === "string" ? data.senderRole : null,
-          name: typeof data.senderName === "string" ? data.senderName : null,
-        },
-      };
-    });
+      .map((d) => serializeMessage(d.id, d.data()));
 
     return res.json({ roomId: canonicalRoomId, sessionId: effectiveSessionId, messages });
   } catch (e: any) {
@@ -390,6 +412,227 @@ router.post("/:roomId/chat/messages", requireRoomAccessToken as any, async (req:
   }
 });
 
+// ── File attachments ────────────────────────────────────────────────────
+// Upload: anyone in the room except viewers (host / cohost / participant).
+// Download: anyone holding a room access token for this room (viewers too).
+// Files go to R2 under room-chat/{roomId}/{sessionId}/{messageId}/; the
+// message doc stores the key, clients only ever see name/size/type and get a
+// short-lived signed URL that forces a download.
+
+const attachmentUpload = createDiskUpload(CHAT_ATTACHMENT_MAX_BYTES, { defParamCharset: "utf8" });
+
+// 20 files / 10 min per identity per room (per process).
+const attachmentLimiter = new SlidingWindowLimiter({ windowMs: 10 * 60_000, max: 20 });
+
+function rejectViewerOrNoStorage(req: any, res: any, next: any) {
+  const access = (req as any).roomAccess;
+  if (!access || access.role === "viewer") {
+    return res.status(403).json({ error: "not_allowed" });
+  }
+  if (!isR2Configured()) {
+    return res.status(503).json({ error: "storage_unavailable" });
+  }
+  return next();
+}
+
+function receiveAttachment(req: any, res: any, next: any) {
+  attachmentUpload.single("file")(req, res, (err: any) => {
+    if (!err) return next();
+    if (err?.code === "LIMIT_FILE_SIZE") {
+      return res.status(413).json({ error: "file_too_large", maxBytes: CHAT_ATTACHMENT_MAX_BYTES });
+    }
+    return res.status(400).json({ error: "upload_failed" });
+  });
+}
+
+router.post(
+  "/:roomId/chat/attachments",
+  requireRoomAccessToken as any,
+  rejectViewerOrNoStorage,
+  rateLimit([
+    {
+      limiter: attachmentLimiter,
+      key: (req) => {
+        const a = (req as any).roomAccess;
+        return a?.roomId && a?.identity ? `chatfile:${a.roomId}:${a.identity}` : null;
+      },
+    },
+  ]),
+  receiveAttachment,
+  async (req: any, res) => {
+    const file = req.file as UploadedDiskFile | undefined;
+    try {
+      const { access, roomId: canonicalRoomId } = getRoomAccess(req);
+
+      const requestedRoomId = String(req.params.roomId || "").trim();
+      if (requestedRoomId && requestedRoomId !== canonicalRoomId) {
+        return res.status(400).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
+      }
+
+      if (!file) return res.status(400).json({ error: "file_required" });
+      if (!(file.size > 0)) return res.status(400).json({ error: "empty_file" });
+
+      const fileName = sanitizeAttachmentName(file.originalname);
+      if (!fileName) return res.status(400).json({ error: "invalid_file_name" });
+
+      // Content type comes from our allowlist, never from the client header.
+      const contentType = resolveAttachmentContentType(fileName);
+      if (!contentType) return res.status(415).json({ error: "file_type_not_allowed" });
+
+      const caption = sanitizeMessageText(req.body?.text);
+      const rawName = req.body?.displayName ?? req.body?.name;
+      const senderName = sanitizeDisplayName(String(rawName || "")).trim() || null;
+      const uid = (req as any).user?.uid || null;
+
+      await ensureRoomExists(canonicalRoomId);
+
+      const session = await getOrStartActiveSession({
+        roomId: canonicalRoomId,
+        accessRole: access.role,
+        accessIdentity: access.identity,
+        uid,
+        displayName: senderName,
+        allowAutoStart: true,
+      });
+      if (!session.sessionId) {
+        return res.status(409).json({ error: "no_active_session" });
+      }
+
+      const messageRef = firestore
+        .collection("rooms")
+        .doc(canonicalRoomId)
+        .collection("chatSessions")
+        .doc(session.sessionId)
+        .collection("messages")
+        .doc();
+
+      const key = buildAttachmentKey({
+        roomId: canonicalRoomId,
+        sessionId: session.sessionId,
+        messageId: messageRef.id,
+        fileName,
+      });
+
+      // Upload first: a message must never point at a file that isn't there.
+      await uploadFileFromPath(file.path, key, contentType);
+
+      const attachment = { key, name: fileName, size: file.size, contentType };
+      try {
+        await messageRef.set(
+          {
+            text: caption,
+            createdAt: admin.firestore.FieldValue.serverTimestamp(),
+            senderIdentity: access.identity,
+            senderUid: uid,
+            senderRole: access.role,
+            senderName,
+            attachment,
+          },
+          { merge: false }
+        );
+      } catch (e) {
+        // Don't leave an orphaned object behind if the message write failed.
+        await deleteFile(key).catch(() => undefined);
+        throw e;
+      }
+
+      const sender = { identity: access.identity, uid, role: access.role, name: senderName };
+      const publicMeta = publicAttachment(attachment);
+      const eventText = caption || `Shared a file: ${fileName}`;
+
+      // Fire-and-forget: Horizon bot + platform events (same as text messages).
+      chatMessageEvent({
+        roomId: canonicalRoomId,
+        sessionId: session.sessionId,
+        messageId: messageRef.id,
+        text: eventText,
+        sender,
+      });
+      emitChatMessageCreated({
+        roomId: canonicalRoomId,
+        entityId: messageRef.id,
+        actor: { userId: uid || access.identity, username: senderName || access.identity, role: access.role },
+        data: { sessionId: session.sessionId, text: eventText, attachment: publicMeta },
+      });
+
+      return res.json({
+        ok: true,
+        roomId: canonicalRoomId,
+        sessionId: session.sessionId,
+        message: {
+          id: messageRef.id,
+          text: caption,
+          createdAtMs: Date.now(),
+          sender,
+          attachment: publicMeta,
+        },
+      });
+    } catch (e: any) {
+      const msg = String(e?.message || e);
+      if (msg === PERMISSION_ERRORS.ROOM_NOT_FOUND) {
+        return res.status(404).json({ error: PERMISSION_ERRORS.ROOM_NOT_FOUND });
+      }
+      console.error("[roomChat] attachment upload failed", { error: msg });
+      return res.status(500).json({ error: "internal_error" });
+    } finally {
+      await cleanupUploadedFile(file);
+    }
+  }
+);
+
+router.get(
+  "/:roomId/chat/attachments/:sessionId/:messageId",
+  requireRoomAccessToken as any,
+  async (req: any, res) => {
+    try {
+      const { roomId: canonicalRoomId } = getRoomAccess(req);
+
+      const requestedRoomId = String(req.params.roomId || "").trim();
+      if (requestedRoomId && requestedRoomId !== canonicalRoomId) {
+        return res.status(400).json({ error: PERMISSION_ERRORS.ROOM_MISMATCH });
+      }
+
+      const sessionId = asTrimmedString(req.params.sessionId);
+      const messageId = asTrimmedString(req.params.messageId);
+      if (!sessionId || !messageId || sessionId.includes("/") || messageId.includes("/")) {
+        return res.status(400).json({ error: "invalid_attachment" });
+      }
+
+      // Always resolved under the token's room, so a token for room A can
+      // never reach room B's files.
+      const snap = await firestore
+        .collection("rooms")
+        .doc(canonicalRoomId)
+        .collection("chatSessions")
+        .doc(sessionId)
+        .collection("messages")
+        .doc(messageId)
+        .get();
+
+      const attachment = snap.exists ? (snap.data() as any)?.attachment : null;
+      if (!attachment || typeof attachment.key !== "string" || !attachment.key) {
+        return res.status(404).json({ error: "attachment_not_found" });
+      }
+      if (!isR2Configured()) {
+        return res.status(503).json({ error: "storage_unavailable" });
+      }
+
+      const url = await presignDownloadWithDisposition(
+        attachment.key,
+        CHAT_ATTACHMENT_URL_TTL_SECONDS,
+        attachmentContentDisposition(String(attachment.name || "file")),
+        typeof attachment.contentType === "string" ? attachment.contentType : undefined
+      );
+
+      res.setHeader("Cache-Control", "no-store");
+      return res.json({ url, expiresInSeconds: CHAT_ATTACHMENT_URL_TTL_SECONDS, ...publicAttachment(attachment) });
+    } catch (e: any) {
+      console.error("[roomChat] attachment url failed", { error: String(e?.message || e) });
+      return res.status(500).json({ error: "internal_error" });
+    }
+  }
+);
+
 router.get("/:roomId/chat/stream", requireRoomAccessToken as any, async (req: any, res) => {
   try {
     const { roomId: canonicalRoomId } = getRoomAccess(req);
@@ -449,18 +692,7 @@ router.get("/:roomId/chat/stream", requireRoomAccessToken as any, async (req: an
             });
 
           for (const d of added) {
-            const data = (d.data() as any) || {};
-            send("message", {
-              id: d.id,
-              text: typeof data.text === "string" ? data.text : "",
-              createdAtMs: timestampToMillis(data.createdAt),
-              sender: {
-                identity: typeof data.senderIdentity === "string" ? data.senderIdentity : null,
-                uid: typeof data.senderUid === "string" ? data.senderUid : null,
-                role: typeof data.senderRole === "string" ? data.senderRole : null,
-                name: typeof data.senderName === "string" ? data.senderName : null,
-              },
-            });
+            send("message", serializeMessage(d.id, d.data()));
           }
           return; // After emitting ordered initial replay, exit this callback
         }
@@ -469,18 +701,7 @@ router.get("/:roomId/chat/stream", requireRoomAccessToken as any, async (req: an
         for (const change of changes) {
           if (change.type !== "added") continue;
           const d = change.doc;
-          const data = (d.data() as any) || {};
-          send("message", {
-            id: d.id,
-            text: typeof data.text === "string" ? data.text : "",
-            createdAtMs: timestampToMillis(data.createdAt),
-            sender: {
-              identity: typeof data.senderIdentity === "string" ? data.senderIdentity : null,
-              uid: typeof data.senderUid === "string" ? data.senderUid : null,
-              role: typeof data.senderRole === "string" ? data.senderRole : null,
-              name: typeof data.senderName === "string" ? data.senderName : null,
-            },
-          });
+          send("message", serializeMessage(d.id, d.data()));
         }
       },
       (err) => {
