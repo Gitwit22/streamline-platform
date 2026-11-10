@@ -9,12 +9,20 @@ import {
   type PlaybackGate,
 } from "../lib/playbackAccess";
 
-export type PlaybackTarget = { kind: "channel"; id: string } | { kind: "room"; id: string };
+/**
+ * `eventId` (PPV event pages): the server authorizes against THAT event —
+ * the broadcast must be bound to it and the viewer must hold its ticket.
+ */
+export type PlaybackTarget = { kind: "channel"; id: string } | { kind: "room"; id: string; eventId?: string | null };
 
-export type PlaybackFetcher = (path: string) => Promise<{ status: number; body: any }>;
+export type PlaybackFetcher = (path: string, body?: Record<string, unknown>) => Promise<{ status: number; body: any }>;
 
-const defaultFetcher: PlaybackFetcher = async (path) => {
-  const res = await apiFetchOptionalAuth(path, { method: "POST", body: "{}", headers: { "Content-Type": "application/json" } });
+const defaultFetcher: PlaybackFetcher = async (path, payload) => {
+  const res = await apiFetchOptionalAuth(path, {
+    method: "POST",
+    body: JSON.stringify(payload || {}),
+    headers: { "Content-Type": "application/json" },
+  });
   const body = await res.json().catch(() => null);
   return { status: res.status, body };
 };
@@ -55,7 +63,8 @@ export function usePlaybackAuthorization(opts: {
   const tokenRef = useRef<string | null>(null);
   const seqRef = useRef(0);
 
-  const targetKey = target ? `${target.kind}:${target.id}` : "";
+  const targetEventId = target && target.kind === "room" ? target.eventId || null : null;
+  const targetKey = target ? `${target.kind}:${target.id}:${targetEventId || ""}` : "";
 
   const refresh = useCallback(async (): Promise<PlaybackGate> => {
     if (!target || !active) return { kind: "idle" };
@@ -63,7 +72,10 @@ export function usePlaybackAuthorization(opts: {
     setGate((g) => (g.kind === "granted" ? g : { kind: "pending" }));
     let next: PlaybackGate;
     try {
-      const { status, body } = await fetcherRef.current(playbackPath(target));
+      const { status, body } = await fetcherRef.current(
+        playbackPath(target),
+        targetEventId ? { eventId: targetEventId } : {}
+      );
       next = interpretPlaybackResponse(status, body, API_BASE);
     } catch {
       next = { kind: "unavailable", message: "Playback is temporarily unavailable. Retrying…" };

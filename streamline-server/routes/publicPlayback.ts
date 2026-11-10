@@ -25,13 +25,21 @@ import { decideViewerAccess } from "../lib/viewerAccess";
 import { getDeviceId } from "../lib/viewerDevice";
 import { deviceKeyFor } from "../lib/viewerEntitlementsPure";
 import { findActivePpvEntitlement, grantPpvEntitlement } from "../lib/viewerEntitlements";
-import { findClaimedCodeForDevice, getPurchase } from "../lib/monetization";
+import { findClaimedCodeForDevice, getMonetizedEvent, getPurchase, type MonetizedEvent } from "../lib/monetization";
+import { decidePpvPlayback, effectiveEventStatus } from "../lib/ppvLifecyclePure";
 import { getEffectiveEntitlements } from "../lib/effectiveEntitlements";
 import { checkFeature } from "../lib/entitlements";
 import { issuePlayback } from "../lib/hlsPlayback";
 import { SlidingWindowLimiter, clientIp, rateLimit } from "../lib/rateLimit";
 
 const router = Router();
+
+const PPV_DENY_MESSAGES: Record<string, string> = {
+  ppv_unavailable: "Tickets for this stream are not on sale right now.",
+  ppv_event_ended: "This event has ended.",
+  ppv_broadcast_unassigned: "This stream isn't available right now. The host has been notified.",
+  event_not_found: "This event isn't on this channel.",
+};
 
 const playbackIpLimiter = new SlidingWindowLimiter({ windowMs: 60_000, max: 240 });
 const limit = rateLimit([{ limiter: playbackIpLimiter, key: (req) => `ip:${clientIp(req)}` }]);
@@ -97,15 +105,90 @@ async function authorizeRoomPlayback(req: Request, res: Response, roomId: string
 
   let entitlementId: string | null = null;
   let ppvSalesOpen = false;
+  const common = { mode: access.mode, status: streamStatus, roomId, ...extra };
+
+  // ── Pay-per-view: scoped to ONE event ─────────────────────────────
+  // Playback needs: the requested event belongs to this room/channel, it has
+  // not ended, the running protected broadcast is bound to it, and the viewer
+  // holds a ticket for it. A ticket for an earlier show never reaches a later
+  // show on the same room. No "newest event" fallback.
   if (access.mode === "pay_per_view" && !isHost) {
-    const eventId = resolved.ppvEvent?.id || access.ppvEventId || null;
-    if (eventId) {
-      entitlementId = await findPpvEntitlement(resolved, eventId, { uid, rawDeviceId: getDeviceId(req, res) });
+    const requestedEventId = typeof req.body?.eventId === "string" ? req.body.eventId.trim() : "";
+    let event: MonetizedEvent | null = null;
+    let eventInRoom = false;
+    if (requestedEventId) {
+      if (!looksLikeId(requestedEventId)) return res.status(400).json({ error: "invalid_event_id" });
+      event = await getMonetizedEvent(requestedEventId);
+      eventInRoom = !!event && (event.roomId === resolved.roomId || (!!resolved.homeRoomId && event.roomId === resolved.homeRoomId));
+    } else {
+      // Channel/room page without an event: the running broadcast's event,
+      // else the one event on sale (see resolver).
+      event = resolved.broadcastEvent || resolved.ppvEvent;
+      eventInRoom = !!event;
     }
-    if (!entitlementId && resolved.ownerUid) {
-      const ent = await getEffectiveEntitlements(resolved.ownerUid);
-      ppvSalesOpen = checkFeature(ent, "monetization").allowed && checkFeature(ent, "payPerView").allowed;
+
+    if (event && eventInRoom) {
+      entitlementId = await findPpvEntitlement(resolved, event.id, { uid, rawDeviceId: getDeviceId(req, res) });
+      if (!entitlementId && resolved.ownerUid) {
+        const ent = await getEffectiveEntitlements(resolved.ownerUid);
+        ppvSalesOpen = checkFeature(ent, "monetization").allowed && checkFeature(ent, "payPerView").allowed;
+      }
     }
+
+    const ppv = decidePpvPlayback({
+      isHost: false,
+      event: event as any,
+      eventInRoom,
+      broadcast: resolved.broadcast,
+      hasTicket: !!entitlementId,
+      salesOpen: ppvSalesOpen,
+    });
+    const eventCommon = { ...common, eventId: event?.id ?? null, eventStatus: event ? effectiveEventStatus(event as any) : null };
+
+    if (ppv.kind === "checkout") {
+      return res.status(402).json({
+        ok: false,
+        error: "checkout_required",
+        message: "Buy a ticket to watch this stream.",
+        checkoutRequired: true,
+        checkout: {
+          eventId: event!.id,
+          eventName: event!.name,
+          monetizationMode: event!.monetizationMode,
+          currency: event!.currency,
+          fixedAmountCents: event!.fixedAmountCents ?? null,
+          pwywMinCents: event!.pwywMinCents ?? null,
+        },
+        ...eventCommon,
+      });
+    }
+    if (ppv.kind === "deny") {
+      return res.status(ppv.status).json({ ok: false, error: ppv.error, message: PPV_DENY_MESSAGES[ppv.error], ...eventCommon });
+    }
+    if (ppv.kind === "wait" || !live) {
+      return res.json({
+        ok: true,
+        via: "entitlement",
+        playbackUrl: null,
+        expiresAt: null,
+        protected: true,
+        waiting: ppv.kind === "wait" ? ppv.reason : "offline",
+        ...eventCommon,
+      });
+    }
+    const issued = issuePlayback({ roomId, hls, mode: access.mode, entitlementId });
+    if ("error" in issued) {
+      console.error("[playback] HLS_PLAYBACK_SECRET missing; refusing protected playback", { roomId });
+      return res.status(503).json({ error: issued.error, ...eventCommon });
+    }
+    return res.json({
+      ok: true,
+      via: "entitlement",
+      playbackUrl: issued.playbackUrl,
+      expiresAt: issued.expiresAt,
+      protected: issued.protected,
+      ...eventCommon,
+    });
   }
 
   const decision = decideViewerAccess({
@@ -117,7 +200,6 @@ async function authorizeRoomPlayback(req: Request, res: Response, roomId: string
     subscriberProductAvailable: false,
   });
 
-  const common = { mode: access.mode, status: streamStatus, roomId, ...extra };
   if ("error" in decision) {
     return res.status(decision.status).json({
       ok: false,

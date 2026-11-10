@@ -206,7 +206,8 @@ async function recordMonetizationLedgerAndEntitlement(
   type: "access" | "donation",
   amountTotal: number,
   currency: string,
-  paymentIntentId: string | null
+  paymentIntentId: string | null,
+  opts: { grantAccess: boolean } = { grantAccess: true }
 ): Promise<void> {
   const { getMonetizedEvent } = await import("../lib/monetization.js");
   const { recordLedgerEntry } = await import("../lib/revenueLedger.js");
@@ -242,7 +243,7 @@ async function recordMonetizationLedgerAndEntitlement(
     stripeCheckoutSessionId: session.id,
   });
 
-  if (type === "access") {
+  if (type === "access" && opts.grantAccess) {
     const deviceKey = typeof session.metadata?.viewerDevice === "string" ? session.metadata.viewerDevice : null;
     const viewerUid = typeof session.metadata?.viewerUid === "string" ? session.metadata.viewerUid : null;
     const ids = await grantPpvEntitlement({
@@ -256,6 +257,30 @@ async function recordMonetizationLedgerAndEntitlement(
     });
     console.log("[stripe-webhook] Viewer entitlement granted", { eventId, purchaseId, entitlements: ids.length });
   }
+}
+
+/** ppv.ticket.refunded for the n8n email flow (best effort). */
+async function notifyTicketReversal(
+  target: { eventId: string; purchaseId: string },
+  status: "refunded" | "disputed"
+): Promise<void> {
+  const { getMonetizedEvent, getPurchase } = await import("../lib/monetization.js");
+  const [ev, purchase] = await Promise.all([
+    getMonetizedEvent(target.eventId),
+    getPurchase(target.eventId, target.purchaseId).catch(() => null),
+  ]);
+  if (!ev || !purchase || purchase.type !== "access") return;
+  const { getCreatorContact } = await import("../lib/creatorContact.js");
+  const { emitPpvTicketRefunded } = await import("../events/emitters/commerceEmitter.js");
+  emitPpvTicketRefunded({
+    ev: { id: ev.id, name: ev.name, roomId: ev.roomId || null, startsAt: ev.startsAt ?? null },
+    creator: await getCreatorContact(String(ev.ownerUid || "")),
+    purchaseId: purchase.id,
+    amountCents: purchase.amountCents,
+    currency: purchase.currency,
+    buyerEmail: purchase.payerEmail ?? null,
+    reason: status === "disputed" ? "dispute" : "refund",
+  });
 }
 
 /**
@@ -307,6 +332,12 @@ async function handleMonetizationSession(session: Stripe.Checkout.Session): Prom
         ? session.customer_details.email
         : null;
 
+    const viewerUid = typeof session.metadata?.viewerUid === "string" && session.metadata.viewerUid ? session.metadata.viewerUid : null;
+    const { getMonetizedEvent } = await import("../lib/monetization.js");
+    const { effectiveEventStatus } = await import("../lib/ppvLifecyclePure.js");
+    const mEvent = await getMonetizedEvent(mEventId);
+    const endedAtProcessing = !!mEvent && effectiveEventStatus(mEvent as any) === "ended";
+
     const purchase = await createPurchase({
       eventId: mEventId,
       type: mType,
@@ -315,7 +346,38 @@ async function handleMonetizationSession(session: Stripe.Checkout.Session): Prom
       stripeCheckoutSessionId: session.id,
       stripePaymentIntentId: paymentIntentId,
       payerEmail,
+      viewerUid,
+      // Checkout opened before End, paid after (or a delayed payment that
+      // settled late): money is recorded, no access is issued.
+      paidAfterEnd: mType === "access" && endedAtProcessing,
     });
+    const commerce = await import("../events/emitters/commerceEmitter.js");
+    const evRef = mEvent
+      ? { id: mEvent.id, name: mEvent.name, roomId: mEvent.roomId || null, startsAt: mEvent.startsAt ?? null }
+      : { id: mEventId, name: "", roomId: null, startsAt: null };
+
+    if (mType === "access" && purchase.paidAfterEnd) {
+      if (purchase.status === "paid") {
+        await recordMonetizationLedgerAndEntitlement(session, purchase.id, mEventId, mType, amountTotal, currency, paymentIntentId, {
+          grantAccess: false,
+        });
+      }
+      if (purchase.created) {
+        commerce.emitPpvPaymentAfterEnd({
+          ev: evRef,
+          purchaseId: purchase.id,
+          amountCents: amountTotal,
+          currency,
+          buyerEmail: payerEmail,
+          stripePaymentIntentId: paymentIntentId,
+        });
+      }
+      console.warn("[stripe-webhook] Payment confirmed after the event ended; no access issued (manual refund)", {
+        eventId: mEventId,
+        purchaseId: purchase.id,
+      });
+      return;
+    }
 
     // Stage 7: revenue ledger + viewer entitlement. Both idempotent per
     // purchase; skipped when the purchase was already refunded/disputed (a
@@ -324,10 +386,47 @@ async function handleMonetizationSession(session: Stripe.Checkout.Session): Prom
       await recordMonetizationLedgerAndEntitlement(session, purchase.id, mEventId, mType, amountTotal, currency, paymentIntentId);
     }
 
-    if (mType === "access") {
+    if (mType === "access" && purchase.created && purchase.status === "paid" && mEvent) {
+      const { getCreatorContact } = await import("../lib/creatorContact.js");
+      void getCreatorContact(String(mEvent.ownerUid || "")).then((creator) =>
+        commerce.emitPpvTicketPurchased({
+          ev: evRef,
+          creator,
+          purchaseId: purchase.id,
+          amountCents: amountTotal,
+          currency,
+          buyerEmail: payerEmail,
+          buyerIsGuest: !viewerUid,
+        })
+      );
+    }
+
+    if (mType === "access" && purchase.status === "paid") {
+      const { enqueueCodeEmail, attemptCodeEmail, discardCodeEmail } = await import("../lib/ppvCodeEmail.js");
+      const { isValidEmail } = await import("../lib/ppvCodeEmailPure.js");
+      // Guests (no account) get the code by email so they can recover access
+      // on another device after closing the checkout tab. Signed-in buyers
+      // keep the account-bound flow.
+      const guestEmail = !viewerUid && isValidEmail(payerEmail) ? payerEmail!.trim() : null;
+      const deliveryKey = `purchase_${purchase.id}`;
+
       // Stash first: a retry after a partial failure reuses the stashed code,
       // so the stored hash always matches the code the buyer receives.
       const stash = await storeRawCode(session.id, generateAccessCode());
+      let outbox: { created: boolean } | null = null;
+      if (guestEmail) {
+        outbox = await enqueueCodeEmail({
+          deliveryKey,
+          eventId: mEventId,
+          purchaseId: purchase.id,
+          kind: "purchase",
+          to: guestEmail,
+          code: stash.code,
+        }).catch((e: any) => {
+          console.warn("[stripe-webhook] code email enqueue failed", { purchaseId: purchase.id, error: e?.message });
+          return null;
+        });
+      }
       const issued = await createAccessCode({
         eventId: mEventId,
         purchaseId: purchase.id,
@@ -335,8 +434,10 @@ async function handleMonetizationSession(session: Stripe.Checkout.Session): Prom
       });
       if (!issued) {
         // Code already issued (and likely already shown to the buyer); drop
-        // the unusable code this delivery just stashed.
+        // the unusable code this delivery just stashed / queued.
         if (stash.created) await deleteRawCode(session.id).catch(() => {});
+        if (outbox?.created) await discardCodeEmail(deliveryKey);
+        else if (guestEmail) await attemptCodeEmail(deliveryKey); // earlier delivery's email, if still pending
         console.log("[stripe-webhook] Monetization access code already issued (redelivery)", {
           eventId: mEventId,
           purchaseId: purchase.id,
@@ -344,12 +445,14 @@ async function handleMonetizationSession(session: Stripe.Checkout.Session): Prom
         });
         return;
       }
+      if (guestEmail) await attemptCodeEmail(deliveryKey); // failures stay queued for the retry job
       console.log("[stripe-webhook] Monetization access code issued", {
         eventId: mEventId,
         purchaseId: purchase.id,
         sessionId: session.id,
+        emailQueued: !!guestEmail,
       });
-    } else {
+    } else if (mType === "donation") {
       console.log("[stripe-webhook] Monetization donation recorded", {
         eventId: mEventId,
         purchaseId: purchase.id,
@@ -688,7 +791,11 @@ router.post(
         case "charge.dispute.created": {
           const { applyChargeReversal } = await import("../lib/revenueLedgerPure.js");
           const { reversalStores } = await import("../lib/revenueLedger.js");
-          const result = await applyChargeReversal(reversalStores, event.type, event.data.object as any);
+          const result = await applyChargeReversal(
+            { ...reversalStores, afterReversal: notifyTicketReversal },
+            event.type,
+            event.data.object as any
+          );
           if (result.targets > 0) {
             console.log("[stripe-webhook] Monetization reversal applied", { eventType: event.type, ...result });
           }

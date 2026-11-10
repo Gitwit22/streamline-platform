@@ -28,7 +28,16 @@ interface EventInfo {
   donationPresetsCents: number[];
   allowCustomDonation: boolean;
   status: string;
+  /** scheduled (presale) | live | ended — older servers omit it. */
+  effectiveStatus?: "scheduled" | "live" | "ended";
+  checkoutOpen?: boolean;
 }
+
+const CHECKOUT_ERRORS: Record<string, string> = {
+  event_ended: "This event has ended. Tickets are no longer on sale.",
+  monetization_unavailable: "Tickets aren't on sale right now.",
+  ppv_unavailable: "Tickets aren't on sale right now.",
+};
 
 function formatCents(cents: number, currency = "usd"): string {
   return new Intl.NumberFormat("en-US", {
@@ -63,6 +72,12 @@ export default function PpvViewer() {
   const [codeInput, setCodeInput] = useState("");
   const [redeemError, setRedeemError] = useState<string | null>(null);
   const [redeeming, setRedeeming] = useState(false);
+
+  // Lost-code recovery (guests): new code by email, generic answer
+  const [showRecover, setShowRecover] = useState(false);
+  const [recoverEmail, setRecoverEmail] = useState("");
+  const [recoverMessage, setRecoverMessage] = useState<string | null>(null);
+  const [recovering, setRecovering] = useState(false);
 
   // PWYW / donation amount
   const [customAmountDollars, setCustomAmountDollars] = useState("");
@@ -105,8 +120,9 @@ export default function PpvViewer() {
     };
   }, [event?.roomId, hasAccess]);
 
+  // Authorize against THIS event: a ticket only plays this event's broadcast.
   const playback = usePlaybackAuthorization({
-    target: event?.roomId ? { kind: "room", id: event.roomId } : null,
+    target: event?.roomId ? { kind: "room", id: event.roomId, eventId: event.id } : null,
     active: hasAccess,
     live: roomLive,
     nativeHls,
@@ -227,8 +243,31 @@ export default function PpvViewer() {
         throw new Error("No checkout URL");
       }
     } catch (err: any) {
-      setError(err?.body?.error || err?.message || "Checkout failed");
+      const code = err?.body?.error;
+      setError((code && CHECKOUT_ERRORS[code]) || err?.body?.reason || code || err?.message || "Checkout failed");
       setCheckingOut(false);
+    }
+  }
+
+  // ── Lost code: request a new one by email ────────────────────────
+  async function handleRecover() {
+    if (!eventId || !recoverEmail.trim()) return;
+    setRecovering(true);
+    setRecoverMessage(null);
+    try {
+      const res = await apiFetch(
+        "/api/monetization/recover",
+        { method: "POST", body: JSON.stringify({ eventId, email: recoverEmail.trim() }) },
+        { allowNonOk: true }
+      );
+      const data = await res.json().catch(() => ({}));
+      setRecoverMessage(
+        typeof data?.message === "string" ? data.message : data?.reason || "Enter the email you used at checkout."
+      );
+    } catch {
+      setRecoverMessage("Couldn't send the request. Try again in a moment.");
+    } finally {
+      setRecovering(false);
     }
   }
 
@@ -373,6 +412,9 @@ export default function PpvViewer() {
                 <p style={{ fontSize: 13, color: "#facc15", margin: 0, fontWeight: 600 }}>
                   ⚠️ Save this code now. This device is unlocked automatically; use the code to move your access to another device.
                 </p>
+                <p style={{ fontSize: 12, color: "#d4d4d8", margin: "6px 0 0" }}>
+                  Checked out without signing in? We've also emailed this code to the address you used at checkout.
+                </p>
               </div>
 
               <div style={{ display: "flex", gap: 8 }}>
@@ -424,7 +466,8 @@ export default function PpvViewer() {
 
           {!codePolling && !revealedCode && (
             <p style={{ color: "#ef4444" }}>
-              Could not retrieve your access code. Please contact support.
+              Could not show your access code here. If you checked out without signing in, it was emailed to you; you
+              can also request a new one from the event page.
             </p>
           )}
         </div>
@@ -479,7 +522,9 @@ export default function PpvViewer() {
       }}>
         {playback.gate.kind === "login" || playback.gate.kind === "forbidden"
           ? playback.gate.message
-          : roomLive || event.status === "live"
+          : playback.gate.kind === "waiting_live" && playback.gate.reason === "other_event"
+            ? "This channel is live with a different show. Your stream will appear here when this event goes live."
+            : roomLive || event.status === "live"
             ? "🔴 Stream starting…"
             : "Stream not yet live"}
       </div>
@@ -588,6 +633,16 @@ export default function PpvViewer() {
           </p>
         )}
 
+        {(event.effectiveStatus === "ended" || event.checkoutOpen === false) && (
+          <div
+            data-testid="ppv-event-ended"
+            style={{ background: "rgba(156,163,175,0.12)", borderRadius: 12, padding: 20, textAlign: "center", marginBottom: 16 }}
+          >
+            <p style={{ fontSize: 16, fontWeight: 600, margin: 0 }}>This event has ended.</p>
+            <p style={{ color: "#aaa", fontSize: 13, margin: "6px 0 0" }}>Tickets are no longer on sale.</p>
+          </div>
+        )}
+        {event.effectiveStatus !== "ended" && event.checkoutOpen !== false && (
         <div style={{
           background: "rgba(99, 102, 241, 0.1)",
           borderRadius: 12,
@@ -595,6 +650,11 @@ export default function PpvViewer() {
           textAlign: "center",
           marginBottom: 16,
         }}>
+          {event.effectiveStatus === "scheduled" && (
+            <p style={{ fontSize: 12, color: "#a5b4fc", margin: "0 0 10px" }}>
+              Presale: buy now and watch when the show starts.
+            </p>
+          )}
           {event.monetizationMode === "fixed" && (
             <>
               <p style={{ fontSize: 28, fontWeight: 700, marginBottom: 8 }}>
@@ -651,6 +711,7 @@ export default function PpvViewer() {
             </>
           )}
         </div>
+        )}
 
         {/* Code entry */}
         <div style={{ marginTop: 16 }}>
@@ -685,6 +746,48 @@ export default function PpvViewer() {
             </div>
           )}
         </div>
+
+        {/* Lost code (guest buyers) */}
+        {event.effectiveStatus !== "ended" && (
+          <div style={{ marginTop: 12 }}>
+            <button
+              style={{ ...btnSecondary, width: "100%", textAlign: "left" }}
+              onClick={() => setShowRecover(!showRecover)}
+            >
+              {showRecover ? "▾" : "▸"} Lost your code? Get a new one by email
+            </button>
+            {showRecover && (
+              <div style={{ marginTop: 12 }}>
+                <p style={{ color: "#aaa", fontSize: 12, margin: "0 0 8px" }}>
+                  Enter the email you used at checkout. We'll send a new code; your old code stops working.
+                </p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    style={{ ...inputStyle, flex: 1 }}
+                    type="email"
+                    autoComplete="email"
+                    placeholder="you@example.com"
+                    value={recoverEmail}
+                    onChange={(e) => setRecoverEmail(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter") void handleRecover(); }}
+                  />
+                  <button
+                    style={btnSecondary}
+                    onClick={() => void handleRecover()}
+                    disabled={recovering || !recoverEmail.trim()}
+                  >
+                    {recovering ? "…" : "Send"}
+                  </button>
+                </div>
+                {recoverMessage && (
+                  <p data-testid="ppv-recover-message" style={{ color: "#d4d4d8", fontSize: 13, marginTop: 8 }}>
+                    {recoverMessage}
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {error && <p style={{ color: "#ef4444", fontSize: 13 }}>{error}</p>}

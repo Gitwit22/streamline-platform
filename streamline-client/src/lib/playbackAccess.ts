@@ -26,14 +26,50 @@ export type PlaybackGate =
   | { kind: "idle" }
   | { kind: "pending" }
   | { kind: "granted"; url: string; expiresAt: number | null; protected: boolean; mode: ViewerAccessMode }
-  | { kind: "waiting_live"; mode: ViewerAccessMode }
+  | {
+      kind: "waiting_live";
+      mode: ViewerAccessMode;
+      /** PPV: "other_event" = the room is live for a different show than this ticket's. */
+      reason?: "offline" | "other_event";
+    }
   | { kind: "checkout"; checkout: CheckoutInfo | null; message: string; mode: ViewerAccessMode }
   | { kind: "login"; message: string }
-  | { kind: "forbidden"; reason: "private" | "subscriber_not_available" | "ppv_unavailable" | "unknown"; message: string }
+  | {
+      kind: "forbidden";
+      reason:
+        | "private"
+        | "subscriber_not_available"
+        | "ppv_unavailable"
+        | "ppv_event_ended"
+        | "ppv_broadcast_unassigned"
+        | "event_not_found"
+        | "unknown";
+      message: string;
+    }
   | { kind: "not_found" }
   | { kind: "unavailable"; message: string };
 
 const MODES: ViewerAccessMode[] = ["public", "registered", "subscriber", "pay_per_view", "private"];
+
+const FORBIDDEN_REASONS = [
+  "private",
+  "subscriber_not_available",
+  "ppv_unavailable",
+  "ppv_event_ended",
+  "ppv_broadcast_unassigned",
+  "event_not_found",
+] as const;
+type ForbiddenReason = (typeof FORBIDDEN_REASONS)[number] | "unknown";
+
+const FORBIDDEN_FALLBACK: Record<ForbiddenReason, string> = {
+  private: "This stream is private.",
+  subscriber_not_available: "This stream is for subscribers only. Subscriptions are coming soon.",
+  ppv_unavailable: "Tickets for this stream are not on sale right now.",
+  ppv_event_ended: "This event has ended.",
+  ppv_broadcast_unassigned: "This stream isn't available right now. The host has been notified.",
+  event_not_found: "This event isn't on this channel.",
+  unknown: "You don't have access to this stream.",
+};
 
 export function asAccessMode(v: unknown): ViewerAccessMode {
   return typeof v === "string" && (MODES as string[]).includes(v) ? (v as ViewerAccessMode) : "public";
@@ -62,7 +98,8 @@ export function interpretPlaybackResponse(httpStatus: number, body: any, apiBase
         mode,
       };
     }
-    return { kind: "waiting_live", mode };
+    const reason = b.waiting === "other_event" ? "other_event" : b.waiting === "offline" ? "offline" : undefined;
+    return reason ? { kind: "waiting_live", mode, reason } : { kind: "waiting_live", mode };
   }
   if (httpStatus === 401) return { kind: "login", message: message || "Sign in to watch this stream." };
   if (httpStatus === 402) {
@@ -74,18 +111,9 @@ export function interpretPlaybackResponse(httpStatus: number, body: any, apiBase
       checkout: c && typeof c.eventId === "string" ? (c as CheckoutInfo) : null,
     };
   }
-  if (httpStatus === 403) {
-    const reason =
-      b.error === "private" || b.error === "subscriber_not_available" || b.error === "ppv_unavailable" ? b.error : "unknown";
-    const fallback =
-      reason === "private"
-        ? "This stream is private."
-        : reason === "subscriber_not_available"
-          ? "This stream is for subscribers only. Subscriptions are coming soon."
-          : reason === "ppv_unavailable"
-            ? "Tickets for this stream are not on sale right now."
-            : "You don't have access to this stream.";
-    return { kind: "forbidden", reason, message: message || fallback };
+  if (httpStatus === 403 || (httpStatus === 404 && b.error === "event_not_found")) {
+    const reason = (FORBIDDEN_REASONS as readonly string[]).includes(b.error) ? (b.error as ForbiddenReason) : "unknown";
+    return { kind: "forbidden", reason, message: message || FORBIDDEN_FALLBACK[reason] };
   }
   if (httpStatus === 404) return { kind: "not_found" };
   return { kind: "unavailable", message: "Playback is temporarily unavailable. Retrying…" };

@@ -100,3 +100,24 @@ describe("checkout return polling", () => {
     expect(shouldKeepPollingAfterCheckout({ kind: "waiting_live", mode: "pay_per_view" }, 1)).toBe(false);
   });
 });
+
+describe("event-scoped PPV answers", () => {
+  it("waiting for a different show on the same channel", () => {
+    expect(interpretPlaybackResponse(200, { mode: "pay_per_view", playbackUrl: null, waiting: "other_event" }, API)).toEqual({
+      kind: "waiting_live",
+      mode: "pay_per_view",
+      reason: "other_event",
+    });
+    expect(interpretPlaybackResponse(200, { mode: "public", playbackUrl: null }, API)).toEqual({ kind: "waiting_live", mode: "public" });
+  });
+
+  it("ended event / unbound broadcast / wrong-channel event are forbidden with clear messages", () => {
+    const ended = interpretPlaybackResponse(403, { error: "ppv_event_ended" }, API);
+    expect(ended).toEqual({ kind: "forbidden", reason: "ppv_event_ended", message: "This event has ended." });
+    const unbound = interpretPlaybackResponse(403, { error: "ppv_broadcast_unassigned" }, API);
+    expect(unbound.kind === "forbidden" && unbound.reason).toBe("ppv_broadcast_unassigned");
+    const wrong = interpretPlaybackResponse(404, { error: "event_not_found" }, API);
+    expect(wrong.kind === "forbidden" && wrong.reason).toBe("event_not_found");
+    expect(interpretPlaybackResponse(404, {}, API)).toEqual({ kind: "not_found" });
+  });
+});

@@ -300,7 +300,7 @@ export function validateViewerAccessRequest(
         ok: false,
         status: 400,
         error: "ppv_event_invalid",
-        reason: "Pick an active paid event for this room.",
+        reason: "Pick a started paid event for this room.",
       };
     }
     return { ok: true, value: { mode, ppvEventId: requested } };
@@ -310,7 +310,7 @@ export function validateViewerAccessRequest(
       ok: false,
       status: 400,
       error: "ppv_event_required",
-      reason: "Create a paid event for this room first (Monetization page).",
+      reason: "Start a paid event for this room first (Monetization page).",
     };
   }
   return { ok: true, value: { mode, ppvEventId: ctx.activePaidEventIds[0] } };

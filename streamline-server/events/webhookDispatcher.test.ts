@@ -154,6 +154,27 @@ describe("webhookDispatcher", () => {
     assert.equal(fetchCalls[0].url, "http://hook.test/room");
   });
 
+  it("routes commerce (ppv.* / account.*) events to the commerce URL with a stable event id", async () => {
+    setEnv({
+      STREAMLINE_HOOKS_ENABLED: "true",
+      STREAMLINE_WEBHOOK_SECRET: "s3cret",
+      STREAMLINE_COMMERCE_EVENT_URL: "http://hook.test/commerce",
+      STREAMLINE_ROOM_EVENT_URL: "http://hook.test/room",
+      STREAMLINE_WEBHOOK_RETRY_COUNT: "1",
+    });
+
+    const payload = createEventPayload("ppv.ticket.purchased", { id: "ppv.ticket.purchased:p1", entityId: "p1" });
+    await dispatchEvent(payload);
+
+    assert.equal(fetchCalls.length, 1);
+    assert.equal(fetchCalls[0].url, "http://hook.test/commerce");
+    const body = JSON.parse(String((fetchCalls[0] as any).opts?.body));
+    assert.equal(body.id, "ppv.ticket.purchased:p1");
+    const headers = ((fetchCalls[0] as any).opts?.headers) as Record<string, string>;
+    assert.equal(headers["X-Streamline-Event-Id"], "ppv.ticket.purchased:p1");
+    assert.match(headers["X-Streamline-Signature"], /^sha256=[a-f0-9]{64}$/);
+  });
+
   it("retries on non-ok response (up to configured count)", async () => {
     fetchResponse = { ok: false, status: 502, text: async () => "bad gateway" };
 

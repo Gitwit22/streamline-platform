@@ -15,6 +15,7 @@
 import crypto from "crypto";
 import { firestore as db } from "../firebaseAdmin";
 import { FieldValue } from "firebase-admin/firestore";
+import { isLivePaidEvent, PPV_LIFECYCLE_VERSION } from "./ppvLifecyclePure";
 import {
   getCodeSalt,
   sealPendingCode,
@@ -52,6 +53,10 @@ export interface MonetizedEvent {
   deliveryMode: "hls";
   hlsEnabledAtCreation: boolean;
   monetizationType: "pay_per_view" | "donation" | "off";
+  /** 2 = explicit Start/End lifecycle (lib/ppvLifecyclePure.ts); absent = legacy. */
+  lifecycleVersion?: number;
+  startedAt?: number | null;
+  endedAt?: number | null;
   createdAt: FirebaseFirestore.Timestamp | FieldValue;
   updatedAt: FirebaseFirestore.Timestamp | FieldValue;
 }
@@ -65,6 +70,12 @@ export interface Purchase {
   stripeCheckoutSessionId: string;
   stripePaymentIntentId: string | null;
   payerEmail: string | null;
+  /** Lower-cased payerEmail for guest ticket recovery lookups. */
+  payerEmailLower?: string | null;
+  /** Account that bought (signed-in checkout), if any. */
+  viewerUid?: string | null;
+  /** Payment confirmed after the event ended: no access issued, refund manually. */
+  paidAfterEnd?: boolean;
   status: PurchaseStatus;
   createdAt: FirebaseFirestore.Timestamp | FieldValue;
 }
@@ -173,6 +184,9 @@ export async function createMonetizedEvent(
     deliveryMode: "hls",
     hlsEnabledAtCreation: true,
     monetizationType,
+    lifecycleVersion: PPV_LIFECYCLE_VERSION,
+    startedAt: null,
+    endedAt: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -242,6 +256,8 @@ export interface CreatePurchaseInput {
   stripeCheckoutSessionId: string;
   stripePaymentIntentId?: string | null;
   payerEmail?: string | null;
+  viewerUid?: string | null;
+  paidAfterEnd?: boolean;
 }
 
 function isAlreadyExists(err: any): boolean {
@@ -268,6 +284,9 @@ export async function createPurchase(
     stripeCheckoutSessionId: input.stripeCheckoutSessionId,
     stripePaymentIntentId: input.stripePaymentIntentId ?? null,
     payerEmail: input.payerEmail ?? null,
+    payerEmailLower: input.payerEmail ? String(input.payerEmail).trim().toLowerCase() : null,
+    viewerUid: input.viewerUid ?? null,
+    ...(input.paidAfterEnd ? { paidAfterEnd: true } : {}),
     status: "paid",
     createdAt: FieldValue.serverTimestamp(),
   };
@@ -461,10 +480,66 @@ export async function peekRawCode(checkoutSessionId: string): Promise<string | n
 // Stage 7 helpers (viewer access / refunds)
 // ---------------------------------------------------------------------------
 
+/**
+ * Paid event that currently paywalls its room: started (v2) or any non-ended
+ * legacy event. Scheduled v2 events sell presale tickets but do not paywall.
+ */
 export function isActivePaidEvent(e: MonetizedEvent | null | undefined): boolean {
-  if (!e) return false;
-  const paid = e.monetizationMode === "fixed" || e.monetizationMode === "pwyw";
-  return paid && e.status !== "ended";
+  return isLivePaidEvent(e as any);
+}
+
+/** True once any ticket (access purchase) was sold for the event, refunded or not. */
+export async function hasAccessSale(eventId: string): Promise<boolean> {
+  const snap = await purchasesCol(eventId).where("type", "==", "access").limit(1).get();
+  return !snap.empty;
+}
+
+/** Tickets sold (paid, not refunded/disputed) and gross for the ended-event summary. */
+export async function summarizeEventSales(
+  eventId: string
+): Promise<{ ticketsSold: number; grossCents: number; currency: string }> {
+  const snap = await purchasesCol(eventId).where("type", "==", "access").get();
+  let ticketsSold = 0;
+  let grossCents = 0;
+  let currency = "usd";
+  for (const d of snap.docs) {
+    const p = d.data() as Purchase;
+    if (p.status !== "paid" || p.paidAfterEnd) continue;
+    ticketsSold += 1;
+    grossCents += typeof p.amountCents === "number" ? p.amountCents : 0;
+    if (p.currency) currency = p.currency;
+  }
+  return { ticketsSold, grossCents, currency };
+}
+
+/** Paid access purchases bought with this email (guest ticket recovery). */
+export async function findPaidAccessPurchasesByEmail(eventId: string, email: string): Promise<Purchase[]> {
+  const lower = String(email || "").trim().toLowerCase();
+  if (!lower) return [];
+  const [byLower, byExact] = await Promise.all([
+    purchasesCol(eventId).where("payerEmailLower", "==", lower).limit(20).get(),
+    // Purchases recorded before payerEmailLower existed.
+    purchasesCol(eventId).where("payerEmail", "==", String(email).trim()).limit(20).get(),
+  ]);
+  const seen = new Map<string, Purchase>();
+  for (const d of [...byLower.docs, ...byExact.docs]) seen.set(d.id, d.data() as Purchase);
+  return [...seen.values()].filter((p) => p.type === "access" && p.status === "paid" && !p.paidAfterEnd);
+}
+
+export function accessCodeRef(eventId: string, codeId: string) {
+  return accessCodesCol(eventId).doc(codeId);
+}
+
+export function purchaseRef(eventId: string, purchaseId: string) {
+  return purchasesCol(eventId).doc(purchaseId);
+}
+
+export function monetizedEventRef(eventId: string) {
+  return eventsCol().doc(eventId);
+}
+
+export function monetizedEventsCollection() {
+  return eventsCol();
 }
 
 function createdAtMs(e: MonetizedEvent): number {

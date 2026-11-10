@@ -22,8 +22,9 @@ import {
 } from "../lib/streamingMeter";
 import { LIMIT_ERRORS } from "../lib/limitErrors";
 import { deletePrefix } from "../lib/storageClient";
-import { resolveRoomViewerAccess } from "../lib/viewerAccessStore";
+import { clearViewerAccessCache, resolveRoomViewerAccess } from "../lib/viewerAccessStore";
 import { hlsProxyAll, hlsRunPrefix } from "../lib/hlsPlayback";
+import { pickBroadcastEventId } from "../lib/ppvLifecyclePure";
 import { onHlsIdle, onHlsLive } from "../lib/viewerStats";
 import { recordTelemetry } from "../lib/telemetry";
 import { syncRoomProgramOverlay } from "../services/programOverlay";
@@ -147,13 +148,26 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
     // Non-public channels (and HLS_PROXY_ALL) write to an unguessable
     // per-run prefix: viewers only reach it through signed playback URLs
     // (GET /api/hls/play/...), never a predictable public path.
+    // Paid rooms: the run is bound to exactly one PPV event for its whole
+    // life (rooms/{id}.hls.ppvEventId); paid playback requires the viewer's
+    // ticket event to match it. Ambiguous legacy data (several live events,
+    // no explicit pick) binds nothing → paid playback fails closed.
     let protectedRun = hlsProxyAll();
-    if (!protectedRun) {
-      try {
-        protectedRun = (await resolveRoomViewerAccess(roomId, { room, noCache: true })).access.mode !== "public";
-      } catch {
-        protectedRun = true;
+    let ppvEventId: string | null = null;
+    try {
+      const resolvedAccess = await resolveRoomViewerAccess(roomId, { room, noCache: true });
+      if (resolvedAccess.access.mode !== "public") protectedRun = true;
+      if (resolvedAccess.access.mode === "pay_per_view") {
+        ppvEventId = pickBroadcastEventId(resolvedAccess.liveEventIds, resolvedAccess.explicitPpvEventId);
+        if (!ppvEventId) {
+          console.warn("[hls] start: paid room without a single live event; broadcast left unbound", {
+            roomId,
+            liveEventIds: resolvedAccess.liveEventIds,
+          });
+        }
       }
+    } catch {
+      protectedRun = true;
     }
     const prefix = hlsRunPrefix(roomId, protectedRun);
     const playlistName = `room.m3u8`;
@@ -187,7 +201,7 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
 
     // 1) Atomically claim idle → starting (crash-safe). Concurrent starts:
     // only one wins; the others get the existing state back.
-    const claim = await setHlsStarting(roomRef, { presetId, prefix, stopAt, capMinutes });
+    const claim = await setHlsStarting(roomRef, { presetId, prefix, stopAt, capMinutes, ppvEventId });
     if (!claim.started) {
       return res.json({
         roomId,
@@ -215,6 +229,8 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
 
       // 3) Mark live + store URLs (throws if the run was stopped/superseded meanwhile)
       await setHlsLive(roomRef, { egressId, playlistUrl, runId: claim.runId });
+      // Playback decisions read the broadcast binding through the resolver cache.
+      clearViewerAccessCache(roomId);
       // Viewer counting: HLS going live starts (or joins) the live session.
       void onHlsLive(roomId);
 
@@ -287,7 +303,7 @@ router.post("/start/:roomId", requireAuth as any, requireRoomAccessToken as any,
         userId: ownerUid,
         roomId,
         broadcastId: egressId,
-        metadata: { presetId, presetClamped: !!hlsPresetClamped, protectedRun, delegated: ownerUid !== uid },
+        metadata: { presetId, presetClamped: !!hlsPresetClamped, protectedRun, ppvEventId, delegated: ownerUid !== uid },
       });
 
       return res.json({

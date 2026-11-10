@@ -193,7 +193,14 @@ export type HlsStartClaim = {
  */
 export async function setHlsStarting(
   roomRef: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>,
-  params: { presetId: HlsPresetId; prefix: string; stopAt?: string | null; capMinutes?: number | null }
+  params: {
+    presetId: HlsPresetId;
+    prefix: string;
+    stopAt?: string | null;
+    capMinutes?: number | null;
+    /** PPV event this run is bound to (null: not a paid broadcast). */
+    ppvEventId?: string | null;
+  }
 ): Promise<HlsStartClaim> {
   const runId = randomUUID();
   const serverTimestamp = admin.firestore.FieldValue.serverTimestamp();
@@ -216,6 +223,8 @@ export async function setHlsStarting(
       "hls.presetId": params.presetId,
       "hls.prefix": params.prefix,
       "hls.runId": runId,
+      // Always written so a previous run's binding never carries over.
+      "hls.ppvEventId": params.ppvEventId ?? null,
       "hls.startedAt": serverTimestamp,
       "hls.updatedAt": serverTimestamp,
       "hls.heartbeatAt": serverTimestamp,

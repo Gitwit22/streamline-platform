@@ -26,6 +26,14 @@ const FULL: Record<string, string> = {
   EGRESS_TEMPLATE_BASE_URL: "https://api.example.com",
   ROOM_ACCESS_TOKEN_SECRET: "r",
   SUPPORT_TICKET_HASH_SALT: "h",
+  HLS_PLAYBACK_SECRET: "p".repeat(32),
+  RESEND_API_KEY: "re_x",
+  EMAIL_FROM_ADDRESS: "no-reply@example.com",
+  EMAIL_PROVIDER: "resend",
+  EMAIL_SEND_ENABLED: "true",
+  STREAMLINE_HOOKS_ENABLED: "true",
+  STREAMLINE_WEBHOOK_SECRET: "w",
+  STREAMLINE_COMMERCE_EVENT_URL: "https://n8n.example.com/webhook/streamline-events",
 };
 
 test("checkEnv: a complete production config is ok with nothing to report", () => {
@@ -76,4 +84,13 @@ test("publicEnvReport never includes variable names or values", () => {
   assert.deepEqual(pub, { ok: false, config: { missingRequired: 1, missingRecommended: 1, areas: ["billing", "storage"] } });
   const json = JSON.stringify(pub);
   assert.ok(!json.includes("R2_") && !json.includes("STRIPE") && !json.includes("whsec"));
+});
+
+test("checkEnv: email + hooks flags must be switched on, not just present", () => {
+  const r = checkEnv({ ...FULL, EMAIL_SEND_ENABLED: "false", EMAIL_PROVIDER: "stub", STREAMLINE_HOOKS_ENABLED: "1" });
+  const names = r.missingRecommended.flatMap((p) => p.variables);
+  assert.ok(names.includes("EMAIL_SEND_ENABLED"));
+  assert.ok(names.includes("EMAIL_PROVIDER"));
+  assert.ok(names.includes("STREAMLINE_HOOKS_ENABLED"));
+  assert.equal(r.ok, true, "recommended only: readiness stays 200");
 });

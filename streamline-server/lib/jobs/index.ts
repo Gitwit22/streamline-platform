@@ -11,6 +11,7 @@
  *   expired-sessions        1 h        expired invites / pending codes / presence / old markers + job history
  *   temp-uploads            1 h        leftover multer temp files + render work dirs
  *   expired-exports         24 h       rendered export files older than EXPORT_RETENTION_DAYS
+ *   ppv-code-emails         5 min      retry pending guest access-code emails
  *
  * Any interval can be overridden with JOB_<NAME>_MS (e.g. JOB_MEDIA_PURGE_MS);
  * "0" disables that job's timer (cron / admin "Run now" still work).
@@ -31,6 +32,7 @@ export { accountPurgeJob, purgeDeletedAccounts } from "./accountPurge";
 export { ephemeralCleanupJob, cleanupEphemeralDocs } from "./ephemeralCleanup";
 export { tempUploadsJob, cleanupTempUploads } from "./tempUploads";
 export { expiredExportsJob, purgeExpiredExports } from "./expiredExports";
+export { ppvCodeEmailsJob } from "./ppvCodeEmails";
 
 import { startJobScheduler } from "./framework";
 

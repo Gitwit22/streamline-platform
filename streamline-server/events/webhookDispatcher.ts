@@ -41,6 +41,7 @@ const DESTINATION_ENV_KEYS: Record<EventCategory, string> = {
   support: "STREAMLINE_SUPPORT_EVENT_URL",
   monitoring: "STREAMLINE_MONITORING_EVENT_URL",
   alert: "STREAMLINE_ALERT_EVENT_URL",
+  commerce: "STREAMLINE_COMMERCE_EVENT_URL",
   room: "STREAMLINE_ROOM_EVENT_URL",
 };
 
@@ -121,13 +122,15 @@ async function attemptDelivery(
   body: string,
   secret: string,
   timeoutMs: number,
-  event: string
+  event: string,
+  eventId: string
 ): Promise<{ ok: boolean; status: number; snippet: string }> {
   const signature = signPayload(secret, body);
 
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     "X-Streamline-Event": event,
+    "X-Streamline-Event-Id": eventId,
     "X-Streamline-Signature": signature,
     "X-Streamline-Timestamp": new Date().toISOString(),
   };
@@ -182,7 +185,8 @@ export async function dispatchEvent(
         body,
         cfg.secret,
         cfg.timeoutMs,
-        payload.event
+        payload.event,
+        payload.id
       );
 
       lastStatus = result.status;

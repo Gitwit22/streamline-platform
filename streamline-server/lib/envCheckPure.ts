@@ -123,6 +123,55 @@ export const ENV_REQUIREMENTS: EnvRequirement[] = [
   },
   { area: "auth", anyOf: ["ROOM_ACCESS_TOKEN_SECRET"], severity: "recommended", impact: "Room tokens fall back to JWT_SECRET (works, but shares one key)." },
   { area: "support", anyOf: ["SUPPORT_TICKET_HASH_SALT"], severity: "recommended", impact: "Support tickets use a built-in default salt." },
+
+  {
+    area: "monetization",
+    anyOf: ["HLS_PLAYBACK_SECRET"],
+    severity: "recommended",
+    prodOnly: true,
+    impact: "Protected playback (pay-per-view, registered, private channels) returns 503.",
+    validate: (v) => (v.trim().length >= 32 ? null : "must be at least 32 characters"),
+  },
+
+  // Transactional email (lib/transactionalEmail.ts): guest PPV access codes + recovery
+  { area: "email", anyOf: ["RESEND_API_KEY"], severity: "recommended", impact: "Guest access-code and recovery emails stay queued (not sent)." },
+  {
+    area: "email",
+    anyOf: ["EMAIL_FROM", "EMAIL_FROM_ADDRESS"],
+    severity: "recommended",
+    impact: "Guest access-code and recovery emails stay queued (no sender address).",
+  },
+  {
+    area: "email",
+    anyOf: ["EMAIL_PROVIDER"],
+    severity: "recommended",
+    impact: "Email provider is not Resend: transactional email is stubbed.",
+    validate: (v) => (v.trim().toLowerCase() === "resend" ? null : 'must be "resend" to send'),
+  },
+  {
+    area: "email",
+    anyOf: ["EMAIL_SEND_ENABLED"],
+    severity: "recommended",
+    impact: "Transactional email sending is switched off.",
+    validate: (v) => (["true", "1"].includes(v.trim().toLowerCase()) ? null : 'must be "true" to send'),
+  },
+
+  // Platform event hooks → n8n (events/webhookDispatcher.ts)
+  {
+    area: "hooks",
+    anyOf: ["STREAMLINE_HOOKS_ENABLED"],
+    severity: "recommended",
+    impact: "Commerce/lifecycle emails (n8n) are not triggered.",
+    validate: (v) => (v.trim() === "true" ? null : 'must be "true"'),
+  },
+  { area: "hooks", anyOf: ["STREAMLINE_WEBHOOK_SECRET"], severity: "recommended", impact: "Event hooks are not sent (no signing secret)." },
+  {
+    area: "hooks",
+    anyOf: ["STREAMLINE_COMMERCE_EVENT_URL"],
+    severity: "recommended",
+    impact: "Ticket / event / account emails (n8n) are not triggered.",
+    validate: validHttpsUrl,
+  },
 ];
 
 function isSet(env: Record<string, string | undefined>, name: string): boolean {

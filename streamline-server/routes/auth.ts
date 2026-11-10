@@ -2,6 +2,7 @@ import { Router } from "express";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import { requireAuth } from "../middleware/requireAuth";
+import { emitAccountCreated } from "../events/emitters/commerceEmitter";
 import { auth as firebaseAuth, firestore as db } from "../firebaseAdmin";
 import { logAuthSecurityEvent } from "../lib/authAudit";
 import {
@@ -583,6 +584,13 @@ router.post("/signup", signupRateLimit, async (req, res) => {
     if (!claimed) {
       return res.status(409).json({ error: "Email already in use" });
     }
+
+    // Fire-and-forget: welcome email flow (n8n). Never blocks signup.
+    emitAccountCreated({
+      uid,
+      email: emailNorm,
+      displayName: typeof (userData as any).displayName === "string" ? (userData as any).displayName : null,
+    });
 
     const token = signLegacySessionToken(uid);
 

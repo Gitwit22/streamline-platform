@@ -46,6 +46,16 @@ export const EventTypes = {
   ALERT_CREATED: "alert.created",
   ALERT_ACKNOWLEDGED: "alert.acknowledged",
   ALERT_RESOLVED: "alert.resolved",
+
+  // Commerce (pay-per-view + account lifecycle → transactional email flows).
+  // Payloads never carry access codes or other secrets.
+  PPV_EVENT_SCHEDULED: "ppv.event.scheduled",
+  PPV_EVENT_STARTED: "ppv.event.started",
+  PPV_EVENT_ENDED: "ppv.event.ended",
+  PPV_TICKET_PURCHASED: "ppv.ticket.purchased",
+  PPV_TICKET_REFUNDED: "ppv.ticket.refunded",
+  PPV_PAYMENT_AFTER_END: "ppv.payment.after_end",
+  ACCOUNT_CREATED: "account.created",
 } as const;
 
 export type StreamlineEventType =
@@ -66,6 +76,12 @@ export interface EventActor {
 // ---------------------------------------------------------------------------
 
 export interface StreamlineEventPayload {
+  /**
+   * Unique event id, identical across webhook retries of the same delivery.
+   * Emitters may pass a deterministic id (e.g. "ppv.ticket.purchased:<purchaseId>")
+   * so receivers can dedupe redelivered business events too.
+   */
+  id: string;
   /** Canonical event name, e.g. "support.ticket.created". */
   event: StreamlineEventType;
   /** ISO-8601 timestamp of when the event occurred. */
@@ -98,6 +114,7 @@ export type EventCategory =
   | "support"
   | "monitoring"
   | "alert"
+  | "commerce"
   | "room";
 
 export function eventCategory(event: StreamlineEventType): EventCategory {
@@ -106,6 +123,7 @@ export function eventCategory(event: StreamlineEventType): EventCategory {
   if (event.startsWith("support.")) return "support";
   if (event.startsWith("monitoring.")) return "monitoring";
   if (event.startsWith("alert.")) return "alert";
+  if (event.startsWith("ppv.") || event.startsWith("account.")) return "commerce";
   return "room";
 }
 
@@ -115,9 +133,16 @@ export function eventCategory(event: StreamlineEventType): EventCategory {
 
 const SOURCE = "streamline";
 
+function randomEventId(): string {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  return `evt_${require("crypto").randomBytes(12).toString("hex")}`;
+}
+
 export function createEventPayload(
   event: StreamlineEventType,
   opts: {
+    /** Deterministic id for business events that may be re-emitted. */
+    id?: string | null;
     tenantId?: string | null;
     orgId?: string | null;
     schoolId?: string | null;
@@ -128,6 +153,7 @@ export function createEventPayload(
   } = {}
 ): StreamlineEventPayload {
   return {
+    id: (typeof opts.id === "string" && opts.id.trim()) || randomEventId(),
     event,
     timestamp: new Date().toISOString(),
     source: SOURCE,

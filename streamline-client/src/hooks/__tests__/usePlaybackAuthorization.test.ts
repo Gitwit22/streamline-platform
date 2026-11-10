@@ -155,4 +155,24 @@ describe("usePlaybackAuthorization (playback state machine)", () => {
     expect(result.current.gate.kind).toBe("granted");
     expect(result.current.url).toBe("https://cdn/x.m3u8");
   });
+  it("PPV event pages send the eventId; channel/room pages send an empty body", async () => {
+    vi.useFakeTimers();
+    const fetcher = vi.fn<PlaybackFetcher>(async () => ({ status: 200, body: { mode: "pay_per_view", playbackUrl: null } }));
+    const { rerender } = renderHook(
+      (p: { eventId?: string }) =>
+        usePlaybackAuthorization({ target: { kind: "room", id: "r1", eventId: p.eventId }, active: true, live: true, fetcher }),
+      { initialProps: { eventId: "ev1" } }
+    );
+    await flush();
+    expect(fetcher).toHaveBeenLastCalledWith("/api/public/rooms/r1/playback", { eventId: "ev1" });
+    // A different event on the same room is a different target (re-asks).
+    rerender({ eventId: "ev2" });
+    await flush();
+    expect(fetcher).toHaveBeenLastCalledWith("/api/public/rooms/r1/playback", { eventId: "ev2" });
+
+    const channelFetcher = vi.fn<PlaybackFetcher>(async () => ({ status: 200, body: { playbackUrl: null } }));
+    renderHook(() => usePlaybackAuthorization({ target: { kind: "channel", id: "c1" }, active: true, live: true, fetcher: channelFetcher }));
+    await flush();
+    expect(channelFetcher).toHaveBeenLastCalledWith("/api/public/channels/c1/playback", {});
+  });
 });

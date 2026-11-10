@@ -121,22 +121,34 @@ export async function revokeOtherDeviceEntitlements(purchaseId: string, keepId: 
 // Revocation re-check on playlist fetches (every few seconds per viewer):
 // cache the active flag briefly so it costs ~1 read per entitlement per window.
 const ENTITLEMENT_CACHE_MS = 30_000;
-const entitlementCache = new Map<string, { at: number; active: boolean }>();
+const entitlementCache = new Map<string, { at: number; active: boolean; eventId: string | null }>();
 
-export async function isEntitlementStillActive(id: string): Promise<boolean> {
+async function readEntitlementState(id: string): Promise<{ active: boolean; eventId: string | null }> {
   const hit = entitlementCache.get(id);
   const now = Date.now();
-  if (hit && now - hit.at < ENTITLEMENT_CACHE_MS) return hit.active;
+  if (hit && now - hit.at < ENTITLEMENT_CACHE_MS) return { active: hit.active, eventId: hit.eventId };
   let active = false;
+  let eventId: string | null = hit?.eventId ?? null;
   try {
     const s = await col().doc(id).get();
-    active = s.exists && isEntitlementActive(s.data() as ViewerEntitlement, now);
+    const data = s.exists ? (s.data() as ViewerEntitlement) : null;
+    active = !!data && isEntitlementActive(data, now);
+    eventId = data && typeof (data as any).eventId === "string" ? (data as any).eventId : null;
   } catch {
     // Fail open only for a transient read error on an already-issued token
     // within its lifetime; keep the previous answer when we had one.
     active = hit ? hit.active : true;
   }
   if (entitlementCache.size > 5000) entitlementCache.clear();
-  entitlementCache.set(id, { at: now, active });
-  return active;
+  entitlementCache.set(id, { at: now, active, eventId });
+  return { active, eventId };
+}
+
+export async function isEntitlementStillActive(id: string): Promise<boolean> {
+  return (await readEntitlementState(id)).active;
+}
+
+/** Active flag + the PPV event the entitlement belongs to (cached ~30s). */
+export async function getEntitlementPlaybackState(id: string): Promise<{ active: boolean; eventId: string | null }> {
+  return readEntitlementState(id);
 }

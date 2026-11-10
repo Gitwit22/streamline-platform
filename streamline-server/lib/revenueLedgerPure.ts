@@ -167,6 +167,8 @@ export interface ReversalStores {
   markPurchase(eventId: string, purchaseId: string, status: "refunded" | "disputed"): Promise<void>;
   revokeEntitlementsForPurchase(purchaseId: string, reason: string): Promise<number>;
   revokeAccessCode(eventId: string, purchaseId: string): Promise<void>;
+  /** Optional hook after a full refund/dispute was applied (notifications). */
+  afterReversal?(target: ReversalTarget, status: "refunded" | "disputed"): Promise<void>;
 }
 
 /**
@@ -200,6 +202,8 @@ export async function applyChargeReversal(
     }
     revoked += await stores.revokeEntitlementsForPurchase(t.purchaseId, status);
     await stores.revokeAccessCode(t.eventId, t.purchaseId);
+    // Notifications (best effort; a failure must not make Stripe retry the reversal).
+    if (stores.afterReversal) await stores.afterReversal(t, status).catch(() => undefined);
   }
   return { kind: reversal.kind, targets: targets.length, revoked };
 }

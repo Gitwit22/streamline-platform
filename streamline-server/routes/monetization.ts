@@ -3,10 +3,13 @@
  *
  * POST   /api/monetization/events          – create/update MonetizedEvent
  * GET    /api/monetization/events           – list events for authenticated host
+ * POST   /api/monetization/events/:id/start – start event (owner; validated transition)
+ * POST   /api/monetization/events/:id/end   – end event (owner; idempotent)
  * GET    /api/monetization/events/:eventId  – get single event (public)
  * POST   /api/monetization/checkout         – create Stripe Checkout session
  * GET    /api/monetization/code             – poll for raw access code after success
  * POST   /api/monetization/redeem           – redeem access code
+ * POST   /api/monetization/recover          – guest ticket recovery by email (generic reply)
  * POST   /api/monetization/enter            – gate check (can viewer watch?)
  */
 
@@ -29,6 +32,29 @@ import { getPurchase } from "../lib/monetization";
 import { canAccessFeature } from "./featureAccess";
 import { checkFeature, getEffectiveEntitlements } from "../lib/entitlements";
 import { firestore as db } from "../firebaseAdmin";
+import { FieldValue } from "firebase-admin/firestore";
+import { clearViewerAccessCache } from "../lib/viewerAccessStore";
+import {
+  broadcastStateFromHls,
+  checkStartAgainstBroadcast,
+  decidePpvPlayback,
+  effectiveEventStatus,
+  isCheckoutOpen,
+  isLivePaidEvent,
+  isPaidMode,
+  planTransition,
+  priceChangeRequested,
+  type BroadcastState,
+} from "../lib/ppvLifecyclePure";
+import {
+  emitPpvEventEnded,
+  emitPpvEventScheduled,
+  emitPpvEventStarted,
+} from "../events/emitters/commerceEmitter";
+import { getCreatorContact } from "../lib/creatorContact";
+import { recoverTicketsByEmail } from "../lib/ppvCodeEmail";
+import { isValidEmail } from "../lib/ppvCodeEmailPure";
+import { SlidingWindowLimiter, clientIp, rateLimit } from "../lib/rateLimit";
 import {
   createMonetizedEvent,
   updateMonetizedEvent,
@@ -39,6 +65,11 @@ import {
   claimAccessCode,
   findClaimedCodeForDevice,
   retrieveAndDeleteRawCode,
+  hasAccessSale,
+  summarizeEventSales,
+  monetizedEventRef,
+  monetizedEventsCollection,
+  type MonetizedEvent,
   type MonetizationMode,
   type CreateEventInput,
 } from "../lib/monetization";
@@ -59,6 +90,29 @@ function clientUrl(): string | null {
 // ---------------------------------------------------------------------------
 
 const VALID_MODES: MonetizationMode[] = ["off", "fixed", "pwyw", "donation"];
+
+/** Event + its effective lifecycle status for clients. */
+function withLifecycle(e: MonetizedEvent) {
+  return { ...e, effectiveStatus: effectiveEventStatus(e as any), checkoutOpen: isCheckoutOpen(e as any) };
+}
+
+/** What the host needs to know about the room's broadcast for this event. */
+function broadcastSummaryFor(e: MonetizedEvent, b: BroadcastState | null) {
+  const state = b || { live: false, protected: false, eventId: null };
+  const paid = isPaidMode(e.monetizationMode);
+  return {
+    live: state.live,
+    protected: state.protected,
+    assignedEventId: state.eventId,
+    /** This event's ticket holders can watch the running broadcast. */
+    servingThisEvent: state.live && state.eventId === e.id,
+    /** Paid event is started but the running broadcast belongs elsewhere / is public. */
+    restartRequired: paid && isLivePaidEvent(e as any) && state.live && state.eventId !== e.id,
+    /** Running paid broadcast with no event binding (legacy): paid playback is blocked. */
+    unassigned: paid && isLivePaidEvent(e as any) && state.live && !state.eventId,
+  };
+}
+
 
 
 // ---------------------------------------------------------------------------
@@ -135,6 +189,10 @@ router.post("/events", requireAuth, async (req: Request, res: Response) => {
         return res.status(403).json({ error: "not_owner" });
       }
 
+      if (effectiveEventStatus(existing as any) === "ended") {
+        return res.status(409).json({ error: "event_ended", reason: "This event has ended and can no longer be edited." });
+      }
+
       const patch: Record<string, any> = {};
       if (name !== undefined) patch.name = String(name).slice(0, 200);
       if (startsAt !== undefined) patch.startsAt = startsAt || null;
@@ -145,11 +203,37 @@ router.post("/events", requireAuth, async (req: Request, res: Response) => {
       if (donationPresetsCents !== undefined) patch.donationPresetsCents = donationPresetsCents;
       if (allowCustomDonation !== undefined) patch.allowCustomDonation = !!allowCustomDonation;
       if (singlePersonOnly !== undefined) patch.singlePersonOnly = !!singlePersonOnly;
-      if (status !== undefined) patch.status = status;
+      // Status is NOT editable here: saving settings preserves it. Use
+      // POST /events/:eventId/start|end (validated transitions).
+      void status;
+
+      // Ticket price is fixed once anyone has bought a ticket.
+      const priceChanges = priceChangeRequested(existing as any, patch);
+      if (priceChanges.length > 0 && (await hasAccessSale(eventId))) {
+        return res.status(409).json({
+          error: "price_locked",
+          fields: priceChanges,
+          reason: "Tickets have already been sold for this event, so the price can't change.",
+        });
+      }
+      // Changing a started event into a paid one would paywall the room
+      // without the broadcast checks done by Start.
+      const nextMode = patch.monetizationMode ?? existing.monetizationMode;
+      if (
+        isPaidMode(nextMode) &&
+        !isPaidMode(existing.monetizationMode) &&
+        effectiveEventStatus(existing as any) === "live"
+      ) {
+        return res.status(409).json({
+          error: "end_event_first",
+          reason: "End this event and create a paid one instead.",
+        });
+      }
 
       await updateMonetizedEvent(eventId, patch);
+      clearViewerAccessCache();
       const updated = await getMonetizedEvent(eventId);
-      return res.json({ ok: true, event: updated });
+      return res.json({ ok: true, event: updated ? withLifecycle(updated) : updated });
     }
 
     // ── Create new event ─────────────────────────────────────────────
@@ -195,8 +279,15 @@ router.post("/events", requireAuth, async (req: Request, res: Response) => {
       singlePersonOnly: singlePersonOnly ?? undefined,
     };
 
+    // New events start "scheduled" (draft): presale open, room access
+    // unchanged until the creator presses Start.
     const event = await createMonetizedEvent(input);
-    return res.status(201).json({ ok: true, event });
+    if (isPaidMode(event.monetizationMode)) {
+      void getCreatorContact(uid).then((creator) =>
+        emitPpvEventScheduled({ id: event.id, name: event.name, roomId: event.roomId, startsAt: event.startsAt }, creator)
+      );
+    }
+    return res.status(201).json({ ok: true, event: withLifecycle(event) });
   } catch (err: any) {
     console.error("[monetization] create/update event error:", err?.message);
     return res.status(500).json({ error: "internal_error" });
@@ -211,12 +302,157 @@ router.get("/events", requireAuth, async (req: Request, res: Response) => {
     const uid = (req as any).user?.uid;
     if (!uid) return res.status(401).json({ error: "unauthorized" });
     const events = await listMonetizedEventsByOwner(uid);
-    return res.json({ ok: true, events });
+    const roomIds = [...new Set(events.map((e) => e.roomId).filter(Boolean))];
+    const broadcasts = new Map<string, ReturnType<typeof broadcastStateFromHls>>();
+    await Promise.all(
+      roomIds.map(async (rid) => {
+        const snap = await db.collection("rooms").doc(rid).get().catch(() => null);
+        broadcasts.set(rid, broadcastStateFromHls(snap?.exists ? (snap.data() as any)?.hls : null));
+      })
+    );
+    const sold = await Promise.all(events.map((e) => hasAccessSale(e.id).catch(() => false)));
+    return res.json({
+      ok: true,
+      events: events.map((e, i) => ({
+        ...withLifecycle(e),
+        priceLocked: sold[i],
+        broadcast: broadcastSummaryFor(e, broadcasts.get(e.roomId) || null),
+      })),
+    });
   } catch (err: any) {
     console.error("[monetization] list events error:", err?.message);
     return res.status(500).json({ error: "internal_error" });
   }
 });
+
+// ---------------------------------------------------------------------------
+// POST /events/:eventId/start | /end – explicit lifecycle (owner only)
+// ---------------------------------------------------------------------------
+// start: scheduled → live. One started paid event per room. Refused while the
+//        room broadcasts publicly (restart in protected mode first). A
+//        protected broadcast that belongs to another event keeps serving that
+//        event; the response says a restart is needed for this one.
+// end:   → ended (idempotent). Closes checkout and stops live playback for
+//        this event's tickets. Tickets, purchases and revenue are kept.
+class TransitionError extends Error {
+  constructor(public status: number, public code: string, public extra: Record<string, unknown> = {}) {
+    super(code);
+  }
+}
+
+async function transitionEvent(eventId: string, uid: string, action: "start" | "end") {
+  const ref = monetizedEventRef(eventId);
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(ref);
+    if (!snap.exists) throw new TransitionError(404, "event_not_found");
+    const ev = snap.data() as MonetizedEvent;
+    if (ev.ownerUid !== uid) throw new TransitionError(403, "not_owner");
+
+    const plan = planTransition(ev as any, action);
+    if ("error" in plan) throw new TransitionError(409, plan.error, { from: plan.from });
+
+    const roomRef = db.collection("rooms").doc(ev.roomId);
+    const roomSnap = await tx.get(roomRef);
+    const broadcast = broadcastStateFromHls(roomSnap.exists ? (roomSnap.data() as any)?.hls : null);
+
+    let restartRequired = false;
+    if (action === "start" && isPaidMode(ev.monetizationMode)) {
+      // Reading the room's events inside the transaction makes two
+      // concurrent Starts on the same room conflict (one retries and loses).
+      const roomEvents = await tx.get(monetizedEventsCollection().where("roomId", "==", ev.roomId));
+      const other = roomEvents.docs
+        .map((d) => d.data() as MonetizedEvent)
+        .find((e) => e.id !== ev.id && isLivePaidEvent(e as any));
+      if (other) {
+        throw new TransitionError(409, "another_event_live", {
+          liveEventId: other.id,
+          liveEventName: other.name,
+          reason: `End "${other.name}" before starting this event.`,
+        });
+      }
+      const check = checkStartAgainstBroadcast(broadcast, ev.id);
+      if ("error" in check) {
+        throw new TransitionError(409, check.error, {
+          reason:
+            "This room is already streaming publicly. Stop the stream, start the event, then go live again so the broadcast is protected.",
+        });
+      }
+      restartRequired = "restartRequired" in check ? check.restartRequired : false;
+    }
+
+    const now = Date.now();
+    if (!plan.noop) {
+      tx.update(ref, {
+        status: plan.to,
+        ...(action === "start" ? { startedAt: now } : { endedAt: now }),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
+    return {
+      event: { ...ev, status: plan.to, ...(action === "start" ? { startedAt: plan.noop ? ev.startedAt ?? null : now } : {}), ...(action === "end" ? { endedAt: plan.noop ? ev.endedAt ?? now : now } : {}) } as MonetizedEvent,
+      noop: plan.noop,
+      broadcast,
+      restartRequired,
+      at: now,
+    };
+  });
+}
+
+async function handleTransition(req: Request, res: Response, action: "start" | "end") {
+  try {
+    const uid = (req as any).user?.uid;
+    if (!uid) return res.status(401).json({ error: "unauthorized" });
+    const eventId = String(req.params.eventId || "").trim();
+    if (!eventId) return res.status(400).json({ error: "missing_event_id" });
+
+    if (action === "start") {
+      const existing = await getMonetizedEvent(eventId);
+      if (existing && isPaidMode(existing.monetizationMode)) {
+        for (const feature of ["monetization", "payPerView", "hls"] as const) {
+          const gate = await canAccessFeature(uid, feature);
+          if (!gate.allowed) {
+            return res.status(403).json({ error: `${feature}_not_entitled`, reason: gate.reason || "Not included in your plan" });
+          }
+        }
+      }
+    }
+
+    const result = await transitionEvent(eventId, uid, action);
+    clearViewerAccessCache();
+
+    const ev = result.event;
+    if (!result.noop && isPaidMode(ev.monetizationMode)) {
+      const ref = { id: ev.id, name: ev.name, roomId: ev.roomId, startsAt: ev.startsAt };
+      void (async () => {
+        const creator = await getCreatorContact(uid);
+        if (action === "start") emitPpvEventStarted(ref, creator, result.at);
+        else emitPpvEventEnded(ref, creator, await summarizeEventSales(ev.id).catch(() => ({ ticketsSold: 0, grossCents: 0, currency: ev.currency || "usd" })));
+      })().catch((e: any) => console.warn("[monetization] lifecycle event emit failed", { eventId: ev.id, error: e?.message }));
+    }
+
+    const b = result.broadcast;
+    return res.json({
+      ok: true,
+      noop: result.noop,
+      event: withLifecycle(ev),
+      broadcast: {
+        ...broadcastSummaryFor(ev, b),
+        restartRequired: action === "start" ? result.restartRequired : false,
+        // Ending leaves the stream running; this event's ticket holders are cut off.
+        stillLiveForThisEvent: action === "end" && b.live && b.eventId === ev.id,
+      },
+    });
+  } catch (err: any) {
+    if (err instanceof TransitionError) {
+      return res.status(err.status).json({ error: err.code, ...err.extra });
+    }
+    console.error(`[monetization] ${action} event error:`, err?.message);
+    return res.status(500).json({ error: "internal_error" });
+  }
+}
+
+router.post("/events/:eventId/start", requireAuth, (req, res) => void handleTransition(req, res, "start"));
+router.post("/events/:eventId/end", requireAuth, (req, res) => void handleTransition(req, res, "end"));
 
 // ---------------------------------------------------------------------------
 // GET /events/:eventId – public event details (for viewer page)
@@ -241,6 +477,8 @@ router.get("/events/:eventId", async (req: Request, res: Response) => {
         donationPresetsCents: event.donationPresetsCents,
         allowCustomDonation: event.allowCustomDonation,
         status: event.status,
+        effectiveStatus: effectiveEventStatus(event as any),
+        checkoutOpen: isCheckoutOpen(event as any),
       },
     });
   } catch (err: any) {
@@ -274,6 +512,9 @@ router.post("/checkout", async (req: Request, res: Response) => {
     }
     if (event.monetizationMode === "off") {
       return res.status(400).json({ error: "monetization_off" });
+    }
+    if (!isCheckoutOpen(event as any)) {
+      return res.status(409).json({ error: "event_ended", reason: "This event has ended. Tickets are no longer on sale." });
     }
 
     // Server-side kill switches + the event OWNER's effective entitlements:
@@ -467,6 +708,38 @@ router.post("/redeem", async (req: Request, res: Response) => {
 });
 
 // ---------------------------------------------------------------------------
+// POST /recover – guest ticket recovery by purchase email
+// ---------------------------------------------------------------------------
+// Always answers the same generic message (never reveals whether an email
+// bought a ticket) and does the work after responding, so response timing
+// doesn't leak it either. Matching paid tickets get a NEW code by email (the
+// old code stops working).
+const recoverIpLimiter = new SlidingWindowLimiter({ windowMs: 15 * 60_000, max: 10 });
+const recoverEmailLimiter = new SlidingWindowLimiter({ windowMs: 60 * 60_000, max: 3 });
+const RECOVER_MESSAGE = "If that email bought a ticket for this event, we've sent a new access code to it.";
+
+router.post(
+  "/recover",
+  rateLimit([{ limiter: recoverIpLimiter, key: (req) => `ip:${clientIp(req)}` }]),
+  async (req: Request, res: Response) => {
+    const eventId = typeof req.body?.eventId === "string" ? req.body.eventId.trim() : "";
+    const email = typeof req.body?.email === "string" ? req.body.email.trim() : "";
+    if (!eventId || eventId.length > 128 || !isValidEmail(email)) {
+      return res.status(400).json({ error: "invalid_request", reason: "Enter the email you used at checkout." });
+    }
+    res.json({ ok: true, message: RECOVER_MESSAGE });
+
+    // Per-email throttle applied silently (same response either way).
+    if (!recoverEmailLimiter.hit(`email:${email.toLowerCase()}:${eventId}`).allowed) return;
+    try {
+      await recoverTicketsByEmail(eventId, email);
+    } catch (err: any) {
+      console.warn("[monetization] recover failed", { eventId, error: err?.message });
+    }
+  }
+);
+
+// ---------------------------------------------------------------------------
 // POST /enter – gate check: can viewer watch? (PPV event page)
 // ---------------------------------------------------------------------------
 // Access = a live ViewerEntitlement for this event (device or account; legacy
@@ -485,19 +758,16 @@ router.post("/enter", async (req: Request, res: Response) => {
     const resolved = await resolveRoomViewerAccess(event.roomId).catch(() => null);
     const mode = resolved?.access.mode || "private";
     const hls = resolved?.room?.hls || {};
+    const broadcast = broadcastStateFromHls(hls);
     const live = hls.status === "live" && !!String(hls.playlistUrl || "").trim();
+    const effectiveStatus = effectiveEventStatus(event as any);
+    const checkoutOpen = isCheckoutOpen(event as any);
 
-    const playbackFor = (entitlementId: string | null) => {
-      if (!live) return null;
-      // Only modes this page can authorize (public / PPV entitlement).
-      if (mode !== "public" && mode !== "pay_per_view") return null;
-      const issued = issuePlayback({ roomId: event.roomId, hls, mode, entitlementId });
-      return issued.ok ? issued.playbackUrl : null;
-    };
-
-    const isPaid = event.monetizationMode === "fixed" || event.monetizationMode === "pwyw";
+    const isPaid = isPaidMode(event.monetizationMode);
     if (!isPaid && mode !== "pay_per_view") {
-      return res.json({ ok: true, access: true, mode, playlistUrl: playbackFor(null) });
+      // Donation / free event on an open room: same as before.
+      const issued = live && mode === "public" ? issuePlayback({ roomId: event.roomId, hls, mode, entitlementId: null }) : null;
+      return res.json({ ok: true, access: true, mode, effectiveStatus, checkoutOpen, playlistUrl: issued && issued.ok ? issued.playbackUrl : null });
     }
 
     const deviceId = getDeviceId(req, res);
@@ -520,10 +790,33 @@ router.post("/enter", async (req: Request, res: Response) => {
       }
     }
     if (!ent) {
-      return res.json({ ok: true, access: false, mode, reason: "no_entitlement" });
+      return res.json({ ok: true, access: false, mode, effectiveStatus, checkoutOpen, reason: "no_entitlement" });
     }
 
-    return res.json({ ok: true, access: true, mode, playlistUrl: playbackFor(ent.id) });
+    // Ticket holder: playable only when THIS event's protected broadcast is live.
+    const decision = decidePpvPlayback({
+      isHost: false,
+      event: event as any,
+      eventInRoom: true,
+      broadcast,
+      hasTicket: true,
+      salesOpen: true,
+    });
+    let playlistUrl: string | null = null;
+    if (decision.kind === "play" && live) {
+      const issued = issuePlayback({ roomId: event.roomId, hls, mode: "pay_per_view", entitlementId: ent.id });
+      playlistUrl = issued.ok ? issued.playbackUrl : null;
+    }
+    return res.json({
+      ok: true,
+      access: true,
+      mode,
+      effectiveStatus,
+      checkoutOpen,
+      playlistUrl,
+      waiting: decision.kind === "wait" ? decision.reason : undefined,
+      blocked: decision.kind === "deny" ? decision.error : undefined,
+    });
   } catch (err: any) {
     console.error("[monetization] enter error:", err?.message);
     return res.status(500).json({ error: "internal_error" });
@@ -555,7 +848,9 @@ router.get("/earnings", requireAuth, async (req: Request, res: Response) => {
         status: r.status,
         createdAt: r.createdAt,
       })),
-      payouts: { available: false, message: "Payouts coming soon." },
+      // Manual payouts: PPV_PAYOUT_NOTE tells creators how/when they're paid
+      // (shown on the Monetization page before they sell tickets).
+      payouts: { available: false, message: String(process.env.PPV_PAYOUT_NOTE || "").trim() || "Payouts coming soon." },
     });
   } catch (err: any) {
     console.error("[monetization] earnings error:", err?.message);

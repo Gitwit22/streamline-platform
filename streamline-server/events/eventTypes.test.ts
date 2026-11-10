@@ -131,3 +131,23 @@ describe("createEventPayload", () => {
     assert.deepEqual(p.data, { title: "test" });
   });
 });
+
+describe("commerce events", () => {
+  it("routes ppv.* and account.* to the commerce category", () => {
+    assert.equal(eventCategory(EventTypes.PPV_TICKET_PURCHASED), "commerce");
+    assert.equal(eventCategory(EventTypes.PPV_EVENT_ENDED), "commerce");
+    assert.equal(eventCategory(EventTypes.ACCOUNT_CREATED), "commerce");
+    // Existing categories unchanged.
+    assert.equal(eventCategory(EventTypes.ROOM_BROADCAST_STARTED), "room");
+    assert.equal(eventCategory(EventTypes.CHAT_MESSAGE_CREATED), "chat");
+  });
+
+  it("every payload gets an id; deterministic ids are kept", () => {
+    const a = createEventPayload(EventTypes.CHAT_MESSAGE_CREATED);
+    const b = createEventPayload(EventTypes.CHAT_MESSAGE_CREATED);
+    assert.match(a.id, /^evt_[a-f0-9]{24}$/);
+    assert.notEqual(a.id, b.id);
+    const c = createEventPayload(EventTypes.PPV_TICKET_PURCHASED, { id: "ppv.ticket.purchased:p1" });
+    assert.equal(c.id, "ppv.ticket.purchased:p1");
+  });
+});

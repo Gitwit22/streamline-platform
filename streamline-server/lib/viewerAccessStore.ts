@@ -5,11 +5,15 @@
  * effective = strictest of
  *   rooms/{roomId}.viewerAccess                     (the room itself)
  *   rooms/{homeRoomId}.viewerAccess                 (its channel; home room of the saved embed)
- *   legacy: active paid event on roomId / homeRoomId → pay_per_view
+ *   event rule: the running broadcast is bound to a paid event (hls.ppvEventId,
+ *               any status) → pay_per_view; else a STARTED paid event (or a
+ *               legacy non-ended one) on roomId / homeRoomId → pay_per_view
+ * Scheduled (v2 draft) events never change room access.
  */
 import { firestore as db } from "../firebaseAdmin";
-import { listActivePaidEvents, getMonetizedEvent, isActivePaidEvent, type MonetizedEvent } from "./monetization";
+import { listActivePaidEvents, getMonetizedEvent, type MonetizedEvent } from "./monetization";
 import { channelBindingAllowed } from "./channelBindingPure";
+import { broadcastStateFromHls, isPaidMode, pickBroadcastEventId, type BroadcastState } from "./ppvLifecyclePure";
 import {
   hasExplicitViewerAccess,
   legacyViewerAccess,
@@ -28,8 +32,20 @@ export interface ResolvedRoomAccess {
   /** savedEmbeds/{id} the room is bound to, if any. */
   channelId: string | null;
   access: ViewerAccess;
-  /** The event that sells access (pay_per_view only). */
+  /**
+   * Event offered for sale / shown on channel pages (pay_per_view only): the
+   * running broadcast's event, else the explicitly configured live event,
+   * else the single live paid event. Never "newest of several".
+   */
   ppvEvent: MonetizedEvent | null;
+  /** Running HLS broadcast and the event it was bound to at start. */
+  broadcast: BroadcastState;
+  /** The broadcast's event (any status), when bound and still in this room. */
+  broadcastEvent: MonetizedEvent | null;
+  /** Live (paywalling) paid events on the room and its channel home room. */
+  liveEventIds: string[];
+  /** ppvEventId from an explicit room/channel setting, if any. */
+  explicitPpvEventId: string | null;
 }
 
 const CACHE_MS = 5_000;
@@ -107,27 +123,53 @@ export async function resolveRoomViewerAccess(roomId: string, opts: { room?: any
 
     const own = hasExplicitViewerAccess(room.viewerAccess) ? normalizeViewerAccess(room.viewerAccess) : null;
     const home = homeRoom && hasExplicitViewerAccess(homeRoom.viewerAccess) ? normalizeViewerAccess(homeRoom.viewerAccess) : null;
-    const legacy = legacyViewerAccess(room, activeEvents[0]?.id || null);
+    const belongs = (e: MonetizedEvent | null) => !!e && (e.roomId === roomId || (!!homeRoomId && e.roomId === homeRoomId));
 
-    const access = strictestViewerAccess(own, home, legacy);
+    // A running broadcast bound to a paid event stays paid for its whole run,
+    // even after that event ends (no silent fallback to public).
+    const broadcast = broadcastStateFromHls(room.hls);
+    let broadcastEvent: MonetizedEvent | null = null;
+    if (broadcast.live && broadcast.eventId) {
+      const e = activeEvents.find((x) => x.id === broadcast.eventId) || (await getMonetizedEvent(broadcast.eventId));
+      broadcastEvent = belongs(e) ? e : null;
+    }
+    const eventRule: ViewerAccess =
+      broadcastEvent && isPaidMode(broadcastEvent.monetizationMode)
+        ? { mode: "pay_per_view", ppvEventId: broadcastEvent.id }
+        : legacyViewerAccess(room, activeEvents[0]?.id || null);
+
+    const access = strictestViewerAccess(own, home, eventRule);
+    const liveEventIds = activeEvents.map((e) => e.id);
+    const explicitPpvEventId =
+      (own?.mode === "pay_per_view" && own.ppvEventId) || (home?.mode === "pay_per_view" && home.ppvEventId) || null;
 
     let ppvEvent: MonetizedEvent | null = null;
     if (access.mode === "pay_per_view") {
-      if (access.ppvEventId) {
-        const e = activeEvents.find((x) => x.id === access.ppvEventId) || (await getMonetizedEvent(access.ppvEventId));
-        // The configured event must belong to this room or its channel.
-        if (e && (e.roomId === roomId || (homeRoomId && e.roomId === homeRoomId))) ppvEvent = e;
+      if (broadcastEvent) {
+        ppvEvent = broadcastEvent;
+      } else {
+        const pick = pickBroadcastEventId(liveEventIds, explicitPpvEventId);
+        ppvEvent = pick ? activeEvents.find((x) => x.id === pick) || null : null;
       }
-      if (!ppvEvent || !isActivePaidEvent(ppvEvent)) {
-        ppvEvent = activeEvents[0] || ppvEvent || null;
-      }
-      if (ppvEvent) access.ppvEventId = ppvEvent.id;
+      access.ppvEventId = ppvEvent ? ppvEvent.id : access.ppvEventId ?? null;
     }
 
-    value = { roomId, room, ownerUid, homeRoomId, channelId, access, ppvEvent };
+    value = { roomId, room, ownerUid, homeRoomId, channelId, access, ppvEvent, broadcast, broadcastEvent, liveEventIds, explicitPpvEventId };
   } catch (err: any) {
     console.warn("[viewerAccess] resolve failed; failing closed", { roomId, error: err?.message || err });
-    value = { roomId, room, ownerUid, homeRoomId: null, channelId: null, access: { mode: "private", allowEmails: [] }, ppvEvent: null };
+    value = {
+      roomId,
+      room,
+      ownerUid,
+      homeRoomId: null,
+      channelId: null,
+      access: { mode: "private", allowEmails: [] },
+      ppvEvent: null,
+      broadcast: broadcastStateFromHls(room.hls),
+      broadcastEvent: null,
+      liveEventIds: [],
+      explicitPpvEventId: null,
+    };
     // Do not cache failures.
     return value;
   }

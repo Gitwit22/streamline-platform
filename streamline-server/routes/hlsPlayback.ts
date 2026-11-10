@@ -13,7 +13,29 @@ import { firestore as db } from "../firebaseAdmin";
 import { verifyPlaybackToken, getPlaybackSecret } from "../lib/playbackToken";
 import { isSafePlaylistPath } from "../lib/hlsPlaylistRewrite";
 import { buildAuthorizedPlaylist, hlsPrefixFor } from "../lib/hlsPlayback";
-import { isEntitlementStillActive } from "../lib/viewerEntitlements";
+import { getEntitlementPlaybackState } from "../lib/viewerEntitlements";
+import { getMonetizedEvent } from "../lib/monetization";
+import { effectiveEventStatus } from "../lib/ppvLifecyclePure";
+
+// Event status, re-read at most every 10s per event (playlists poll every ~6s).
+const EVENT_STATUS_CACHE_MS = 10_000;
+const eventEndedCache = new Map<string, { at: number; ended: boolean }>();
+
+async function isEventEndedCached(eventId: string): Promise<boolean> {
+  const hit = eventEndedCache.get(eventId);
+  const now = Date.now();
+  if (hit && now - hit.at < EVENT_STATUS_CACHE_MS) return hit.ended;
+  let ended = hit?.ended ?? false;
+  try {
+    const ev = await getMonetizedEvent(eventId);
+    ended = !ev || effectiveEventStatus(ev as any) === "ended";
+  } catch {
+    // transient read error: keep the previous answer
+  }
+  if (eventEndedCache.size > 5000) eventEndedCache.clear();
+  eventEndedCache.set(eventId, { at: now, ended });
+  return ended;
+}
 import { SlidingWindowLimiter, clientIp, rateLimit } from "../lib/rateLimit";
 
 const router = Router();
@@ -64,8 +86,18 @@ router.get(
       const runCheck = verifyPlaybackToken(secret, req.query.token, { roomId, runId: hls.runId ?? null });
       if ("reason" in runCheck) return res.status(403).json({ error: `token_${runCheck.reason}` });
 
-      if (runCheck.payload.e && !(await isEntitlementStillActive(runCheck.payload.e))) {
-        return res.status(403).json({ error: "entitlement_revoked" });
+      if (runCheck.payload.e) {
+        // Ticket-based token: still valid, for THIS run's event, and that
+        // event hasn't ended (ending stops renewal and live playback).
+        const ent = await getEntitlementPlaybackState(runCheck.payload.e);
+        if (!ent.active) return res.status(403).json({ error: "entitlement_revoked" });
+        const runEventId = typeof hls.ppvEventId === "string" && hls.ppvEventId ? hls.ppvEventId : null;
+        if (ent.eventId && runEventId !== ent.eventId) {
+          return res.status(403).json({ error: "event_mismatch" });
+        }
+        if (ent.eventId && (await isEventEndedCached(ent.eventId))) {
+          return res.status(403).json({ error: "event_ended" });
+        }
       }
 
       const body = await buildAuthorizedPlaylist({
