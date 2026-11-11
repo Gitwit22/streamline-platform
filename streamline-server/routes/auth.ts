@@ -31,6 +31,15 @@ import { normalizeBillingTruthFromUser } from "../lib/billingTruth";
 import { PERMISSION_ERRORS } from "../lib/permissionErrors";
 import { buildNewUserDoc } from "../lib/newUserDefaults";
 import { emailClaimBlocks, emailClaimId } from "../lib/emailClaimPure";
+import {
+  accountEmailAvailable,
+  consumeAccountEmailToken,
+  issueAndSendAccountEmail,
+  syncFirebaseEmailVerified,
+} from "../lib/accountEmail";
+import { isEmailVerified } from "../lib/accountEmailPure";
+import { maskEmail } from "../lib/transactionalEmail";
+import { isValidEmail } from "../lib/ppvCodeEmailPure";
 
 console.log("✅ auth router loaded");
 
@@ -62,6 +71,25 @@ const signupRateLimit = rateLimit([{ limiter: signupIpLimiter, key: ipKey }]);
 const recoveryRateLimit = rateLimit([
   { limiter: recoveryIpLimiter, key: ipKey },
   { limiter: recoveryAccountLimiter, key: accountKey("login") },
+]);
+// Emails cost money and land in someone's inbox: at most 3 links per address
+// (reset) or per signed-in user (verification resend) per hour.
+const resetEmailAccountLimiter = new SlidingWindowLimiter({ windowMs: 60 * MINUTE_MS, max: 3 });
+const verifyResendUserLimiter = new SlidingWindowLimiter({ windowMs: 60 * MINUTE_MS, max: 3 });
+const resetEmailRateLimit = rateLimit([
+  { limiter: recoveryIpLimiter, key: ipKey },
+  { limiter: resetEmailAccountLimiter, key: accountKey("login") },
+]);
+/** Link redemption (reset / verify): per IP; the 256-bit token itself can't be guessed. */
+const emailTokenRateLimit = rateLimit([{ limiter: recoveryIpLimiter, key: ipKey }]);
+const verifyResendRateLimit = rateLimit([
+  {
+    limiter: verifyResendUserLimiter,
+    key: (req: any) => {
+      const uid = req.user?.uid || req.user?.id;
+      return uid ? `uid:${uid}` : null;
+    },
+  },
 ]);
 
 // Constant hash used to spend the same bcrypt time when a login is unknown,
@@ -168,9 +196,12 @@ async function ensureFirebaseCustomToken(uid: string, email: string, password?: 
     const existing = await firebaseAuth.getUser(uid);
     hasUser = true;
     if (password) {
+      // Only an address change un-verifies the account: a password change
+      // must not wipe a confirmed email (publicPlayback relies on it).
+      const emailChanged = String(existing.email || "").trim().toLowerCase() !== emailNorm;
       await firebaseAuth.updateUser(uid, {
         email: emailNorm,
-        emailVerified: false,
+        ...(emailChanged ? { emailVerified: false } : {}),
         password,
       });
     } else if (!existing.email || String(existing.email).trim().toLowerCase() !== emailNorm) {
@@ -592,6 +623,14 @@ router.post("/signup", signupRateLimit, async (req, res) => {
       displayName: typeof (userData as any).displayName === "string" ? (userData as any).displayName : null,
     });
 
+    // Fire-and-forget: email confirmation link (Resend). Never blocks or fails
+    // signup; the user can resend it later from the app.
+    if (accountEmailAvailable()) {
+      issueAndSendAccountEmail({ uid, email: emailNorm, purpose: "verify_email" }).catch((err: any) => {
+        console.warn("[auth] signup verification email failed:", err?.message || err);
+      });
+    }
+
     const token = signLegacySessionToken(uid);
 
     // Set cookie for httpOnly auth (legacy/secondary) and return token
@@ -623,12 +662,17 @@ const FORGOT_PASSWORD_UNAVAILABLE_MESSAGE =
  * so /forgot-password/check can't be used to tell them apart.
  */
 function forgotPasswordUnavailableBody() {
+  const emailResetAvailable = accountEmailAvailable();
   return {
     canReset: false,
     method: null,
     availableMethods: [] as string[],
     recoveryQuestion: null,
-    message: FORGOT_PASSWORD_UNAVAILABLE_MESSAGE,
+    // Config-level (same for every login), so it reveals nothing about the account.
+    emailResetAvailable,
+    message: emailResetAvailable
+      ? "We can email you a link to reset your password."
+      : FORGOT_PASSWORD_UNAVAILABLE_MESSAGE,
   };
 }
 
@@ -657,6 +701,7 @@ router.post("/forgot-password/check", recoveryRateLimit, async (req, res) => {
       method: forgotPasswordStatus.availableMethods[0],
       availableMethods: forgotPasswordStatus.availableMethods,
       recoveryQuestion: forgotPasswordStatus.recoveryQuestion,
+      emailResetAvailable: accountEmailAvailable(),
       message: forgotPasswordStatus.availableMethods.includes("admin")
         ? "Enter the reset code your administrator gave you, then choose a new password."
         : "Account recovery is available. Verify your identity to choose a new password.",
@@ -905,6 +950,193 @@ router.post("/forgot-password/reset", recoveryRateLimit, async (req, res) => {
   } catch (err: any) {
     console.error("POST /api/auth/forgot-password/reset failed:", err?.message || err);
     return res.status(500).json({ error: "forgot_password_reset_failed" });
+  }
+});
+
+// --- Email links (Resend): password reset + email verification ---
+
+const RESET_EMAIL_SENT_MESSAGE =
+  "If an account exists for that email, we've sent a password reset link. It expires in 60 minutes. Check your spam folder if you don't see it.";
+const EMAIL_UNAVAILABLE_MESSAGE = "Email isn't available right now. Use another recovery option or contact support.";
+const INVALID_RESET_LINK_MESSAGE = "This reset link is invalid or has expired. Request a new one.";
+
+/**
+ * POST /api/auth/forgot-password/email  { login }
+ * Always answers the same way for valid input (account or not), and does the
+ * lookup + send after responding so timing doesn't reveal accounts either.
+ */
+router.post("/forgot-password/email", resetEmailRateLimit, async (req, res) => {
+  const login = normalizeLoginIdentifier((req.body || {}).login);
+  if (!isValidEmail(login)) {
+    return res.status(400).json({ error: "Enter a valid email address." });
+  }
+  if (!accountEmailAvailable()) {
+    return res.status(503).json({ error: "email_unavailable", message: EMAIL_UNAVAILABLE_MESSAGE });
+  }
+
+  res.json({ ok: true, message: RESET_EMAIL_SENT_MESSAGE });
+
+  try {
+    const userDoc = await findUserByLogin(login);
+    const user = userDoc ? userDoc.data() || {} : null;
+    if (!userDoc || !user || isDeletedAccount(user)) return;
+    const result = await issueAndSendAccountEmail({ uid: userDoc.id, email: login, purpose: "password_reset" });
+    await logAuthSecurityEvent({
+      event: "password_reset_email_requested",
+      actorUserId: userDoc.id,
+      targetUserId: userDoc.id,
+      ip: req.ip || null,
+      details: { sent: result.ok, error: result.ok === false ? result.error : null },
+    });
+  } catch (err: any) {
+    console.error("POST /api/auth/forgot-password/email failed:", { to: maskEmail(login), error: err?.message || err });
+  }
+});
+
+/**
+ * POST /api/auth/reset-password/email  { token, newPassword, confirmPassword }
+ * Redeems an emailed reset link. Same success shape as /forgot-password/reset.
+ */
+router.post("/reset-password/email", emailTokenRateLimit, async (req, res) => {
+  try {
+    const { token, newPassword, confirmPassword } = (req.body || {}) as {
+      token?: string;
+      newPassword?: string;
+      confirmPassword?: string;
+    };
+
+    if (String(newPassword || "") !== String(confirmPassword || "")) {
+      return res.status(400).json({ error: "Passwords do not match." });
+    }
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) {
+      return res.status(400).json({ error: passwordError });
+    }
+
+    // bcrypt is slow: hash before the transaction, not inside it.
+    const passwordHash = await bcrypt.hash(String(newPassword), 10);
+    const now = Date.now();
+    // Floor to the second: JWT iat is in seconds, and the new session token
+    // below is issued within this same second.
+    const authRevokedAtMs = Math.floor(now / 1000) * 1000;
+    let nextPasswordReset: ReturnType<typeof normalizePasswordResetState> | null = null;
+
+    const consumed = await consumeAccountEmailToken(token, "password_reset", (user, at) => {
+      nextPasswordReset = buildConsumedPasswordResetState(user.passwordReset, at);
+      return {
+        passwordHash,
+        passwordReset: nextPasswordReset,
+        // Invalidate sessions issued before the reset (e.g. an attacker's token).
+        authRevokedAtMs,
+        // Opening the link proves the user controls this address.
+        emailVerified: true,
+        ...(isEmailVerified(user) ? {} : { emailVerifiedAtMs: at }),
+      };
+    });
+
+    if (consumed.ok === false) {
+      return res.status(400).json({ error: INVALID_RESET_LINK_MESSAGE, reason: consumed.reason });
+    }
+
+    const { uid, email, user } = consumed;
+
+    try {
+      await firebaseAuth.revokeRefreshTokens(uid);
+    } catch (err: any) {
+      console.warn("[auth] revokeRefreshTokens after email password reset failed:", err?.message || err);
+    }
+
+    const sessionToken = signLegacySessionToken(uid);
+    const customToken = await ensureFirebaseCustomToken(uid, email, String(newPassword));
+    await syncFirebaseEmailVerified(uid, email);
+    res.cookie("token", sessionToken, cookieOptions());
+
+    await logAuthSecurityEvent({
+      event: "password_reset_completed",
+      actorUserId: uid,
+      targetUserId: uid,
+      ip: req.ip || null,
+      details: { method: "email", recoverySetupRequired: false, recoveryMethod: "email" },
+    });
+
+    return res.json({
+      success: true,
+      token: sessionToken,
+      customToken,
+      requiresRecoverySetup: false,
+      user: {
+        id: uid,
+        ...stripSensitiveUserFields({ ...user, passwordReset: nextPasswordReset, emailVerified: true }),
+      },
+    });
+  } catch (err: any) {
+    console.error("POST /api/auth/reset-password/email failed:", err?.message || err);
+    return res.status(500).json({ error: "reset_password_email_failed" });
+  }
+});
+
+/**
+ * POST /api/auth/verify-email  { token }
+ * Public (the link may be opened on a device that isn't signed in).
+ */
+router.post("/verify-email", emailTokenRateLimit, async (req, res) => {
+  try {
+    const consumed = await consumeAccountEmailToken((req.body || {}).token, "verify_email", (user, at) => ({
+      emailVerified: true,
+      ...(isEmailVerified(user) ? {} : { emailVerifiedAtMs: at }),
+    }));
+
+    if (consumed.ok === false) {
+      const message =
+        consumed.reason === "used"
+          ? "This confirmation link was already used. If your email still shows as unconfirmed, send a new link from the app."
+          : "This confirmation link is invalid or has expired. Send a new one from the app.";
+      return res.status(400).json({ error: message, reason: consumed.reason });
+    }
+
+    await syncFirebaseEmailVerified(consumed.uid, consumed.email);
+    await logAuthSecurityEvent({
+      event: "email_verified",
+      actorUserId: consumed.uid,
+      targetUserId: consumed.uid,
+      ip: req.ip || null,
+      details: {},
+    });
+    return res.json({ ok: true, emailVerified: true });
+  } catch (err: any) {
+    console.error("POST /api/auth/verify-email failed:", err?.message || err);
+    return res.status(500).json({ error: "verify_email_failed" });
+  }
+});
+
+/**
+ * POST /api/auth/verify-email/resend
+ * Signed-in user asks for a new confirmation link. Reports a failed send.
+ */
+router.post("/verify-email/resend", requireAuth, verifyResendRateLimit, async (req, res) => {
+  try {
+    const uid = (req as any).user?.uid || (req as any).user?.id;
+    if (!uid) return res.status(401).json({ error: PERMISSION_ERRORS.UNAUTHORIZED });
+
+    const snap = await db.collection("users").doc(uid).get();
+    const user = snap.exists ? snap.data() || {} : null;
+    if (!user || isDeletedAccount(user)) return res.status(404).json({ error: "user_not_found" });
+    if (isEmailVerified(user)) return res.json({ ok: true, alreadyVerified: true });
+
+    const email = normalizeLoginIdentifier(user.email);
+    if (!isValidEmail(email)) return res.status(400).json({ error: "This account has no valid email address." });
+    if (!accountEmailAvailable()) {
+      return res.status(503).json({ error: "email_unavailable", message: EMAIL_UNAVAILABLE_MESSAGE });
+    }
+
+    const result = await issueAndSendAccountEmail({ uid, email, purpose: "verify_email" });
+    if (!result.ok) {
+      return res.status(502).json({ error: "email_send_failed", message: "We couldn't send the email. Try again in a few minutes." });
+    }
+    return res.json({ ok: true, sentTo: maskEmail(email) });
+  } catch (err: any) {
+    console.error("POST /api/auth/verify-email/resend failed:", err?.message || err);
+    return res.status(500).json({ error: "verify_email_resend_failed" });
   }
 });
 

@@ -10,6 +10,8 @@ import BillingSuccess from "./pages/BillingSuccess";
 import ForgotPasswordPage from "./pages/ForgotPasswordPage";
 import PpvViewer from "./pages/PpvViewer";
 import RecoverySetupPage from "./pages/RecoverySetupPage";
+import VerifyEmailPage from "./pages/VerifyEmailPage";
+import { EmailVerifyReminder } from "./components/EmailVerifyReminder";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { creatorRoutes } from "./creator/routes";
 
@@ -56,6 +58,8 @@ function App() {
       // otherwise we race with a freshly-stored login token.
       if (
         path.startsWith("/login") || path.startsWith("/signup") ||
+        path.startsWith("/forgot-password") || path.startsWith("/reset-password") ||
+        path.startsWith("/verify-email") ||
         path === "/welcome" || path === "/" ||
         path.startsWith("/privacy") || path.startsWith("/terms") ||
         path.startsWith("/support") || path.startsWith("/learnmore") ||
@@ -169,6 +173,8 @@ function App() {
         </div>
       )}
 
+      <EmailVerifyReminder />
+
       <Routes>
       {/* Redirect legacy lane paths to creator welcome */}
       <Route path="/streamline/corporate/*" element={<Navigate to="/welcome" replace />} />
@@ -179,6 +185,8 @@ function App() {
       <Route path="/" element={<Navigate to="/welcome" replace />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ForgotPasswordPage />} />
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
       <Route path="/signup" element={<SignupPage />} />
       <Route
         path="/account-recovery/setup"

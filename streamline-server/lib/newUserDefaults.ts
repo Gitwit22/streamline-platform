@@ -23,6 +23,8 @@ export function buildNewUserDoc(input: NewUserDocInput) {
     emailLower: String(input.email || "").trim().toLowerCase(),
     displayName: input.displayName ? String(input.displayName) : "",
     passwordHash: input.passwordHash,
+    // Set true only by redeeming an emailed link (lib/accountEmail.ts).
+    emailVerified: false,
 
     // Billing defaults
     planId,

@@ -3,6 +3,8 @@
  *
  *   roomInviteAcceptances      expiresAtMs <= now (invite acceptance expired)
  *   monetizationPendingCodes   expiresAt (ms) <= now (abandoned checkout codes)
+ *   authEmailTokens            expiresAtMs older than 1 day (password reset /
+ *                               email confirmation links; lib/accountEmail.ts)
  *   rooms/{id}/joinPagePresence lastSeenAtMs older than 1h
  *   rooms/{id}/hlsViewers       lastSeenAtMs older than 1h (unique-viewer
  *                               totals live in viewerSessions, unaffected)
@@ -100,6 +102,10 @@ export async function cleanupEphemeralDocs(now: Date, opts: { shouldStop?: () =>
   );
   await step("monetizationPendingCodes", () =>
     deleteMatching(firestore.collection("monetizationPendingCodes").where("expiresAt", "<=", nowMs), MAX_PER_COLLECTION, shouldStop)
+  );
+  // Kept a day past expiry so a late click still reads "expired", not "invalid".
+  await step("authEmailTokens", () =>
+    deleteMatching(firestore.collection("authEmailTokens").where("expiresAtMs", "<=", nowMs - DAY_MS), MAX_PER_COLLECTION, shouldStop)
   );
 
   // Presence: collection group first, room scan when the index is missing.

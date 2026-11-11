@@ -180,6 +180,21 @@ MAINTENANCE_JOBS_URL=https://<backend>/api/maintenance/jobs/run-due
 # (or MAINTENANCE_BASE_URL=https://<backend>; the legacy MAINTENANCE_EXPIRE_URL's origin is also accepted)
 ```
 
+### 9. Email (Resend): password reset, email confirmation, guest ticket codes
+```bash
+EMAIL_PROVIDER=resend
+EMAIL_SEND_ENABLED=true
+RESEND_API_KEY=re_...                     # Resend key with sending access
+EMAIL_FROM="StreamLine <no-reply@nxtlvlts.com>"   # domain must be verified in Resend
+# optional: EMAIL_REPLY_TO=support@...
+# CLIENT_URL (section 7) is required too: emailed links point at it.
+```
+Without all of these, **Forgot Password offers no email link** (security question /
+emergency code / admin code only), new signups get **no confirmation email**, and
+guest PPV access codes stay queued. `GET /api/health/ready` lists the missing ones
+under the `email` area. Verify with a real signup: a "Confirm your StreamLine email"
+message should appear in the Resend dashboard's email log.
+
 ---
 
 ## 🚨 Common Mistakes

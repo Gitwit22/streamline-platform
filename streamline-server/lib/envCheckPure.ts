@@ -133,13 +133,14 @@ export const ENV_REQUIREMENTS: EnvRequirement[] = [
     validate: (v) => (v.trim().length >= 32 ? null : "must be at least 32 characters"),
   },
 
-  // Transactional email (lib/transactionalEmail.ts): guest PPV access codes + recovery
-  { area: "email", anyOf: ["RESEND_API_KEY"], severity: "recommended", impact: "Guest access-code and recovery emails stay queued (not sent)." },
+  // Transactional email (lib/transactionalEmail.ts): guest PPV access codes + recovery,
+  // password reset links and email confirmation (lib/accountEmail.ts)
+  { area: "email", anyOf: ["RESEND_API_KEY"], severity: "recommended", impact: "No password reset or email confirmation links; guest access-code emails stay queued (not sent)." },
   {
     area: "email",
     anyOf: ["EMAIL_FROM", "EMAIL_FROM_ADDRESS"],
     severity: "recommended",
-    impact: "Guest access-code and recovery emails stay queued (no sender address).",
+    impact: "No password reset or email confirmation links; guest access-code emails stay queued (no sender address).",
   },
   {
     area: "email",

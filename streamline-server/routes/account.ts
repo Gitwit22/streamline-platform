@@ -34,6 +34,7 @@ import {
   normalizeRolePresetId,
 } from "../lib/permissions/roleDefaults";
 import { loadOwnerRolePreset, rolePresetDocRef } from "../lib/permissions/rolePresetStore";
+import { accountEmailAvailable } from "../lib/accountEmail";
 
 const router = Router();
 
@@ -413,6 +414,10 @@ router.get("/me", async (req, res) => {
     const payload = {
       id: uid,
       email: data.email || null,
+      // Only true after the user opened an emailed link (lib/accountEmail.ts).
+      emailVerified: (data as any).emailVerified === true,
+      // Whether confirmation/reset links can be emailed at all (Resend configured).
+      emailDeliveryAvailable: accountEmailAvailable(),
       displayName: data.displayName || null,
       passwordReset: buildPublicPasswordResetState((data as any).passwordReset),
       recovery: buildPublicRecoveryState((data as any).recovery),
