@@ -1,6 +1,10 @@
 import { useCallback } from "react";
+import { kickServerUrlProblem, kickStreamKeyProblem } from "../../lib/kickDestination";
 
-export type PlatformKey = "youtube" | "facebook" | "twitch" | "instagram" | "custom";
+export type PlatformKey = "youtube" | "facebook" | "twitch" | "kick" | "instagram" | "custom";
+
+/** Session key entry sent to start-multistream; `platform` marks a Kick session destination. */
+export type SessionKeyEntry = { rtmpUrlBase?: string; streamKey?: string; platform?: string };
 
 export type PlatformState = {
   selected: boolean;
@@ -33,7 +37,7 @@ export type DestinationsStartPayload = {
   facebookKey?: string;
   twitchKey?: string;
   enabledTargetIds?: string[];
-  sessionKeys?: Record<string, { rtmpUrlBase?: string; streamKey?: string }>;
+  sessionKeys?: Record<string, SessionKeyEntry>;
   destinations?: EffectiveDestinationPayload[];
   extraDestinations?: SessionRtmpDestination[];
   presetId?: string;
@@ -83,7 +87,7 @@ export function useDestinationsStartPayload({
     let computedPayload: DestinationsStartPayload | null = null;
 
     const runFrozen = () => {
-      const sessionKeyPayload: Record<string, { rtmpUrlBase?: string; streamKey?: string }> = {};
+      const sessionKeyPayload: Record<string, SessionKeyEntry> = {};
       const instagramDestinations: SessionRtmpDestination[] = [];
       const enabledTargetIds: string[] = [];
       const effectiveDestinations: EffectiveDestinationPayload[] = [];
@@ -137,6 +141,47 @@ export function useDestinationsStartPayload({
 
           if (!hasMain && !state.manualFields.length) {
             nextPlatformState[platform].info = "Session-only. Not saved for reuse.";
+          }
+          return;
+        }
+
+        if (platform === "kick") {
+          // Kick: saved destination (Server URL + key from Settings), or a
+          // Server URL + key entered for this stream only. Manual keys only.
+          const main = mainByPlatform[platform];
+          const mainSaved = !!(main && main.mode !== "connected");
+          const mainUsable = mainSaved && !!main.hasKey;
+          const field = state.manualFields.find((f) => (f.value && f.value.trim()) || (f.base && f.base.trim()));
+          if (!state.selected && !field) return;
+          hasSelection = true;
+          const targetId = main?.targetId || main?.id;
+          const sessionKey = (field?.value || "").replace(/\s+/g, "");
+
+          if (!sessionKey) {
+            if (!mainUsable) {
+              nextPlatformState[platform].error = mainSaved ? "No stream key set." : "Add your Kick Server URL and Stream Key.";
+              hasErrors = true;
+              return;
+            }
+            enabledTargetIds.push(main.id);
+            effectiveDestinations.push({ platform, source: "main", destinationId: main.id, targetId, rtmpUrlBase: main.rtmpUrlBase });
+            return;
+          }
+
+          const base = (field?.base || "").trim() || (mainSaved ? main.rtmpUrlBase || "" : "");
+          const problem = kickServerUrlProblem(base) || kickStreamKeyProblem(sessionKey);
+          if (problem) {
+            nextPlatformState[platform].error = problem;
+            hasErrors = true;
+            return;
+          }
+          if (mainSaved) {
+            enabledTargetIds.push(main.id);
+            sessionKeyPayload[targetId || main.id] = { rtmpUrlBase: base, streamKey: sessionKey };
+            effectiveDestinations.push({ platform, source: "session", streamKey: sessionKey, destinationId: main.id, targetId, rtmpUrlBase: base });
+          } else {
+            effectiveDestinations.push({ platform, source: "session", streamKey: sessionKey, rtmpUrlBase: base });
+            if (!state.info) nextPlatformState[platform].info = "Session-only. Not saved for reuse.";
           }
           return;
         }
@@ -276,9 +321,9 @@ export function normalizeStartLivePayloadFromDestinationsKeys(keys: {
   facebookKey?: string;
   twitchKey?: string;
   enabledTargetIds?: string[];
-  sessionKeys?: Record<string, { rtmpUrlBase?: string; streamKey?: string }>;
+  sessionKeys?: Record<string, SessionKeyEntry>;
   destinations?: Array<{
-    platform: "youtube" | "facebook" | "twitch" | "custom";
+    platform: "youtube" | "facebook" | "twitch" | "kick" | "custom";
     source: "main" | "session";
     streamKey?: string;
     destinationId?: string;
@@ -300,7 +345,7 @@ export function normalizeStartLivePayloadFromDestinationsKeys(keys: {
   let facebookKey = keys.facebookKey;
   let twitchKey = keys.twitchKey;
   let enabledTargetIds = Array.isArray(keys.enabledTargetIds) ? keys.enabledTargetIds.filter((id) => !!id) : [];
-  let sessionKeyMap: Record<string, { rtmpUrlBase?: string; streamKey?: string }> = keys.sessionKeys ? { ...keys.sessionKeys } : {};
+  let sessionKeyMap: Record<string, SessionKeyEntry> = keys.sessionKeys ? { ...keys.sessionKeys } : {};
   const extraDestinations = Array.isArray(keys.extraDestinations) ? keys.extraDestinations : [];
 
   if (destinationInputs.length) {
@@ -318,6 +363,11 @@ export function normalizeStartLivePayloadFromDestinationsKeys(keys: {
           if (item.platform === "youtube") youtubeKey = trimmed;
           if (item.platform === "facebook") facebookKey = trimmed;
           if (item.platform === "twitch") twitchKey = trimmed;
+          if (item.platform === "kick") {
+            // Session-only Kick: the server validates the URL and appends the key once.
+            const keyId = `kick-${Object.keys(sessionKeyMap).length + 1}`;
+            sessionKeyMap[keyId] = { rtmpUrlBase: item.rtmpUrlBase, streamKey: trimmed, platform: "kick" };
+          }
           if (item.platform === "custom") {
             let base = item.rtmpUrlBase;
             let key = trimmed;
@@ -379,6 +429,8 @@ function getDefaultRtmpBase(p: PlatformKey): string {
       return "rtmps://live-api-s.facebook.com:443/rtmp/";
     case "twitch":
       return "rtmp://live.twitch.tv/app";
+    case "kick":
+      return ""; // creator-provided (Kick dashboard)
     case "instagram":
       return "rtmps://edgetee-upload-det1-1.xx.fbcdn.net:443/rtmp/";
     case "custom":
