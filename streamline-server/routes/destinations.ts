@@ -9,6 +9,7 @@ import { assertPlatformTranscodeEnabled } from "../lib/platformFlags";
 import { requireAuth } from "../middleware/requireAuth";
 import type { DestinationStatus, DestinationStatusReason, ApiErrorCode, DestinationItem, DestinationsGetResponse, DestinationPostResponse, ValidateRequestBody, ValidateResponse } from "../types/streaming";
 import { decryptStreamKey, encryptStreamKey, normalizeRtmpBase } from "../lib/crypto";
+import { isKickPlatform, KICK_ERROR_MESSAGES, resolveKickCredentials, type KickErrorCode } from "../lib/kickDestinationPure";
 
 const router = Router();
 
@@ -23,6 +24,11 @@ function deriveStatus(hasEnc: boolean, streamKeyDec: string | null, enabled: boo
     return { status: "disconnected", statusReason: undefined };
   }
   return { status: "connected", statusReason: undefined };
+}
+
+/** Kick setup errors: a code plus a fixed message (never the submitted URL or key). */
+function sendKickError(res: any, code: KickErrorCode) {
+  return res.status(400).json({ error: code, message: KICK_ERROR_MESSAGES[code] });
 }
 
 function normalizeName(name?: string | null): string {
@@ -129,11 +135,30 @@ router.post("/", requireAuth, async (req: any, res) => {
     if (!gate) return;
     const planLimit = gate.limit; // null = unlimited
     const { platform, name, rtmpUrlBase, streamKeyEnc, streamKeyPlain, enabled, mode, persistent, oauthRef } = req.body || {};
-    if (!platform || !rtmpUrlBase) {
+
+    // Kick: creator-provided RTMPS Server URL (ingest path kept) + key. A key
+    // pasted onto the URL is split off so it is only ever appended once.
+    const isKick = isKickPlatform(platform);
+    let kickBase: string | null = null;
+    let kickKey: string | null = null;
+    if (isKick) {
+      const suppliedKey =
+        typeof streamKeyPlain === "string" && streamKeyPlain.trim()
+          ? streamKeyPlain
+          : streamKeyEnc
+          ? decryptStreamKey(streamKeyEnc as any) ?? undefined
+          : undefined;
+      const kick = resolveKickCredentials({ serverUrl: rtmpUrlBase, streamKey: suppliedKey, requireKey: persistent !== false });
+      if (kick.ok === false) return sendKickError(res, kick.code);
+      kickBase = kick.serverUrl;
+      kickKey = kick.streamKey;
+    }
+
+    if (!platform || (!rtmpUrlBase && !isKick)) {
       return res.status(400).json({ error: "missing_required_fields" as ApiErrorCode, details: "platform and rtmpUrlBase are required" });
     }
 
-    const normalizedBase = normalizeRtmpBase(String(rtmpUrlBase));
+    const normalizedBase = isKick ? (kickBase as string) : normalizeRtmpBase(String(rtmpUrlBase));
     const normalizedPlatform = String(platform).toLowerCase();
     const normalizedName = normalizeName(name);
 
@@ -148,7 +173,7 @@ router.post("/", requireAuth, async (req: any, res) => {
     // otherwise allow callers to supply an already-encrypted payload.
     let finalEnc: any = streamKeyEnc || null;
     let plainKey: string | null = null;
-    const normalizedPlain = normalizeStreamKeyInput(streamKeyPlain);
+    const normalizedPlain = isKick ? kickKey : normalizeStreamKeyInput(streamKeyPlain);
     if (normalizedPlain) {
       const enc = encryptStreamKey(normalizedPlain);
       if (!enc) {
@@ -231,6 +256,13 @@ router.post("/validate", requireAuth, async (req: any, res) => {
 
     if (!(await requireDestinationAccess(uid, res))) return;
     const body: ValidateRequestBody = req.body || ({} as any);
+    if (isKickPlatform(body.platform)) {
+      const kick = resolveKickCredentials({ serverUrl: body.rtmpUrlBase, streamKey: body.streamKeyPlain, requireKey: false });
+      if (kick.ok === false) return sendKickError(res, kick.code);
+      const { status, statusReason } = deriveStatus(!!kick.streamKey, kick.streamKey, true);
+      const payload: ValidateResponse = { ok: true, status, statusReason: statusReason ?? null };
+      return res.json(payload);
+    }
     if (!body.platform || !body.rtmpUrlBase) {
       return res.status(400).json({ error: "missing_required_fields" as ApiErrorCode });
     }
@@ -263,7 +295,8 @@ router.put("/:id", requireAuth, async (req: any, res) => {
 
     const id = String(req.params.id || "");
     if (!id) return res.status(400).json({ error: "invalid_query" as ApiErrorCode });
-    const updates = req.body || {};
+    // Copied so a Kick key split off the Server URL can be applied as the new key.
+    const updates = { ...(req.body || {}) };
 
     // Disabling a destination and/or clearing its stored key is cleanup: never
     // gated. Any other change (enable, rename, new key) requires the entitlement.
@@ -282,6 +315,25 @@ router.put("/:id", requireAuth, async (req: any, res) => {
 
     let nextPlatform = typeof updates.platform === "string" ? String(updates.platform).toLowerCase() : current.platform;
     let nextBase = typeof updates.rtmpUrlBase === "string" ? normalizeRtmpBase(String(updates.rtmpUrlBase)) : current.rtmpUrlBase;
+
+    // Kick: validate whenever the Server URL, platform or key changes. Pure
+    // cleanup (disable, clear key) stays possible even for a legacy bad URL.
+    if (isKickPlatform(nextPlatform)) {
+      const newKeyInput =
+        typeof updates.streamKeyPlain === "string" && updates.streamKeyPlain.trim() ? updates.streamKeyPlain : undefined;
+      const touchesKick =
+        typeof updates.rtmpUrlBase === "string" || !isKickPlatform(current.platform) || newKeyInput !== undefined;
+      if (touchesKick) {
+        const kick = resolveKickCredentials({
+          serverUrl: typeof updates.rtmpUrlBase === "string" ? updates.rtmpUrlBase : current.rtmpUrlBase,
+          streamKey: newKeyInput,
+          requireKey: false,
+        });
+        if (kick.ok === false) return sendKickError(res, kick.code);
+        nextBase = kick.serverUrl;
+        if (kick.streamKey) updates.streamKeyPlain = kick.streamKey;
+      }
+    }
     const nextNameNorm = normalizeName(typeof updates.name === "string" ? updates.name : current.name);
     const nextMode = updates.mode === "connected" ? "connected" : "manual";
     const nextPersistent = typeof updates.persistent === "boolean" ? updates.persistent : (typeof current.persistent === "boolean" ? current.persistent : true);

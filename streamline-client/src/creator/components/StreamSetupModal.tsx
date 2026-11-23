@@ -9,13 +9,15 @@ import { getSelectedOwnerContext } from "../../lib/producerDelegation";
 import { useDestinationsStartPayload } from "../hooks/useDestinationsStartPayload";
 import CollapsibleSection from "./CollapsibleSection";
 import { getFeatureErrorMessage } from "../../lib/featureErrors";
+import { KICK_SETUP_HELP } from "../../lib/kickDestination";
 
-type PlatformKey = "youtube" | "facebook" | "twitch" | "instagram" | "custom";
+type PlatformKey = "youtube" | "facebook" | "twitch" | "kick" | "instagram" | "custom";
 
 const PLATFORM_CONFIG: Record<PlatformKey, { label: string; accent: string }> = {
   youtube: { label: "YouTube", accent: "#ef4444" },
   facebook: { label: "Facebook", accent: "#3b82f6" },
   twitch: { label: "Twitch", accent: "#a855f7" },
+  kick: { label: "Kick", accent: "#53fc18" },
   instagram: { label: "Instagram", accent: "#f97316" },
   custom: { label: "Custom (RTMP)", accent: "#14b8a6" },
 };
@@ -42,6 +44,7 @@ const buildDefaultPlatformState = (): Record<PlatformKey, PlatformState> => ({
   youtube: { selected: false, manualFields: [], error: null, info: null },
   facebook: { selected: false, manualFields: [], error: null, info: null },
   twitch: { selected: false, manualFields: [], error: null, info: null },
+  kick: { selected: false, manualFields: [], error: null, info: null },
   instagram: { selected: false, manualFields: [], error: null, info: null },
   custom: { selected: false, manualFields: [], error: null, info: null },
 });
@@ -68,6 +71,8 @@ function getDefaultRtmpBase(p: PlatformKey): string {
       return "rtmps://live-api-s.facebook.com:443/rtmp/";
     case "twitch":
       return "rtmp://live.twitch.tv/app";
+    case "kick":
+      return ""; // creator-provided (Kick dashboard)
     case "instagram":
       return "rtmps://edgetee-upload-det1-1.xx.fbcdn.net:443/rtmp/";
     case "custom":
@@ -112,7 +117,7 @@ interface Props {
     facebookKey?: string;
     twitchKey?: string;
     enabledTargetIds?: string[];
-    sessionKeys?: Record<string, { rtmpUrlBase?: string; streamKey?: string }>;
+    sessionKeys?: Record<string, { rtmpUrlBase?: string; streamKey?: string; platform?: string }>;
     destinations?: EffectiveDestinationPayload[];
     extraDestinations?: SessionRtmpDestination[];
     presetId?: string;
@@ -195,6 +200,7 @@ export default function StreamSetupModalV2({
     youtube: false,
     facebook: false,
     twitch: false,
+    kick: false,
     instagram: false,
     custom: false,
   });
@@ -214,7 +220,7 @@ export default function StreamSetupModalV2({
   const [boundEmbedError, setBoundEmbedError] = useState<string | null>(null);
   const [hlsAdvancedOpen, setHlsAdvancedOpen] = useState(false);
 
-  const platformOrder: PlatformKey[] = ["youtube", "facebook", "twitch", "instagram", "custom"];
+  const platformOrder: PlatformKey[] = ["youtube", "facebook", "twitch", "kick", "instagram", "custom"];
 
   const [recordingMode, setRecordingMode] = useState<"cloud" | "dual">(defaultRecordingMode);
 
@@ -559,7 +565,7 @@ export default function StreamSetupModalV2({
       });
       setStartError(null);
       setWarmupStartedAt(null);
-      setWarmupReadyMap({ youtube: false, facebook: false, twitch: false, instagram: false, custom: false });
+      setWarmupReadyMap({ youtube: false, facebook: false, twitch: false, kick: false, instagram: false, custom: false });
       setWarmupLogged(false);
     }
   }, [open]);
@@ -682,10 +688,11 @@ export default function StreamSetupModalV2({
 
   const selectedPlatforms = platformOrder.filter((p) => platformState[p].selected);
   const customHasManual = platformState.custom.manualFields.some((f) => f.value.trim());
+  const kickHasManual = platformState.kick.manualFields.some((f) => f.value.trim() || (f.base || "").trim());
   const instagramState = platformState.instagram;
   const instagramHasManual = instagramState.manualFields.some((f) => (f.value && f.value.trim()) || (f.base && f.base.trim()));
   const instagramSelected = instagramState.selected || instagramHasManual;
-  const anyPlatformSelection = selectedPlatforms.length > 0 || customHasManual || instagramSelected;
+  const anyPlatformSelection = selectedPlatforms.length > 0 || customHasManual || kickHasManual || instagramSelected;
   const instagramMissingKeySelected = (() => {
     if (!instagramSelected) return false;
     const firstManual = instagramState.manualFields.find((f) => (f.value && f.value.trim()) || (f.base && f.base.trim()));
@@ -774,7 +781,7 @@ export default function StreamSetupModalV2({
       setWarmupActive(true);
       setWarmupStartedAt(now);
       setWarmupPlatforms(platformsNow);
-      setWarmupReadyMap({ youtube: false, facebook: false, twitch: false, instagram: false, custom: false });
+      setWarmupReadyMap({ youtube: false, facebook: false, twitch: false, kick: false, instagram: false, custom: false });
       setWarmupLogged(false);
 
       await onStartStream(computed.payload);
@@ -1006,6 +1013,8 @@ export default function StreamSetupModalV2({
                 const manualLabel =
                   platform === "custom"
                     ? "Custom stream key (RTMP)"
+                    : platform === "kick"
+                    ? "Kick Stream Key (this stream only)"
                     : platform === "instagram"
                     ? "Stream key from Instagram Live Producer"
                     : "Session stream key (this stream only)";
@@ -1055,7 +1064,9 @@ export default function StreamSetupModalV2({
                         <button
                           onClick={() => {
                             const fieldId = `${platform}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-                            const nextFields = [...state.manualFields, { id: fieldId, value: "", base: getDefaultRtmpBase(platform) }];
+                            // Kick has no default ingest: prefill the saved Server URL, if any.
+                            const base = platform === "kick" ? (main?.rtmpUrlBase || "") : getDefaultRtmpBase(platform);
+                            const nextFields = [...state.manualFields, { id: fieldId, value: "", base }];
                             updatePlatformState(platform, { manualFields: nextFields, error: null });
                           }}
                           disabled={disabled || manualLimitReached}
@@ -1077,6 +1088,8 @@ export default function StreamSetupModalV2({
                       <div style={{ fontSize: '0.75rem', color: 'rgba(226,232,240,0.7)' }}>
                         {platform === 'instagram'
                           ? 'Instagram Live is session-only. Enter RTMP URL + Stream Key from Instagram Live Producer each time you go live. (Auto: 9:16 Reels preset)'
+                          : platform === 'kick'
+                          ? `No saved Kick destination yet. Save one in Settings → Stream Destinations, or use "Add key" for this stream only. ${KICK_SETUP_HELP}`
                           : 'No saved destination yet. Add one in Settings → Stream Destinations to reuse across sessions.'}
                       </div>
                     )}
@@ -1087,7 +1100,9 @@ export default function StreamSetupModalV2({
                           <div key={field.id} style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                               <input
-                                type="text"
+                                type={platform === 'kick' ? 'password' : 'text'}
+                                autoComplete={platform === 'kick' ? 'new-password' : undefined}
+                                aria-label={manualLabel}
                                 value={field.value}
                                 onChange={(e) => {
                                   const nextFields = state.manualFields.map((f) => (f.id === field.id ? { ...f, value: e.target.value } : f));
@@ -1126,7 +1141,7 @@ export default function StreamSetupModalV2({
                                 ✕
                               </button>
                             </div>
-                            {(platform === 'custom' || platform === 'instagram') && (
+                            {(platform === 'custom' || platform === 'instagram' || platform === 'kick') && (
                               <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
                                 <input
                                   type="text"
@@ -1135,7 +1150,14 @@ export default function StreamSetupModalV2({
                                     const nextFields = state.manualFields.map((f) => (f.id === field.id ? { ...f, base: e.target.value } : f));
                                     updatePlatformState(platform, { manualFields: nextFields, error: null });
                                   }}
-                                  placeholder={platform === 'instagram' ? 'RTMP URL from Instagram Live Producer' : 'Optional RTMP ingest URL (base)'}
+                                  aria-label={platform === 'kick' ? 'Kick Server URL' : undefined}
+                                  placeholder={
+                                    platform === 'instagram'
+                                      ? 'RTMP URL from Instagram Live Producer'
+                                      : platform === 'kick'
+                                      ? 'Kick Server URL (rtmps://…)'
+                                      : 'Optional RTMP ingest URL (base)'
+                                  }
                                   disabled={streamIsLive || streamDisallowed}
                                   style={{
                                     flex: 1,

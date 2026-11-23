@@ -1,5 +1,6 @@
 import { firestore } from "../firebaseAdmin";
 import { getEffectiveEntitlements } from "./effectiveEntitlements";
+import { KICK_REQUIREMENTS } from "./kickDestinationPure";
 
 export type MediaPresetId = "standard_720p30" | "hd_1080p30" | "sports_1080p60" | "pro_1440p30" | "ultra_4k30";
 
@@ -216,11 +217,18 @@ export type DestinationCap = { label: string; maxHeight: number; maxFps: number;
  * - Twitch: 1080p60, 6000 kbps max (non-partner ingest guidance).
  * - Facebook Live: 1080p60, 6000 kbps (stay inside the recommended band).
  * - YouTube: accepts up to 4K.
+ * - Kick: 1080p60, 8000 kbps max (lib/kickDestinationPure.ts KICK_REQUIREMENTS).
  * - Custom RTMP: no platform limit.
- * - Other named platforms (kick, linkedin, ...): 1080p60.
+ * - Other named platforms (linkedin, ...): 1080p60.
  */
 export const DESTINATION_CAPS: Record<string, DestinationCap> = {
   twitch: { label: "Twitch", maxHeight: 1080, maxFps: 60, maxVideoKbps: 6000 },
+  kick: {
+    label: "Kick",
+    maxHeight: KICK_REQUIREMENTS.maxShortEdge,
+    maxFps: KICK_REQUIREMENTS.maxFps,
+    maxVideoKbps: KICK_REQUIREMENTS.maxVideoKbps,
+  },
   facebook: { label: "Facebook", maxHeight: 1080, maxFps: 60, maxVideoKbps: 6000 },
   youtube: { label: "YouTube", maxHeight: 2160, maxFps: 60, maxVideoKbps: null },
   custom: { label: "Custom RTMP", maxHeight: 2160, maxFps: 60, maxVideoKbps: null },

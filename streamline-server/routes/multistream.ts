@@ -27,7 +27,18 @@ import { recordTelemetry } from "../lib/telemetry";
 import { decideMultistreamStart, maskSecretTail, redactRtmpUrl } from "../lib/mediaPure";
 import { compositorUrl, instagramAspectFor, warnBuiltInLayoutFallback } from "../lib/egressTemplate";
 import { syncRoomProgramOverlay } from "../services/programOverlay";
-import { summarizeEgressOutput, type MultistreamOutputKind } from "../lib/multistreamStatusPure";
+import { ingestPrefix, summarizeEgressOutput, type MultistreamOutputKind, type OutputTarget } from "../lib/multistreamStatusPure";
+import {
+  buildKickIngestUrl,
+  checkKickEncoderProfile,
+  isKickPlatform,
+  KICK_ERROR_MESSAGES,
+  KICK_PLATFORM,
+  resolveKickCredentials,
+  scrubKickKeys,
+  type KickErrorCode,
+} from "../lib/kickDestinationPure";
+import { redactEgressError } from "../lib/streamSummaryPure";
 
 // livekit-server-sdk is ESM; use dynamic import so CommonJS builds work on Render
 let _lkMod: any | null = null;
@@ -154,7 +165,7 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       : Array.isArray(destinationIds)
       ? destinationIds.map((id: any) => String(id)).filter(Boolean)
       : [];
-    const sessionKeyMap: Record<string, { rtmpUrlBase?: string; streamKey?: string }> =
+    const sessionKeyMap: Record<string, { rtmpUrlBase?: string; streamKey?: string; platform?: string }> =
       sessionKeys && typeof sessionKeys === "object" ? (sessionKeys as any) : {};
 
     const extraArray: Array<{
@@ -177,7 +188,10 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       return type === "instagram" && protocol === "rtmp" && !!base && !!key;
     });
 
-    if (!youtubeStreamKey && !facebookStreamKey && !twitchStreamKey && destIds.length === 0 && !hasExtraInstagram) {
+    // Session-only keys (Kick / custom entered for this stream) count too; the
+    // resolved-URL check further down still rejects a request that yields none.
+    const hasSessionKeys = Object.values(sessionKeyMap).some((e) => !!trimKey(e?.streamKey));
+    if (!youtubeStreamKey && !facebookStreamKey && !twitchStreamKey && destIds.length === 0 && !hasExtraInstagram && !hasSessionKeys) {
       return res.status(400).json({ error: "At least one stream key is required" });
     }
 
@@ -218,6 +232,41 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
       urls.push(url);
       logEntries.push({ platform, url: maskUrl(url), keyLen: key.length, last4: maskSecretTail(key) || "", source });
     };
+    /** Drop every output of one platform (urls and logEntries stay index-aligned). */
+    const removePlatform = (platform: string) => {
+      for (let i = logEntries.length - 1; i >= 0; i -= 1) {
+        if (logEntries[i].platform === platform) {
+          logEntries.splice(i, 1);
+          urls.splice(i, 1);
+        }
+      }
+    };
+
+    // Per-destination setup problems (Kick). A broken Kick setup never blocks
+    // the creator's other destinations; it is reported back instead.
+    const destinationErrors: Array<{ platform: string; code: KickErrorCode; message: string }> = [];
+    const addKickError = (code: KickErrorCode, detail?: string[]) => {
+      if (!destinationErrors.some((e) => e.platform === KICK_PLATFORM && e.code === code)) {
+        destinationErrors.push({ platform: KICK_PLATFORM, code, message: KICK_ERROR_MESSAGES[code] });
+      }
+      console.warn("[multistream:start] kick destination skipped", { roomId, code, detail: detail || null });
+      recordTelemetry("destination.failed", {
+        userId: ownerUid,
+        roomId,
+        metadata: { stage: "setup", platform: KICK_PLATFORM, error: code },
+      });
+    };
+    /** Kick: creator's RTMPS server URL (path kept) + key appended exactly once. */
+    const pushKick = (serverUrl: unknown, key: unknown, source: string): boolean => {
+      const kick = resolveKickCredentials({ serverUrl, streamKey: key, requireKey: true });
+      if (kick.ok === false) {
+        addKickError(kick.code);
+        return false;
+      }
+      const streamKey = kick.streamKey as string;
+      pushLog(KICK_PLATFORM, buildKickIngestUrl(kick.serverUrl, streamKey), streamKey, source);
+      return true;
+    };
     const pushInstagramLog = (platform: string, url: string, key: string, source: string) => {
       instagramUrls.push(url);
       instagramLogEntries.push({ platform, url: maskUrl(url), keyLen: key.length, last4: maskSecretTail(key) || "", source });
@@ -254,8 +303,6 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
           const targetId = data.targetId || snap.id;
           const sessionKey = sessionKeyMap[targetId];
           const baseRaw = String(sessionKey?.rtmpUrlBase || data.rtmpUrlBase || "");
-          const base = normalizeRtmpBase(baseRaw);
-          if (!base) continue;
 
           let dec: string | null = null;
           if (sessionKey?.streamKey) {
@@ -265,6 +312,15 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
             dec = maybeDec ? trimKey(maybeDec) : null;
           }
 
+          if (isKickPlatform(data.platform)) {
+            pushKick(baseRaw, dec || "", sessionKey?.streamKey ? "session" : "main");
+            // Consumed here even when invalid, so it is never retried below as a "custom" output.
+            if (sessionKey?.streamKey) usedSessionKeys.add(targetId);
+            continue;
+          }
+
+          const base = normalizeRtmpBase(baseRaw);
+          if (!base) continue;
           if (!dec) continue;
           const url = `${base}/${dec}`;
           const source = sessionKey?.streamKey ? "session" : "main";
@@ -279,6 +335,10 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
     // Handle standalone session keys (e.g., custom RTMP) that aren't tied to saved destinations
     for (const [keyId, entry] of Object.entries(sessionKeyMap || {})) {
       if (usedSessionKeys.has(keyId)) continue;
+      if (isKickPlatform(entry?.platform)) {
+        pushKick(entry?.rtmpUrlBase, entry?.streamKey, "session");
+        continue;
+      }
       let base = normalizeRtmpBase(String(entry?.rtmpUrlBase || ""));
       let dec = entry?.streamKey ? trimKey(entry.streamKey) : "";
 
@@ -326,8 +386,49 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
     }
 
     if (urls.length === 0 && instagramUrls.length === 0) {
+      if (destinationErrors.length > 0) {
+        const first = destinationErrors[0];
+        return res.status(400).json({ error: first.code, message: first.message, destinationErrors });
+      }
       return res.status(400).json({ error: "At least one stream key is required" });
     }
+
+    // Preset: explicit setup-modal choice, else the ROOM OWNER's saved default;
+    // clamp to the owner's effective plan, then to the strictest destination
+    // (one egress feeds every URL in `urls`).
+    const { requestedId: resolvedRequestedId } = resolveRequestedPresetId({
+      bodyPresetId: presetId,
+      presetExplicit: rawBody.presetExplicit,
+      actorIsOwner: ownerUid === uid,
+      ownerDefaultPresetId: presetCtx.defaultPresetId,
+    });
+    const planClamp = clampPresetForPlan(planId, resolvedRequestedId, presetCtx.maxPresetId);
+    const requestedId = planClamp.requestedId;
+    let streamProfile = applyDestinationCaps(
+      planClamp.effectiveId,
+      logEntries.map((e) => e.platform),
+      presetCtx.maxPresetId
+    );
+
+    // Kick shares the main egress encoder. Verify the final profile against
+    // Kick's ingest limits before sending anything; if it doesn't fit, Kick
+    // alone is skipped and the profile is recomputed for the rest.
+    if (logEntries.some((e) => e.platform === KICK_PLATFORM)) {
+      const kickCheck = checkKickEncoderProfile(encodingOptionsFor(streamProfile.profile));
+      if (kickCheck.ok === false) {
+        removePlatform(KICK_PLATFORM);
+        addKickError(kickCheck.code, kickCheck.problems);
+        if (urls.length === 0 && instagramUrls.length === 0) {
+          const first = destinationErrors[0];
+          return res.status(400).json({ error: first.code, message: first.message, destinationErrors });
+        }
+        streamProfile = applyDestinationCaps(planClamp.effectiveId, logEntries.map((e) => e.platform), presetCtx.maxPresetId);
+      }
+    }
+    const effectiveId = streamProfile.effectiveId;
+    const clamped = planClamp.clamped || streamProfile.adjusted;
+    const encodingOptions = encodingOptionsFor(streamProfile.profile);
+
     // Destination cap (owner's effective plan): counts every resolved output
     // URL - direct platform keys, saved destinations, standalone session keys
     // and Instagram.
@@ -355,26 +456,6 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
     if (instagramLogEntries.length > 0) {
       console.log("[multistream:start] Instagram RTMP URLs (masked):", instagramLogEntries);
     }
-
-    // Preset: explicit setup-modal choice, else the ROOM OWNER's saved default;
-    // clamp to the owner's effective plan, then to the strictest destination
-    // (one egress feeds every URL in `urls`).
-    const { requestedId: resolvedRequestedId } = resolveRequestedPresetId({
-      bodyPresetId: presetId,
-      presetExplicit: rawBody.presetExplicit,
-      actorIsOwner: ownerUid === uid,
-      ownerDefaultPresetId: presetCtx.defaultPresetId,
-    });
-    const planClamp = clampPresetForPlan(planId, resolvedRequestedId, presetCtx.maxPresetId);
-    const requestedId = planClamp.requestedId;
-    const streamProfile = applyDestinationCaps(
-      planClamp.effectiveId,
-      logEntries.map((e) => e.platform),
-      presetCtx.maxPresetId
-    );
-    const effectiveId = streamProfile.effectiveId;
-    const clamped = planClamp.clamped || streamProfile.adjusted;
-    const encodingOptions = encodingOptionsFor(streamProfile.profile);
 
     // Refuse to start a second set of egresses for the same room. A doc that
     // claims running egress is verified against LiveKit so a stale doc (e.g.
@@ -594,6 +675,12 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
           usageType: "live",
           warmupMs,
           warmupPlatforms: platforms,
+          // Platform + ingest URL minus the key, per output, in start order, so
+          // multistream-status can say WHICH destination failed.
+          outputTargets: {
+            normal: logEntries.map((e): OutputTarget => ({ platform: e.platform, prefix: ingestPrefix(e.url) })),
+            instagram: instagramLogEntries.map((e): OutputTarget => ({ platform: e.platform, prefix: ingestPrefix(e.url) })),
+          },
         },
         { merge: true }
       );
@@ -678,9 +765,11 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         presetAdjustment: streamProfile.adjustmentReason,
         presetBitrateCapped: streamProfile.bitrateCapped,
         streamVideoKbps: streamProfile.profile.videoKbps,
+        // Destinations that were skipped (e.g. Kick setup); the rest are live.
+        ...(destinationErrors.length ? { destinationErrors } : {}),
       });
     } catch (err) {
-      console.error("[multistream:start] error:", (err as any)?.message || err);
+      console.error("[multistream:start] error:", scrubKickKeys(redactEgressError((err as any)?.message || String(err))));
       return await failStart(500, { error: "Failed to start multistream" });
     }
   } catch (err) {
@@ -722,9 +811,10 @@ router.get("/:roomId/multistream-status", requireAuth, requireRoomAccessToken as
     const egressIds: { normal?: string; instagram?: string } =
       data?.egressIds || (data?.egressId ? { normal: data.egressId } : {});
 
-    const rows: Array<{ kind: MultistreamOutputKind; id: string }> = [];
-    if (egressIds.normal) rows.push({ kind: "multistream", id: egressIds.normal });
-    if (egressIds.instagram) rows.push({ kind: "instagram", id: egressIds.instagram });
+    const targets: { normal?: OutputTarget[]; instagram?: OutputTarget[] } = data?.outputTargets || {};
+    const rows: Array<{ kind: MultistreamOutputKind; id: string; targets: OutputTarget[] }> = [];
+    if (egressIds.normal) rows.push({ kind: "multistream", id: egressIds.normal, targets: Array.isArray(targets.normal) ? targets.normal : [] });
+    if (egressIds.instagram) rows.push({ kind: "instagram", id: egressIds.instagram, targets: Array.isArray(targets.instagram) ? targets.instagram : [] });
     if (rows.length === 0) return res.json({ ok: true, live: false, outputs: [] });
 
     const client = await getEgressClient();
@@ -732,15 +822,20 @@ router.get("/:roomId/multistream-status", requireAuth, requireRoomAccessToken as
       rows.map(async (r) => {
         try {
           const list = await client.listEgress({ egressId: r.id });
-          return summarizeEgressOutput(r.kind, r.id, Array.isArray(list) ? list[0] : null);
+          return summarizeEgressOutput(r.kind, r.id, Array.isArray(list) ? list[0] : null, r.targets);
         } catch (e: any) {
           console.warn("[multistream:status] listEgress failed", { egressId: r.id, error: e?.message || e });
-          return summarizeEgressOutput(r.kind, r.id, null);
+          return summarizeEgressOutput(r.kind, r.id, null, r.targets);
         }
       })
     );
     for (const o of outputs) {
       if (o.failed) console.warn("[multistream:status] output failed", { roomId, kind: o.kind, egressId: o.egressId, error: o.error });
+      for (const d of o.destinations) {
+        if (d.status === "failed") {
+          console.warn("[multistream:status] destination failed", { roomId, kind: o.kind, platform: d.platform, error: d.error });
+        }
+      }
     }
     return res.json({ ok: true, live: true, outputs });
   } catch (err) {

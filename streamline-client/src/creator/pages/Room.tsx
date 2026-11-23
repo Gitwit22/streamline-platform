@@ -1,5 +1,6 @@
 import React from "react";
 import { getFeatureErrorMessage } from "../../lib/featureErrors";
+import { kickErrorMessage } from "../../lib/kickDestination";
 import { useEffect, useState, useRef, useMemo } from "react";
 import { logAuthDebugContext } from "../../lib/logAuthDebug";
 import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
@@ -2000,7 +2001,12 @@ function RoomPage() {
   const [presetClamped, setPresetClamped] = useState(false);
   const [presetAdjustment, setPresetAdjustment] = useState<string | null>(null);
   // Failed multistream outputs reported by the server (e.g. Instagram rejected the push).
-  const [outputIssues, setOutputIssues] = useState<Array<{ kind: string; error: string | null }>>([]);
+  // Live destination problems: a whole output failing (kind multistream /
+  // instagram) or one destination inside it (kind "destination", e.g. Kick
+  // rejecting its key while YouTube keeps running).
+  const [outputIssues, setOutputIssues] = useState<Array<{ kind: string; error: string | null; label?: string; platform?: string }>>([]);
+  // Destinations skipped at start (e.g. Kick setup / encoder limits); shown in the same banner.
+  const [destinationSetupIssues, setDestinationSetupIssues] = useState<Array<{ platform: string; label: string; message: string }>>([]);
   const [outputIssuesDismissed, setOutputIssuesDismissed] = useState(false);
   const [defaultRecordingModePref, setDefaultRecordingModePref] = useState<"cloud" | "dual">("cloud");
   const [firestoreRoomId, setFirestoreRoomId] = useState<string | null>(null);
@@ -3557,6 +3563,7 @@ function RoomPage() {
     if (streamStatus !== "live" || !roomId || !roomAccessToken || !canManageStream) {
       setOutputIssues([]);
       setOutputIssuesDismissed(false);
+      if (streamStatus === "idle") setDestinationSetupIssues([]);
       return;
     }
     let cancelled = false;
@@ -3570,10 +3577,21 @@ function RoomPage() {
         if (!res.ok || cancelled) return;
         const data = await res.json().catch(() => ({}));
         if (cancelled) return;
-        const outputs: Array<{ kind: string; failed?: boolean; error?: string | null }> = Array.isArray(data?.outputs)
-          ? data.outputs
-          : [];
-        setOutputIssues(outputs.filter((o) => o.failed).map((o) => ({ kind: o.kind, error: o.error ?? null })));
+        const outputs: Array<{
+          kind: string;
+          failed?: boolean;
+          error?: string | null;
+          destinations?: Array<{ platform: string; label?: string; status?: string | null; error?: string | null }>;
+        }> = Array.isArray(data?.outputs) ? data.outputs : [];
+        setOutputIssues(
+          outputs.flatMap((o) => {
+            if (o.failed) return [{ kind: o.kind, error: o.error ?? null }];
+            // Output still live, but one destination's push failed.
+            return (Array.isArray(o.destinations) ? o.destinations : [])
+              .filter((d) => d?.status === "failed")
+              .map((d) => ({ kind: "destination", platform: d.platform, label: d.label || d.platform, error: d.error ?? null }));
+          })
+        );
       } catch {
         // transient; next poll retries
       }
@@ -4507,6 +4525,7 @@ function RoomPage() {
           setPresetClamped(false);
         }
         setPresetAdjustment(null);
+        setDestinationSetupIssues([]);
         const requestBody = {
           ...startLivePayload,
           userId: getOrCreateUid(),
@@ -4548,6 +4567,13 @@ function RoomPage() {
         }
         if (!res.ok) {
           const code = data?.error ?? data?.code ?? data?.data?.error ?? data?.data?.code;
+          const kickMessage = kickErrorMessage(code, data?.message);
+          if (kickMessage) {
+            // Destination setup problem (fixed server text, never the URL/key).
+            alert(kickMessage);
+            setStreamStatus("idle");
+            return;
+          }
           const mapped = getFeatureErrorMessage(code, code === "TRANSCODE_DISABLED" ? "transcode" : "multistream");
           const message =
             mapped !== "Feature unavailable."
@@ -4592,6 +4618,17 @@ function RoomPage() {
         setPresetClamped(!!(data?.presetClamped || data?.data?.presetClamped));
         const adjustment = data?.presetAdjustment || data?.data?.presetAdjustment || null;
         setPresetAdjustment(typeof adjustment === "string" && adjustment ? adjustment : null);
+        const skipped: Array<{ platform?: string; code?: string; message?: string }> = Array.isArray(data?.destinationErrors)
+          ? data.destinationErrors
+          : [];
+        setDestinationSetupIssues(
+          skipped.map((d) => ({
+            platform: String(d.platform || ""),
+            label: d.platform === "kick" ? "Kick" : String(d.platform || "Destination"),
+            message: kickErrorMessage(d.code, d.message) || String(d.message || "This destination was skipped."),
+          }))
+        );
+        if (skipped.length) setOutputIssuesDismissed(false);
         if (keys.record) {
           await startRecording({ layout: keys.layout ?? "grid", mode: "cloud", presetId: explicitPresetId, skipQualityConfirm: true });
         }
@@ -5099,7 +5136,7 @@ function RoomPage() {
         </div>
       )}
 
-      {outputIssues.length > 0 && !outputIssuesDismissed && (
+      {(outputIssues.length > 0 || destinationSetupIssues.length > 0) && !outputIssuesDismissed && (
         <div
           role="alert"
           style={{
@@ -5121,10 +5158,28 @@ function RoomPage() {
           }}
         >
           <div style={{ flex: 1 }}>
+            {destinationSetupIssues.map((d, i) => (
+              <div key={`setup-${i}`} style={{ marginBottom: 6 }}>
+                <strong>{d.label} skipped.</strong> {d.message}
+                {d.platform === "kick" && (
+                  <div style={{ opacity: 0.85, marginTop: 2 }}>Fix it in Settings → Stream Destinations; your other destinations are live.</div>
+                )}
+              </div>
+            ))}
             {outputIssues.map((o, i) => (
               <div key={i} style={{ marginBottom: i < outputIssues.length - 1 ? 6 : 0 }}>
-                <strong>{o.kind === "instagram" ? "Instagram" : "Stream destinations"} output failed.</strong>{" "}
+                <strong>
+                  {o.kind === "destination"
+                    ? `${o.label || "Destination"} connection failed.`
+                    : `${o.kind === "instagram" ? "Instagram" : "Stream destinations"} output failed.`}
+                </strong>{" "}
                 {o.error || "The destination rejected or dropped the stream."}
+                {o.kind === "destination" && o.platform === "kick" && (
+                  <div style={{ opacity: 0.85, marginTop: 2 }}>
+                    Kick refused the connection. Check the Server URL and Stream Key in Settings → Stream Destinations (or
+                    replace the key), then stop and restart the stream. Your other destinations keep streaming.
+                  </div>
+                )}
                 {o.kind === "instagram" && (
                   <div style={{ opacity: 0.85, marginTop: 2 }}>
                     Instagram stream keys work once — copy a fresh Stream URL + key from Live Producer, then stop and

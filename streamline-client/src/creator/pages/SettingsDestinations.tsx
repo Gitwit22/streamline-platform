@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { fetchDestinations, createDestination, validateDestinationPreCreate, preflight, updateDestination, deleteDestination, type DestinationItem } from "../../services/destinations";
 import { getMeCached } from "../../lib/meCache";
 import { useFeatureAccess } from "../../hooks/useFeatureAccess";
+import { destinationApiErrorMessage, KICK_SETUP_HELP, kickServerUrlProblem, kickStreamKeyProblem } from "../../lib/kickDestination";
 
 function StatusBadge({ status, reason }: { status: string; reason?: string | null }) {
   const color = status === "connected" ? "#16a34a" : status === "disconnected" ? "#6b7280" : "#f59e0b";
@@ -37,6 +38,8 @@ export default function SettingsDestinations(
   const [platform, setPlatform] = useState("youtube");
   const [name, setName] = useState("");
   const [streamKey, setStreamKey] = useState("");
+  // Kick has no fixed ingest: the creator pastes the Server URL from their dashboard.
+  const [kickServerUrl, setKickServerUrl] = useState("");
   const [persistent, setPersistent] = useState(true);
   const [validation, setValidation] = useState<{ status: string; statusReason?: string | null } | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -188,22 +191,38 @@ export default function SettingsDestinations(
     );
   }
 
+  /** Kick needs a Server URL and (when saving for reuse) a key; checked before any request. */
+  function kickFormProblem(): string | null {
+    if (platform !== "kick") return null;
+    return kickServerUrlProblem(kickServerUrl) || (streamKey.trim() || persistent ? kickStreamKeyProblem(streamKey) : null);
+  }
+
   async function onValidate() {
     setError(null);
+    const problem = kickFormProblem();
+    if (problem) {
+      setError(problem);
+      return;
+    }
     try {
-      const base = getDefaultRtmpBase(platform);
+      const base = platform === "kick" ? kickServerUrl.trim() : getDefaultRtmpBase(platform);
       const res = await validateDestinationPreCreate({ platform, rtmpUrlBase: base, streamKeyPlain: streamKey || undefined });
       setValidation({ status: res.status, statusReason: res.statusReason ?? null });
     } catch (e: any) {
-      setError(e?.message || String(e));
+      setError(destinationApiErrorMessage(e));
     }
   }
 
   async function onCreate(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    const problem = kickFormProblem();
+    if (problem) {
+      setError(problem);
+      return;
+    }
     try {
-      const base = getDefaultRtmpBase(platform);
+      const base = platform === "kick" ? kickServerUrl.trim() : getDefaultRtmpBase(platform);
       const res = await createDestination({ platform, name, rtmpUrlBase: base, streamKeyPlain: streamKey || undefined, mode: "manual", persistent });
       // After creating, clear validation so the form is "fresh" for the next key
       setValidation(null);
@@ -212,10 +231,11 @@ export default function SettingsDestinations(
       setPlatform("youtube");
       setName("");
       setStreamKey("");
+      setKickServerUrl("");
       setPersistent(true);
       await load();
     } catch (e: any) {
-      setError(e?.message || String(e));
+      setError(destinationApiErrorMessage(e));
     }
   }
 
@@ -254,6 +274,15 @@ export default function SettingsDestinations(
 
   async function onSaveEdit(id: string) {
     setError(null);
+    if (editForm.platform === "kick") {
+      const problem =
+        kickServerUrlProblem(editForm.rtmpUrlBase) ||
+        (editForm.streamKeyPlain.trim() ? kickStreamKeyProblem(editForm.streamKeyPlain) : null);
+      if (problem) {
+        setError(problem);
+        return;
+      }
+    }
     try {
       const payload: any = {
         platform: editForm.platform,
@@ -270,7 +299,7 @@ export default function SettingsDestinations(
       setEditingId(null);
       setEditForm({ platform: "youtube", name: "", rtmpUrlBase: "", streamKeyPlain: "", persistent: true, mode: "manual" });
     } catch (e: any) {
-      setError(e?.message || String(e));
+      setError(destinationApiErrorMessage(e));
     }
   }
 
@@ -305,7 +334,7 @@ export default function SettingsDestinations(
         <div>
           <h1 style={{ fontSize: 24, fontWeight: 600, margin: 0 }}>Stream Destinations</h1>
           <p style={{ marginTop: 4, fontSize: 13, color: "#6b7280", maxWidth: 520 }}>
-            Configure where StreamLine sends your live stream. Add YouTube, Facebook, Twitch, or custom destinations
+            Configure where StreamLine sends your live stream. Add YouTube, Facebook, Twitch, Kick, or custom destinations
             (RTMP) and save your stream keys once here for one-click Go Live in the room.
           </p>
         </div>
@@ -338,6 +367,9 @@ export default function SettingsDestinations(
             Paste your stream key from your platform. Keys are stored encrypted and will be used automatically when
             you go live.
           </p>
+          {platform === "kick" && (
+            <div style={{ fontSize: 11, color: "#cbd5e1", marginBottom: 10 }}>{KICK_SETUP_HELP}</div>
+          )}
           {platform === "facebook" && (
             <div style={{ fontSize: 11, color: "#cbd5e1", marginBottom: 10 }}>
               Facebook may require a new stream key for scheduled events. Make sure this key is current.
@@ -372,6 +404,7 @@ export default function SettingsDestinations(
               <option value="youtube">YouTube</option>
               <option value="facebook">Facebook</option>
               <option value="twitch">Twitch</option>
+              <option value="kick">Kick</option>
               <option value="custom">Custom</option>
             </select>
             <input
@@ -386,13 +419,34 @@ export default function SettingsDestinations(
                 background: "rgba(15, 23, 42, 0.7)",
               }}
             />
+            {platform === "kick" && (
+              <input
+                type="text"
+                name="kickServerUrl"
+                aria-label="Kick Server URL"
+                value={kickServerUrl}
+                onChange={e => setKickServerUrl(e.target.value)}
+                placeholder="Kick Server URL (rtmps://…)"
+                autoComplete="off"
+                spellCheck={false}
+                style={{
+                  border: "1px solid rgba(248, 250, 252, 0.2)",
+                  borderRadius: 6,
+                  padding: "6px 8px",
+                  color: "#f9fafb",
+                  background: "rgba(15, 23, 42, 0.7)",
+                  fontFamily: "monospace",
+                }}
+              />
+            )}
             <input
               type="password"
               name="streamKey"
               id="stream-destination-stream-key"
               value={streamKey}
               onChange={e => setStreamKey(e.target.value)}
-              placeholder="Enter stream key (optional, stored encrypted)"
+              aria-label="Stream Key"
+              placeholder={platform === "kick" ? "Kick Stream Key (stored encrypted)" : "Enter stream key (optional, stored encrypted)"}
               style={{
                 border: "1px solid rgba(248, 250, 252, 0.2)",
                 borderRadius: 6,
@@ -520,6 +574,7 @@ export default function SettingsDestinations(
                             <option value="youtube">YouTube</option>
                             <option value="facebook">Facebook</option>
                             <option value="twitch">Twitch</option>
+                            <option value="kick">Kick</option>
                             <option value="custom">Custom</option>
                           </select>
                         ) : (
@@ -550,7 +605,7 @@ export default function SettingsDestinations(
                           <input
                             value={editForm.rtmpUrlBase}
                             onChange={e => setEditForm(f => ({ ...f, rtmpUrlBase: e.target.value }))}
-                            placeholder="rtmp://..."
+                            placeholder={editForm.platform === "kick" ? "rtmps://… (Kick Server URL)" : "rtmp://..."}
                             style={{
                               border: "1px solid rgba(248, 250, 252, 0.2)",
                               borderRadius: 6,
@@ -568,6 +623,8 @@ export default function SettingsDestinations(
                             ? "Facebook default"
                             : item.platform === "twitch"
                             ? "Twitch default"
+                            : item.platform === "kick"
+                            ? "Kick server (RTMPS)"
                             : "Custom endpoint (RTMP)"
                         )}
                       </td>
