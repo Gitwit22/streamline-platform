@@ -4,6 +4,7 @@ import {
   buildKickIngestUrl,
   checkKickEncoderProfile,
   isKickPlatform,
+  isLiveKitRtmpUrl,
   KICK_ERROR_MESSAGES,
   normalizeKickServerUrl,
   normalizeKickStreamKey,
@@ -25,10 +26,53 @@ test("platform id is case/space insensitive", () => {
 test("server URL: keeps host, port and ingest path; drops trailing slash", () => {
   const r = normalizeKickServerUrl(KICK_URL);
   assert.deepEqual(r, { ok: true, url: "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app", embeddedKey: null });
-  const deep = normalizeKickServerUrl("rtmps://ingest.example.net/live/app/v2//");
-  assert.deepEqual(deep, { ok: true, url: "rtmps://ingest.example.net/live/app/v2", embeddedKey: null });
-  const noPath = normalizeKickServerUrl("  rtmps://ingest.example.net  ");
-  assert.deepEqual(noPath, { ok: true, url: "rtmps://ingest.example.net", embeddedKey: null });
+  const deep = normalizeKickServerUrl("rtmps://ingest.example.net:8443/live/app/v2//");
+  assert.deepEqual(deep, { ok: true, url: "rtmps://ingest.example.net:8443/live/app/v2", embeddedKey: null });
+  const noPort = normalizeKickServerUrl("rtmps://ingest.example.net/live");
+  assert.deepEqual(noPort, { ok: true, url: "rtmps://ingest.example.net:443/live", embeddedKey: null });
+});
+
+test("server URL: Kick's dashboard URL without a path gets Kick's :443/app (production failure 2026-11-23)", () => {
+  for (const raw of [
+    "rtmps://fa723fc1b171.global-contribute.live-video.net",
+    "rtmps://fa723fc1b171.global-contribute.live-video.net/",
+    "  rtmps://fa723fc1b171.global-contribute.live-video.net:443  ",
+  ]) {
+    assert.deepEqual(
+      normalizeKickServerUrl(raw),
+      { ok: true, url: "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app", embeddedKey: null },
+      raw
+    );
+  }
+  // Key pasted straight after the host: split off, then the app path is supplied.
+  assert.deepEqual(normalizeKickServerUrl(`rtmps://fa723fc1b171.global-contribute.live-video.net/${KEY}`), {
+    ok: true,
+    url: "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app",
+    embeddedKey: KEY,
+  });
+});
+
+test("LiveKit RTMP URL rule: host/app/key accepted, host/key refused (the 400 seen in production)", () => {
+  assert.equal(isLiveKitRtmpUrl(`rtmps://fa723fc1b171.global-contribute.live-video.net/${KEY}`), false);
+  assert.equal(isLiveKitRtmpUrl(`rtmps://fa723fc1b171.global-contribute.live-video.net/app/${KEY}`), true);
+  assert.equal(isLiveKitRtmpUrl(`rtmp://a.rtmp.youtube.com/live2/abcd`), true);
+  assert.equal(isLiveKitRtmpUrl(`rtmps://live-api-s.facebook.com:443/rtmp/FB-1`), true);
+  assert.equal(isLiveKitRtmpUrl(`https://host/app/key`), false);
+});
+
+test("every accepted Server URL form yields an ingest URL LiveKit accepts", () => {
+  for (const raw of [
+    "rtmps://fa723fc1b171.global-contribute.live-video.net",
+    "rtmps://fa723fc1b171.global-contribute.live-video.net/",
+    KICK_URL,
+    `${KICK_URL}${KEY}`,
+    `rtmps://fa723fc1b171.global-contribute.live-video.net/${KEY}`,
+    "rtmps://ingest.example.net:8443/live/app/v2",
+  ]) {
+    const r = resolveKickCredentials({ serverUrl: raw, streamKey: KEY, requireKey: true });
+    assert.equal(r.ok, true, raw);
+    if (r.ok) assert.equal(isLiveKitRtmpUrl(buildKickIngestUrl(r.serverUrl, r.streamKey as string)), true, raw);
+  }
 });
 
 test("server URL: only RTMPS is accepted", () => {
