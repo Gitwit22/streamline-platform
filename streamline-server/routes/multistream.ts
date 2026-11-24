@@ -32,6 +32,7 @@ import {
   buildKickIngestUrl,
   checkKickEncoderProfile,
   isKickPlatform,
+  isLiveKitRtmpUrl,
   KICK_ERROR_MESSAGES,
   KICK_PLATFORM,
   resolveKickCredentials,
@@ -264,7 +265,14 @@ router.post("/:roomId/start-multistream", requireAuth, requireRoomAccessToken as
         return false;
       }
       const streamKey = kick.streamKey as string;
-      pushLog(KICK_PLATFORM, buildKickIngestUrl(kick.serverUrl, streamKey), streamKey, source);
+      const ingestUrl = buildKickIngestUrl(kick.serverUrl, streamKey);
+      // LiveKit refuses the whole egress (HTTP 400) for one malformed RTMP URL;
+      // catch it here so only Kick is skipped and the rest still go live.
+      if (!isLiveKitRtmpUrl(ingestUrl)) {
+        addKickError("kick_server_url_invalid", ["ingest url not in rtmp(s)://host/app/key form"]);
+        return false;
+      }
+      pushLog(KICK_PLATFORM, ingestUrl, streamKey, source);
       return true;
     };
     const pushInstagramLog = (platform: string, url: string, key: string, source: string) => {

@@ -13,6 +13,25 @@
 
 export const KICK_PLATFORM = "kick";
 
+/**
+ * Kick's dashboard Server URL can come without the ingest app path (e.g.
+ * rtmps://<id>.global-contribute.live-video.net). Kick's help center tells
+ * third-party encoders to add ":443/app"; LiveKit egress also rejects an RTMP
+ * URL with no app segment (400 before any connection is made).
+ */
+export const KICK_DEFAULT_INGEST_PATH = "/app";
+export const KICK_DEFAULT_PORT = "443";
+
+/**
+ * LiveKit egress's RTMP URL rule (livekit/egress pkg/config/urls.go):
+ * rtmp(s)://{host}(/{path})/{app}/{stream_key}. Anything else is refused.
+ */
+const LIVEKIT_RTMP_URL = /^(rtmps?:\/\/)(.*\/)(.*\/)(\S*)( live=1)?$/;
+
+export function isLiveKitRtmpUrl(url: string): boolean {
+  return LIVEKIT_RTMP_URL.test(String(url || ""));
+}
+
 export const KICK_REQUIREMENTS = {
   protocol: "rtmps",
   videoCodec: "h264",
@@ -55,10 +74,11 @@ const EMBEDDED_KEY_PATTERN = /^sk_[A-Za-z0-9._~-]+$/;
 export type KickResult<T> = ({ ok: true } & T) | { ok: false; code: KickErrorCode };
 
 /**
- * Normalize a creator-provided Kick Server URL. Keeps host, port and ingest
- * path exactly (only trailing slashes go). A Kick key pasted onto the end of
- * the URL is split off and returned as `embeddedKey` so it is never appended
- * twice.
+ * Normalize a creator-provided Kick Server URL. Keeps host and ingest path
+ * exactly (only trailing slashes go); a URL with no path gets Kick's "/app",
+ * and a missing port becomes the RTMPS default 443 (same endpoint, explicit).
+ * A Kick key pasted onto the end of the URL is split off and returned as
+ * `embeddedKey` so it is never appended twice.
  */
 export function normalizeKickServerUrl(raw: unknown): KickResult<{ url: string; embeddedKey: string | null }> {
   const s = typeof raw === "string" ? raw.trim() : "";
@@ -88,8 +108,8 @@ export function normalizeKickServerUrl(raw: unknown): KickResult<{ url: string; 
   if (segments.length > 0 && EMBEDDED_KEY_PATTERN.test(segments[segments.length - 1])) {
     embeddedKey = segments.pop() as string;
   }
-  const path = segments.length ? `/${segments.join("/")}` : "";
-  const port = parsed.port ? `:${parsed.port}` : "";
+  const path = segments.length ? `/${segments.join("/")}` : KICK_DEFAULT_INGEST_PATH;
+  const port = `:${parsed.port || KICK_DEFAULT_PORT}`;
   return { ok: true, url: `rtmps://${parsed.hostname}${port}${path}`, embeddedKey };
 }
 
