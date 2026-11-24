@@ -128,6 +128,8 @@ const allowedOrigins = new Set(
     // Production custom domains
     "https://streamline.nxtlvlts.com",
     "https://www.streamline.nxtlvlts.com",
+    "https://streamlineplatform.us",
+    "https://www.streamlineplatform.us",
     "https://supporthub.nxtlvlts.com",
     // Local dev
     "http://localhost:5173",
