@@ -1,6 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { DeckState } from "../../../lib/audioDeck";
+import type { VideoDeckState } from "../../../lib/mediaVideo";
 
 const deck = {
   ensureLoaded: vi.fn(async () => {}),
@@ -24,6 +25,41 @@ const deck = {
 };
 let state: DeckState;
 vi.mock("../../hooks/useAudioDeck", () => ({ useAudioDeck: () => ({ deck, state }) }));
+
+const videoDeck = {
+  ensureLoaded: vi.fn(async () => {}),
+  addFiles: vi.fn(() => 1),
+  addFromLibrary: vi.fn(() => true),
+  playOnStage: vi.fn(async () => {}),
+  togglePause: vi.fn(),
+  stop: vi.fn(async () => {}),
+  seek: vi.fn(),
+  setLoop: vi.fn(),
+  setVolume: vi.fn(),
+  move: vi.fn(),
+  remove: vi.fn(),
+  retrySave: vi.fn(),
+  clearError: vi.fn(),
+};
+let videoState: VideoDeckState;
+vi.mock("../../hooks/useVideoDeck", () => ({ useVideoDeck: () => ({ deck: videoDeck, state: videoState }) }));
+function baseVideoState(over: Partial<VideoDeckState> = {}): VideoDeckState {
+  return {
+    loaded: true,
+    persistError: null,
+    videos: [],
+    currentId: null,
+    stage: "off",
+    playing: false,
+    position: 0,
+    duration: 0,
+    loop: false,
+    error: null,
+    preview: null,
+    canPublish: true,
+    ...over,
+  };
+}
 
 let broadcasting = false;
 vi.mock("../../../lib/mixerInstance", () => ({
@@ -55,6 +91,9 @@ function baseState(over: Partial<DeckState> = {}): DeckState {
 const mp3 = (name: string) => new File(["x"], name, { type: "audio/mpeg" });
 
 describe("AudioDeckPanel", () => {
+  beforeEach(() => {
+    videoState = baseVideoState();
+  });
   afterEach(() => {
     cleanup();
     vi.clearAllMocks();
@@ -153,9 +192,79 @@ describe("AudioDeckPanel", () => {
       { id: "v1", type: "video", name: "Clip", videoUrl: "https://x/v1", duration: 5 },
     ]);
     render(<AudioDeckPanel open onClose={() => {}} />);
-    fireEvent.click(screen.getAllByText("From library")[0]);
+    // Sections: Videos, Playlist, Soundboard.
+    fireEvent.click(screen.getAllByText("From library")[1]);
     fireEvent.click(await screen.findByText("Theme"));
     expect(screen.queryByText("Clip")).toBeNull();
     expect(deck.addFromLibrary).toHaveBeenCalledWith({ id: "a1", name: "Theme", url: "https://x/a1" }, "playlist");
+  });
+  it("is titled Media", () => {
+    state = baseState();
+    render(<AudioDeckPanel open onClose={() => {}} />);
+    expect(screen.getByText("🎞️ Media")).toBeTruthy();
+    expect(videoDeck.ensureLoaded).toHaveBeenCalled();
+  });
+
+  it("adds video files by drop and file picker, and rejects non-video files", () => {
+    state = baseState();
+    render(<AudioDeckPanel open onClose={() => {}} />);
+    const files = [new File(["x"], "clip.mp4", { type: "video/mp4" })];
+    fireEvent.drop(screen.getByTestId("videos-drop"), { dataTransfer: { files, types: ["Files"] } });
+    expect(videoDeck.addFiles).toHaveBeenLastCalledWith(files);
+    fireEvent.change(screen.getByTestId("videos-file-input"), { target: { files } });
+    expect(videoDeck.addFiles).toHaveBeenLastCalledWith(files);
+    videoDeck.addFiles.mockReturnValueOnce(0);
+    fireEvent.drop(screen.getByTestId("videos-drop"), { dataTransfer: { files: [mp3("a.mp3")], types: ["Files"] } });
+    expect(screen.getByText("Only video files can be added.")).toBeTruthy();
+  });
+
+  it("plays a video on stage and takes it off", () => {
+    state = baseState();
+    videoState = baseVideoState({
+      videos: [
+        { id: "v1", name: "Intro", volume: 1, assetId: "a", url: "https://x/v1", saveState: "saved" },
+        { id: "v2", name: "Promo", volume: 1, assetId: "b", url: "https://x/v2", saveState: "saved" },
+      ],
+      currentId: "v2",
+      stage: "live",
+      playing: true,
+      duration: 30,
+    });
+    render(<AudioDeckPanel open onClose={() => {}} />);
+    expect(screen.getByTestId("video-on-stage").textContent).toContain("On stage: Promo");
+    fireEvent.click(screen.getByTitle("Play Intro on stage"));
+    expect(videoDeck.playOnStage).toHaveBeenCalledWith("v1");
+    fireEvent.click(screen.getByLabelText("Pause video"));
+    expect(videoDeck.togglePause).toHaveBeenCalled();
+    fireEvent.click(screen.getByText("Take off stage"));
+    expect(videoDeck.stop).toHaveBeenCalled();
+  });
+
+  it("disables stage buttons outside a room and says why", () => {
+    state = baseState();
+    videoState = baseVideoState({
+      canPublish: false,
+      videos: [{ id: "v1", name: "Intro", volume: 1, assetId: "a", url: "https://x/v1", saveState: "saved" }],
+    });
+    render(<AudioDeckPanel open onClose={() => {}} />);
+    expect(screen.getByText("Join the room to play videos on stage.")).toBeTruthy();
+    expect((screen.getByTitle("Play Intro on stage") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("adds finished videos and recordings from the library, not audio or unfinished recordings", async () => {
+    state = baseState();
+    listMock.mockResolvedValue([
+      { id: "a1", type: "audio", name: "Theme", videoUrl: "https://x/a1", duration: 65 },
+      { id: "v1", type: "video", name: "Clip", videoUrl: "https://x/v1", duration: 5, hasVideo: true },
+      { id: "r1", type: "recording", name: "Last show", videoUrl: "https://x/r1", status: "ready", hasVideo: true },
+      { id: "r2", type: "recording", name: "Processing show", videoUrl: "https://x/r2", status: "processing" },
+    ]);
+    render(<AudioDeckPanel open onClose={() => {}} />);
+    fireEvent.click(screen.getAllByText("From library")[0]);
+    fireEvent.click(await screen.findByText("Clip"));
+    expect(screen.getByText("Last show")).toBeTruthy();
+    expect(screen.queryByText("Theme")).toBeNull();
+    expect(screen.queryByText("Processing show")).toBeNull();
+    expect(videoDeck.addFromLibrary).toHaveBeenCalledWith({ id: "v1", name: "Clip", url: "https://x/v1" });
   });
 });

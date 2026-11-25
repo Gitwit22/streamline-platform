@@ -98,6 +98,10 @@ export async function purgeUserOwnedData(uid: string): Promise<UserDataPurgeResu
     await firestore.collection("audioDecks").doc(uid).delete();
     return { deleted: 1, more: false };
   });
+  await step("mediaVideoDecks", async () => {
+    await firestore.collection("mediaVideoDecks").doc(uid).delete();
+    return { deleted: 1, more: false };
+  });
   await step("collaborators_as_owner", () =>
     deleteQueryDocs(firestore.collection("collaboratorRelationships").where("ownerUid", "==", uid))
   );

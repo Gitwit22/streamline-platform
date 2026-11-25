@@ -83,4 +83,20 @@ describe("GraphicsPanel", () => {
     expect((await screen.findByTestId("banner-row")).textContent).toContain("Scrolling");
     expect(puts[0]).toMatchObject({ banners: [{ text: "Follow us", scroll: true }] });
   });
+  it("warns when a save didn't reach the live outputs, and retries", async () => {
+    let rev = 1;
+    let synced = false;
+    const puts = setup({ graphics: { lowerThirds: [LT], banners: [] }, rev: 1 }, (body) => {
+      rev += 1;
+      return res(200, { graphics: body, rev, synced });
+    });
+    fireEvent.click(await screen.findByText("Show"));
+    await screen.findByTestId("graphics-not-synced");
+    // The save itself stood: the row shows it as live.
+    expect(screen.getByText("Hide")).toBeTruthy();
+    synced = true;
+    fireEvent.click(screen.getByText("Retry"));
+    await vi.waitFor(() => expect(screen.queryByTestId("graphics-not-synced")).toBeNull());
+    expect(puts[1]).toMatchObject({ rev: 2, activeLowerThirdId: "lt1" });
+  });
 });

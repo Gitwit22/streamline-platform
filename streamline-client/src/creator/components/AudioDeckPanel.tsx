@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type CSSProperties, type DragEvent } from "react";
 import { useAudioDeck } from "../hooks/useAudioDeck";
+import { useVideoDeck } from "../hooks/useVideoDeck";
 import { DECK_LIMITS, isAudioFile, type DeckItem, type DeckList, type LoopMode } from "../../lib/audioDeck";
+import { VIDEO_LIMITS, isVideoFile, type VideoItem } from "../../lib/mediaVideo";
 import { assetsApi, type MediaAsset } from "../../lib/editingApi";
 import { getMixer } from "../../lib/mixerInstance";
 
@@ -23,9 +25,10 @@ function useBroadcasting(): boolean {
 }
 
 /**
- * In-room audio deck: background-music playlist and soundboard pads. Audio
- * plays into the mixer's Music channel; files are saved to the content
- * library so the deck is there next session.
+ * In-room Media panel: stage videos (lib/mediaVideo.ts), background-music
+ * playlist and soundboard pads (lib/audioDeck.ts). Audio plays into the
+ * mixer's Music channel; videos play on stage as the host's screen share.
+ * Files are saved to the content library so they're there next session.
  */
 export default function AudioDeckPanel({
   open,
@@ -83,15 +86,16 @@ export default function AudioDeckPanel({
   return (
     <div data-testid="audio-deck" style={panel}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div style={{ fontWeight: 800, color: "#e5e7eb", fontSize: 14 }}>🎵 Audio</div>
-        <button type="button" onClick={onClose} style={iconBtn} aria-label="Close audio">
+        <div style={{ fontWeight: 800, color: "#e5e7eb", fontSize: 14 }}>🎞️ Media</div>
+        <button type="button" onClick={onClose} style={iconBtn} aria-label="Close media">
           ✕
         </button>
       </div>
 
       {!broadcasting && (
         <div style={hintBox} data-testid="audio-not-broadcasting">
-          Only you hear this right now. Turn on <b>Send mix to stream</b> in the mixer so guests and viewers hear it.
+          Only you hear this music right now. Turn on <b>Send mix to stream</b> in the mixer so guests and viewers hear the
+          playlist and soundboard (videos are always heard).
           {onOpenMixer && (
             <button type="button" style={{ ...smallBtn, marginLeft: 6 }} onClick={onOpenMixer}>
               Open mixer
@@ -110,6 +114,8 @@ export default function AudioDeckPanel({
       )}
       {notice && <div style={warnBox}>{notice}</div>}
       {!state.loaded && <div style={muted}>Loading your audio…</div>}
+
+      <VideoSection onNotice={setNotice} />
 
       {/* ---- Now playing ---- */}
       <section style={section}>
@@ -237,11 +243,12 @@ export default function AudioDeckPanel({
       </section>
 
       <div style={{ fontSize: 10, color: "#64748b" }}>
-        Plays through the mixer's Music channel. Added files are saved to your content library.
+        Music and pads play through the mixer's Music channel. Added files are saved to your content library.
       </div>
 
       {picker && (
         <LibraryPicker
+          kind="audio"
           onClose={() => setPicker(null)}
           onPick={(a) => {
             if (!deck.addFromLibrary({ id: a.id, name: a.name, url: a.videoUrl }, picker)) {
@@ -250,6 +257,224 @@ export default function AudioDeckPanel({
           }}
         />
       )}
+    </div>
+  );
+}
+
+function StagePreview({ stream }: { stream: MediaStream | null }) {
+  const ref = useRef<HTMLVideoElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.srcObject = stream;
+    if (stream) void el.play().catch(() => {});
+  }, [stream]);
+  return (
+    <video
+      ref={ref}
+      muted
+      playsInline
+      autoPlay
+      data-testid="stage-video-preview"
+      style={{ width: "100%", aspectRatio: "16 / 9", background: "#000", borderRadius: 6, objectFit: "contain" }}
+    />
+  );
+}
+
+/**
+ * Stage videos: play one on stage for guests and every output (published as
+ * the host's screen share by MediaVideoBridge).
+ */
+function VideoSection({ onNotice }: { onNotice: (msg: string | null) => void }) {
+  const { deck, state } = useVideoDeck();
+  const [picker, setPicker] = useState(false);
+  const [dropOver, setDropOver] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    void deck.ensureLoaded();
+  }, [deck]);
+
+  const add = (files: File[]) => {
+    const room = VIDEO_LIMITS.videos - state.videos.length;
+    const n = deck.addFiles(files);
+    if (files.length > 0 && n === 0) {
+      onNotice(room <= 0 ? "The video list is full." : "Only video files can be added.");
+    } else if (n < files.length) {
+      onNotice(`Added ${n} of ${files.length} files (video only, up to ${VIDEO_LIMITS.videos}).`);
+    } else {
+      onNotice(null);
+    }
+  };
+
+  const current = state.videos.find((x) => x.id === state.currentId) || null;
+  const starting = state.stage === "starting";
+
+  return (
+    <section style={section} data-testid="video-section">
+      <div style={sectionTitle}>Videos</div>
+      <div style={muted}>Plays on stage for guests and viewers, in place of your screen share.</div>
+      {state.persistError && <div style={warnBox}>{state.persistError}</div>}
+      {state.error && (
+        <div style={errBox} role="alert" data-testid="video-error">
+          {state.error}
+          <button type="button" style={{ ...iconBtn, marginLeft: 6 }} aria-label="Dismiss video error" onClick={() => deck.clearError()}>
+            ✕
+          </button>
+        </div>
+      )}
+      {!state.canPublish && <div style={warnBox}>Join the room to play videos on stage.</div>}
+
+      {state.stage !== "off" && (
+        <div data-testid="video-on-stage" style={{ ...pickerBox, borderColor: "rgba(239,68,68,0.6)" }}>
+          {state.stage === "live" && <StagePreview stream={state.preview} />}
+          <div style={{ ...ellipsis, fontSize: 12, color: "#fecaca", fontWeight: 700 }}>
+            {starting ? "Starting… " : "● On stage: "}
+            {current?.name || ""}
+          </div>
+          <input
+            type="range"
+            aria-label="Seek video"
+            min={0}
+            max={Math.max(1, state.duration)}
+            step={0.5}
+            value={Math.min(state.position, state.duration || 0)}
+            disabled={starting || !state.duration}
+            onChange={(e) => deck.seek(Number(e.target.value))}
+            style={{ width: "100%" }}
+          />
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#64748b" }}>
+            <span>{fmt(state.position)}</span>
+            <span>{fmt(state.duration)}</span>
+          </div>
+          <div style={{ display: "flex", gap: 4 }}>
+            <button
+              type="button"
+              style={{ ...ctrlBtn, background: state.playing ? "#eab308" : "#059669", color: state.playing ? "#000" : "#fff" }}
+              aria-label={state.playing ? "Pause video" : "Resume video"}
+              onClick={() => deck.togglePause()}
+              disabled={starting}
+            >
+              {state.playing ? "⏸" : "▶"}
+            </button>
+            <button type="button" style={{ ...smallBtn, color: "#fca5a5", borderColor: "rgba(239,68,68,0.5)" }} onClick={() => void deck.stop()}>
+              Take off stage
+            </button>
+          </div>
+        </div>
+      )}
+
+      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11, color: "#cbd5e1" }}>
+        <input type="checkbox" checked={state.loop} onChange={(e) => deck.setLoop(e.target.checked)} />
+        Loop the video (otherwise it leaves the stage when it ends)
+      </label>
+
+      <div
+        data-testid="videos-drop"
+        style={dropBox(dropOver)}
+        onDragOver={(e) => {
+          if (!Array.from(e.dataTransfer?.types || []).includes("Files")) return;
+          e.preventDefault();
+          e.stopPropagation();
+          setDropOver(true);
+        }}
+        onDragLeave={() => setDropOver(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          setDropOver(false);
+          add(Array.from(e.dataTransfer?.files || []));
+        }}
+      >
+        {!state.loaded && <div style={muted}>Loading your videos…</div>}
+        {state.loaded && state.videos.length === 0 && <div style={muted}>Drop video files here, or add them below.</div>}
+        {state.videos.map((it, i) => (
+          <VideoRow
+            key={it.id}
+            item={it}
+            onStage={it.id === state.currentId}
+            disabled={starting || !state.canPublish}
+            onPlay={() => void deck.playOnStage(it.id)}
+            onVolume={(v) => deck.setVolume(it.id, v)}
+            onUp={i > 0 ? () => deck.move(it.id, -1) : undefined}
+            onDown={i < state.videos.length - 1 ? () => deck.move(it.id, 1) : undefined}
+            onRemove={() => deck.remove(it.id)}
+            onRetry={() => deck.retrySave(it.id)}
+          />
+        ))}
+      </div>
+      <AddButtons onFiles={() => input.current?.click()} onLibrary={() => setPicker(true)} full={state.videos.length >= VIDEO_LIMITS.videos} />
+      <input
+        ref={input}
+        type="file"
+        multiple
+        accept="video/*"
+        hidden
+        data-testid="videos-file-input"
+        onChange={(e) => {
+          add(Array.from(e.target.files || []));
+          e.target.value = "";
+        }}
+      />
+      {picker && (
+        <LibraryPicker
+          kind="video"
+          onClose={() => setPicker(false)}
+          onPick={(a) => {
+            if (!deck.addFromLibrary({ id: a.id, name: a.name, url: a.videoUrl })) onNotice("The video list is full.");
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+function VideoRow({
+  item,
+  onStage,
+  disabled,
+  onPlay,
+  onVolume,
+  onUp,
+  onDown,
+  onRemove,
+  onRetry,
+}: {
+  item: VideoItem;
+  onStage: boolean;
+  disabled: boolean;
+  onPlay: () => void;
+  onVolume: (v: number) => void;
+  onUp?: () => void;
+  onDown?: () => void;
+  onRemove: () => void;
+  onRetry: () => void;
+}) {
+  return (
+    <div data-testid="video-item" style={{ ...row, borderColor: onStage ? "rgba(239,68,68,0.6)" : "rgba(255,255,255,0.08)" }}>
+      <button
+        type="button"
+        style={{ ...smallBtn, padding: "2px 6px", color: onStage ? "#fca5a5" : "#86efac", borderColor: onStage ? "rgba(239,68,68,0.5)" : "rgba(34,197,94,0.5)" }}
+        onClick={onPlay}
+        disabled={disabled || !item.url}
+        title={`Play ${item.name} on stage`}
+      >
+        {onStage ? "● Live" : "▶ Stage"}
+      </button>
+      <span style={{ ...ellipsis, flex: 1, fontSize: 12, color: onStage ? "#fecaca" : "#e5e7eb" }} title={item.name}>
+        {item.name}
+      </span>
+      <SaveBadge item={item} onRetry={onRetry} />
+      <input type="range" aria-label={`${item.name} volume`} min={0} max={1} step={0.05} value={item.volume} onChange={(e) => onVolume(Number(e.target.value))} style={{ width: 56 }} />
+      <button type="button" style={iconBtn} aria-label="Move up" onClick={onUp} disabled={!onUp}>
+        ↑
+      </button>
+      <button type="button" style={iconBtn} aria-label="Move down" onClick={onDown} disabled={!onDown}>
+        ↓
+      </button>
+      <button type="button" style={{ ...iconBtn, color: "#fca5a5" }} aria-label={`Remove ${item.name}`} onClick={onRemove}>
+        ✕
+      </button>
     </div>
   );
 }
@@ -268,7 +493,7 @@ function AddButtons({ onFiles, onLibrary, full }: { onFiles: () => void; onLibra
   );
 }
 
-function SaveBadge({ item, onRetry }: { item: DeckItem; onRetry: () => void }) {
+function SaveBadge({ item, onRetry }: { item: DeckItem | VideoItem; onRetry: () => void }) {
   if (item.saveState === "saving") {
     return <span style={badge("#93c5fd")}>Saving{typeof item.uploadPct === "number" ? ` ${item.uploadPct}%` : "…"}</span>;
   }
@@ -376,7 +601,23 @@ function Pad({
   );
 }
 
-function LibraryPicker({ onClose, onPick }: { onClose: () => void; onPick: (a: MediaAsset) => void }) {
+/** Library files a list can use: audio for the deck, finished videos/recordings for the stage. */
+function libraryFilter(kind: "audio" | "video", a: MediaAsset): boolean {
+  if (!a.videoUrl) return false;
+  if (kind === "audio") return a.type === "audio";
+  if (a.type === "recording") return a.status === "ready" && a.hasVideo !== false;
+  return a.type === "video" && a.hasVideo !== false;
+}
+
+function LibraryPicker({
+  kind,
+  onClose,
+  onPick,
+}: {
+  kind: "audio" | "video";
+  onClose: () => void;
+  onPick: (a: MediaAsset) => void;
+}) {
   const [items, setItems] = useState<MediaAsset[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
@@ -384,7 +625,7 @@ function LibraryPicker({ onClose, onPick }: { onClose: () => void; onPick: (a: M
     assetsApi
       .list()
       .then((all) => {
-        if (!cancelled) setItems(all.filter((a) => a.type === "audio" && !!a.videoUrl));
+        if (!cancelled) setItems(all.filter((a) => libraryFilter(kind, a)));
       })
       .catch(() => {
         if (!cancelled) setError("Couldn't load your library.");
@@ -392,18 +633,20 @@ function LibraryPicker({ onClose, onPick }: { onClose: () => void; onPick: (a: M
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [kind]);
   return (
     <div style={pickerBox} data-testid="library-picker">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <div style={sectionTitle}>Audio in your library</div>
+        <div style={sectionTitle}>{kind === "audio" ? "Audio" : "Videos"} in your library</div>
         <button type="button" style={iconBtn} aria-label="Close library" onClick={onClose}>
           ✕
         </button>
       </div>
       {error && <div style={errBox}>{error}</div>}
       {!items && !error && <div style={muted}>Loading…</div>}
-      {items && items.length === 0 && <div style={muted}>No audio files yet. Add files to upload them.</div>}
+      {items && items.length === 0 && (
+        <div style={muted}>{kind === "audio" ? "No audio files" : "No videos"} yet. Add files to upload them.</div>
+      )}
       <div style={{ display: "grid", gap: 4, maxHeight: 200, overflowY: "auto" }}>
         {items?.map((a) => (
           <button key={a.id} type="button" style={{ ...row, ...linkBtn, color: "#e5e7eb", justifyContent: "space-between" }} onClick={() => onPick(a)}>
@@ -417,11 +660,12 @@ function LibraryPicker({ onClose, onPick }: { onClose: () => void; onPick: (a: M
 }
 
 /**
- * Drop audio files anywhere on the room: a full-screen target appears while
- * dragging, split into Playlist / Soundboard.
+ * Drop media files anywhere on the room: a full-screen target appears while
+ * dragging, split into Videos / Playlist / Soundboard.
  */
 export function AudioDropOverlay({ onDropped }: { onDropped: () => void }) {
   const { deck } = useAudioDeck();
+  const { deck: videoDeck } = useVideoDeck();
   const [dragging, setDragging] = useState(false);
   const depth = useRef(0);
 
@@ -453,7 +697,7 @@ export function AudioDropOverlay({ onDropped }: { onDropped: () => void }) {
   }, []);
 
   if (!dragging) return null;
-  const zone = (list: DeckList, label: string) => (
+  const zone = (list: DeckList | "videos", label: string) => (
     <div
       data-testid={`room-drop-${list}`}
       onDragOver={(e) => e.preventDefault()}
@@ -461,6 +705,11 @@ export function AudioDropOverlay({ onDropped }: { onDropped: () => void }) {
         e.preventDefault();
         depth.current = 0;
         setDragging(false);
+        if (list === "videos") {
+          void videoDeck.ensureLoaded();
+          if (videoDeck.addFiles(Array.from(e.dataTransfer?.files || []).filter(isVideoFile)) > 0) onDropped();
+          return;
+        }
         void deck.ensureLoaded();
         if (deck.addFiles(droppedAudio(e), list) > 0) onDropped();
       }}
@@ -482,6 +731,7 @@ export function AudioDropOverlay({ onDropped }: { onDropped: () => void }) {
   );
   return (
     <div style={{ position: "fixed", inset: 0, zIndex: 60, display: "flex", gap: 16, padding: 24, background: "rgba(0,0,0,0.55)" }}>
+      {zone("videos", "Drop to add stage videos")}
       {zone("playlist", "Drop to add to the playlist")}
       {zone("pads", "Drop to add soundboard pads")}
     </div>

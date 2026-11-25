@@ -22,6 +22,7 @@ test("account purge covers every user-owned collection", () => {
     "savedEmbeds",
     "brandKits",
     "audioDecks",
+    "mediaVideoDecks",
     "collaboratorRelationships",
     "auth.deleteUser",
     "recursiveDelete(doc.ref)", // user doc + all subcollections (destinations = stream keys)

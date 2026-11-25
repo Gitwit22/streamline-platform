@@ -37,6 +37,7 @@ import brandKitsRoutes, { roomBrandKitRouter } from "./routes/brandKits";
 import roomsGraphicsRoutes from "./routes/roomsGraphics";
 import roomsRenameRoutes from "./routes/roomsRename";
 import audioDeckRoutes from "./routes/audioDeck";
+import mediaVideosRoutes from "./routes/mediaVideos";
 import editingRoutes from "./routes/editing";
 import projectsRoutes from "./routes/projects";
 import myContentRoutes from "./routes/myContent";
@@ -377,6 +378,8 @@ app.use("/api/saved-embeds", savedEmbedsRoutes);
 app.use("/api/brand-kits", brandKitsRoutes);
 // Audio deck layout (playlist + soundboard pads; files live in the content library)
 app.use("/api/audio-deck", audioDeckRoutes);
+// Saved stage videos for the in-room Media panel (files live in the content library)
+app.use("/api/media-videos", mediaVideosRoutes);
 
 // Reject legacy EDU/Corporate lane requests
 app.use("/api/edu", (_req, res) => res.status(404).json({ error: "lane_removed" }));

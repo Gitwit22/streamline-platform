@@ -32,7 +32,8 @@ const ASSET_ID_RE = /^[A-Za-z0-9_-]+$/;
 // Flat shape (no strictNullChecks on the server).
 export type AudioDeckParse = { ok: boolean; value?: AudioDeckLayout; field?: string; details?: string };
 
-function parseItems(raw: unknown, field: string, max: number): { items?: DeckItem[]; error?: AudioDeckParse } {
+/** Validates a list of deck items (also used by the media video list, lib/mediaVideosPure.ts). */
+export function parseDeckItems(raw: unknown, field: string, max: number): { items?: DeckItem[]; error?: AudioDeckParse } {
   if (raw === undefined) return { items: [] };
   if (!Array.isArray(raw)) return { error: { ok: false, field, details: `${field} must be an array` } };
   if (raw.length > max) return { error: { ok: false, field, details: `at most ${max} items` } };
@@ -62,9 +63,9 @@ function parseItems(raw: unknown, field: string, max: number): { items?: DeckIte
 export function parseAudioDeckInput(body: unknown): AudioDeckParse {
   if (!body || typeof body !== "object" || Array.isArray(body)) return { ok: false, field: "body", details: "body must be an object" };
   const b = body as Record<string, unknown>;
-  const pl = parseItems(b.playlist, "playlist", AUDIO_DECK_LIMITS.playlist);
+  const pl = parseDeckItems(b.playlist, "playlist", AUDIO_DECK_LIMITS.playlist);
   if (pl.error) return pl.error;
-  const pads = parseItems(b.pads, "pads", AUDIO_DECK_LIMITS.pads);
+  const pads = parseDeckItems(b.pads, "pads", AUDIO_DECK_LIMITS.pads);
   if (pads.error) return pads.error;
   const loopMode = b.loopMode === undefined ? "all" : b.loopMode;
   if (!(LOOP_MODES as readonly unknown[]).includes(loopMode)) {

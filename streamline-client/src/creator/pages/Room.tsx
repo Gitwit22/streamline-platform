@@ -72,6 +72,7 @@ import AudioDeckPanel, { AudioDropOverlay } from "../components/AudioDeckPanel";
 import AudioMixerModal from "../components/AudioMixerModal";
 import ViewerStatsChip from "../components/ViewerStatsChip";
 import MixerBridge from "../components/MixerBridge";
+import MediaVideoBridge from "../components/MediaVideoBridge";
 import ScreenShareRouter, { type ScreenShareRouteMode } from "../components/ScreenShareRouter";
 import ScreenSharePopout from "../components/ScreenSharePopout";
 import { TourProvider, useTour } from "../../components/tour/TourProvider";
@@ -91,6 +92,13 @@ import { fetchDestinations, preflight, type DestinationItem } from "../../servic
 import { normalizeUiRolePresetId } from "../../lib/roles";
 import { recordingEvents } from "../../lib/recordingEvents";
 import { detectInAppBrowser } from "../../lib/detectInAppBrowser";
+import {
+  classifyMediaDeviceError,
+  deviceFromKind,
+  isPermissionDenied,
+  type MediaErrorDevice,
+  type MediaPermissionError,
+} from "../../lib/mediaDeviceErrors";
 import {
   ROOM_ACCESS_HLS_NOTE,
   normalizeRoomAccess,
@@ -472,7 +480,7 @@ function MediaPermissionErrorBanner({
   error,
   onDismiss
 }: { 
-  error: { type: 'denied' | 'notFound' | 'notReadable' | 'notSupported' | 'inAppBrowser' | null; message: string } | null;
+  error: MediaPermissionError | null;
   onDismiss: () => void;
 }) {
   if (!error) return null;
@@ -578,47 +586,67 @@ function MediaPermissionErrorBanner({
   );
 }
 
-function MediaDeviceErrorHandler({ onError }: { onError: (error: any) => void }) {
+/**
+ * Reports camera/mic/screen-share failures (RoomEvent.MediaDevicesError) and
+ * tells the shell when a failed camera/mic later publishes, so a stale
+ * "blocked" banner clears itself. Classification: lib/mediaDeviceErrors.ts.
+ */
+function MediaDeviceErrorHandler({
+  onError,
+  onRecovered,
+}: {
+  onError: (error: unknown, kind?: unknown) => void;
+  onRecovered: (device: MediaErrorDevice) => void;
+}) {
   const room = useRoomContext();
 
   useEffect(() => {
     if (!room) return;
     let pendingTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const handleError = (error: any) => {
-      console.error('[MediaDeviceError]', error);
+    const hasPublished = (device: MediaErrorDevice): boolean => {
+      if (device === "screen") return false;
+      const source = device === "audioinput" ? Track.Source.Microphone : Track.Source.Camera;
+      return !!room.localParticipant?.getTrackPublication(source)?.track;
+    };
 
-      // Permission-denied is never transient — show immediately.
-      const name = error?.name || String(error);
-      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
-        onError(error);
+    const handleError = (error: any, kind?: unknown) => {
+      console.error('[MediaDeviceError]', { name: error?.name, message: error?.message, kind });
+      const device = deviceFromKind(kind);
+      // A redundant enable attempt can fail after the device already
+      // published (e.g. a second prompt dismissed): nothing is wrong.
+      if (hasPublished(device)) return;
+
+      // Permission-denied (and screen-share errors) are never transient — report now.
+      if (device === "screen" || isPermissionDenied(error)) {
+        onError(error, kind);
         return;
       }
 
       // For all other errors, delay briefly. LiveKit often auto-retries
-      // with fallback constraints and succeeds within ~2 s. If by then
-      // the local participant has an active audio or video track the
-      // error was transient — suppress it.
+      // with fallback constraints and succeeds within ~2 s.
       if (pendingTimer) clearTimeout(pendingTimer);
       pendingTimer = setTimeout(() => {
         pendingTimer = null;
-        const lp = room.localParticipant;
-        const hasAudio = lp?.audioTrackPublications?.size > 0;
-        const hasVideo = lp?.videoTrackPublications?.size > 0;
-        if (hasAudio || hasVideo) {
-          return;
-        }
-        onError(error);
+        if (hasPublished(device)) return;
+        onError(error, kind);
       }, 2500);
     };
 
+    const handlePublished = (pub: any) => {
+      if (pub?.source === Track.Source.Camera) onRecovered("videoinput");
+      else if (pub?.source === Track.Source.Microphone) onRecovered("audioinput");
+    };
+
     room.on(RoomEvent.MediaDevicesError, handleError);
+    room.on(RoomEvent.LocalTrackPublished, handlePublished);
 
     return () => {
       room.off(RoomEvent.MediaDevicesError, handleError);
+      room.off(RoomEvent.LocalTrackPublished, handlePublished);
       if (pendingTimer) clearTimeout(pendingTimer);
     };
-  }, [room, onError]);
+  }, [room, onError, onRecovered]);
 
   return null;
 }
@@ -1357,50 +1385,24 @@ function LiveKitShell({
   }, []);
 
   // Media permission error state and handlers
-  const [mediaPermissionError, setMediaPermissionError] = useState<{
-    type: 'denied' | 'notFound' | 'notReadable' | 'notSupported' | 'inAppBrowser' | null;
-    message: string;
-  } | null>(null);
+  const [mediaPermissionError, setMediaPermissionError] = useState<MediaPermissionError | null>(null);
 
-  // Handle media device errors and show appropriate messaging
-  const handleMediaDeviceError = (error: any) => {
-    console.error('[Room] MediaDevicesError:', error);
-
-    const errorName = error?.name || String(error);
-    
-    if (errorName === 'NotAllowedError' || errorName === 'PermissionDeniedError') {
-      setMediaPermissionError({
-        type: 'denied',
-        message: '🔒 Camera/mic blocked. Tap the lock icon → allow → reload.',
-      });
-    } else if (errorName === 'NotFoundError') {
-      setMediaPermissionError({
-        type: 'notFound',
-        message: '⚠️ No camera/mic found. Check if devices are connected.',
-      });
-    } else if (errorName === 'NotReadableError') {
-      setMediaPermissionError({
-        type: 'notReadable',
-        message: '⚠️ Camera/mic in use by another app. Close other apps and reload.',
-      });
-    } else if (errorName === 'NotSupportedError' || errorName === 'OverconstrainedError') {
-      setMediaPermissionError({
-        type: 'notSupported',
-        message: '⚠️ Browser or device limitation. Try a different browser.',
-      });
-    } else {
-      setMediaPermissionError({
-        type: 'notSupported',
-        message: `⚠️ Unable to access camera/mic: ${errorName}`,
-      });
-    }
-  };
+  // Stable identities: MediaDeviceErrorHandler re-subscribes (and drops its
+  // pending timer) whenever these change.
+  const handleMediaDeviceError = React.useCallback((error: unknown, kind?: unknown) => {
+    const next = classifyMediaDeviceError(error, kind);
+    if (next) setMediaPermissionError(next);
+  }, []);
+  const handleMediaDeviceRecovered = React.useCallback((device: MediaErrorDevice) => {
+    setMediaPermissionError((prev) => (prev && prev.device === device ? null : prev));
+  }, []);
 
   // Check for in-app browser on mount
   React.useEffect(() => {
     if (detectInAppBrowser()) {
       setMediaPermissionError({
         type: 'inAppBrowser',
+        device: null,
         message: '⚠️ This in-app browser may block camera/mic. Open in Chrome/Safari.',
       });
     }
@@ -1532,7 +1534,7 @@ function LiveKitShell({
         <LiveKitDebugLogger />
         <VideoElementMonitor />
         {DEV_CONTROLS && <PermissionsDebugOverlay dashboardRole={dashboardRole === "host" ? "host" : "participant"} />}
-        <MediaDeviceErrorHandler onError={handleMediaDeviceError} />
+        <MediaDeviceErrorHandler onError={handleMediaDeviceError} onRecovered={handleMediaDeviceRecovered} />
         <WaitingForHostBanner isViewer={isViewer} />
         <MediaPermissionErrorBanner 
           error={mediaPermissionError} 
@@ -1548,6 +1550,8 @@ function LiveKitShell({
         />
         <TileVisibilityEnforcer rootRef={mediaRootRef} hideLocal={subjectToControls && !controlsTileVisible} />
         {audioMixerEnabled && <MixerBridge />}
+        {/* Stage videos from the Media panel (same gate as the panel). */}
+        {audioMixerEnabled && !isAudience && <MediaVideoBridge />}
         {advancedScreenShareEnabled && <ScreenSharePopout mode={screenShareMode} onActiveSharerChange={onActiveSharerChange} />}
         {(isHost || canLayout) && roomId && roomAccessToken && (
           <LayoutPickerPanel open={showLayoutPicker} onClose={onToggleLayoutPicker} />
@@ -5546,9 +5550,9 @@ function RoomPage() {
                 transition: 'all 0.3s ease',
                 fontWeight: '500'
               }}
-              title="Background music playlist and soundboard (plays through the mixer's Music channel)"
+              title="Media: play videos on stage, background music and soundboard"
             >
-              🎵 Audio
+              🎞️ Media
             </button>
             )}
 

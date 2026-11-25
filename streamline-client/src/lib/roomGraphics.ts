@@ -27,7 +27,12 @@ export const EMPTY_ROOM_GRAPHICS: RoomGraphics = {
   activeBannerId: null,
 };
 
-export type GraphicsSnapshot = { graphics: RoomGraphics; rev: number };
+export type GraphicsSnapshot = {
+  graphics: RoomGraphics;
+  rev: number;
+  /** False when a save was stored but the live room's outputs couldn't be updated. */
+  synced: boolean;
+};
 
 export class GraphicsError extends Error {
   code: string;
@@ -56,7 +61,7 @@ function messageFor(code: string, details?: string): string {
 }
 
 function toSnapshot(p: unknown): GraphicsSnapshot {
-  const o = (p && typeof p === "object" ? p : {}) as { graphics?: Partial<RoomGraphics>; rev?: unknown };
+  const o = (p && typeof p === "object" ? p : {}) as { graphics?: Partial<RoomGraphics>; rev?: unknown; synced?: unknown };
   const g = o.graphics || {};
   return {
     graphics: {
@@ -66,6 +71,8 @@ function toSnapshot(p: unknown): GraphicsSnapshot {
       activeBannerId: typeof g.activeBannerId === "string" ? g.activeBannerId : null,
     },
     rev: typeof o.rev === "number" ? o.rev : 0,
+    // Older servers don't send it: treat as synced (their previous behavior).
+    synced: o.synced !== false,
   };
 }
 
