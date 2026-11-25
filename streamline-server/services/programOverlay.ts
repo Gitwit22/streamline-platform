@@ -84,24 +84,29 @@ async function writeOverlay(svc: any, lkRoom: any, overlay: ProgramOverlay | nul
  * Rooms with nothing to draw (no kit, no visible graphics) skip all
  * LiveKit calls, unless `clearWhenNoKit` is set: the kit or graphics were
  * just removed, so a running room's overlay must be cleared.
+ *
+ * Resolves false only when a running room could not be updated (callers
+ * that must not report a false success, like live graphics, check it);
+ * true when it was updated or there was nothing to update.
  */
 export async function syncRoomProgramOverlay(
   roomId: string,
   roomData?: any,
   opts: { clearWhenNoKit?: boolean } = {}
-): Promise<void> {
+): Promise<boolean> {
   try {
     const room = roomData ?? (await db.collection("rooms").doc(roomId).get()).data();
-    if (!room) return;
-    if (!roomMayDrawOverlay(room) && !opts.clearWhenNoKit) return;
+    if (!room) return true;
+    if (!roomMayDrawOverlay(room) && !opts.clearWhenNoKit) return true;
     const svc = await roomService();
-    if (!svc) return;
+    if (!svc) return true;
     const name = livekitRoomNameFor(roomId, room);
     const rooms = await svc.listRooms([name]);
-    if (!rooms || rooms.length === 0) return;
-    await writeOverlay(svc, rooms[0], await getRoomProgramOverlay(room), roomId);
+    if (!rooms || rooms.length === 0) return true;
+    return await writeOverlay(svc, rooms[0], await getRoomProgramOverlay(room), roomId);
   } catch (err: any) {
     console.warn("[programOverlay] sync failed", { roomId, error: err?.message || String(err) });
+    return false;
   }
 }
 

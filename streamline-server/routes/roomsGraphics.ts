@@ -58,6 +58,7 @@ router.get("/:roomId/graphics", requireAuth as any, requireRoomAccessToken as an
 });
 
 // PUT /api/rooms/:roomId/graphics { lowerThirds, banners, activeLowerThirdId, activeBannerId, rev }
+//   -> { graphics, rev, synced } (synced=false: saved, but the running room's outputs weren't updated)
 router.put("/:roomId/graphics", requireAuth as any, requireRoomAccessToken as any, async (req: any, res) => {
   const roomId = String(req.params.roomId || "").trim();
   if (!roomId) return res.status(400).json({ error: "roomId_required" });
@@ -100,9 +101,11 @@ router.put("/:roomId/graphics", requireAuth as any, requireRoomAccessToken as an
     if (outcome.conflict) {
       return res.status(409).json({ error: "graphics_conflict", graphics: outcome.graphics, rev: outcome.rev });
     }
-    // Outputs and the in-room stage pick it up through room metadata.
-    await syncRoomProgramOverlay(roomId, outcome.room, { clearWhenNoKit: true });
-    return res.json({ graphics: outcome.graphics, rev: outcome.rev });
+    // Outputs and the in-room stage pick it up through room metadata. The
+    // save stands either way; `synced: false` tells the producer the live
+    // outputs didn't change yet, instead of a silent false success.
+    const synced = await syncRoomProgramOverlay(roomId, outcome.room, { clearWhenNoKit: true });
+    return res.json({ graphics: outcome.graphics, rev: outcome.rev, synced });
   } catch (err) {
     console.error("[graphics] PUT error", err);
     return res.status(500).json({ error: "internal_error" });

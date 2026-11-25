@@ -31,6 +31,8 @@ export default function GraphicsPanel({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Saved, but the running room's outputs weren't updated (server synced=false).
+  const [notSynced, setNotSynced] = useState(false);
   const [reloadKey, setReloadKey] = useState(0);
 
   // Lower third form ("" = adding a new one, else editing that id).
@@ -71,6 +73,7 @@ export default function GraphicsPanel({
       const snap = await saveRoomGraphics(roomId, roomAccessToken, next, rev);
       setGraphics(snap.graphics);
       setRev(snap.rev);
+      setNotSynced(!snap.synced);
       return true;
     } catch (e) {
       if (e instanceof GraphicsError && e.current) {
@@ -124,7 +127,9 @@ export default function GraphicsPanel({
           ✕
         </button>
       </div>
-      <div style={{ fontSize: 11, color: "#94a3b8" }}>Shown on every output: destinations, HLS and recordings.</div>
+      <div style={{ fontSize: 11, color: "#94a3b8" }}>
+        Shown on every output: destinations, HLS and recordings. In the room they show in Program view.
+      </div>
 
       {loadError && !loaded && (
         <div style={{ display: "grid", gap: 6 }}>
@@ -139,6 +144,14 @@ export default function GraphicsPanel({
       {loaded && (
         <>
           {error && <div style={errBox}>{error}</div>}
+          {notSynced && (
+            <div style={errBox} role="alert" data-testid="graphics-not-synced">
+              Saved, but the live outputs didn't update yet.{" "}
+              <button type="button" style={smallBtn} disabled={busy} onClick={() => void save(graphics)}>
+                Retry
+              </button>
+            </div>
+          )}
 
           <section style={section}>
             <div style={sectionTitle}>Lower thirds</div>
