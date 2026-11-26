@@ -2,7 +2,8 @@ import { useEffect, useRef, useState, type CSSProperties, type DragEvent } from 
 import { useAudioDeck } from "../hooks/useAudioDeck";
 import { useVideoDeck } from "../hooks/useVideoDeck";
 import { DECK_LIMITS, isAudioFile, type DeckItem, type DeckList, type LoopMode } from "../../lib/audioDeck";
-import { VIDEO_LIMITS, isVideoFile, type VideoItem } from "../../lib/mediaVideo";
+import { PLAY_MODES, VIDEO_LIMITS, isVideoFile, type PlayMode, type PlayTarget, type VideoItem } from "../../lib/mediaVideo";
+import type { PlayerLinkStatus } from "../../lib/youtubePlayerLink";
 import { assetsApi, type MediaAsset } from "../../lib/editingApi";
 import { getMixer } from "../../lib/mixerInstance";
 
@@ -95,7 +96,7 @@ export default function AudioDeckPanel({
       {!broadcasting && (
         <div style={hintBox} data-testid="audio-not-broadcasting">
           Only you hear this music right now. Turn on <b>Send mix to stream</b> in the mixer so guests and viewers hear the
-          playlist and soundboard (videos are always heard).
+          playlist and soundboard (video sound is always sent).
           {onOpenMixer && (
             <button type="button" style={{ ...smallBtn, marginLeft: 6 }} onClick={onOpenMixer}>
               Open mixer
@@ -275,20 +276,67 @@ function StagePreview({ stream }: { stream: MediaStream | null }) {
       muted
       playsInline
       autoPlay
-      data-testid="stage-video-preview"
+      data-testid="video-preview"
       style={{ width: "100%", aspectRatio: "16 / 9", background: "#000", borderRadius: 6, objectFit: "contain" }}
     />
   );
 }
 
+const PLAY_MODE_LABELS: Record<PlayMode, string> = {
+  once: "Play one, then stop",
+  loop: "Repeat the video",
+  next: "Play the playlist in order",
+  nextLoop: "Play the playlist on repeat",
+};
+
+/** YouTube links play from the StreamLine Media Player tab, captured once per show. */
+function YouTubePlayerControls({ status, onOpen, onCapture, onDisconnect }: {
+  status: PlayerLinkStatus;
+  onOpen: () => void;
+  onCapture: () => void;
+  onDisconnect: () => void;
+}) {
+  if (status === "connected") {
+    return (
+      <div style={{ ...row, justifyContent: "space-between" }} data-testid="yt-player-connected">
+        <span style={{ fontSize: 11, color: "#86efac" }}>● YouTube player connected</span>
+        <button type="button" style={smallBtn} onClick={onDisconnect}>
+          Disconnect
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div style={{ ...hintBox, display: "grid", gap: 6 }} data-testid="yt-player-setup">
+      <div>
+        <b>YouTube player</b> (once per show, Chrome or Edge):
+        <br />
+        1. Open the player tab and click <b>Start the player</b> there.
+        <br />
+        2. Come back and capture it: pick <b>StreamLine Media Player</b> and keep <b>tab audio</b> on.
+      </div>
+      <div style={{ display: "flex", gap: 6 }}>
+        <button type="button" style={smallBtn} onClick={onOpen}>
+          {status === "none" ? "1. Open player tab" : "Open player tab again"}
+        </button>
+        <button type="button" style={{ ...smallBtn, color: status === "ready" ? "#fff" : undefined, background: status === "ready" ? "#2563eb" : undefined }} onClick={onCapture} disabled={status === "none"}>
+          2. Capture player tab
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /**
- * Stage videos: play one on stage for guests and every output (published as
- * the host's screen share by MediaVideoBridge).
+ * Video playlist: files, library videos and YouTube links, played in the
+ * host's own video box or on stage (MediaVideoBridge / lib/mediaOutputs.ts).
  */
 function VideoSection({ onNotice }: { onNotice: (msg: string | null) => void }) {
   const { deck, state } = useVideoDeck();
   const [picker, setPicker] = useState(false);
   const [dropOver, setDropOver] = useState(false);
+  const [ytInput, setYtInput] = useState("");
+  const [ytError, setYtError] = useState<string | null>(null);
   const input = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -299,7 +347,7 @@ function VideoSection({ onNotice }: { onNotice: (msg: string | null) => void }) 
     const room = VIDEO_LIMITS.videos - state.videos.length;
     const n = deck.addFiles(files);
     if (files.length > 0 && n === 0) {
-      onNotice(room <= 0 ? "The video list is full." : "Only video files can be added.");
+      onNotice(room <= 0 ? "The video playlist is full." : "Only video files can be added.");
     } else if (n < files.length) {
       onNotice(`Added ${n} of ${files.length} files (video only, up to ${VIDEO_LIMITS.videos}).`);
     } else {
@@ -307,13 +355,23 @@ function VideoSection({ onNotice }: { onNotice: (msg: string | null) => void }) 
     }
   };
 
+  const addYouTube = () => {
+    const err = deck.addYouTube(ytInput);
+    setYtError(err);
+    if (!err) setYtInput("");
+  };
+
   const current = state.videos.find((x) => x.id === state.currentId) || null;
-  const starting = state.stage === "starting";
+  const starting = state.status === "starting";
+  const cantPublish = state.attached && !state.caps.box && !state.caps.stage;
+  const hasYouTube = state.videos.some((v) => v.kind === "youtube");
 
   return (
     <section style={section} data-testid="video-section">
       <div style={sectionTitle}>Videos</div>
-      <div style={muted}>Plays on stage for guests and viewers, in place of your screen share.</div>
+      <div style={muted}>
+        <b>Box</b> plays in your own video tile (your camera comes back after). <b>Stage</b> plays it on stage as a share.
+      </div>
       {state.persistError && <div style={warnBox}>{state.persistError}</div>}
       {state.error && (
         <div style={errBox} role="alert" data-testid="video-error">
@@ -323,15 +381,21 @@ function VideoSection({ onNotice }: { onNotice: (msg: string | null) => void }) 
           </button>
         </div>
       )}
-      {!state.canPublish && <div style={warnBox}>Join the room to play videos on stage.</div>}
+      {!state.attached && <div style={warnBox}>Join the room to play videos.</div>}
+      {cantPublish && (
+        <div style={warnBox} data-testid="video-cant-publish">
+          You can't send video from this room. Invisible hosts and audience members can't publish; join as a visible host to play videos.
+        </div>
+      )}
 
-      {state.stage !== "off" && (
-        <div data-testid="video-on-stage" style={{ ...pickerBox, borderColor: "rgba(239,68,68,0.6)" }}>
-          {state.stage === "live" && <StagePreview stream={state.preview} />}
+      {state.status !== "off" && (
+        <div data-testid="video-now-playing" style={{ ...pickerBox, borderColor: "rgba(239,68,68,0.6)" }}>
+          {state.status === "live" && <StagePreview stream={state.preview} />}
           <div style={{ ...ellipsis, fontSize: 12, color: "#fecaca", fontWeight: 700 }}>
-            {starting ? "Starting… " : "● On stage: "}
+            {starting ? "Starting… " : state.target === "box" ? "● In your video box: " : "● On stage: "}
             {current?.name || ""}
           </div>
+          {state.notice && <div style={warnBox}>{state.notice}</div>}
           <input
             type="range"
             aria-label="Seek video"
@@ -358,15 +422,27 @@ function VideoSection({ onNotice }: { onNotice: (msg: string | null) => void }) 
               {state.playing ? "⏸" : "▶"}
             </button>
             <button type="button" style={{ ...smallBtn, color: "#fca5a5", borderColor: "rgba(239,68,68,0.5)" }} onClick={() => void deck.stop()}>
-              Take off stage
+              {state.target === "box" ? "Stop (back to my camera)" : "Stop (off stage)"}
             </button>
           </div>
+          {state.target === "box" && <div style={muted}>Turning your camera off also stops the video.</div>}
         </div>
       )}
 
       <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 11, color: "#cbd5e1" }}>
-        <input type="checkbox" checked={state.loop} onChange={(e) => deck.setLoop(e.target.checked)} />
-        Loop the video (otherwise it leaves the stage when it ends)
+        Playlist
+        <select
+          aria-label="Play mode"
+          value={state.playMode}
+          onChange={(e) => deck.setPlayMode(e.target.value as PlayMode)}
+          style={{ ...select, flex: 1 }}
+        >
+          {PLAY_MODES.map((m) => (
+            <option key={m} value={m}>
+              {PLAY_MODE_LABELS[m]}
+            </option>
+          ))}
+        </select>
       </label>
 
       <div
@@ -387,14 +463,16 @@ function VideoSection({ onNotice }: { onNotice: (msg: string | null) => void }) 
         }}
       >
         {!state.loaded && <div style={muted}>Loading your videos…</div>}
-        {state.loaded && state.videos.length === 0 && <div style={muted}>Drop video files here, or add them below.</div>}
+        {state.loaded && state.videos.length === 0 && <div style={muted}>Drop video files here, or add files or YouTube links below.</div>}
         {state.videos.map((it, i) => (
           <VideoRow
             key={it.id}
             item={it}
-            onStage={it.id === state.currentId}
-            disabled={starting || !state.canPublish}
-            onPlay={() => void deck.playOnStage(it.id)}
+            playingIn={it.id === state.currentId && state.status !== "off" ? state.target : null}
+            canBox={state.attached && state.caps.box && !starting}
+            canStage={state.attached && state.caps.stage && !starting}
+            needsPlayer={it.kind === "youtube" && state.player !== "connected"}
+            onPlay={(target) => void deck.play(it.id, target)}
             onVolume={(v) => deck.setVolume(it.id, v)}
             onUp={i > 0 ? () => deck.move(it.id, -1) : undefined}
             onDown={i < state.videos.length - 1 ? () => deck.move(it.id, 1) : undefined}
@@ -416,12 +494,42 @@ function VideoSection({ onNotice }: { onNotice: (msg: string | null) => void }) 
           e.target.value = "";
         }}
       />
+      <form
+        style={{ display: "flex", gap: 6 }}
+        onSubmit={(e) => {
+          e.preventDefault();
+          addYouTube();
+        }}
+      >
+        <input
+          aria-label="YouTube link"
+          placeholder="Paste a YouTube link"
+          value={ytInput}
+          onChange={(e) => setYtInput(e.target.value)}
+          style={{ ...select, flex: 1, padding: "5px 8px" }}
+        />
+        <button type="submit" style={smallBtn} disabled={!ytInput.trim() || state.videos.length >= VIDEO_LIMITS.videos}>
+          + YouTube
+        </button>
+      </form>
+      {ytError && <div style={errBox}>{ytError}</div>}
+      {hasYouTube && (
+        <YouTubePlayerControls
+          status={state.player}
+          onOpen={() => deck.openPlayer()}
+          onCapture={() => void deck.capturePlayer()}
+          onDisconnect={() => deck.disconnectPlayer()}
+        />
+      )}
+      {hasYouTube && (
+        <div style={muted}>Only play videos you have the rights to stream. Destinations may mute or block copyrighted content.</div>
+      )}
       {picker && (
         <LibraryPicker
           kind="video"
           onClose={() => setPicker(false)}
           onPick={(a) => {
-            if (!deck.addFromLibrary({ id: a.id, name: a.name, url: a.videoUrl })) onNotice("The video list is full.");
+            if (!deck.addFromLibrary({ id: a.id, name: a.name, url: a.videoUrl })) onNotice("The video playlist is full.");
           }}
         />
       )}
@@ -431,8 +539,10 @@ function VideoSection({ onNotice }: { onNotice: (msg: string | null) => void }) 
 
 function VideoRow({
   item,
-  onStage,
-  disabled,
+  playingIn,
+  canBox,
+  canStage,
+  needsPlayer,
   onPlay,
   onVolume,
   onUp,
@@ -441,31 +551,48 @@ function VideoRow({
   onRetry,
 }: {
   item: VideoItem;
-  onStage: boolean;
-  disabled: boolean;
-  onPlay: () => void;
+  playingIn: PlayTarget | null;
+  canBox: boolean;
+  canStage: boolean;
+  needsPlayer: boolean;
+  onPlay: (target: PlayTarget) => void;
   onVolume: (v: number) => void;
   onUp?: () => void;
   onDown?: () => void;
   onRemove: () => void;
   onRetry: () => void;
 }) {
-  return (
-    <div data-testid="video-item" style={{ ...row, borderColor: onStage ? "rgba(239,68,68,0.6)" : "rgba(255,255,255,0.08)" }}>
+  const playable = item.kind === "youtube" ? !needsPlayer : !!item.url;
+  const why = needsPlayer ? "Connect the YouTube player first" : !item.url && item.kind === "file" ? "Unavailable" : "";
+  const btn = (target: PlayTarget, label: string, allowed: boolean) => {
+    const live = playingIn === target;
+    return (
       <button
         type="button"
-        style={{ ...smallBtn, padding: "2px 6px", color: onStage ? "#fca5a5" : "#86efac", borderColor: onStage ? "rgba(239,68,68,0.5)" : "rgba(34,197,94,0.5)" }}
-        onClick={onPlay}
-        disabled={disabled || !item.url}
-        title={`Play ${item.name} on stage`}
+        style={{
+          ...smallBtn,
+          padding: "2px 6px",
+          color: live ? "#fca5a5" : "#86efac",
+          borderColor: live ? "rgba(239,68,68,0.5)" : "rgba(34,197,94,0.5)",
+        }}
+        onClick={() => onPlay(target)}
+        disabled={!allowed || !playable}
+        title={why || (target === "box" ? `Play ${item.name} in my video box` : `Play ${item.name} on stage`)}
       >
-        {onStage ? "● Live" : "▶ Stage"}
+        {live ? "● Live" : label}
       </button>
-      <span style={{ ...ellipsis, flex: 1, fontSize: 12, color: onStage ? "#fecaca" : "#e5e7eb" }} title={item.name}>
+    );
+  };
+  return (
+    <div data-testid="video-item" style={{ ...row, borderColor: playingIn ? "rgba(239,68,68,0.6)" : "rgba(255,255,255,0.08)" }}>
+      {btn("box", "▶ Box", canBox)}
+      {btn("stage", "▶ Stage", canStage)}
+      <span style={{ ...ellipsis, flex: 1, fontSize: 12, color: playingIn ? "#fecaca" : "#e5e7eb" }} title={item.name}>
+        {item.kind === "youtube" && <span style={{ color: "#f87171", fontWeight: 800 }}>YT </span>}
         {item.name}
       </span>
       <SaveBadge item={item} onRetry={onRetry} />
-      <input type="range" aria-label={`${item.name} volume`} min={0} max={1} step={0.05} value={item.volume} onChange={(e) => onVolume(Number(e.target.value))} style={{ width: 56 }} />
+      <input type="range" aria-label={`${item.name} volume`} min={0} max={1} step={0.05} value={item.volume} onChange={(e) => onVolume(Number(e.target.value))} style={{ width: 48 }} />
       <button type="button" style={iconBtn} aria-label="Move up" onClick={onUp} disabled={!onUp}>
         ↑
       </button>

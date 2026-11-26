@@ -7,7 +7,8 @@ import { normalizeMediaVideos, parseMediaVideosInput } from "../lib/mediaVideosP
 /**
  * The signed-in user's saved stage videos (in-room Media panel), mounted at
  * /api/media-videos. Stored at mediaVideoDecks/{uid}; the files are the
- * user's own content-library assets. Same contract as /api/audio-deck.
+ * user's own content-library assets or YouTube video ids. Same contract as
+ * /api/audio-deck.
  */
 const router = Router();
 
@@ -24,7 +25,8 @@ router.get("/", requireAuth as any, async (req: any, res) => {
   try {
     const snap = await videosRef(uid).get();
     const layout = normalizeMediaVideos(snap.exists ? snap.data() : null);
-    const ids = new Set(layout.videos.map((i) => i.assetId));
+    // YouTube items need no lookup; only library files resolve to signed URLs.
+    const ids = new Set(layout.videos.map((i) => i.assetId).filter((id): id is string => !!id));
     const resolved = await resolveMediaAssets(uid, ids);
     const assets: Record<string, { url: string; name: string; type: string; duration: number }> = {};
     const missing: string[] = [];
@@ -46,7 +48,7 @@ router.get("/", requireAuth as any, async (req: any, res) => {
   }
 });
 
-// PUT /api/media-videos { videos, loop }
+// PUT /api/media-videos { videos: [{ assetId | youtubeId, name, volume }], playMode }
 router.put("/", requireAuth as any, async (req: any, res) => {
   const uid = String(req.user?.uid || "");
   if (!uid) return res.status(401).json({ error: "unauthorized" });

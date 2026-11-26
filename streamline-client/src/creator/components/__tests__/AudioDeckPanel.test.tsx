@@ -30,11 +30,15 @@ const videoDeck = {
   ensureLoaded: vi.fn(async () => {}),
   addFiles: vi.fn(() => 1),
   addFromLibrary: vi.fn(() => true),
-  playOnStage: vi.fn(async () => {}),
+  play: vi.fn(async () => {}),
   togglePause: vi.fn(),
   stop: vi.fn(async () => {}),
   seek: vi.fn(),
-  setLoop: vi.fn(),
+  setPlayMode: vi.fn(),
+  addYouTube: vi.fn((): string | null => null),
+  openPlayer: vi.fn(),
+  capturePlayer: vi.fn(async () => {}),
+  disconnectPlayer: vi.fn(),
   setVolume: vi.fn(),
   move: vi.fn(),
   remove: vi.fn(),
@@ -49,14 +53,18 @@ function baseVideoState(over: Partial<VideoDeckState> = {}): VideoDeckState {
     persistError: null,
     videos: [],
     currentId: null,
-    stage: "off",
+    target: null,
+    status: "off",
     playing: false,
     position: 0,
     duration: 0,
-    loop: false,
+    playMode: "once",
     error: null,
+    notice: null,
     preview: null,
-    canPublish: true,
+    attached: true,
+    caps: { stage: true, box: true, sound: true },
+    player: "none",
     ...over,
   };
 }
@@ -218,37 +226,76 @@ describe("AudioDeckPanel", () => {
     expect(screen.getByText("Only video files can be added.")).toBeTruthy();
   });
 
-  it("plays a video on stage and takes it off", () => {
+  it("plays in the box or on stage and stops back to the camera", () => {
     state = baseState();
     videoState = baseVideoState({
       videos: [
-        { id: "v1", name: "Intro", volume: 1, assetId: "a", url: "https://x/v1", saveState: "saved" },
-        { id: "v2", name: "Promo", volume: 1, assetId: "b", url: "https://x/v2", saveState: "saved" },
+        { id: "v1", kind: "file", name: "Intro", volume: 1, assetId: "a", youtubeId: null, url: "https://x/v1", saveState: "saved" },
+        { id: "v2", kind: "file", name: "Promo", volume: 1, assetId: "b", youtubeId: null, url: "https://x/v2", saveState: "saved" },
       ],
       currentId: "v2",
-      stage: "live",
+      target: "box",
+      status: "live",
       playing: true,
       duration: 30,
     });
     render(<AudioDeckPanel open onClose={() => {}} />);
-    expect(screen.getByTestId("video-on-stage").textContent).toContain("On stage: Promo");
+    expect(screen.getByTestId("video-now-playing").textContent).toContain("In your video box: Promo");
+    fireEvent.click(screen.getByTitle("Play Intro in my video box"));
+    expect(videoDeck.play).toHaveBeenLastCalledWith("v1", "box");
     fireEvent.click(screen.getByTitle("Play Intro on stage"));
-    expect(videoDeck.playOnStage).toHaveBeenCalledWith("v1");
+    expect(videoDeck.play).toHaveBeenLastCalledWith("v1", "stage");
     fireEvent.click(screen.getByLabelText("Pause video"));
     expect(videoDeck.togglePause).toHaveBeenCalled();
-    fireEvent.click(screen.getByText("Take off stage"));
+    fireEvent.click(screen.getByText("Stop (back to my camera)"));
     expect(videoDeck.stop).toHaveBeenCalled();
+    fireEvent.change(screen.getByLabelText("Play mode"), { target: { value: "next" } });
+    expect(videoDeck.setPlayMode).toHaveBeenCalledWith("next");
   });
 
-  it("disables stage buttons outside a room and says why", () => {
+  it("disables playing outside a room, and explains it to invisible hosts", () => {
     state = baseState();
-    videoState = baseVideoState({
-      canPublish: false,
-      videos: [{ id: "v1", name: "Intro", volume: 1, assetId: "a", url: "https://x/v1", saveState: "saved" }],
-    });
+    const v1 = { id: "v1", kind: "file" as const, name: "Intro", volume: 1, assetId: "a", youtubeId: null, url: "https://x/v1", saveState: "saved" as const };
+    videoState = baseVideoState({ attached: false, caps: { stage: false, box: false, sound: false }, videos: [v1] });
     render(<AudioDeckPanel open onClose={() => {}} />);
-    expect(screen.getByText("Join the room to play videos on stage.")).toBeTruthy();
+    expect(screen.getByText("Join the room to play videos.")).toBeTruthy();
+    expect((screen.getByTitle("Play Intro in my video box") as HTMLButtonElement).disabled).toBe(true);
+    cleanup();
+    videoState = baseVideoState({ caps: { stage: false, box: false, sound: false }, videos: [v1] });
+    render(<AudioDeckPanel open onClose={() => {}} />);
+    expect(screen.getByTestId("video-cant-publish").textContent).toMatch(/Invisible hosts/);
     expect((screen.getByTitle("Play Intro on stage") as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("adds YouTube links and walks through connecting the player", () => {
+    state = baseState();
+    render(<AudioDeckPanel open onClose={() => {}} />);
+    fireEvent.change(screen.getByLabelText("YouTube link"), { target: { value: "https://youtu.be/dQw4w9WgXcQ" } });
+    fireEvent.click(screen.getByText("+ YouTube"));
+    expect(videoDeck.addYouTube).toHaveBeenCalledWith("https://youtu.be/dQw4w9WgXcQ");
+    videoDeck.addYouTube.mockReturnValueOnce("That isn't a YouTube video link.");
+    fireEvent.change(screen.getByLabelText("YouTube link"), { target: { value: "nope" } });
+    fireEvent.click(screen.getByText("+ YouTube"));
+    expect(screen.getByText("That isn't a YouTube video link.")).toBeTruthy();
+    cleanup();
+
+    const yt = { id: "y1", kind: "youtube" as const, name: "Song", volume: 1, assetId: null, youtubeId: "dQw4w9WgXcQ", url: null, saveState: "saved" as const };
+    videoState = baseVideoState({ videos: [yt], player: "ready" });
+    render(<AudioDeckPanel open onClose={() => {}} />);
+    const blocked = screen.getAllByTitle("Connect the YouTube player first") as HTMLButtonElement[];
+    expect(blocked).toHaveLength(2); // Box + Stage
+    expect(blocked.every((b) => b.disabled)).toBe(true);
+    fireEvent.click(screen.getByText("Open player tab again"));
+    expect(videoDeck.openPlayer).toHaveBeenCalled();
+    fireEvent.click(screen.getByText("2. Capture player tab"));
+    expect(videoDeck.capturePlayer).toHaveBeenCalled();
+    cleanup();
+
+    videoState = baseVideoState({ videos: [yt], player: "connected" });
+    render(<AudioDeckPanel open onClose={() => {}} />);
+    expect(screen.getByTestId("yt-player-connected")).toBeTruthy();
+    fireEvent.click(screen.getByTitle("Play Song on stage"));
+    expect(videoDeck.play).toHaveBeenLastCalledWith("y1", "stage");
   });
 
   it("adds finished videos and recordings from the library, not audio or unfinished recordings", async () => {

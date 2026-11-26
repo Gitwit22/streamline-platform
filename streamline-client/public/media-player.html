@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta name="robots" content="noindex" />
+<title>StreamLine Media Player</title>
+<!--
+  StreamLine Media Player: plays YouTube videos for a room's Media panel.
+  The room tab captures THIS tab (picture + this tab's audio only) and sends
+  it to the stage or the host's video box (src/lib/youtubePlayerLink.ts).
+
+  Talks to its room over BroadcastChannel "sl-media-player:<ch>" (same
+  origin only). Messages from the room ({ to: "player", ... }):
+    load { req, videoId, loop } · play · pause · seek { t } · loop { on } · stop · ping
+    check { color } / check-done (full-screen color so the room can confirm it captured this tab)
+  Messages to the room ({ to: "room", ... }):
+    ready · playing { req, title, d } · state { state, t, d } · time { t, d }
+    error { req, code } · closed
+  Only an 11-character video id is accepted; the embed URL is built here.
+-->
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; font-family: system-ui, -apple-system, Segoe UI, sans-serif; }
+  #yt-wrap { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; }
+  #yt-wrap.idle { visibility: hidden; }
+  #yt { width: 100vw; height: 56.25vw; max-height: 100vh; max-width: 177.78vh; border: 0; }
+  #card { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; color: #e5e7eb; z-index: 2; background: #000; }
+  #card.hidden { display: none; }
+  .box { max-width: 520px; padding: 24px; text-align: center; line-height: 1.5; }
+  .box h1 { font-size: 20px; margin: 0 0 8px; }
+  .box p { color: #94a3b8; font-size: 14px; margin: 8px 0; }
+  button { margin-top: 14px; padding: 12px 20px; border-radius: 10px; border: 0; background: #dc2626; color: #fff; font-size: 15px; font-weight: 700; cursor: pointer; }
+  #check { position: fixed; inset: 0; z-index: 5; display: none; }
+  #status { position: fixed; left: 10px; bottom: 8px; font-size: 11px; color: #334155; z-index: 1; }
+  #yt-wrap:not(.idle) ~ #status { display: none; }
+</style>
+</head>
+<body>
+<div id="yt-wrap" class="idle"><div id="yt"></div></div>
+<div id="card">
+  <div class="box">
+    <h1>StreamLine Media Player</h1>
+    <p id="msg">This tab plays YouTube videos for your room. Keep it open during your show.</p>
+    <button id="arm" type="button">Start the player</button>
+  </div>
+</div>
+<div id="status"></div>
+<div id="check"></div>
+<script>
+(function () {
+  "use strict";
+  var card = document.getElementById("card");
+  var msg = document.getElementById("msg");
+  var armBtn = document.getElementById("arm");
+  var wrap = document.getElementById("yt-wrap");
+  var statusEl = document.getElementById("status");
+  var checkEl = document.getElementById("check");
+  var checkTimer = null;
+  var ID_RE = /^[A-Za-z0-9_-]{11}$/;
+
+  var ch = new URLSearchParams(location.search).get("ch") || "";
+  if (!/^[A-Za-z0-9]{8,40}$/.test(ch)) {
+    msg.textContent = "Open this player from the Media panel in your room.";
+    armBtn.style.display = "none";
+    return;
+  }
+  var bc = new BroadcastChannel("sl-media-player:" + ch);
+  // Lets the room confirm the host picked THIS tab in the share picker.
+  try {
+    if (navigator.mediaDevices && navigator.mediaDevices.setCaptureHandleConfig) {
+      navigator.mediaDevices.setCaptureHandleConfig({ handle: "sl-media-player:" + ch, exposeOrigin: true, permittedOrigins: [location.origin] });
+    }
+  } catch (e) { /* unsupported */ }
+
+  var armed = false, player = null, apiReady = false, pending = null;
+  var loop = false, req = null, currentId = null, playing = false;
+
+  function send(m) { m.to = "room"; try { bc.postMessage(m); } catch (e) { /* closed */ } }
+  function now() { return player && player.getCurrentTime ? player.getCurrentTime() || 0 : 0; }
+  function dur() { return player && player.getDuration ? player.getDuration() || 0 : 0; }
+  function setStatus(t) { statusEl.textContent = t; }
+
+  armBtn.addEventListener("click", function () {
+    // This click is the user activation that lets the player play with sound.
+    armed = true;
+    card.classList.add("hidden");
+    setStatus("Player ready. Go back to your room tab and click “Capture player tab”.");
+    send({ type: "ready" });
+  });
+
+  window.onYouTubeIframeAPIReady = function () {
+    player = new YT.Player("yt", {
+      width: "100%",
+      height: "100%",
+      playerVars: { autoplay: 1, controls: 0, disablekb: 1, fs: 0, rel: 0, iv_load_policy: 3, modestbranding: 1, playsinline: 1, origin: location.origin },
+      events: {
+        onReady: function () { apiReady = true; if (pending) { var p = pending; pending = null; load(p); } },
+        onStateChange: onState,
+        onError: function (e) {
+          // Never leave YouTube's error screen on air.
+          wrap.classList.add("idle");
+          send({ type: "error", req: req, code: e && e.data }); req = null; playing = false;
+        }
+      }
+    });
+  };
+  var s = document.createElement("script");
+  s.src = "https://www.youtube.com/iframe_api";
+  s.onerror = function () { setStatus("Couldn't load YouTube."); send({ type: "error", req: null, code: "api" }); };
+  document.head.appendChild(s);
+
+  function load(m) {
+    if (!ID_RE.test(m.videoId)) { send({ type: "error", req: m.req, code: "bad_id" }); return; }
+    if (!apiReady) { pending = m; return; }
+    req = m.req; loop = !!m.loop; currentId = m.videoId;
+    wrap.classList.remove("idle");
+    player.loadVideoById(m.videoId, 0);
+  }
+
+  function onState(e) {
+    var st = e.data;
+    if (st === 1) { // playing
+      playing = true;
+      if (req != null) {
+        var data = player.getVideoData ? player.getVideoData() : null;
+        send({ type: "playing", req: req, title: data && data.title ? String(data.title).slice(0, 80) : "", d: dur() });
+        req = null;
+      }
+      send({ type: "state", state: "playing", t: now(), d: dur() });
+    } else if (st === 2) { // paused
+      playing = false;
+      send({ type: "state", state: "paused", t: now(), d: dur() });
+    } else if (st === 0) { // ended
+      if (loop && currentId) { player.seekTo(0, true); player.playVideo(); return; }
+      playing = false;
+      send({ type: "state", state: "ended", t: now(), d: dur() });
+    }
+  }
+
+  setInterval(function () { if (playing) send({ type: "time", t: now(), d: dur() }); }, 500);
+
+  bc.onmessage = function (ev) {
+    var m = ev.data;
+    if (!m || m.to !== "player") return;
+    if (m.type === "ping") { if (armed) send({ type: "ready" }); return; }
+    if (m.type === "check" && /^rgb\(\d{1,3},\d{1,3},\d{1,3}\)$/.test(m.color)) {
+      checkEl.style.background = m.color; checkEl.style.display = "block";
+      clearTimeout(checkTimer); checkTimer = setTimeout(function () { checkEl.style.display = "none"; }, 5000);
+      return;
+    }
+    if (m.type === "check-done") { clearTimeout(checkTimer); checkEl.style.display = "none"; return; }
+    if (!armed) return;
+    if (m.type === "load") load(m);
+    else if (!player || !apiReady) return;
+    else if (m.type === "play") player.playVideo();
+    else if (m.type === "pause") player.pauseVideo();
+    else if (m.type === "seek" && typeof m.t === "number") player.seekTo(Math.max(0, m.t), true);
+    else if (m.type === "loop") loop = !!m.on;
+    else if (m.type === "stop") { playing = false; req = null; currentId = null; player.stopVideo(); wrap.classList.add("idle"); }
+  };
+
+  window.addEventListener("pagehide", function () { send({ type: "closed" }); });
+})();
+</script>
+</body>
+</html>

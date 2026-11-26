@@ -1,69 +1,89 @@
 /**
- * Stage videos for the in-room Media panel: the host picks a video and it
- * plays "on stage" for guests and every output.
+ * Video playlist for the in-room Media panel: uploaded / library videos and
+ * YouTube links, played either in the host's own video box (replacing their
+ * camera picture) or on stage (as their screen share).
  *
- * How it reaches the stream: the video plays in a hidden <video> element in
- * the host's tab. Its picture (element captureStream) and its sound (Web
- * Audio, through a per-video volume) are published into the LiveKit room as
- * the host's screen share (Track.Source.ScreenShare / ScreenShareAudio,
- * via MediaVideoBridge). Everything that already handles a screen share then
- * handles the video: the in-room program stage, layouts, the program
- * compositor (RTMP destinations, HLS, recordings) and guests. The host hears
- * it through the mixer's Screen share channel (MixerBridge), like any
- * screen-share audio.
+ * How a video reaches the room:
+ *  - File videos play in a hidden <video> in this tab. The picture is the
+ *    element's captureStream(); two elements alternate so the next video is
+ *    ready before the current one stops (a playlist never drops the picture).
+ *  - YouTube videos play in the StreamLine Media Player tab, captured once
+ *    per show (lib/youtubePlayerLink.ts); each play publishes a clone of that
+ *    capture.
+ *  - Sound goes through Web Audio (per-video volume) into one track for the
+ *    whole session.
+ *  - lib/mediaOutputs.ts (via MediaVideoBridge) publishes picture + sound to
+ *    the box or the stage, and restores the camera / name tile afterwards.
  *
- * One stage video at a time, and not while the host shares their screen.
- * The deck lives for the whole tab (like lib/audioDeck.ts), so playback
- * survives closing the panel; leaving the room takes the video off stage.
+ * Play modes: once · loop (repeat the video) · next (continue down the
+ * playlist) · nextLoop (continue, then start over).
  *
- * Persistence: added files are uploaded to the content library and the list
- * (order, names, volumes, loop) is saved per account (server:
- * routes/mediaVideos.ts). An item that couldn't be uploaded stays playable
- * this session and is marked "not saved".
+ * Play/stop run one at a time (`exclusive`), so quick clicks can't publish
+ * twice; a newer request makes an older start give up at its next step.
+ *
+ * Persistence: uploaded files go to the content library and the playlist
+ * (order, names, volumes, play mode, YouTube ids) is saved per account
+ * (server: routes/mediaVideos.ts). The deck lives for the whole tab; leaving
+ * the room ends playback.
  */
 
 import type { AudioMixer } from "./audioMixer";
 import type { DeckSaveState } from "./audioDeck";
+import type { OutputHandle, PlayTarget, PublishCapabilities } from "./mediaOutputs";
+import type { PlayerEvents, PlayerLinkStatus } from "./youtubePlayerLink";
+import { YouTubePlayerLink } from "./youtubePlayerLink";
+import { fetchYouTubeTitle, parseYouTubeId } from "./youtube";
+
+export type { PlayTarget, PublishCapabilities } from "./mediaOutputs";
+
+export type VideoKind = "file" | "youtube";
 
 export type VideoItem = {
   id: string;
+  kind: VideoKind;
   name: string;
   /** 0–1, applied to the video's sound. */
   volume: number;
   assetId: string | null;
-  /** Playable URL (blob: for local files, signed URL for library files). */
+  youtubeId: string | null;
+  /** Playable URL for files (blob: for local files, signed URL for library files). */
   url: string | null;
   saveState: DeckSaveState;
   saveError?: string;
   uploadPct?: number;
 };
 
-/** off: nothing on stage · starting: loading/publishing · live: on stage. */
-export type StageStatus = "off" | "starting" | "live";
+export type PlayMode = "once" | "loop" | "next" | "nextLoop";
+export const PLAY_MODES: readonly PlayMode[] = ["once", "loop", "next", "nextLoop"];
+
+/** off: nothing playing · starting: loading/publishing · live: playing in the box or on stage. */
+export type PlayStatus = "off" | "starting" | "live";
 
 export type VideoDeckState = {
   loaded: boolean;
   /** List couldn't be loaded: changes aren't saved this session. */
   persistError: string | null;
   videos: VideoItem[];
-  /** The video on stage (or starting). */
   currentId: string | null;
-  stage: StageStatus;
+  target: PlayTarget | null;
+  status: PlayStatus;
   playing: boolean;
   position: number;
   duration: number;
-  loop: boolean;
+  playMode: PlayMode;
   error: string | null;
-  /** The picture being published (for the panel's preview); null when off stage. */
+  /** Non-error information for the host (e.g. sound not allowed). */
+  notice: string | null;
+  /** The picture being sent (panel preview); null when off. */
   preview: MediaStream | null;
   /** A LiveKit room is attached (MediaVideoBridge is mounted). */
-  canPublish: boolean;
+  attached: boolean;
+  caps: PublishCapabilities;
+  player: PlayerLinkStatus;
 };
 
-export type SavedVideos = {
-  videos: Array<{ assetId: string; name: string; volume: number }>;
-  loop: boolean;
-};
+export type SavedVideoItem = { assetId?: string; youtubeId?: string; name: string; volume: number };
+export type SavedVideos = { videos: SavedVideoItem[]; playMode: PlayMode };
 
 export interface VideoPersistence {
   load(): Promise<{ layout: SavedVideos; assets: Record<string, { url: string }>; missing: string[] }>;
@@ -73,27 +93,25 @@ export interface VideoPersistence {
   resolveUrl(assetId: string): Promise<string | null>;
 }
 
-/** Tracks one stage video published into the room. */
-export interface StageHandle {
-  /** Removes exactly these tracks from the room (idempotent). */
-  unpublish(): Promise<void>;
-}
-
-/** Puts tracks on stage in the LiveKit room (implemented by MediaVideoBridge). */
+/** Puts tracks into the room (implemented by MediaVideoBridge with lib/mediaOutputs.ts). */
 export interface StagePublisher {
+  capabilities(): PublishCapabilities;
   /** True while the local participant shares their screen. */
   isScreenSharing(): boolean;
-  /**
-   * Publishes the picture as the screen share and the sound as screen-share
-   * audio. `onStopped` runs if something else removes them (e.g. the control
-   * bar's "Stop sharing", or host controls forbidding screen share).
-   */
-  publish(video: MediaStreamTrack, audio: MediaStreamTrack | null, onStopped: () => void): Promise<StageHandle>;
+  publish(target: PlayTarget, video: MediaStreamTrack, audio: MediaStreamTrack | null, onStopped: () => void): Promise<OutputHandle>;
 }
+
+/** The parts of YouTubePlayerLink the deck uses (a fake in tests). */
+export type PlayerLinkLike = Pick<
+  YouTubePlayerLink,
+  "status" | "videoTrack" | "audioTrack" | "setEvents" | "open" | "capture" | "load" | "play" | "pause" | "seek" | "setLoop" | "stop" | "disconnect"
+>;
 
 type MixerLike = Pick<AudioMixer, "init" | "resume" | "getAudioContext">;
 
-export const VIDEO_LIMITS = { videos: 20 } as const;
+export const VIDEO_LIMITS = { videos: 30 } as const;
+const NO_CAPS: PublishCapabilities = { stage: false, box: false, sound: false };
+const DEFAULT_YOUTUBE_NAME = "YouTube video";
 
 const VIDEO_EXT = /\.(mp4|m4v|webm|mov|ogv|mkv)$/i;
 
@@ -109,7 +127,25 @@ export function videoNameFromFile(name: string): string {
   return (base || "Video").slice(0, 80);
 }
 
-/** The element's picture as a track (captureStream; Firefox: mozCaptureStream). Null when unsupported. */
+/**
+ * The item to play after `currentId` in a playlist mode; null to stop.
+ * Skips items that can't play (files without a URL).
+ */
+export function nextVideo(videos: VideoItem[], currentId: string, wrap: boolean): VideoItem | null {
+  const playable = (v: VideoItem) => (v.kind === "youtube" ? !!v.youtubeId : !!v.url);
+  const i = videos.findIndex((v) => v.id === currentId);
+  if (i < 0) return null;
+  const n = videos.length;
+  for (let step = 1; step <= n; step++) {
+    const j = i + step;
+    if (j >= n && !wrap) return null;
+    const v = videos[j % n];
+    if (playable(v)) return v;
+  }
+  return null;
+}
+
+/** The element's picture as a stream (captureStream; Firefox: mozCaptureStream). Null when unsupported. */
 function captureStreamOf(el: HTMLVideoElement): MediaStream | null {
   const anyEl = el as HTMLVideoElement & { captureStream?: () => MediaStream; mozCaptureStream?: () => MediaStream };
   const fn = anyEl.captureStream || anyEl.mozCaptureStream;
@@ -158,6 +194,18 @@ function mountHidden(el: HTMLVideoElement): void {
   document.body.appendChild(el);
 }
 
+function setMotionHint(t: MediaStreamTrack) {
+  try {
+    t.contentHint = "motion";
+  } catch {
+    // read-only in some browsers
+  }
+}
+
+function errMessage(e: unknown, fallback: string): string {
+  return e instanceof Error && e.message ? e.message : fallback;
+}
+
 let seq = 0;
 function newId(): string {
   seq += 1;
@@ -167,12 +215,22 @@ function newId(): string {
 const SAVE_DEBOUNCE_MS = 400;
 const TRACK_WAIT_MS = 2000;
 
+type Slot = { el: HTMLVideoElement; gain: GainNode };
+type Graph = { ctx: AudioContext; slots: [Slot, Slot]; yt: { track: MediaStreamTrack; gain: GainNode } | null };
+type Source =
+  | { kind: "file"; itemId: string; slot: Slot; video: MediaStreamTrack }
+  | { kind: "youtube"; itemId: string; video: MediaStreamTrack };
+/** src on success; otherwise error (null = gave up quietly because a newer request took over). */
+type Started = { src: Source | null; error: string | null };
+
 export type VideoDeckDeps = {
   createVideo?: () => HTMLVideoElement;
   mountElement?: (el: HTMLVideoElement) => void;
   captureStream?: (el: HTMLVideoElement) => MediaStream | null;
   createObjectUrl?: (f: File) => string;
   revokeObjectUrl?: (u: string) => void;
+  player?: PlayerLinkLike;
+  fetchTitle?: (youtubeId: string) => Promise<string | null>;
 };
 
 export class VideoDeck {
@@ -181,25 +239,32 @@ export class VideoDeck {
     persistError: null,
     videos: [],
     currentId: null,
-    stage: "off",
+    target: null,
+    status: "off",
     playing: false,
     position: 0,
     duration: 0,
-    loop: false,
+    playMode: "once",
     error: null,
+    notice: null,
     preview: null,
-    canPublish: false,
+    attached: false,
+    caps: NO_CAPS,
+    player: "none",
   };
   private listeners = new Set<(s: VideoDeckState) => void>();
 
   private publisher: StagePublisher | null = null;
-  private handle: StageHandle | null = null;
-  /** Bumped on every start/stop so a slow start can tell it was superseded. */
-  private session = 0;
+  private handle: OutputHandle | null = null;
+  private sessionTarget: PlayTarget | null = null;
+  private sessionSeq = 0;
+  private sessionId = 0;
+  private active: Source | null = null;
+  /** Bumped by every play/stop request; an older start gives up when it changes. */
+  private op = 0;
+  private chain: Promise<unknown> = Promise.resolve();
 
-  private el: HTMLVideoElement | null = null;
-  private elCtx: AudioContext | null = null;
-  private gain: GainNode | null = null;
+  private graph: Graph | null = null;
   private dest: MediaStreamAudioDestinationNode | null = null;
 
   private files = new Map<string, File>();
@@ -212,6 +277,8 @@ export class VideoDeck {
   private captureStream: (el: HTMLVideoElement) => MediaStream | null;
   private createObjectUrl: (f: File) => string;
   private revokeObjectUrl: (u: string) => void;
+  private fetchTitle: (youtubeId: string) => Promise<string | null>;
+  readonly player: PlayerLinkLike;
 
   constructor(
     private mixer: MixerLike,
@@ -223,6 +290,21 @@ export class VideoDeck {
     this.captureStream = deps.captureStream ?? captureStreamOf;
     this.createObjectUrl = deps.createObjectUrl ?? ((f) => URL.createObjectURL(f));
     this.revokeObjectUrl = deps.revokeObjectUrl ?? ((u) => URL.revokeObjectURL(u));
+    this.fetchTitle = deps.fetchTitle ?? ((id) => fetchYouTubeTitle(id));
+    this.player = deps.player ?? new YouTubePlayerLink();
+    const events: PlayerEvents = {
+      onStatus: (s) => this.set({ player: s }),
+      onState: (s) => this.onPlayerState(s),
+      onTime: (t, d) => {
+        if (this.active?.kind === "youtube") this.set({ position: t, duration: d || this.state.duration });
+      },
+      onDisconnected: () => {
+        if (this.active?.kind === "youtube" || this.state.status === "starting") {
+          void this.stop().then(() => this.set({ error: "The YouTube player tab was closed or stopped sharing." }));
+        }
+      },
+    };
+    this.player.setEvents(events);
   }
 
   // -------------------------------------------------------------------------
@@ -263,39 +345,86 @@ export class VideoDeck {
 
   attachPublisher(p: StagePublisher): void {
     this.publisher = p;
-    this.set({ canPublish: true });
+    this.set({ attached: true, caps: p.capabilities() });
   }
 
-  /** Leaving the room: take the video off stage and forget the room. */
+  /** Permissions changed (promoted, demoted, host controls). */
+  refreshCapabilities(): void {
+    if (this.publisher) this.set({ caps: this.publisher.capabilities() });
+  }
+
+  /** Leaving the room: end playback and forget the room. */
   detachPublisher(p: StagePublisher): void {
     if (this.publisher !== p) return;
     void this.stop();
     this.publisher = null;
-    this.set({ canPublish: false });
+    this.set({ attached: false, caps: NO_CAPS });
+  }
+
+  // -------------------------------------------------------------------------
+  // YouTube player tab
+  // -------------------------------------------------------------------------
+
+  /** Click 1: open the player tab. */
+  openPlayer(): void {
+    if (!this.player.open()) {
+      this.set({ error: "Your browser blocked the player tab. Allow pop-ups for this site, then try again." });
+    } else {
+      this.set({ error: null });
+    }
+  }
+
+  /** Click 2: capture the player tab. */
+  async capturePlayer(): Promise<void> {
+    try {
+      await this.player.capture();
+      this.set({ error: null });
+    } catch (e) {
+      this.set({ error: errMessage(e, "Couldn't capture the player tab.") });
+    }
+  }
+
+  disconnectPlayer(): void {
+    this.player.disconnect();
   }
 
   // -------------------------------------------------------------------------
   // Persistence (same rules as the audio deck)
   // -------------------------------------------------------------------------
 
-  /** Loads the saved list once per tab. Safe to call repeatedly. */
+  /** Loads the saved playlist once per tab. Safe to call repeatedly. */
   ensureLoaded(): Promise<void> {
     if (!this.loadPromise) {
       this.loadPromise = (async () => {
         try {
           const { layout, assets, missing } = await this.persistence.load();
           const missingSet = new Set(missing);
-          const saved: VideoItem[] = layout.videos.map((x) => ({
-            id: newId(),
-            name: x.name,
-            volume: x.volume,
-            assetId: x.assetId,
-            url: assets[x.assetId]?.url || null,
-            saveState: missingSet.has(x.assetId) || !assets[x.assetId]?.url ? "missing" : "saved",
-          }));
+          const saved: VideoItem[] = layout.videos.map((x) =>
+            x.youtubeId
+              ? {
+                  id: newId(),
+                  kind: "youtube",
+                  name: x.name,
+                  volume: x.volume,
+                  assetId: null,
+                  youtubeId: x.youtubeId,
+                  url: null,
+                  saveState: "saved",
+                }
+              : {
+                  id: newId(),
+                  kind: "file",
+                  name: x.name,
+                  volume: x.volume,
+                  assetId: x.assetId || null,
+                  youtubeId: null,
+                  url: (x.assetId && assets[x.assetId]?.url) || null,
+                  saveState: !x.assetId || missingSet.has(x.assetId) || !assets[x.assetId]?.url ? "missing" : "saved",
+                },
+          );
           // Anything added before the load finished stays, after the saved items.
           const addedEarly = this.state.videos.length > 0;
-          this.set({ loaded: true, persistError: null, videos: [...saved, ...this.state.videos], loop: layout.loop });
+          this.set({ loaded: true, persistError: null, videos: [...saved, ...this.state.videos], playMode: layout.playMode });
           if (addedEarly) this.scheduleSave();
         } catch {
           this.set({ loaded: true, persistError: "Couldn't load your saved videos. Changes in this session won't be saved." });
@@ -306,13 +435,16 @@ export class VideoDeck {
   }
 
   private layout(): SavedVideos {
-    // "missing" items stay saved: a lookup can fail transiently. Only remove() drops them.
-    return {
-      videos: this.state.videos
-        .filter((it) => !!it.assetId && (it.saveState === "saved" || it.saveState === "missing"))
-        .map((it) => ({ assetId: it.assetId!, name: it.name, volume: it.volume })),
-      loop: this.state.loop,
-    };
+    // "missing" files stay saved: a lookup can fail transiently. Only remove() drops them.
+    const videos: SavedVideoItem[] = [];
+    for (const it of this.state.videos) {
+      if (it.kind === "youtube" && it.youtubeId) {
+        videos.push({ youtubeId: it.youtubeId, name: it.name, volume: it.volume });
+      } else if (it.assetId && (it.saveState === "saved" || it.saveState === "missing")) {
+        videos.push({ assetId: it.assetId, name: it.name, volume: it.volume });
+      }
+    }
+    return { videos, playMode: this.state.playMode };
   }
 
   private scheduleSave() {
@@ -322,7 +454,7 @@ export class VideoDeck {
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
       this.persistence.save(this.layout()).catch(() => {
-        this.set({ error: "Couldn't save your video list. Your last change may not be kept." });
+        this.set({ error: "Couldn't save your video playlist. Your last change may not be kept." });
       });
     }, SAVE_DEBOUNCE_MS);
   }
@@ -349,7 +481,17 @@ export class VideoDeck {
       const url = this.createObjectUrl(f);
       this.files.set(id, f);
       this.blobUrls.set(id, url);
-      return { id, name: videoNameFromFile(f.name), volume: 1, assetId: null, url, saveState: "saving", uploadPct: 0 };
+      return {
+        id,
+        kind: "file",
+        name: videoNameFromFile(f.name),
+        volume: 1,
+        assetId: null,
+        youtubeId: null,
+        url,
+        saveState: "saving",
+        uploadPct: 0,
+      };
     });
     if (added.length === 0) return 0;
     this.set({ videos: [...this.state.videos, ...added] });
@@ -370,11 +512,7 @@ export class VideoDeck {
       this.scheduleSave();
     } catch (e) {
       if (!this.find(id)) return;
-      this.updateItem(id, {
-        saveState: "failed",
-        uploadPct: undefined,
-        saveError: e instanceof Error && e.message ? e.message : "Upload failed",
-      });
+      this.updateItem(id, { saveState: "failed", uploadPct: undefined, saveError: errMessage(e, "Upload failed") });
     }
   }
 
@@ -388,9 +526,11 @@ export class VideoDeck {
     if (this.state.videos.length >= VIDEO_LIMITS.videos) return false;
     const item: VideoItem = {
       id: newId(),
+      kind: "file",
       name: (asset.name || "Video").slice(0, 80),
       volume: 1,
       assetId: asset.id,
+      youtubeId: null,
       url: asset.url,
       saveState: "saved",
     };
@@ -399,17 +539,40 @@ export class VideoDeck {
     return true;
   }
 
-  /** Removes from the list only; the library file is kept. */
+  /** Adds a YouTube link (or id). Returns an error message, or null when added. */
+  addYouTube(input: string): string | null {
+    const youtubeId = parseYouTubeId(input);
+    if (!youtubeId) return "That isn't a YouTube video link.";
+    if (this.state.videos.length >= VIDEO_LIMITS.videos) return "The playlist is full.";
+    const id = newId();
+    this.set({
+      videos: [
+        ...this.state.videos,
+        { id, kind: "youtube", name: DEFAULT_YOUTUBE_NAME, volume: 1, assetId: null, youtubeId, url: null, saveState: "saved" },
+      ],
+    });
+    this.scheduleSave();
+    void this.fetchTitle(youtubeId).then((title) => {
+      const it = this.find(id);
+      if (title && it && it.name === DEFAULT_YOUTUBE_NAME) {
+        this.updateItem(id, { name: title });
+        this.scheduleSave();
+      }
+    });
+    return null;
+  }
+
+  /** Removes from the playlist only; library files are kept. */
   remove(id: string): void {
     const item = this.find(id);
     if (!item) return;
-    if (this.state.currentId === id) void this.stop();
+    if (this.active?.itemId === id || (this.state.currentId === id && this.state.status !== "off")) void this.stop();
     const blob = this.blobUrls.get(id);
     if (blob) this.revokeObjectUrl(blob);
     this.blobUrls.delete(id);
     this.files.delete(id);
     this.set({ videos: this.state.videos.filter((x) => x.id !== id) });
-    if (item.assetId) this.scheduleSave();
+    if (item.assetId || item.youtubeId) this.scheduleSave();
   }
 
   move(id: string, delta: -1 | 1): void {
@@ -426,160 +589,310 @@ export class VideoDeck {
     if (!this.find(id)) return;
     const v = Math.max(0, Math.min(1, Math.round(volume * 100) / 100));
     this.updateItem(id, { volume: v });
-    if (this.state.currentId === id && this.gain) this.gain.gain.value = v;
+    if (this.active?.itemId === id) this.applyVolume(this.active, v);
     this.scheduleSave();
   }
 
-  setLoop(loop: boolean): void {
-    this.set({ loop });
-    if (this.el) this.el.loop = loop;
+  setPlayMode(mode: PlayMode): void {
+    if (!PLAY_MODES.includes(mode)) return;
+    this.set({ playMode: mode });
+    const loop = mode === "loop";
+    if (this.active?.kind === "file") this.active.slot.el.loop = loop;
+    if (this.active?.kind === "youtube") this.player.setLoop(loop);
     this.scheduleSave();
   }
 
   // -------------------------------------------------------------------------
-  // Stage playback
+  // Audio graph
   // -------------------------------------------------------------------------
 
-  /** The hidden player, its sound wired through a volume node (needs a user gesture first time). */
-  private ensureElement(): HTMLVideoElement | null {
+  /** Two hidden players + their volume nodes, in the mixer's AudioContext (needs a user gesture first time). */
+  private ensureGraph(): Graph | null {
     this.mixer.init();
     void this.mixer.resume();
     const ctx = this.mixer.getAudioContext();
     if (!ctx) return null;
-    if (this.el && this.elCtx === ctx) return this.el;
-
-    // An element can only be wired into one AudioContext: replace it if the context changed.
-    if (this.el) {
-      this.el.pause();
-      this.el.remove();
+    if (this.graph && this.graph.ctx === ctx) return this.graph;
+    // An element can only be wired into one AudioContext: rebuild if the context changed.
+    if (this.graph) {
+      for (const s of this.graph.slots) {
+        s.el.pause();
+        s.el.remove();
+      }
     }
-    const el = this.createVideo();
-    el.crossOrigin = "anonymous";
-    el.preload = "auto";
-    el.playsInline = true;
-    el.addEventListener("timeupdate", () => {
-      if (this.state.stage !== "off") this.set({ position: el.currentTime || 0 });
-    });
-    el.addEventListener("durationchange", () => {
-      if (this.state.stage !== "off") this.set({ duration: Number.isFinite(el.duration) ? el.duration : 0 });
-    });
-    el.addEventListener("ended", () => this.onEnded());
-    el.addEventListener("error", () => this.onElementError());
-    this.mountElement(el);
-
-    const source = ctx.createMediaElementSource(el);
-    const gain = ctx.createGain();
-    source.connect(gain);
-    this.el = el;
-    this.elCtx = ctx;
-    this.gain = gain;
+    const slot = (): Slot => {
+      const el = this.createVideo();
+      el.crossOrigin = "anonymous";
+      el.preload = "auto";
+      el.playsInline = true;
+      this.mountElement(el);
+      const gain = ctx.createGain();
+      ctx.createMediaElementSource(el).connect(gain);
+      const s: Slot = { el, gain };
+      el.addEventListener("timeupdate", () => {
+        if (this.isActiveSlot(s)) this.set({ position: el.currentTime || 0 });
+      });
+      el.addEventListener("durationchange", () => {
+        if (this.isActiveSlot(s)) this.set({ duration: Number.isFinite(el.duration) ? el.duration : 0 });
+      });
+      el.addEventListener("ended", () => {
+        if (this.isActiveSlot(s)) this.onSourceEnded(null);
+      });
+      el.addEventListener("error", () => {
+        if (!this.isActiveSlot(s)) return; // load failures while starting are handled by play()
+        const item = this.find(this.active!.itemId);
+        this.onSourceEnded(item ? `“${item.name}” stopped: the file couldn't be played.` : "The video stopped.");
+      });
+      el.addEventListener("pause", () => {
+        if (this.isActiveSlot(s) && this.state.status === "live") this.set({ playing: false });
+      });
+      el.addEventListener("play", () => {
+        if (this.isActiveSlot(s) && this.state.status === "live") this.set({ playing: true });
+      });
+      return s;
+    };
+    this.graph = { ctx, slots: [slot(), slot()], yt: null };
     this.dest = null;
-    return el;
+    return this.graph;
   }
 
-  /** Starts playing `id` and puts it on stage (replacing whatever is on stage). */
-  async playOnStage(id: string): Promise<void> {
+  private isActiveSlot(s: Slot): boolean {
+    return this.active?.kind === "file" && this.active.slot === s;
+  }
+
+  /** The player tab's sound, wired through its own volume node. */
+  private ensureYouTubeAudio(graph: Graph): GainNode | null {
+    const track = this.player.audioTrack;
+    if (!track) return null;
+    if (graph.yt && graph.yt.track === track) return graph.yt.gain;
+    try {
+      graph.yt?.gain.disconnect();
+    } catch {
+      // not connected
+    }
+    const gain = graph.ctx.createGain();
+    graph.ctx.createMediaStreamSource(new MediaStream([track])).connect(gain);
+    graph.yt = { track, gain };
+    if (this.dest) gain.connect(this.dest);
+    return gain;
+  }
+
+  /** One sound track for the whole session (all sources feed it). */
+  private ensureDest(graph: Graph): MediaStreamAudioDestinationNode {
+    if (this.dest) return this.dest;
+    const dest = graph.ctx.createMediaStreamDestination();
+    for (const s of graph.slots) s.gain.connect(dest);
+    graph.yt?.gain.connect(dest);
+    this.dest = dest;
+    return dest;
+  }
+
+  private dropDest() {
+    const dest = this.dest;
+    if (!dest || !this.graph) return;
+    for (const node of [...this.graph.slots.map((s) => s.gain), this.graph.yt?.gain]) {
+      try {
+        node?.disconnect(dest);
+      } catch {
+        // not connected
+      }
+    }
+    dest.stream.getTracks().forEach((t) => t.stop());
+    this.dest = null;
+  }
+
+  private applyVolume(src: Source, v: number) {
+    if (src.kind === "file") src.slot.gain.gain.value = v;
+    else if (this.graph?.yt) this.graph.yt.gain.gain.value = v;
+  }
+
+  // -------------------------------------------------------------------------
+  // Playback
+  // -------------------------------------------------------------------------
+
+  /** Runs play/stop one at a time. */
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.chain.then(fn, fn);
+    this.chain = run.catch(() => undefined);
+    return run;
+  }
+
+  /** Plays `id` in the host's video box or on stage (switching from whatever is playing). */
+  play(id: string, target: PlayTarget): Promise<void> {
+    const op = ++this.op;
+    return this.exclusive(() => this.playNow(id, target, op));
+  }
+
+  /** Ends playback: the box goes back to the camera / name tile, the stage share is removed. */
+  stop(): Promise<void> {
+    ++this.op;
+    // Make a start in progress give up now instead of after its timeout.
+    if (this.state.status === "starting") this.player.stop();
+    for (const s of this.graph?.slots ?? []) {
+      if (!this.isActiveSlot(s)) s.el.pause();
+    }
+    return this.exclusive(() => this.endSession(this.state.error));
+  }
+
+  private fail(error: string) {
+    this.set({ error });
+  }
+
+  private async playNow(id: string, target: PlayTarget, op: number): Promise<void> {
+    const stale = () => op !== this.op;
+    if (stale()) return;
     const item = this.find(id);
     if (!item) return;
-    if (!item.url) {
-      this.set({ error: `“${item.name}” isn't available. It may have been deleted from your library.` });
-      return;
+    const pub = this.publisher;
+    if (!pub) return this.fail("Join the room to play videos.");
+    const caps = pub.capabilities();
+    this.set({ caps });
+    if (!caps.stage && !caps.box) {
+      return this.fail("You can't send video from this room (invisible hosts and audience members can't publish).");
     }
-    const publisher = this.publisher;
-    if (!publisher) {
-      this.set({ error: "Join the room to play videos on stage." });
-      return;
+    if (target === "stage" && !caps.stage) return this.fail("Your role can't put videos on stage. Play it in your video box instead.");
+    if (target === "box" && !caps.box) return this.fail("Your role can't send video.");
+    if (item.kind === "file" && !item.url) {
+      return this.fail(`“${item.name}” isn't available. It may have been deleted from your library.`);
     }
-    if (this.state.stage !== "off") await this.stop();
-    if (publisher.isScreenSharing()) {
-      this.set({ error: "Stop your screen share first: a stage video plays in its place." });
-      return;
-    }
-    const el = this.ensureElement();
-    const ctx = this.elCtx;
-    if (!el || !ctx || !this.gain) {
-      this.set({ error: "Audio isn't ready yet. Try again." });
-      return;
+    if (item.kind === "youtube" && this.player.status !== "connected") {
+      return this.fail("Connect the YouTube player first (Open player tab, then Capture player tab).");
     }
 
-    const token = ++this.session;
-    const stale = () => token !== this.session;
-    this.set({ currentId: id, stage: "starting", playing: false, position: 0, duration: 0, error: null, preview: null });
-    this.gain.gain.value = item.volume;
-    el.loop = this.state.loop;
-
-    // 1) Start playback (one retry with a fresh URL: signed library URLs expire).
-    let started = await this.tryPlay(el, item.url);
-    if (stale()) return;
-    if (started === "failed" && item.assetId && !this.blobUrls.has(id)) {
-      const fresh = await this.persistence.resolveUrl(item.assetId).catch(() => null);
+    // Switching between box and stage: end the current session first.
+    if (this.handle && this.sessionTarget !== target) {
+      await this.endSession(null);
       if (stale()) return;
-      if (fresh) {
-        this.updateItem(id, { url: fresh });
-        started = await this.tryPlay(el, fresh);
-        if (stale()) return;
-      }
     }
-    if (started !== "ok") {
-      this.resetStage(
-        started === "blocked"
-          ? "Your browser blocked playback. Click play again to start the video."
-          : `Couldn't play “${item.name}”. The file may be unsupported or unavailable.`,
-      );
-      return;
+    if (!this.handle && target === "stage" && pub.isScreenSharing()) {
+      return this.fail("Stop your screen share first, or play the video in your video box.");
     }
+    const graph = this.ensureGraph();
+    if (!graph) return this.fail("Audio isn't ready yet. Try again.");
 
-    // 2) Capture the picture and the sound.
-    const captured = this.captureStream(el);
-    const video = captured ? await waitForVideoTrack(captured, TRACK_WAIT_MS) : null;
+    const switching = !!this.handle;
+    this.set({
+      currentId: id,
+      target,
+      status: "starting",
+      error: null,
+      position: 0,
+      duration: 0,
+      ...(switching ? {} : { preview: null, notice: null, playing: false }),
+    });
+
+    const started = await this.startSource(item, graph, stale);
     if (stale()) {
-      video?.stop();
+      if (started.src) this.disposeSource(started.src, this.active);
       return;
     }
-    if (!video) {
-      el.pause();
-      this.resetStage(
-        captured
-          ? `“${item.name}” has no picture to show.`
-          : "This browser can't put a video on stage. Use Chrome, Edge or Firefox.",
-      );
+    if (!started.src) {
+      const prev = this.active;
+      // Keep the video that was already playing, unless it was a YouTube
+      // video and this one was too: the player tab has already left it.
+      if (this.handle && prev && !(prev.kind === "youtube" && item.kind === "youtube")) {
+        this.set({ status: "live", currentId: prev.itemId, error: started.error });
+      } else {
+        await this.endSession(started.error);
+      }
       return;
     }
-    try {
-      video.contentHint = "motion";
-    } catch {
-      // read-only in some browsers
-    }
-    if (this.dest) {
+    const src = started.src;
+
+    if (this.handle) {
+      // Playlist / switch: swap the picture without leaving the box or stage.
       try {
-        this.gain.disconnect(this.dest);
-      } catch {
-        // already disconnected
+        await this.handle.replaceVideo(src.video);
+      } catch (e) {
+        this.disposeSource(src, this.active);
+        await this.endSession(errMessage(e, "Couldn't switch videos."));
+        return;
+      }
+      const prev = this.active;
+      this.active = src;
+      this.disposeSource(prev, src);
+    } else {
+      const dest = this.ensureDest(graph);
+      const sessionId = ++this.sessionSeq;
+      let handle: OutputHandle;
+      try {
+        handle = await pub.publish(target, src.video, dest.stream.getAudioTracks()[0] || null, () => this.onStoppedElsewhere(sessionId));
+      } catch (e) {
+        this.disposeSource(src, null);
+        await this.endSession(`Couldn't play the video (${errMessage(e, "unknown error")}).`);
+        return;
+      }
+      this.handle = handle;
+      this.sessionTarget = target;
+      this.sessionId = sessionId;
+      this.active = src;
+    }
+    if (stale()) return; // a newer request is queued and takes over from here
+    const preview = typeof MediaStream !== "undefined" ? new MediaStream([src.video]) : null;
+    this.set({ status: "live", currentId: id, playing: true, preview, notice: this.handle?.notice ?? null, error: null });
+  }
+
+  private async startSource(item: VideoItem, graph: Graph, stale: () => boolean): Promise<Started> {
+    const loop = this.state.playMode === "loop";
+    if (item.kind === "youtube") {
+      const gain = this.ensureYouTubeAudio(graph);
+      if (gain) gain.gain.value = item.volume;
+      let title = "";
+      try {
+        title = await this.player.load(item.youtubeId!, loop);
+      } catch (e) {
+        return { src: null, error: stale() ? null : errMessage(e, "YouTube couldn't play this video.") };
+      }
+      const base = this.player.videoTrack;
+      if (!base || base.readyState !== "live") return { src: null, error: "The YouTube player was disconnected." };
+      if (title && item.name === DEFAULT_YOUTUBE_NAME) {
+        this.updateItem(item.id, { name: title.slice(0, 80) });
+        this.scheduleSave();
+      }
+      // A clone: ending this session must not end the captured tab.
+      const video = base.clone();
+      setMotionHint(video);
+      return { error: null, src: { kind: "youtube", itemId: item.id, video } };
+    }
+
+    // File: use the element that isn't on air, so the current picture stays until the swap.
+    const slot = graph.slots.find((s) => !this.isActiveSlot(s)) ?? graph.slots[0];
+    slot.gain.gain.value = item.volume;
+    slot.el.loop = loop;
+    let result = await this.tryPlay(slot.el, item.url!);
+    if (stale()) return { src: null, error: null };
+    if (result === "failed" && item.assetId && !this.blobUrls.has(item.id)) {
+      const fresh = await this.persistence.resolveUrl(item.assetId).catch(() => null);
+      if (stale()) return { src: null, error: null };
+      if (fresh) {
+        this.updateItem(item.id, { url: fresh });
+        result = await this.tryPlay(slot.el, fresh);
+        if (stale()) return { src: null, error: null };
       }
     }
-    this.dest = ctx.createMediaStreamDestination();
-    this.gain.connect(this.dest);
-    const audio = this.dest.stream.getAudioTracks()[0] || null;
-
-    // 3) Publish.
-    let handle: StageHandle;
-    try {
-      handle = await publisher.publish(video, audio, () => this.onStoppedElsewhere(token));
-    } catch (e) {
-      video.stop();
-      if (stale()) return;
-      el.pause();
-      const msg = e instanceof Error && e.message ? e.message : "unknown error";
-      this.resetStage(`Couldn't put the video on stage (${msg}).`);
-      return;
+    if (result !== "ok") {
+      this.releaseSlot(slot);
+      return {
+        src: null,
+        error:
+          result === "blocked"
+            ? "Your browser blocked playback. Click play again to start the video."
+            : `Couldn't play “${item.name}”. The file may be unsupported or unavailable.`,
+      };
     }
-    if (stale()) {
-      void handle.unpublish();
-      return;
+    const captured = this.captureStream(slot.el);
+    const video = captured ? await waitForVideoTrack(captured, TRACK_WAIT_MS) : null;
+    if (!video || stale()) {
+      video?.stop();
+      this.releaseSlot(slot);
+      if (stale()) return { src: null, error: null };
+      return {
+        src: null,
+        error: captured ? `“${item.name}” has no picture to show.` : "This browser can't send a video. Use Chrome, Edge or Firefox.",
+      };
     }
-    this.handle = handle;
-    const preview = typeof MediaStream !== "undefined" ? new MediaStream([video]) : null;
-    this.set({ stage: "live", playing: !el.paused, preview });
+    setMotionHint(video);
+    return { error: null, src: { kind: "file", itemId: item.id, slot, video } };
   }
 
   private async tryPlay(el: HTMLVideoElement, url: string): Promise<"ok" | "blocked" | "failed"> {
@@ -599,14 +912,61 @@ export class VideoDeck {
     }
   }
 
-  private resetStage(error: string | null) {
-    this.set({ stage: "off", playing: false, currentId: null, position: 0, duration: 0, preview: null, error });
+  private releaseSlot(slot: Slot) {
+    slot.el.pause();
+    // Release the file so the browser stops buffering it.
+    slot.el.removeAttribute("src");
+    try {
+      slot.el.load();
+    } catch {
+      // ignore
+    }
   }
 
-  /** Pause / resume the video on stage (the picture holds its last frame while paused). */
+  /** Stops a source that is no longer on air (`next` is what replaced it, if anything). */
+  private disposeSource(src: Source | null, next: Source | null) {
+    if (!src) return;
+    src.video.stop();
+    if (src.kind === "file") {
+      if (!(next?.kind === "file" && next.slot === src.slot)) this.releaseSlot(src.slot);
+    } else if (next?.kind !== "youtube") {
+      this.player.stop();
+    }
+  }
+
+  private async endSession(error: string | null): Promise<void> {
+    const handle = this.handle;
+    const active = this.active;
+    this.handle = null;
+    this.active = null;
+    this.sessionTarget = null;
+    // Restore the box / remove the share first, then stop our tracks: an
+    // ended track still in the camera tile would read as "camera off".
+    if (handle) {
+      try {
+        await handle.release();
+      } catch {
+        // the room may already be gone
+      }
+    }
+    this.disposeSource(active, null);
+    if (!active && this.player.status === "connected") this.player.stop();
+    for (const s of this.graph?.slots ?? []) this.releaseSlot(s);
+    this.dropDest();
+    this.set({ status: "off", target: null, playing: false, currentId: null, position: 0, duration: 0, preview: null, notice: null, error });
+  }
+
+  /** Pause / resume (the picture holds its last frame while paused). */
   togglePause(): void {
-    const el = this.el;
-    if (!el || this.state.stage !== "live") return;
+    const src = this.active;
+    if (!src || this.state.status !== "live") return;
+    if (src.kind === "youtube") {
+      if (this.state.playing) this.player.pause();
+      else this.player.play();
+      this.set({ playing: !this.state.playing });
+      return;
+    }
+    const el = src.slot.el;
     if (el.paused) {
       void this.mixer.resume();
       el.play().then(
@@ -620,54 +980,48 @@ export class VideoDeck {
   }
 
   seek(seconds: number): void {
-    if (!this.el || this.state.stage === "off") return;
+    const src = this.active;
+    if (!src || this.state.status !== "live") return;
     const max = this.state.duration || seconds;
     const t = Math.max(0, Math.min(max, seconds));
-    this.el.currentTime = t;
+    if (src.kind === "youtube") this.player.seek(t);
+    else src.slot.el.currentTime = t;
     this.set({ position: t });
   }
 
-  /** Takes the video off stage and stops playback. */
-  async stop(): Promise<void> {
-    this.session += 1;
-    const handle = this.handle;
-    this.handle = null;
-    if (this.el) {
-      this.el.pause();
-      // Release the file so the browser stops buffering it.
-      this.el.removeAttribute("src");
-      try {
-        this.el.load();
-      } catch {
-        // ignore
-      }
+  private onPlayerState(s: "playing" | "paused" | "ended") {
+    if (this.active?.kind !== "youtube" || this.state.status !== "live") return;
+    if (s === "ended") this.onSourceEnded(null);
+    else this.set({ playing: s === "playing" });
+  }
+
+  /** The video on air finished (or failed): continue the playlist or stop. */
+  private onSourceEnded(error: string | null) {
+    const target = this.sessionTarget;
+    const cur = this.active?.itemId;
+    if (!target || !cur) return;
+    const mode = this.state.playMode;
+    const next = mode === "next" || mode === "nextLoop" ? nextVideo(this.state.videos, cur, mode === "nextLoop") : null;
+    if (!next || (mode === "loop" && !error)) {
+      // "loop" repeats inside the player; reaching here means it couldn't.
+      void this.stop().then(() => {
+        if (error) this.set({ error });
+      });
+      return;
     }
-    this.resetStage(this.state.error);
-    if (handle) {
-      try {
-        await handle.unpublish();
-      } catch {
-        // the room may already be gone
-      }
+    if (next.kind === "youtube" && this.player.status !== "connected") {
+      void this.stop().then(() =>
+        this.set({ error: `Up next is “${next.name}” on YouTube: connect the YouTube player to keep the playlist going.` }),
+      );
+      return;
     }
+    if (error) this.set({ error });
+    void this.play(next.id, target);
   }
 
-  private onEnded() {
-    // Only fires without loop: the video is done, so the stage goes back to the cameras.
-    if (this.state.stage === "live") void this.stop();
-  }
-
-  private onElementError() {
-    // Load failures while starting are handled by playOnStage (play() rejects).
-    if (this.state.stage !== "live") return;
-    const item = this.state.currentId ? this.find(this.state.currentId) : null;
-    void this.stop().then(() => this.set({ error: item ? `“${item.name}” stopped: the file couldn't be played.` : "The video stopped." }));
-  }
-
-  /** Our tracks were removed by something else (control bar, host controls, disconnect). */
-  private onStoppedElsewhere(token: number) {
-    if (token !== this.session) return;
-    this.handle = null; // already unpublished
+  /** Our output was removed by something else (camera button, control bar, host controls, disconnect). */
+  private onStoppedElsewhere(sessionId: number) {
+    if (sessionId !== this.sessionId) return;
     void this.stop();
   }
 }

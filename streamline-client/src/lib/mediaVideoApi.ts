@@ -6,14 +6,21 @@
 import { API_BASE } from "./apiBase";
 import { apiFetchAuth } from "./api";
 import { assetsApi } from "./editingApi";
-import type { SavedVideos, VideoPersistence } from "./mediaVideo";
+import { PLAY_MODES, type PlayMode, type SavedVideoItem, type SavedVideos, type VideoPersistence } from "./mediaVideo";
 
 export function asSavedVideos(raw: unknown): SavedVideos {
   const o = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
-  const videos = (Array.isArray(o.videos) ? o.videos : [])
-    .filter((x): x is { assetId: string; name: string; volume?: number } => !!x && typeof x.assetId === "string")
-    .map((x) => ({ assetId: x.assetId, name: String(x.name || "Video"), volume: typeof x.volume === "number" ? x.volume : 1 }));
-  return { videos, loop: o.loop === true };
+  const videos: SavedVideoItem[] = [];
+  for (const x of Array.isArray(o.videos) ? o.videos : []) {
+    if (!x || typeof x !== "object") continue;
+    const it = x as { assetId?: unknown; youtubeId?: unknown; name?: unknown; volume?: unknown };
+    const name = String(it.name || "Video");
+    const volume = typeof it.volume === "number" ? it.volume : 1;
+    if (typeof it.youtubeId === "string" && it.youtubeId) videos.push({ youtubeId: it.youtubeId, name, volume });
+    else if (typeof it.assetId === "string" && it.assetId) videos.push({ assetId: it.assetId, name, volume });
+  }
+  const playMode = PLAY_MODES.includes(o.playMode as PlayMode) ? (o.playMode as PlayMode) : "once";
+  return { videos, playMode };
 }
 
 export const videoPersistence: VideoPersistence = {
