@@ -12,6 +12,7 @@ import {
   type HlsBranding,
 } from "../../lib/hlsBranding";
 import { listBrandKits, setRoomBrandKit, type BrandKitList } from "../../lib/brandKits";
+import { BrandImageUpload } from "./BrandImageUpload";
 
 /**
  * Branding editor for one Streamline Channel (saved embed). Edits the
@@ -317,16 +318,27 @@ export function BrandingFields({
         error={errors.subtitle}
         onChange={(v) => onChange("subtitle", v)}
       />
-      <TextField
-        label="Logo image URL"
-        placeholder="https://example.com/logo.png"
-        value={draft.logoUrl}
-        max={HLS_BRANDING_LIMITS.logoUrl}
-        disabled={logoDisabled}
-        error={errors.logoUrl || (logoBroken && draft.logoUrl.trim() ? "Couldn't load this image — check the URL." : undefined)}
-        hint="Square PNG/SVG works best. Leave empty for the StreamLine logo."
-        onChange={(v) => onChange("logoUrl", v)}
-      />
+      <div style={{ display: "grid", gap: 6 }}>
+        <span style={labelStyle}>Logo</span>
+        <BrandImageUpload
+          label="Upload logo"
+          testId="logo-upload"
+          hasImage={!!draft.logoUrl.trim()}
+          disabled={logoDisabled}
+          onUploaded={(url) => onChange("logoUrl", url)}
+          onClear={() => onChange("logoUrl", "")}
+        />
+        <TextField
+          label="…or paste an image link"
+          placeholder="https://example.com/logo.png"
+          value={draft.logoUrl}
+          max={HLS_BRANDING_LIMITS.logoUrl}
+          disabled={logoDisabled}
+          error={errors.logoUrl || (logoBroken && draft.logoUrl.trim() ? "Couldn't load this image — check the URL." : undefined)}
+          hint="A square image with a transparent background works best. Leave empty for the StreamLine logo."
+          onChange={(v) => onChange("logoUrl", v)}
+        />
+      </div>
 
       <div style={{ display: "grid", gap: 6 }}>
         <span style={labelStyle}>Theme</span>

@@ -16,6 +16,7 @@
 import { firestore, auth } from "../../firebaseAdmin";
 import { deleteFile, deletePrefix, isR2Configured } from "../storageClient";
 import { isKeySafeId, roomAttachmentPrefix } from "../chatAttachmentsPure";
+import { brandAssetPrefix, isKeySafeOwnerId } from "../brandAssetsPure";
 
 const BATCH = 300;
 const PREFIX_BATCH = 5000;
@@ -94,6 +95,12 @@ export async function purgeUserOwnedData(uid: string): Promise<UserDataPurgeResu
 
   await step("savedEmbeds", () => deleteQueryDocs(firestore.collection("savedEmbeds").where("ownerId", "==", uid)));
   await step("brandKits", () => deleteQueryDocs(firestore.collection("brandKits").where("ownerId", "==", uid)));
+  // Uploaded brand images (logos / backgrounds) in R2.
+  await step("brand_assets_prefix", async () => {
+    if (!isR2Configured() || !isKeySafeOwnerId(uid)) return { deleted: 0, more: false };
+    const r = await deletePrefix(brandAssetPrefix(uid), PREFIX_BATCH);
+    return { deleted: r.deleted, more: r.deleted >= PREFIX_BATCH };
+  });
   await step("audioDecks", async () => {
     await firestore.collection("audioDecks").doc(uid).delete();
     return { deleted: 1, more: false };
