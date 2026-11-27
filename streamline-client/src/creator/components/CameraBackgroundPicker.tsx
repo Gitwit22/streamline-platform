@@ -22,11 +22,6 @@ function same(a: CameraEffect, b: CameraEffect) {
 export default function CameraBackgroundPicker({ canUseCamera }: { canUseCamera: boolean }) {
   const snap = useSyncExternalStore(cameraEffectStore.subscribe, cameraEffectStore.getSnapshot);
   const [open, setOpen] = useState(false);
-  const [uploadError, setUploadError] = useState<string | null>(null);
-  const [uploadNote, setUploadNote] = useState<string | null>(null);
-  const [preparing, setPreparing] = useState(false);
-  const fileRef = useRef<HTMLInputElement | null>(null);
-  const panelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -38,6 +33,55 @@ export default function CameraBackgroundPicker({ canUseCamera }: { canUseCamera:
   }, [open]);
 
   if (!canUseCamera) return null;
+
+  const active = snap.effect;
+  const label = active.mode === "none" ? "Background" : active.mode === "image" ? "Background: image" : "Background: blur";
+
+  return (
+    <>
+      <button
+        type="button"
+        className="sl-stage-bg-toggle"
+        data-testid="camera-background-toggle"
+        aria-expanded={open}
+        aria-haspopup="dialog"
+        onClick={() => setOpen((o) => !o)}
+        title="Blur or replace your camera background"
+      >
+        {label}
+      </button>
+      {open && (
+        <div
+          role="dialog"
+          aria-label="Camera background"
+          className="sl-stage-bg-panel"
+          data-testid="camera-background-panel"
+          style={panelStyle}
+        >
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <div style={{ fontWeight: 800, fontSize: 13 }}>Camera background</div>
+            <button type="button" onClick={() => setOpen(false)} style={closeBtn} aria-label="Close">
+              ×
+            </button>
+          </div>
+          <CameraBackgroundOptions />
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
+ * The background choices themselves (None, blur, built-in images, your own
+ * photo) with upload and status messages. Shared by the in-room picker and
+ * the pre-join device check, so both write the same selection.
+ */
+export function CameraBackgroundOptions({ columns = 3 }: { columns?: number }) {
+  const snap = useSyncExternalStore(cameraEffectStore.subscribe, cameraEffectStore.getSnapshot);
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadNote, setUploadNote] = useState<string | null>(null);
+  const [preparing, setPreparing] = useState(false);
+  const fileRef = useRef<HTMLInputElement | null>(null);
 
   const active = snap.effect;
   const applying = snap.status.state === "applying";
@@ -64,107 +108,76 @@ export default function CameraBackgroundPicker({ canUseCamera }: { canUseCamera:
     }
   };
 
-  const label = active.mode === "none" ? "Background" : active.mode === "image" ? "Background: image" : "Background: blur";
-
   return (
-    <>
-      <button
-        type="button"
-        className="sl-stage-bg-toggle"
-        data-testid="camera-background-toggle"
-        aria-expanded={open}
-        aria-haspopup="dialog"
-        onClick={() => setOpen((o) => !o)}
-        title="Blur or replace your camera background"
-      >
-        {label}
-      </button>
-      {open && (
-        <div
-          ref={panelRef}
-          role="dialog"
-          aria-label="Camera background"
-          className="sl-stage-bg-panel"
-          data-testid="camera-background-panel"
-          style={panelStyle}
-        >
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
-            <div style={{ fontWeight: 800, fontSize: 13 }}>Camera background</div>
-            <button type="button" onClick={() => setOpen(false)} style={closeBtn} aria-label="Close">
-              ×
-            </button>
-          </div>
-
-          <div style={grid}>
-            <Option label="None" selected={active.mode === "none"} onClick={() => pick(NO_EFFECT)}>
-              <span style={{ fontSize: 18 }}>⊘</span>
+    <div style={{ display: "grid", gap: 10 }} data-testid="camera-background-options">
+      <div style={{ ...grid, gridTemplateColumns: `repeat(${columns}, minmax(0, 1fr))` }}>
+        <Option label="None" selected={active.mode === "none"} onClick={() => pick(NO_EFFECT)}>
+          <span style={{ fontSize: 18 }}>⊘</span>
+        </Option>
+        <Option label="Slight blur" selected={active.mode === "blur-light"} onClick={() => pick({ mode: "blur-light", imageId: null })}>
+          <BlurSwatch amount={2} />
+        </Option>
+        <Option label="Blur" selected={active.mode === "blur-strong"} onClick={() => pick({ mode: "blur-strong", imageId: null })}>
+          <BlurSwatch amount={5} />
+        </Option>
+        {CAMERA_BACKGROUND_PRESETS.map((p) => {
+          const effect: CameraEffect = { mode: "image", imageId: p.id };
+          const src = renderPresetBackground(p.id);
+          return (
+            <Option key={p.id} label={p.label} selected={same(active, effect)} onClick={() => pick(effect)}>
+              {src ? <img src={src} alt="" style={thumbImg} /> : <span style={{ fontSize: 11 }}>{p.label}</span>}
             </Option>
-            <Option label="Slight blur" selected={active.mode === "blur-light"} onClick={() => pick({ mode: "blur-light", imageId: null })}>
-              <BlurSwatch amount={2} />
-            </Option>
-            <Option label="Blur" selected={active.mode === "blur-strong"} onClick={() => pick({ mode: "blur-strong", imageId: null })}>
-              <BlurSwatch amount={5} />
-            </Option>
-            {CAMERA_BACKGROUND_PRESETS.map((p) => {
-              const effect: CameraEffect = { mode: "image", imageId: p.id };
-              const src = renderPresetBackground(p.id);
-              return (
-                <Option key={p.id} label={p.label} selected={same(active, effect)} onClick={() => pick(effect)}>
-                  {src ? <img src={src} alt="" style={thumbImg} /> : <span style={{ fontSize: 11 }}>{p.label}</span>}
-                </Option>
-              );
-            })}
-            {snap.customImage && (
-              <Option
-                label="Your image"
-                selected={same(active, { mode: "image", imageId: CUSTOM_IMAGE_ID })}
-                onClick={() => pick({ mode: "image", imageId: CUSTOM_IMAGE_ID })}
-              >
-                <img src={snap.customImage} alt="" style={thumbImg} />
-              </Option>
-            )}
-          </div>
+          );
+        })}
+        {snap.customImage && (
+          <Option
+            label="Your image"
+            selected={same(active, { mode: "image", imageId: CUSTOM_IMAGE_ID })}
+            onClick={() => pick({ mode: "image", imageId: CUSTOM_IMAGE_ID })}
+          >
+            <img src={snap.customImage} alt="" style={thumbImg} />
+          </Option>
+        )}
+      </div>
 
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <input
-              ref={fileRef}
-              type="file"
-              accept={CUSTOM_IMAGE_ACCEPT}
-              aria-label="Upload your own background"
-              style={{ display: "none" }}
-              onChange={(e) => void handleFile(e.target.files?.[0])}
-            />
-            <button type="button" style={secondaryBtn} disabled={preparing} onClick={() => fileRef.current?.click()}>
-              {preparing ? "Preparing…" : snap.customImage ? "Change your image" : "Upload your own"}
-            </button>
-            {snap.customImage && (
-              <button type="button" style={linkBtn} onClick={() => cameraEffectStore.removeCustomImage()}>
-                Remove your image
-              </button>
-            )}
-          </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <input
+          ref={fileRef}
+          type="file"
+          accept={CUSTOM_IMAGE_ACCEPT}
+          aria-label="Upload your own background"
+          style={{ display: "none" }}
+          onChange={(e) => void handleFile(e.target.files?.[0])}
+        />
+        <button type="button" style={secondaryBtn} disabled={preparing} onClick={() => fileRef.current?.click()}>
+          {preparing ? "Preparing…" : snap.customImage ? "Change your image" : "Upload your own"}
+        </button>
+        {snap.customImage && (
+          <button type="button" style={linkBtn} onClick={() => cameraEffectStore.removeCustomImage()}>
+            Remove your image
+          </button>
+        )}
+      </div>
 
-          <div aria-live="polite" style={{ display: "grid", gap: 4 }}>
-            {applying && <div style={hint}>Turning on the effect…</div>}
-            {snap.status.state === "error" && (
-              <div role="alert" style={errText}>
-                {snap.status.message}
-              </div>
-            )}
-            {uploadError && (
-              <div role="alert" style={errText}>
-                {uploadError}
-              </div>
-            )}
-            {uploadNote && <div style={hint}>{uploadNote}</div>}
+      <div aria-live="polite" style={{ display: "grid", gap: 4 }}>
+        {applying && <div style={hint}>Turning on the effect…</div>}
+        {snap.status.state === "error" && (
+          <div role="alert" style={errText}>
+            {snap.status.message}
           </div>
-          <div style={hint}>
-            Everyone in the room, the stream and recordings see your background. It's processed on this device and
-            applies whenever your camera is on.
+        )}
+        {uploadError && (
+          <div role="alert" style={errText}>
+            {uploadError}
           </div>
-        </div>
-      )}
-    </>
+        )}
+        {uploadNote && <div style={hint}>{uploadNote}</div>}
+      </div>
+      <div style={hint}>
+        Everyone in the room, the stream and recordings see your background. It's processed on this device and applies
+        whenever your camera is on.
+      </div>
+    </div>
   );
 }
 
@@ -212,7 +225,7 @@ const panelStyle: CSSProperties = {
   color: "#e2e8f0",
   boxShadow: "0 12px 40px rgba(0,0,0,0.45)",
 };
-const grid: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 8 };
+const grid: CSSProperties = { display: "grid", gap: 8 };
 function optionStyle(selected: boolean): CSSProperties {
   return {
     display: "grid",

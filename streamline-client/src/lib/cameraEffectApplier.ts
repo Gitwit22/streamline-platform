@@ -102,3 +102,15 @@ export function createCameraEffectApplier(deps: {
     }
   };
 }
+
+/** Loaded only when an effect is used: keeps MediaPipe out of the main bundle. */
+export const loadBackgroundProcessors = () =>
+  import("@livekit/track-processors") as unknown as Promise<ProcessorModule>;
+
+/**
+ * MediaPipe's WASM is served from our own origin (scripts/copy-mediapipe-wasm.cjs)
+ * instead of cdn.jsdelivr.net, which some networks block.
+ */
+export function defaultProcessorBaseOptions(): ProcessorBaseOptions {
+  return { assetPaths: { tasksVisionFileSet: new URL("/mediapipe/wasm", window.location.origin).href } };
+}

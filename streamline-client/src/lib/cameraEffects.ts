@@ -114,6 +114,11 @@ function load(): Snapshot {
   return { effect, customImage, status: { state: "idle" } };
 }
 
+function selectionKey(s: Snapshot): string {
+  const img = s.customImage ? `${s.customImage.length}:${s.customImage.slice(-32)}` : "";
+  return `${s.effect.mode}|${s.effect.imageId || ""}|${img}`;
+}
+
 let snapshot: Snapshot | null = null;
 const listeners = new Set<() => void>();
 
@@ -134,6 +139,22 @@ export const cameraEffectStore = {
   },
   getSnapshot(): Snapshot {
     return current();
+  },
+  /**
+   * Fires only when the selection (effect or custom image) changes, not on
+   * status updates. Appliers use this: they emit status themselves, so a
+   * plain subscribe would re-trigger them in a loop.
+   */
+  subscribeSelection(listener: () => void): () => void {
+    let last = selectionKey(current());
+    const wrapped = () => {
+      const key = selectionKey(current());
+      if (key === last) return;
+      last = key;
+      listener();
+    };
+    listeners.add(wrapped);
+    return () => listeners.delete(wrapped);
   },
   setEffect(effect: CameraEffect) {
     const next = normalizeCameraEffect(effect);
