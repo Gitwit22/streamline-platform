@@ -103,9 +103,12 @@ export function createCameraEffectApplier(deps: {
   };
 }
 
-/** Loaded only when an effect is used: keeps MediaPipe out of the main bundle. */
-export const loadBackgroundProcessors = () =>
-  import("@livekit/track-processors") as unknown as Promise<ProcessorModule>;
+/**
+ * Loaded only when an effect is used: keeps MediaPipe out of the main bundle.
+ * The enhanced processor is a drop-in for the library's (same wrapper and
+ * switchTo contract) with smoother, cleaner mask edges and a halo-free blur.
+ */
+export const loadBackgroundProcessors = (): Promise<ProcessorModule> => import("./enhancedBackgroundProcessor");
 
 /**
  * MediaPipe's WASM is served from our own origin (scripts/copy-mediapipe-wasm.cjs)
