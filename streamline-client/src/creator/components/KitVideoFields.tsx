@@ -11,6 +11,7 @@ import {
 } from "../../lib/programOverlay";
 import { validateLogoUrl } from "../../lib/hlsBranding";
 import { OverlayBackground, OverlayGraphics, OverlayLogo } from "./ProgramOverlayLayer";
+import { BrandImageUpload } from "./BrandImageUpload";
 
 const POSITION_LABEL: Record<LogoPosition, string> = {
   "top-left": "Top left",
@@ -53,7 +54,7 @@ export function KitVideoFields({
         Show the kit logo on the video
       </label>
       {video.showLogo && !hasLogo && (
-        <div style={{ fontSize: 11, color: "#fcd34d" }}>Add a logo image URL above to show it on the video.</div>
+        <div style={{ fontSize: 11, color: "#fcd34d" }}>Upload a logo above (or paste a link) to show it on the video.</div>
       )}
       {video.showLogo && (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
@@ -120,11 +121,20 @@ export function KitVideoFields({
           </div>
           {errors.backgroundColor && <span style={errText}>{errors.backgroundColor}</span>}
         </div>
-        <label style={fieldLabel}>
-          <span style={labelText}>Background image URL</span>
+        <div style={fieldLabel}>
+          <span style={labelText}>Background image</span>
+          <BrandImageUpload
+            label="Upload background"
+            testId="background-upload"
+            hasImage={!!video.backgroundImageUrl.trim()}
+            disabled={disabled}
+            onUploaded={(url) => set("backgroundImageUrl", url)}
+            onClear={() => set("backgroundImageUrl", "")}
+          />
           <input
             type="url"
-            placeholder="https://example.com/background.jpg"
+            aria-label="Background image link"
+            placeholder="…or paste a link: https://example.com/background.jpg"
             value={video.backgroundImageUrl}
             disabled={disabled}
             onChange={(e) => set("backgroundImageUrl", e.target.value)}
@@ -134,9 +144,11 @@ export function KitVideoFields({
           {errors.backgroundImageUrl ? (
             <span style={errText}>{errors.backgroundImageUrl}</span>
           ) : (
-            <span style={{ fontSize: 11, color: "#6b7280" }}>Shows behind the layout, around and between video tiles.</span>
+            <span style={{ fontSize: 11, color: "#6b7280" }}>
+              Shows behind the layout, around and between video tiles. 1920×1080 works best.
+            </span>
           )}
-        </label>
+        </div>
       </div>
 
       <div style={fieldLabel}>

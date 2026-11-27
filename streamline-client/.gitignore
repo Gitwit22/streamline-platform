@@ -10,6 +10,8 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+# Copied from node_modules by scripts/copy-mediapipe-wasm.cjs
+public/mediapipe/
 *.local
 
 # Editor directories and files

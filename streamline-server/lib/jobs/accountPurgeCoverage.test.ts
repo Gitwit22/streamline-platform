@@ -21,6 +21,7 @@ test("account purge covers every user-owned collection", () => {
     "roomInvites",
     "savedEmbeds",
     "brandKits",
+    "brandAssetPrefix(uid)", // uploaded logos / backgrounds in R2
     "audioDecks",
     "mediaVideoDecks",
     "collaboratorRelationships",

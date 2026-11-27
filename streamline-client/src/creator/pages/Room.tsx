@@ -73,6 +73,9 @@ import AudioMixerModal from "../components/AudioMixerModal";
 import ViewerStatsChip from "../components/ViewerStatsChip";
 import MixerBridge from "../components/MixerBridge";
 import MediaVideoBridge from "../components/MediaVideoBridge";
+import CameraEffectController from "../components/CameraEffectController";
+import PreJoinScreen from "../components/PreJoinScreen";
+import { captureOptionFor, loadPreJoinChoices, shouldShowPreJoin, type PreJoinChoices } from "../../lib/preJoin";
 import ScreenShareRouter, { type ScreenShareRouteMode } from "../components/ScreenShareRouter";
 import ScreenSharePopout from "../components/ScreenSharePopout";
 import { TourProvider, useTour } from "../../components/tour/TourProvider";
@@ -1314,6 +1317,8 @@ type LiveKitShellProps = {
   onPublishPermissionChange?: (state: PublishPermissionState) => void;
   /** Host's effective media preset: drives publisher capture defaults. */
   capturePresetId?: string | null;
+  /** Camera / mic choices from the pre-join device check (null = step skipped). */
+  preJoinChoices?: PreJoinChoices | null;
 };
 
 function LiveKitShell({
@@ -1358,11 +1363,22 @@ function LiveKitShell({
   controlsVideoBlocked = false,
   onPublishPermissionChange,
   capturePresetId = null,
+  preJoinChoices = null,
 }: LiveKitShellProps) {
   const [joinPagePresence, setJoinPagePresence] = useState<JoinPagePresence | null>(null);
   // Computed once per mount: changing options would make useLiveKitRoom
   // recreate the Room. Later preset changes go through CaptureDefaultsSync.
   const [roomOptions] = useState(() => buildRoomOptions(capturePresetId || readCachedRoomPreset(roomId)));
+  // What to publish on connect: the pre-join choices, never more than the
+  // room allows. Memoized on primitives so the prop identity is stable.
+  const audioCapture = useMemo(
+    () => captureOptionFor(!isAudience && !controlsAudioBlocked, preJoinChoices?.audioEnabled, preJoinChoices?.audioDeviceId),
+    [isAudience, controlsAudioBlocked, preJoinChoices?.audioEnabled, preJoinChoices?.audioDeviceId],
+  );
+  const videoCapture = useMemo(
+    () => captureOptionFor(!isAudience && !controlsVideoBlocked, preJoinChoices?.videoEnabled, preJoinChoices?.videoDeviceId),
+    [isAudience, controlsVideoBlocked, preJoinChoices?.videoEnabled, preJoinChoices?.videoDeviceId],
+  );
   const mediaRootRef = useRef<HTMLDivElement | null>(null);
 
   // Stable LiveKitRoom callbacks: useLiveKitRoom re-runs its connect effect
@@ -1501,8 +1517,8 @@ function LiveKitShell({
       // Viewers are subscribe-only: never try to publish on connect (it
       // would fail and surface device errors). Promoted viewers turn mic/cam
       // on themselves via the control bar once LiveKit grants publish.
-      audio={!isAudience && !controlsAudioBlocked}
-      video={!isAudience && !controlsVideoBlocked}
+      audio={audioCapture}
+      video={videoCapture}
       options={roomOptions}
       connectOptions={undefined}
       onConnected={handleLkConnected}
@@ -1535,6 +1551,8 @@ function LiveKitShell({
         <VideoElementMonitor />
         {DEV_CONTROLS && <PermissionsDebugOverlay dashboardRole={dashboardRole === "host" ? "host" : "participant"} />}
         <MediaDeviceErrorHandler onError={handleMediaDeviceError} onRecovered={handleMediaDeviceRecovered} />
+        {/* Applies the participant's camera background (blur / image) to their camera track. */}
+        {!isAudience && <CameraEffectController />}
         <WaitingForHostBanner isViewer={isViewer} />
         <MediaPermissionErrorBanner 
           error={mediaPermissionError} 
@@ -1744,6 +1762,8 @@ function RoomPage() {
   });
   const [pendingName, setPendingName] = useState(displayName);
   const [token, setToken] = useState<string | null>(null);
+  // Set when the participant finishes the pre-join device check (once per visit).
+  const [preJoinChoices, setPreJoinChoices] = useState<PreJoinChoices | null>(null);
   const [serverUrl, setServerUrl] = useState<string | null>(null);
   const [dashboardOpen, setDashboardOpen] = useState(false);
   const [showStreamSetup, setShowStreamSetup] = useState(false);
@@ -2163,6 +2183,17 @@ function RoomPage() {
     !isHost &&
     presenceMode !== "invisible" &&
     (livekitPublish && livekitPublish.canPublish !== null ? livekitPublish.canPublish === false : tokenSaysViewer);
+
+  // Pre-join device check (camera / mic / background) before connecting.
+  const inPreJoin = shouldShowPreJoin({
+    done: !!preJoinChoices,
+    hasName: !!displayName,
+    isHost,
+    hasToken: !!token,
+    isAudience,
+    // Invisible hosts join to monitor quietly; keep their flow unchanged.
+    blocked: showGoodbye || !!accessDenied || presenceMode === "invisible",
+  });
 
   const subjectToControls = !isHost;
   const controlsAllowPublishAudio = !subjectToControls || effectiveControls.canPublishAudio !== false;
@@ -3498,12 +3529,14 @@ function RoomPage() {
     );
   }, []);
   const gateRoomClosed = publicRoomInfo?.status === "ended" || publicRoomInfo?.status === "not_found";
+  // Guests checking their devices are still on the join page for the host.
+  const onJoinPage = onJoinGate || (inPreJoin && !isHost);
   useEffect(() => {
-    if (!roomId || !onJoinGate || gateRoomClosed) return;
+    if (!roomId || !onJoinPage || gateRoomClosed) return;
     sendPresence("join_page");
     const id = setInterval(() => sendPresence("join_page"), 20000);
     return () => clearInterval(id);
-  }, [roomId, onJoinGate, gateRoomClosed, sendPresence]);
+  }, [roomId, onJoinPage, gateRoomClosed, sendPresence]);
   useEffect(() => {
     if (!roomId || isHost) return;
     const onPageHide = () => {
@@ -4208,6 +4241,8 @@ function RoomPage() {
   // Goodbye screen → back into this same room (guests' own room page).
   const handleRejoin = () => {
     explicitLeaveRef.current = false;
+    // Rejoining after leaving goes through the device check again.
+    setPreJoinChoices(null);
     setShowGoodbye(false);
     setGoodbyeMessage(null);
     retryConnection();
@@ -4970,7 +5005,7 @@ function RoomPage() {
           maxWidth: '400px',
           lineHeight: 1.5
         }}>
-          When you enter the room, tap the microphone and camera icons to enable audio and video.
+          If you're joining on camera, you'll check your camera, microphone and background before you go in.
         </p>
         )}
       </JoinGateLayout>
@@ -5002,6 +5037,21 @@ function RoomPage() {
             onHome={goHomeFromGate}
           />
         )}
+      </JoinGateLayout>
+    );
+  }
+
+  if (inPreJoin) {
+    return (
+      <JoinGateLayout roomName={gateRoomName} hostName={publicRoomInfo?.hostName} branding={publicRoomInfo?.branding} isLive={gateIsLive}>
+        <PreJoinScreen
+          displayName={displayName}
+          initialChoices={loadPreJoinChoices()}
+          cameraAllowed={!controlsVideoBlocked}
+          micAllowed={!controlsAudioBlocked}
+          onJoin={setPreJoinChoices}
+          onBack={isHost ? undefined : goBackFromGate}
+        />
       </JoinGateLayout>
     );
   }
@@ -5748,6 +5798,7 @@ function RoomPage() {
           controlsVideoBlocked={controlsVideoBlocked}
           onPublishPermissionChange={handlePublishPermissionChange}
           capturePresetId={ownerDefaultPresetId}
+          preJoinChoices={preJoinChoices}
         />
       )}
 

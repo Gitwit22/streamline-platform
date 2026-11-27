@@ -38,6 +38,7 @@ import roomsGraphicsRoutes from "./routes/roomsGraphics";
 import roomsRenameRoutes from "./routes/roomsRename";
 import audioDeckRoutes from "./routes/audioDeck";
 import mediaVideosRoutes from "./routes/mediaVideos";
+import { brandAssetsPublicRouter, brandAssetsUploadRouter } from "./routes/brandAssets";
 import editingRoutes from "./routes/editing";
 import projectsRoutes from "./routes/projects";
 import myContentRoutes from "./routes/myContent";
@@ -300,6 +301,8 @@ app.use("/api/public/hls", publicHlsRoutes);
 app.use("/api/public/viewers", publicViewersRouter);
 // Public viewer-safe HLS config (no auth)
 app.use("/api/public/rooms", publicRoomsHlsConfigRoutes);
+// Uploaded brand images (logo / video background): public redirect to R2
+app.use("/api/public/brand-assets", brandAssetsPublicRouter);
 // Viewer playback authorization: POST /api/public/{channels|rooms}/:id/playback
 app.use("/api/public", publicPlaybackRoutes);
 
@@ -376,6 +379,8 @@ app.use("/api/live", liveRoutes);
 app.use("/api/saved-embeds", savedEmbedsRoutes);
 // Brand kits (account-owned reusable viewer branding)
 app.use("/api/brand-kits", brandKitsRoutes);
+// Brand image uploads (logo / video background) for kits and channel branding
+app.use("/api/brand-assets", brandAssetsUploadRouter);
 // Audio deck layout (playlist + soundboard pads; files live in the content library)
 app.use("/api/audio-deck", audioDeckRoutes);
 // Saved stage videos for the in-room Media panel (files live in the content library)

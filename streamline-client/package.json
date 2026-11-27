@@ -8,9 +8,9 @@
   },
   "scripts": {
     "check:no-loginpage-jsx": "node scripts/check-no-loginpage-jsx.cjs",
-    "predev": "npm run check:no-loginpage-jsx",
+    "predev": "npm run check:no-loginpage-jsx && node scripts/copy-mediapipe-wasm.cjs",
     "dev": "vite",
-    "prebuild": "npm run check:no-loginpage-jsx",
+    "prebuild": "npm run check:no-loginpage-jsx && node scripts/copy-mediapipe-wasm.cjs",
     "build": "vite build",
     "preview": "vite preview",
     "server": "tsx server/index.ts",
@@ -21,6 +21,7 @@
   "dependencies": {
     "@livekit/components-react": "latest",
     "@livekit/components-styles": "latest",
+    "@livekit/track-processors": "0.8.3",
     "@stripe/stripe-js": "^8.6.0",
     "bcryptjs": "^3.0.3",
     "clsx": "^2.1.1",
