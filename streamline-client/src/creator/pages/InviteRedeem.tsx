@@ -178,6 +178,7 @@ export default function InviteRedeem() {
         else if (msg === "max_uses_reached" || msg === "invite_max_used" || msg === "invite_already_used") setError("This invite has reached its use limit.");
         else if (msg === "room_full") setError("This room is full. Please try again later.");
         else if (msg === "rate_limited") setError("Too many attempts. Please wait a moment.");
+        else if (msg === "waiting_room_denied") setError("The host didn't let you into this room.");
         else setError(msg);
         setJoining(false);
         return;
@@ -189,6 +190,13 @@ export default function InviteRedeem() {
 
       // Store guest session token in multiple layers for resilience
       if (gst) storeGuestSession(roomId, gst);
+
+      // Waiting room (202): no LiveKit token yet. Drop any token cached by an
+      // earlier visit so the room page asks the server, which keeps us
+      // waiting until the host lets us in.
+      if (res.status === 202 || data?.status === "waiting") {
+        try { sessionStorage.removeItem(`sl_lk_token:${roomId}`); } catch { /* ignore */ }
+      }
 
       // Cache the LiveKit token from join-now so Room.tsx can use it immediately
       if (data?.roomToken && data?.serverUrl) {

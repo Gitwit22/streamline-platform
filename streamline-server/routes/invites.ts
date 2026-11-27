@@ -22,6 +22,8 @@ import {
   summarizeJoinPagePresence,
   type JoinPagePresenceEntry,
 } from "../lib/joinPagePresence";
+import { isWaitingRoomEnabled } from "../lib/waitingRoomPure";
+import { listWaiting } from "../lib/waitingRoom";
 
 type InviteRole = "guest" | "cohost";
 
@@ -543,7 +545,24 @@ router.get("/room-status", async (req, res) => {
     if (joinPage.count > 0) hasJoinPageView = true;
     if (hasRecentEnteredRoom(presenceEntries, now)) hasEnteredRoom = true;
 
-    return res.json({ roomId, hasJoinPageView, hasEnteredRoom, joinPage });
+    // Waiting room count for the host's badge (additive; never fails the poll).
+    const waitingRoomOn = isWaitingRoomEnabled(roomSnap.data() || {});
+    let waitingCount = 0;
+    if (waitingRoomOn) {
+      try {
+        waitingCount = (await listWaiting(roomId)).length;
+      } catch (err: any) {
+        console.warn("/api/invites/room-status waiting room count failed", err?.message || err);
+      }
+    }
+
+    return res.json({
+      roomId,
+      hasJoinPageView,
+      hasEnteredRoom,
+      joinPage,
+      waitingRoom: { enabled: waitingRoomOn, count: waitingCount },
+    });
   } catch (err: any) {
     console.error("/api/invites/room-status error", err?.message || err);
     return res.status(500).json({ error: "internal_error" });

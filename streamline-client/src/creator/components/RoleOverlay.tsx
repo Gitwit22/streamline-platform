@@ -7,6 +7,7 @@ import { apiFetch, apiFetchAuth } from "../../lib/api";
 import { encodeReconnectMediaMessage, reconnectMedia } from "../../lib/mediaRecovery";
 import { ChatComposer, ChatMessageList } from "./RoomChat";
 import { useRoomChat, useRoomChatContext, type RoomChatState } from "../hooks/useRoomChat";
+import WaitingRoomPanel from "./WaitingRoomPanel";
 
 // Normalize API base to avoid trailing slashes that cause "//api/..." URLs
 const API_BASE = (import.meta.env.VITE_API_BASE || "").replace(/\/+$/, "");
@@ -502,6 +503,12 @@ function HostPanel({
           Manual-only. No room overlays or banners.
         </p>
       </Section>
+
+      {canModerate && roomId && roomAccessToken && (
+        <Section title="Waiting Room">
+          <WaitingRoomPanel roomId={roomId} roomAccessToken={roomAccessToken} />
+        </Section>
+      )}
 
       <Section title="Live Participants">
         <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '0.5rem', gap: '0.5rem' }}>

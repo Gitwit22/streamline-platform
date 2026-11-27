@@ -62,7 +62,14 @@ import {
 } from "../../lib/roomJoin";
 import RoleOverlay from "../components/RoleOverlay";
 import { LiveKitRoomChatProvider } from "../components/RoomChat";
-import { JoinGateLayout, RoomUnavailableCard, WaitingForHostCard } from "../components/RoomJoinGate";
+import { JoinGateLayout, RoomUnavailableCard, WaitingForAdmissionCard, WaitingForHostCard } from "../components/RoomJoinGate";
+import {
+  WAITING_ROOM_DENIED_MESSAGE,
+  WAITING_ROOM_POLL_MS,
+  parseWaitingRoomStatus,
+  waitingRoomGateFromMint,
+  waitingRoomPillText,
+} from "../../lib/waitingRoom";
 import StreamSetupModalV2 from "../components/StreamSetupModal";
 import { ErrorBoundary } from "../../components/ErrorBoundary";
 import { RoleChangeToast } from "../components/RoleChangeToast";
@@ -1282,6 +1289,8 @@ type LiveKitShellProps = {
   watermarkEnabled: boolean;
   dashboardOpen: boolean;
   onCloseDashboard: () => void;
+  /** Opens the host Dashboard (the waiting-room badge links to it). */
+  onOpenDashboard?: () => void;
   roomName: string;
   roomAccessToken: string | null;
   canMuteGuests: boolean;
@@ -1336,6 +1345,7 @@ function LiveKitShell({
   watermarkEnabled,
   dashboardOpen,
   onCloseDashboard,
+  onOpenDashboard,
   roomName,
   roomAccessToken,
   canMuteGuests,
@@ -1366,6 +1376,8 @@ function LiveKitShell({
   preJoinChoices = null,
 }: LiveKitShellProps) {
   const [joinPagePresence, setJoinPagePresence] = useState<JoinPagePresence | null>(null);
+  // People in the waiting room (from the same host poll as joinPagePresence).
+  const [waitingRoomCount, setWaitingRoomCount] = useState(0);
   // Computed once per mount: changing options would make useLiveKitRoom
   // recreate the Room. Later preset changes go through CaptureDefaultsSync.
   const [roomOptions] = useState(() => buildRoomOptions(capturePresetId || readCachedRoomPreset(roomId)));
@@ -1430,6 +1442,7 @@ function LiveKitShell({
   useEffect(() => {
     if (!canSeeJoinPage || !roomId) {
       setJoinPagePresence(null);
+      setWaitingRoomCount(0);
       return;
     }
 
@@ -1447,12 +1460,16 @@ function LiveKitShell({
         if (res.status === 401 || res.status === 403) {
           // Not allowed to see it: stop quietly.
           setJoinPagePresence(null);
+          setWaitingRoomCount(0);
           return;
         }
         if (res.ok) {
           failures = 0;
           const data = await res.json().catch(() => null);
-          if (!cancelled) setJoinPagePresence(parseJoinPagePresence(data));
+          if (!cancelled) {
+            setJoinPagePresence(parseJoinPagePresence(data));
+            setWaitingRoomCount(parseWaitingRoomStatus(data).count);
+          }
         } else {
           failures++;
         }
@@ -1469,6 +1486,7 @@ function LiveKitShell({
     };
   }, [canSeeJoinPage, roomId, roomAccessToken]);
   const joinPagePill = joinPagePillText(joinPagePresence);
+  const waitingRoomPill = waitingRoomPillText(waitingRoomCount);
 
   // Prevent double-audio playback from LiveKit DOM:
   // in some browser/component combinations, audio can play via both an <audio>
@@ -1608,6 +1626,32 @@ function LiveKitShell({
           >
             {joinPagePill}
           </div>
+        )}
+        {canSeeJoinPage && waitingRoomPill && (
+          <button
+            type="button"
+            data-testid="waiting-room-pill"
+            onClick={onOpenDashboard}
+            title="Open the Dashboard to let them in"
+            style={{
+              position: "absolute",
+              top: joinPagePill ? 44 : 10,
+              left: "50%",
+              transform: "translateX(-50%)",
+              padding: "6px 14px",
+              borderRadius: 999,
+              background: "rgba(66,32,6,0.92)",
+              border: "1px solid rgba(245,158,11,0.85)",
+              fontSize: 12,
+              fontWeight: 600,
+              color: "#fde68a",
+              zIndex: 21,
+              cursor: onOpenDashboard ? "pointer" : "default",
+            }}
+          >
+            {waitingRoomPill}
+            {onOpenDashboard && !dashboardOpen ? " · Review" : ""}
+          </button>
         )}
         {/* When host is invisible, hide their local video tile completely */}
         {presenceMode === "invisible" && (
@@ -1823,7 +1867,10 @@ function RoomPage() {
     } catch { /* ignore */ }
     return "normal";
   });
-  const [roomGateStatus, setRoomGateStatus] = useState<"unknown" | "idle" | "live" | "blocked">("unknown");
+  // "waiting_admission": the host has the waiting room on and hasn't let us in yet.
+  const [roomGateStatus, setRoomGateStatus] = useState<"unknown" | "idle" | "live" | "blocked" | "waiting_admission">("unknown");
+  // When we entered the waiting room (for the "Waiting 1m 20s" clock).
+  const [queuedAt, setQueuedAt] = useState<number | null>(null);
   const roomGatePollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Bumped to re-run the token mint effect (room went live, Retry, rejoin).
   const [mintAttempt, setMintAttempt] = useState(0);
@@ -3214,6 +3261,30 @@ function RoomPage() {
           const errCode = extractApiErrorCode(data);
           const mapped = mapJoinErrorMessage(errCode);
 
+          // Waiting room (checked before the generic 409 below, which means
+          // "not live yet"). Ask again on a short fixed interval: the host may
+          // let us in any moment, and each ask keeps us on their list.
+          const waitingGate = waitingRoomGateFromMint(res.status, errCode);
+          if (waitingGate === "waiting") {
+            if (roomId && typeof data?.guestSessionToken === "string" && data.guestSessionToken.trim()) {
+              storeGuestSession(roomId, data.guestSessionToken.trim());
+            }
+            setRoomGateStatus("waiting_admission");
+            setQueuedAt((prev) => prev ?? Date.now());
+            if (mintRetryTimerRef.current) clearTimeout(mintRetryTimerRef.current);
+            mintRetryTimerRef.current = setTimeout(() => {
+              mintRetryTimerRef.current = null;
+              requestMint();
+            }, WAITING_ROOM_POLL_MS);
+            return;
+          }
+          if (waitingGate === "denied") {
+            setNeedsReauth(false);
+            setRoomGateStatus("blocked");
+            setAccessDenied(WAITING_ROOM_DENIED_MESSAGE);
+            return;
+          }
+
           if (res.status === 409) {
             // Not live yet: show the waiting screen and try again on a
             // backoff timer (the status/info polls also re-request as soon
@@ -3483,7 +3554,8 @@ function RoomPage() {
   }, [roomId, onJoinGate, roomGateStatus, requestMint, STALE_WAIT_MS]);
 
   // Elapsed-wait clock for the waiting screen.
-  const showingWaitScreen = onJoinGate && (!displayName || roomGateStatus === "idle");
+  const showingWaitScreen =
+    onJoinGate && (!displayName || roomGateStatus === "idle" || roomGateStatus === "waiting_admission");
   useEffect(() => {
     if (!showingWaitScreen) return;
     const id = setInterval(() => setNowTick(Date.now()), 1000);
@@ -4870,7 +4942,7 @@ function RoomPage() {
       <JoinGateLayout roomName={gateRoomName} hostName={publicRoomInfo?.hostName} branding={publicRoomInfo?.branding}>
         <RoomUnavailableCard
           testId="room-access-denied"
-          title="You don't have access to this room"
+          title={accessDenied === WAITING_ROOM_DENIED_MESSAGE ? "You weren't let in" : "You don't have access to this room"}
           message={
             accessDenied === "You don't have access to this room."
               ? "Ask the host for an invite link, or check that you're signed in with the right account."
@@ -5020,6 +5092,19 @@ function RoomPage() {
         onRejoin={isHost ? undefined : handleRejoin}
         message={goodbyeMessage}
       />
+    );
+  }
+
+  // Waiting room: the host lets people in one by one; /token is re-asked on
+  // a short interval and the room opens as soon as the host admits us.
+  if (!isHost && !token && roomGateStatus === "waiting_admission") {
+    return (
+      <JoinGateLayout roomName={gateRoomName} hostName={publicRoomInfo?.hostName} branding={publicRoomInfo?.branding} isLive={gateIsLive}>
+        <WaitingForAdmissionCard
+          elapsedMs={queuedAt ? Math.max(0, nowTick - queuedAt) : 0}
+          onLeave={goHomeFromGate}
+        />
+      </JoinGateLayout>
     );
   }
 
@@ -5768,6 +5853,7 @@ function RoomPage() {
           watermarkEnabled={watermarkEnabled}
           dashboardOpen={dashboardOpen}
           onCloseDashboard={() => setDashboardOpen(false)}
+          onOpenDashboard={() => setDashboardOpen(true)}
           roomName={roomName || ""}
           roomAccessToken={roomAccessToken}
           canMuteGuests={canMuteGuestsUi}

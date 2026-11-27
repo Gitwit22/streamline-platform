@@ -97,6 +97,8 @@ export async function ensureRoomDoc(params: {
   brandKitId?: string;
   // Display name for a NEW room (the typed label; see lib/roomNamingPure.ts).
   displayName?: string;
+  // Waiting room for a NEW room (only written when true; absent reads as off).
+  waitingRoomEnabled?: boolean;
 }): Promise<{
   ref: FirebaseFirestore.DocumentReference<FirebaseFirestore.DocumentData>;
   data: RoomDoc;
@@ -122,6 +124,7 @@ export async function ensureRoomDoc(params: {
       ...(savedEmbedId ? { savedEmbedId } : {}),
       ...(params.brandKitId ? { brandKitId: params.brandKitId } : {}),
       ...(params.displayName ? { displayName: params.displayName } : {}),
+      ...(params.waitingRoomEnabled === true ? { waitingRoomEnabled: true } : {}),
       createdAt: serverTimestamp,
       updatedAt: serverTimestamp,
       status: initialStatus || "live",

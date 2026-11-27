@@ -11,6 +11,9 @@ import {
   resolveRoomAccessMode,
   isDiscoverable,
 } from "../lib/roomAccessPolicy";
+import { isWaitingRoomEnabled } from "../lib/waitingRoomPure";
+import { markAdmitted } from "../lib/waitingRoom";
+import { listRoomParticipantIdentities } from "./roomGuestAccess";
 
 const router = Router();
 
@@ -26,6 +29,7 @@ function policyPayload(roomId: string, room: Record<string, any>) {
     requiresAuth: derived.requiresAuth,
     requiresPayment: room.requiresPayment === true,
     allowGuests: typeof room.allowGuests === "boolean" ? !!room.allowGuests : null,
+    waitingRoomEnabled: isWaitingRoomEnabled(room),
   };
 }
 
@@ -46,7 +50,7 @@ router.get("/:roomId/policy", requireRoomAccessToken as any, async (req: any, re
 });
 
 // PATCH /api/rooms/:roomId/policy
-// Body: { access?: "invite_only" | "link" | "public", allowGuests?: boolean }
+// Body: { access?: "invite_only" | "link" | "public", allowGuests?: boolean, waitingRoomEnabled?: boolean }
 // Auth: Firebase auth + roomAccessToken. Owner/admin host, or a producer /
 // cohost whose token holds canModerate. Only affects the production room;
 // the viewer-facing HLS channel is unaffected.
@@ -66,12 +70,16 @@ router.patch("/:roomId/policy", requireAuth as any, requireRoomAccessToken as an
 
   const body = (req.body || {}) as any;
   const allowGuests = typeof body.allowGuests === "boolean" ? body.allowGuests : undefined;
+  if (body.waitingRoomEnabled !== undefined && typeof body.waitingRoomEnabled !== "boolean") {
+    return res.status(400).json({ error: "invalid_waiting_room" });
+  }
+  const waitingRoomEnabled: boolean | undefined = body.waitingRoomEnabled;
   const hasAccess = body.access !== undefined;
   const nextAccess = hasAccess ? normalizeRoomAccessMode(body.access) : null;
   if (hasAccess && !nextAccess) {
     return res.status(400).json({ error: "invalid_access" });
   }
-  if (typeof allowGuests !== "boolean" && !nextAccess) {
+  if (typeof allowGuests !== "boolean" && !nextAccess && typeof waitingRoomEnabled !== "boolean") {
     return res.status(400).json({ error: "invalid_policy_patch" });
   }
 
@@ -83,6 +91,9 @@ router.patch("/:roomId/policy", requireAuth as any, requireRoomAccessToken as an
     updatedAt: admin.firestore.FieldValue.serverTimestamp(),
   };
   if (typeof allowGuests === "boolean") patch.allowGuests = allowGuests;
+  const room = (snap.data() as any) || {};
+  const turningWaitingRoomOn = waitingRoomEnabled === true && !isWaitingRoomEnabled(room);
+  if (typeof waitingRoomEnabled === "boolean") patch.waitingRoomEnabled = waitingRoomEnabled;
   if (nextAccess) {
     const derived = derivePolicyFields(nextAccess);
     patch.access = derived.access;
@@ -90,6 +101,21 @@ router.patch("/:roomId/policy", requireAuth as any, requireRoomAccessToken as an
     patch.requiresAuth = derived.requiresAuth;
     patch.accessUpdatedBy = uid;
   }
+  // Turning the waiting room on never queues people already in the room:
+  // record them as admitted so their reconnects/token refreshes go straight
+  // back in. Done before the flag is saved so there is no window where they'd
+  // be queued. Best effort: the setting is saved either way.
+  if (turningWaitingRoomOn) {
+    try {
+      const livekitRoomName = String(room.livekitRoomName || access.livekitRoomName || roomId).trim();
+      const identities = await listRoomParticipantIdentities(livekitRoomName);
+      if (identities && identities.length) await markAdmitted(roomId, identities, uid);
+      else if (identities === null) console.warn("[roomsPolicy] waiting room on: could not list participants", { roomId });
+    } catch (err: any) {
+      console.warn("[roomsPolicy] waiting room on: admitting current participants failed", { roomId, error: err?.message || err });
+    }
+  }
+
   await ref.set(patch as any, { merge: true });
 
   const after = await ref.get();

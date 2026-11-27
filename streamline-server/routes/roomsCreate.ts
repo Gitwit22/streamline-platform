@@ -26,7 +26,8 @@ const router = Router();
  * Creates a new Firestore room document and returns its id.
  * Body: { livekitRoomName?: string, roomType?: "rtc" | "hls", presenceMode?: PresenceMode,
  *         access?: "invite_only" | "link" | "public",   (default invite_only)
- *         brandKitId?: string | null }  (omitted = owner's default kit, null = none)
+ *         brandKitId?: string | null,  (omitted = owner's default kit, null = none)
+ *         waitingRoomEnabled?: boolean }  (default off; see lib/waitingRoomPure.ts)
  *
  * roomId is generated from Firestore (roomsRef.doc().id).
  */
@@ -58,6 +59,10 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
   }
   const access: RoomAccessMode = accessFromCreateBody(req.body);
   const requiresPayment = typeof req.body?.requiresPayment === "boolean" ? req.body.requiresPayment : undefined;
+  if (req.body?.waitingRoomEnabled !== undefined && typeof req.body.waitingRoomEnabled !== "boolean") {
+    return res.status(400).json({ error: "invalid_waiting_room" });
+  }
+  const waitingRoomEnabled = req.body?.waitingRoomEnabled === true;
   const rawNameInput = String(req.body?.livekitRoomName || req.body?.roomName || "");
   const rawName = sanitizeDisplayName(rawNameInput).trim();
 
@@ -151,6 +156,7 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
       requiresPayment,
       brandKitId,
       displayName,
+      waitingRoomEnabled,
     });
 
     return res.status(201).json({
@@ -161,6 +167,7 @@ router.post("/create", requireAuth as any, async (req: any, res) => {
       roomType: data.roomType || roomType,
       access: resolveRoomAccessMode(data as any),
       brandKitId: brandKitId || null,
+      waitingRoomEnabled: data.waitingRoomEnabled === true,
       presenceMode,
       actingContext: {
         ownerUid,

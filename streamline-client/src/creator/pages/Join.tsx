@@ -180,6 +180,8 @@ export default function Join() {
 
   // Production-room access for new rooms (invite-only by default).
   const [newRoomAccess, setNewRoomAccess] = useState<RoomAccessMode>(DEFAULT_ROOM_ACCESS);
+  // Waiting room for a new room: people wait until the host lets them in (off by default).
+  const [newRoomWaitingRoom, setNewRoomWaitingRoom] = useState(false);
 
   // Brand kit for a new room ("" = none). Pre-selected to the account's default kit.
   const [brandKits, setBrandKits] = useState<BrandKitList | null>(null);
@@ -648,6 +650,7 @@ export default function Join() {
             savedEmbedId: undefined,
             presenceMode: hostPresenceMode,
             access: newRoomAccess,
+            waitingRoomEnabled: newRoomWaitingRoom,
             // Omitted when the picker is hidden: the server applies the owner's default kit.
             ...(showBrandKitPicker ? { brandKitId: newRoomKitId || null } : {}),
           }),
@@ -1532,6 +1535,33 @@ export default function Join() {
                 <div style={{ marginTop: "6px", fontSize: "11px", color: "#9ca3af" }}>
                   {ROOM_ACCESS_HLS_NOTE} You can change this later from the host dashboard.
                 </div>
+                <label
+                  data-testid="new-room-waiting-room"
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: "8px",
+                    marginTop: "10px",
+                    padding: "8px 10px",
+                    borderRadius: "10px",
+                    border: `1px solid ${newRoomWaitingRoom ? "rgba(249,115,22,0.7)" : "rgba(55,65,81,0.9)"}`,
+                    background: newRoomWaitingRoom ? "rgba(249,115,22,0.08)" : "rgba(15,23,42,0.85)",
+                    cursor: "pointer",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={newRoomWaitingRoom}
+                    onChange={(e) => setNewRoomWaitingRoom(e.target.checked)}
+                    style={{ marginTop: "2px" }}
+                  />
+                  <span style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
+                    <span style={{ fontSize: "13px", fontWeight: 600, color: "#e5e7eb" }}>Waiting room</span>
+                    <span style={{ fontSize: "11px", color: "#9ca3af" }}>
+                      People who open the link wait until you or a co-host let them in. Audience viewers aren't affected.
+                    </span>
+                  </span>
+                </label>
               </div>
             )}
 

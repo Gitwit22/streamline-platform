@@ -198,6 +198,35 @@ export function WaitingForHostCard({
   );
 }
 
+/** The host has the waiting room on: the guest waits here until let in. */
+export function WaitingForAdmissionCard({ elapsedMs, onLeave }: { elapsedMs: number; onLeave: () => void }) {
+  return (
+    <div style={cardStyle} role="status" data-testid="join-gate-waiting-room">
+      <div
+        style={{
+          width: 40,
+          height: 40,
+          margin: "0 auto",
+          borderRadius: "50%",
+          border: "3px solid rgba(239,68,68,0.3)",
+          borderTopColor: "#ef4444",
+          animation: "sl-spin 1s linear infinite",
+        }}
+      />
+      <h1 style={{ fontSize: "1.25rem", fontWeight: 600, color: "#ffffff", margin: 0 }}>You're in the waiting room</h1>
+      <p style={{ fontSize: "0.9rem", color: "rgba(255,255,255,0.6)", lineHeight: 1.5, margin: 0 }}>
+        The host will let you in soon. Keep this page open — you'll join automatically.
+      </p>
+      <p style={{ fontSize: "0.75rem", opacity: 0.5, margin: 0 }}>Waiting {formatElapsed(elapsedMs)}</p>
+      <div style={{ display: "flex", gap: 10 }}>
+        <button type="button" onClick={onLeave} style={secondaryButton} data-testid="join-gate-waiting-room-leave">
+          Leave
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function RoomUnavailableCard({
   title,
   message,

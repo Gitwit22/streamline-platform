@@ -415,6 +415,8 @@ export type RoomPolicy = {
   requiresAuth: boolean;
   requiresPayment: boolean;
   allowGuests: boolean | null;
+  /** Host admits people from a waiting room (absent on older servers = off). */
+  waitingRoomEnabled?: boolean;
 };
 
 export async function apiGetRoomPolicy(roomId: string, roomAccessToken: string) {
@@ -431,7 +433,7 @@ export async function apiGetRoomPolicy(roomId: string, roomAccessToken: string) 
 export async function apiUpdateRoomPolicy(
   roomId: string,
   roomAccessToken: string,
-  patch: Partial<Pick<RoomPolicy, "access">> & { allowGuests?: boolean }
+  patch: Partial<Pick<RoomPolicy, "access">> & { allowGuests?: boolean; waitingRoomEnabled?: boolean }
 ) {
   const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/policy`, {
     method: "PATCH",
@@ -441,6 +443,37 @@ export async function apiUpdateRoomPolicy(
     body: JSON.stringify(patch),
   });
   return res.json() as Promise<{ ok: true; roomId: string } & RoomPolicy>;
+}
+
+// ── Waiting room (host side; server: routes/waitingRoom.ts) ──
+
+export async function apiGetWaitingRoom(roomId: string, roomAccessToken: string): Promise<unknown> {
+  const res = await apiFetch(`/api/rooms/${encodeURIComponent(roomId)}/waiting-room`, {
+    method: "GET",
+    headers: { "x-room-access-token": roomAccessToken },
+  });
+  return res.json();
+}
+
+export async function apiDecideWaiting(
+  roomId: string,
+  roomAccessToken: string,
+  entryId: string,
+  decision: "admit" | "deny",
+): Promise<{ ok: true; id: string; status: string }> {
+  const res = await apiFetchAuth(
+    `/api/rooms/${encodeURIComponent(roomId)}/waiting-room/${encodeURIComponent(entryId)}/${decision}`,
+    { method: "POST", headers: { "x-room-access-token": roomAccessToken } },
+  );
+  return res.json();
+}
+
+export async function apiAdmitAllWaiting(roomId: string, roomAccessToken: string): Promise<{ ok: true; admitted: number }> {
+  const res = await apiFetchAuth(`/api/rooms/${encodeURIComponent(roomId)}/waiting-room/admit-all`, {
+    method: "POST",
+    headers: { "x-room-access-token": roomAccessToken },
+  });
+  return res.json();
 }
 
 export function clearAuthStorage() {

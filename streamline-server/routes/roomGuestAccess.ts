@@ -46,6 +46,8 @@ import { applyOwnerPresetToControls, loadOwnerRolePreset } from "../lib/permissi
 import { roomDisplayName } from "../lib/roomDisplayPure";
 import { resolveRoomViewerAccess } from "../lib/viewerAccessStore";
 import { getRoomKitBranding } from "../services/brandKits";
+import { isWaitingRoomEnabled, waitingRoomApplies } from "../lib/waitingRoomPure";
+import { waitingRoomGate } from "../lib/waitingRoom";
 
 /**
  * Invite JWT from x-invite-token, body.inviteToken or query inviteToken/t.
@@ -217,6 +219,26 @@ async function getParticipantCount(livekitRoomName: string): Promise<number | nu
     return participants?.length ?? 0;
   } catch (err) {
     console.warn("[roomGuestAccess] participant count failed", (err as any)?.message || err);
+    return null;
+  }
+}
+
+/**
+ * Identities currently in the LiveKit room. Null when LiveKit isn't
+ * configured or can't be reached (callers treat that as "unknown").
+ */
+export async function listRoomParticipantIdentities(livekitRoomName: string): Promise<string[] | null> {
+  const serviceUrl = deriveServiceUrl();
+  const apiKey = process.env.LIVEKIT_API_KEY;
+  const apiSecret = process.env.LIVEKIT_API_SECRET;
+  if (!serviceUrl || !apiKey || !apiSecret) return null;
+  try {
+    const RoomServiceClient = await getRoomServiceClient();
+    const client = new RoomServiceClient(serviceUrl, apiKey, apiSecret);
+    const participants = await client.listParticipants(livekitRoomName);
+    return (participants || []).map((p: any) => String(p?.identity || "")).filter(Boolean);
+  } catch (err) {
+    console.warn("[roomGuestAccess] participant list failed", (err as any)?.message || err);
     return null;
   }
 }
@@ -647,6 +669,74 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       return res.status(401).json({ error: "login_required" });
     }
 
+    // Identity and acceptance come before the waiting room and capacity
+    // checks so a queued guest keeps the same identity when admitted.
+    const displayName = sanitizeDisplayName(String(req.body?.displayName || "")).trim() || `Guest-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+    
+    // Logged-in callers keep their account identity; anonymous guests get a
+    // nonce-derived identity that is also stored in the guest session so
+    // /token refreshes reconnect as the same participant.
+    const identity = authedUser ? authedUser.uid : joinNowIdentity(inviteId, joinNonce);
+    logPayload.identity = identity;
+    logPayload.displayName = displayName;
+    logPayload.authed = !!authedUser;
+
+    if (authedUser) {
+      try {
+        await recordInviteAcceptance({
+          roomId,
+          uid: authedUser.uid,
+          inviteId,
+          role: "participant",
+          createdByUid: redeemResult.createdByUid,
+          expiresAtMs: redeemResult.expiresAtMs,
+        });
+      } catch (err: any) {
+        // Non-fatal: the guest session below still carries the invite.
+        console.warn("[join-now] failed to record acceptance", err?.message || err);
+      }
+    }
+
+    // Waiting room (opt-in per room, lib/waitingRoomPure.ts): the invite is
+    // redeemed and the guest session issued, but no LiveKit token until the
+    // host admits them; the client then waits on /token with the session.
+    const isOwnerJoining = !!authedUser && !!ownerId && authedUser.uid === ownerId;
+    if (
+      waitingRoomApplies({
+        enabled: isWaitingRoomEnabled(room),
+        isHostLike: isOwnerJoining,
+        isCohost: false,
+        role: authedUser ? "participant" : "guest",
+      })
+    ) {
+      const gate = await waitingRoomGate({ roomId, identity, displayName, uid: authedUser?.uid || null });
+      if (gate === "denied") {
+        logPayload.event = "join_now_fail";
+        logPayload.reason = "waiting_room_denied";
+        logPayload.latencyMs = Date.now() - startTime;
+        console.log("[join-now]", logPayload);
+        return res.status(403).json({ error: "waiting_room_denied" });
+      }
+      if (gate === "waiting") {
+        const waitingSessionToken = signGuestSession(
+          { inviteId, roomId, role: "guest", displayName, identity: authedUser ? undefined : identity },
+          GUEST_SESSION_TTL,
+        );
+        setGuestSessionCookie(res, waitingSessionToken);
+        logPayload.event = "join_now_waiting";
+        logPayload.latencyMs = Date.now() - startTime;
+        console.log("[join-now]", logPayload);
+        return res.status(202).json({
+          status: "waiting",
+          roomId,
+          roomName,
+          identity,
+          displayName,
+          guestSessionToken: waitingSessionToken,
+        });
+      }
+    }
+
     // Enforce room capacity (plan maxGuests) for unauthenticated guest join.
     // Fail-closed if we cannot determine occupancy.
     const capDecision = await enforceCapacityOrRespond({
@@ -679,32 +769,6 @@ router.post("/invites/:inviteId/join-now", async (req: any, res) => {
       logPayload.missing = missing;
       console.log("[join-now]", logPayload);
       return res.status(500).json({ code: "misconfigured", error: "LiveKit keys missing", missing });
-    }
-
-    const displayName = sanitizeDisplayName(String(req.body?.displayName || "")).trim() || `Guest-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-    
-    // Logged-in callers keep their account identity; anonymous guests get a
-    // nonce-derived identity that is also stored in the guest session so
-    // /token refreshes reconnect as the same participant.
-    const identity = authedUser ? authedUser.uid : joinNowIdentity(inviteId, joinNonce);
-    logPayload.identity = identity;
-    logPayload.displayName = displayName;
-    logPayload.authed = !!authedUser;
-
-    if (authedUser) {
-      try {
-        await recordInviteAcceptance({
-          roomId,
-          uid: authedUser.uid,
-          inviteId,
-          role: "participant",
-          createdByUid: redeemResult.createdByUid,
-          expiresAtMs: redeemResult.expiresAtMs,
-        });
-      } catch (err: any) {
-        // Non-fatal: the guest session below still carries the invite.
-        console.warn("[join-now] failed to record acceptance", err?.message || err);
-      }
     }
 
     const AccessToken = await getAccessTokenCtor();
@@ -1171,6 +1235,35 @@ router.post("/rooms/:roomId/token", async (req: any, res) => {
       if (controlsRole === "viewer") lkRole = "viewer";
       else if (controlsRole === "participant") lkRole = "participant";
       else if (controlsRole === "cohost") lkRole = user ? "cohost" : "participant";
+    }
+
+    // Waiting room (opt-in per room, lib/waitingRoomPure.ts): anyone who would
+    // get an on-stage token waits until the host or a cohost admits them.
+    // Hosts/producers/cohosts and audience viewers skip it.
+    if (waitingRoomApplies({ enabled: isWaitingRoomEnabled(room), isHostLike, isCohost, role: lkRole })) {
+      const gate = await waitingRoomGate({
+        roomId,
+        identity: String(identity),
+        displayName,
+        uid: user?.uid || null,
+      });
+      if (gate === "denied") return res.status(403).json({ error: "waiting_room_denied" });
+      if (gate === "waiting") {
+        // Pin the guest's identity for the next polls (a guest promoted from a
+        // legacy invite above has no session yet and would get a new identity).
+        let waitingSessionToken: string | undefined;
+        if (!user && guest && guest.roomId === roomId) {
+          waitingSessionToken = signGuestSession(
+            { inviteId: guest.inviteId, roomId, role: guest.role, displayName, identity },
+            GUEST_SESSION_TTL,
+          );
+          setGuestSessionCookie(res, waitingSessionToken);
+        }
+        return res.status(409).json({
+          error: "waiting_room",
+          ...(waitingSessionToken ? { guestSessionToken: waitingSessionToken } : {}),
+        });
+      }
     }
 
     // Enforce room capacity (plan maxGuests) for non-owner joins.

@@ -26,6 +26,8 @@ import roomControlsRoutes, { enforceRoomControlsForRoom, listRoomCohostIdentitie
 import roomChatRoutes from "./routes/roomChat";
 import roomsProgramStateRoutes from "./routes/roomsProgramState";
 import roomsPolicyRoutes from "./routes/roomsPolicy";
+import waitingRoomRoutes from "./routes/waitingRoom";
+import { clearWaitingEntry, clearWaitingRoom } from "./lib/waitingRoom";
 import roomsRecordingsRoutes from "./routes/roomsRecordings";
 import destinationsRoutes from "./routes/destinations";
 import liveRoutes from "./routes/live";
@@ -346,6 +348,7 @@ app.use("/api/multistream", multistreamRoutes);
 app.use("/api/rooms", roomsResolveRoutes);
 // Room access policy (allowGuests, etc.)
 app.use("/api/rooms", roomsPolicyRoutes);
+app.use("/api/rooms", waitingRoomRoutes);
 // Realtime in-room controls (host/cohost writes; all participants read via roomAccessToken)
 app.use("/api/rooms", roomControlsRoutes);
 // Per-session persistent chat (roomAccessToken scoped)
@@ -823,6 +826,12 @@ app.post("/api/roomModeration/remove", requireAuth, requireRoomAccessToken as an
 
     await roomService.removeParticipant(livekitRoomName, identity);
 
+    // Removed people lose their waiting-room admission: with the waiting room
+    // on they must be let in again. Best effort; the kick itself succeeded.
+    await clearWaitingEntry(roomId, String(identity)).catch((err: any) =>
+      console.warn("[remove] clearing waiting room entry failed", err?.message || err),
+    );
+
     return res.json({ ok: true });
   } catch (e: any) {
     console.error("remove error", e);
@@ -899,6 +908,11 @@ app.post("/api/roomModeration/remove-all", requireAuth, requireRoomAccessToken a
       // Best-effort — don't fail the kick operation if status update fails
       console.warn("[remove-all] failed to set room status=ended", { roomId, err: (statusErr as any)?.message });
     }
+
+    // Session over: admissions don't carry into the next session (best effort).
+    await clearWaitingRoom(roomId).catch((err: any) =>
+      console.warn("[remove-all] clearing waiting room failed", { roomId, err: err?.message || err }),
+    );
 
     return res.json({ ok: true, removedCount, results });
   } catch (e: any) {

@@ -34,6 +34,7 @@ import {
   presetControlsPatch,
 } from "../lib/permissions/rolePresetStore";
 import { getInviteAcceptance } from "../lib/inviteAcceptance";
+import { markAdmitted } from "../lib/waitingRoom";
 
 const router = Router();
 
@@ -446,6 +447,12 @@ async function applyRolePresetToIdentity(
 
   try {
     const preset = await loadOwnerRolePreset(await presetOwnerUidFor(roomId, uid), presetId);
+    // Presets are stage roles (participant/cohost): the host setting one
+    // counts as letting them in (waiting room). Recorded before the controls
+    // write, which can trigger the participant's token refresh.
+    await markAdmitted(roomId, [rawIdentity], uid).catch((err: any) =>
+      console.warn("[roomControls] waiting room admission failed", err?.message || err),
+    );
     await controlsDocRef(roomId, identityDocId).set(presetControlsPatch(preset, uid), { merge: true });
 
     // Push to LiveKit in real time so the participant's in-room
@@ -924,6 +931,15 @@ function stageChangeHandler(direction: "promote" | "demote") {
       // Participant "Share Screen" comes from the room owner's participant preset.
       const participantPreset =
         direction === "promote" ? await loadOwnerRolePreset(await getRoomOwnerUid(roomId), "participant") : null;
+
+      // Bringing someone on stage is a host decision: their token refresh must
+      // not land them in the waiting room (an audience viewer never queued).
+      // Recorded before the controls write below, which triggers that refresh.
+      if (direction === "promote") {
+        await markAdmitted(roomId, [targetIdentity], uid).catch((err: any) =>
+          console.warn("[promote] waiting room admission failed", err?.message || err),
+        );
+      }
 
       // Persist first so the SSE stream/rejoin enforcement sees the new role.
       const ref = controlsDocRef(roomId, identityDocId);
