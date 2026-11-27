@@ -73,6 +73,7 @@ import AudioMixerModal from "../components/AudioMixerModal";
 import ViewerStatsChip from "../components/ViewerStatsChip";
 import MixerBridge from "../components/MixerBridge";
 import MediaVideoBridge from "../components/MediaVideoBridge";
+import CameraEffectController from "../components/CameraEffectController";
 import ScreenShareRouter, { type ScreenShareRouteMode } from "../components/ScreenShareRouter";
 import ScreenSharePopout from "../components/ScreenSharePopout";
 import { TourProvider, useTour } from "../../components/tour/TourProvider";
@@ -1535,6 +1536,8 @@ function LiveKitShell({
         <VideoElementMonitor />
         {DEV_CONTROLS && <PermissionsDebugOverlay dashboardRole={dashboardRole === "host" ? "host" : "participant"} />}
         <MediaDeviceErrorHandler onError={handleMediaDeviceError} onRecovered={handleMediaDeviceRecovered} />
+        {/* Applies the participant's camera background (blur / image) to their camera track. */}
+        {!isAudience && <CameraEffectController />}
         <WaitingForHostBanner isViewer={isViewer} />
         <MediaPermissionErrorBanner 
           error={mediaPermissionError} 

@@ -310,6 +310,29 @@ button:focus-visible {
 .sl-stage-chat-toggle[aria-pressed="true"] {
   background: rgba(30, 41, 59, 0.9);
 }
+/* Camera background picker (CameraBackgroundPicker.tsx): under the chat toggle. */
+.sl-stage-bg-toggle {
+  position: absolute;
+  top: 78px;
+  left: 10px;
+  z-index: 15;
+  padding: 5px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(15, 23, 42, 0.75);
+  color: #e2e8f0;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.sl-stage-bg-toggle:hover,
+.sl-stage-bg-toggle[aria-expanded="true"] {
+  background: rgba(30, 41, 59, 0.9);
+}
+.sl-viewer .sl-stage-bg-toggle,
+.sl-viewer .sl-stage-bg-panel {
+  display: none !important;
+}
 .sl-stage-chat-badge {
   min-width: 18px;
   padding: 0 5px;

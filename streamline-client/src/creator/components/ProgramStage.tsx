@@ -17,11 +17,13 @@ import {
   LayoutContextProvider,
   ParticipantTile,
   RoomAudioRenderer,
+  useLocalParticipantPermissions,
   useRoomContext,
   useRoomInfo,
   type TrackReferenceOrPlaceholder,
 } from "@livekit/components-react";
 import { StageChatPanel } from "./RoomChat";
+import CameraBackgroundPicker from "./CameraBackgroundPicker";
 import { useRoomChatContext } from "../hooks/useRoomChat";
 import { RoomEvent, Track, type Participant } from "livekit-client";
 import { apiGetProgramState, apiUpdateProgramState } from "../../lib/api";
@@ -452,6 +454,16 @@ export default function ProgramStage() {
     </button>
   );
 
+  // Camera background picker: only for people allowed to publish a camera.
+  // Same rule as HostControlsEnforcer's sourceAllowed: an empty
+  // canPublishSources means every source; camera is TrackSource 1 ("camera").
+  const permissions = useLocalParticipantPermissions();
+  const publishSources: unknown[] = Array.isArray(permissions?.canPublishSources) ? permissions!.canPublishSources : [];
+  const canUseCamera =
+    !!permissions?.canPublish &&
+    (publishSources.length === 0 || publishSources.some((s) => s === 1 || String(s).toLowerCase() === "camera"));
+  const backgroundPicker = <CameraBackgroundPicker canUseCamera={canUseCamera} />;
+
   const unread = chatAvailable && !chatOpen ? chat!.unreadCount : 0;
   const chatToggle = chatAvailable ? (
     <button
@@ -480,6 +492,7 @@ export default function ProgramStage() {
           <SafeVideoConference />
           {toggle}
           {chatToggle}
+          {backgroundPicker}
         </div>
         {chatPanel}
       </div>
@@ -507,6 +520,7 @@ export default function ProgramStage() {
         </div>
         {toggle}
         {chatToggle}
+        {backgroundPicker}
       </div>
       <ControlBar controls={{ chat: false }} />
     </div>
